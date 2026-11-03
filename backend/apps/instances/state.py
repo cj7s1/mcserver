@@ -27,6 +27,7 @@ JOB_STATUS = {
 }
 
 STARTUP_GRACE = timedelta(minutes=10)
+CRASH_LOOP_RESTARTS = 3
 
 
 def _parse(ts: str | None) -> datetime | None:
@@ -39,9 +40,17 @@ def _parse(ts: str | None) -> datetime | None:
 
 
 def compute(
-    instance: Instance, container: dict[str, Any] | None, job_kind: str | None = None, now: datetime | None = None
+    instance: Instance,
+    container: dict[str, Any] | None,
+    job_kind: str | None = None,
+    now: datetime | None = None,
+    crash_restarts: int = 0,
 ) -> tuple[str, str]:
-    """Return (status, detail)."""
+    """Return (status, detail).
+
+    ``crash_restarts`` is how many times Docker restarted the container since it was last
+    ready (tracked by the reconciler); a high value while not healthy is a crash loop.
+    """
     now = now or timezone.now()
     if instance.archived_at:
         return Status.ARCHIVED, "Archived; container removed, data kept"
@@ -56,6 +65,11 @@ def compute(
     state = container.get("status")
     health = container.get("health")
     exit_code = container.get("exit_code")
+    if crash_restarts >= CRASH_LOOP_RESTARTS and health != "healthy" and state in ("running", "restarting"):
+        return Status.FAILED, (
+            f"Crash loop: the server exited during startup {crash_restarts} times. "
+            "See the Overview diagnostics and the console for the cause."
+        )
     if container.get("restarting") or state == "restarting":
         return Status.FAILED, f"Crash loop: container is restarting (exit code {exit_code})"
     if state == "running":

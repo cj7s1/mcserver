@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from django.core.cache import cache
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -42,6 +43,53 @@ def _ts(value: str | None):  # type: ignore[no-untyped-def]
         return None
 
 
+CRASH_LOOP_AUTOSTOP = 5
+
+
+def crash_restarts(instance: Instance, container: dict[str, Any] | None) -> int:
+    """Docker restarts since the server was last healthy (baseline kept in the cache).
+
+    Docker's RestartCount is cumulative for a container, so we remember the count at the
+    start of each not-ready streak and report the difference.
+    """
+    c = container or {}
+    key = f"crashloop:{instance.pk}"
+    count = int(c.get("restart_count") or 0)
+    if not c.get("exists") or c.get("health") == "healthy" or c.get("status") in ("exited", "created", "dead"):
+        cache.delete(key)
+        return 0
+    baseline = cache.get(key)
+    if baseline is None or baseline > count:  # new streak, or container recreated (count reset)
+        cache.set(key, count, 24 * 3600)
+        return 0
+    return count - int(baseline)
+
+
+def _stop_crash_loop(instance: Instance, restarts: int) -> None:
+    """Stop a container that keeps crashing so it does not burn CPU forever."""
+    from apps.audit import service as audit
+
+    summary = ""
+    try:
+        from .diagnostics import diagnose
+
+        issues = [i for i in diagnose(instance)["issues"] if i["code"] != "crash_loop"]
+        if issues:
+            summary = f" Likely cause: {issues[0]['title']}."
+    except Exception as exc:  # diagnostics are best effort
+        log.debug("diagnostics failed: %s", exc)
+    try:
+        AgentClient(instance.node).stop(instance.id, timeout=15)
+    except ApiError as exc:
+        log.warning("could not stop crash-looping %s: %s", instance.pk, exc)
+        return
+    Instance.objects.filter(pk=instance.pk).update(desired_state="stopped")
+    instance.desired_state = "stopped"
+    instance.status = Status.FAILED
+    instance.status_detail = (f"Stopped automatically after {restarts} crashes during startup.{summary}")[:500]
+    audit.record("instance.crash_loop_stopped", instance=instance, target=instance, success=False, details={"restarts": restarts})
+
+
 def apply_observation(instance: Instance, container: dict[str, Any] | None, *, agent_ok: bool = True) -> bool:
     """Update an instance from an agent container description. Returns True if changed."""
     job_kind = None
@@ -52,8 +100,12 @@ def apply_observation(instance: Instance, container: dict[str, Any] | None, *, a
     if not agent_ok:
         instance.status, instance.status_detail = Status.UNKNOWN, "Node agent unreachable"
     else:
-        status, detail = state.compute(instance, container, job_kind)
+        restarts = crash_restarts(instance, container) if not job_kind else 0
+        status, detail = state.compute(instance, container, job_kind, crash_restarts=restarts)
         instance.status, instance.status_detail = status, detail[:500]
+        if restarts >= CRASH_LOOP_AUTOSTOP and instance.desired_state == "running":
+            _stop_crash_loop(instance, restarts)
+            status = instance.status
         c = container or {}
         instance.container_state = c.get("status") or ""
         instance.health = c.get("health") or ""
@@ -68,6 +120,12 @@ def apply_observation(instance: Instance, container: dict[str, Any] | None, *, a
                 instance.ready_at = now
             if instance.installed_at is None:
                 instance.installed_at = now
+                try:
+                    from apps.modpacks.pinning import pin_installed_release
+
+                    pin_installed_release(instance)
+                except Exception as exc:  # pinning is best effort; never break reconciliation
+                    log.warning("pinning failed for %s: %s", instance.pk, exc)
         elif status not in (Status.RUNNING, Status.BACKING_UP):
             instance.ready_at = (
                 None if status in (Status.STOPPED, Status.FAILED, Status.STARTING, Status.INSTALLING) else instance.ready_at

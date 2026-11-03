@@ -41,6 +41,8 @@ instance_patterns = [
     path("<uuid:pk>/files/upload", instances.FilesUploadView.as_view()),
     path("<uuid:pk>/files/extract", instances.ExtractView.as_view()),
     path("<uuid:pk>/import", instances.ImportArchiveView.as_view()),
+    path("<uuid:pk>/diagnostics", instances.DiagnosticsView.as_view()),
+    path("<uuid:pk>/manual-downloads", instances.ManualDownloadsView.as_view()),
     path("<uuid:pk>/files/<str:op>", instances.FilesOpView.as_view()),
     path("<uuid:pk>/schedules", instances.ScheduleListView.as_view()),
     path("<uuid:pk>/schedules/<int:sid>", instances.ScheduleDetailView.as_view()),

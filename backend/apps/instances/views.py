@@ -79,9 +79,12 @@ class InstanceListView(APIView):
         else:
             from apps.modpacks.providers import get_provider
 
-            resolved = get_provider(data["modpack_provider"]).resolve_modpack(
-                data["modpack_project_id"], data["modpack_version_id"]
-            )
+            if data.get("curseforge_slug"):
+                resolved = keyless_curseforge(data)
+            else:
+                resolved = get_provider(data["modpack_provider"]).resolve_modpack(
+                    data["modpack_project_id"], data["modpack_version_id"]
+                )
             warnings = resolved.get("warnings", [])
             fields.update(
                 server_type=resolved["server_type"],
@@ -663,9 +666,19 @@ class ExtractView(APIView):
         strip = data.get("strip", "auto")
         if strip not in ("auto", "none"):
             raise ValidationError({"strip": ["Must be auto or none"]})
-        job = enqueue("extract_archive", title=f"Extract {path.rsplit('/', 1)[-1]}", instance=instance, user=request.user,
-                      params={"path": path, "destination": str(data.get("destination", "")), "strip": strip,
-                              "overwrite": bool(data.get("overwrite")), "delete_archive": bool(data.get("delete_archive"))})
+        job = enqueue(
+            "extract_archive",
+            title=f"Extract {path.rsplit('/', 1)[-1]}",
+            instance=instance,
+            user=request.user,
+            params={
+                "path": path,
+                "destination": str(data.get("destination", "")),
+                "strip": strip,
+                "overwrite": bool(data.get("overwrite")),
+                "delete_archive": bool(data.get("delete_archive")),
+            },
+        )
         audit.record("files.extract", request=request, instance=instance, target=instance, details={"path": path})
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
@@ -696,9 +709,74 @@ class ImportArchiveView(APIView):
         client = AgentClient(instance.node)
         client.upload(instance.id, temp_name, upload.chunks(1024 * 1024), overwrite=False)
         overwrite = request.query_params.get("overwrite") == "true"
-        job = enqueue("extract_archive", title=f"Import {upload.name}", instance=instance, user=request.user,
-                      params={"path": temp_name, "destination": "", "strip": "auto", "overwrite": overwrite,
-                              "delete_archive": True, "mark_installed": True})
-        audit.record("instance.imported", request=request, instance=instance, target=instance,
-                     details={"archive": upload.name[:200], "size": upload.size, "overwrite": overwrite})
+        job = enqueue(
+            "extract_archive",
+            title=f"Import {upload.name}",
+            instance=instance,
+            user=request.user,
+            params={
+                "path": temp_name,
+                "destination": "",
+                "strip": "auto",
+                "overwrite": overwrite,
+                "delete_archive": True,
+                "mark_installed": True,
+            },
+        )
+        audit.record(
+            "instance.imported",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"archive": upload.name[:200], "size": upload.size, "overwrite": overwrite},
+        )
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class DiagnosticsView(APIView):
+    """Known failure signatures found in the recent server log, with suggested fixes."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from .diagnostics import diagnose
+
+        instance = get_instance_for(request.user, pk, "instance.console")
+        return Response(diagnose(instance))
+
+
+class ManualDownloadsView(APIView):
+    """Files a modpack needs that could not be downloaded automatically (author restrictions)."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from .diagnostics import manual_downloads
+
+        instance = get_instance_for(request.user, pk, "instance.files.read")
+        return Response(manual_downloads(instance))
+
+
+def keyless_curseforge(data: dict[str, Any]) -> dict[str, Any]:
+    """Describe a CurseForge pack identified only by slug/URL (no API key configured)."""
+    slug = data["curseforge_slug"]
+    file_id = str(data.get("modpack_version_id") or "")
+    warnings = [
+        "No CurseForge API key is configured, so the release could not be verified in advance. "
+        "The runtime installs it with its built-in key.",
+    ]
+    if not file_id:
+        warnings.append("No file was selected: the newest release is installed and then pinned automatically.")
+    return {
+        "provider": "curseforge",
+        "server_type": "AUTO_CURSEFORGE",
+        "project_id": "",
+        "slug": slug,
+        "name": slug.replace("-", " ").title(),
+        "icon_url": "",
+        "version_id": file_id,
+        "version_name": "",
+        "minecraft_version": data["minecraft_version"],
+        "loader": data.get("modpack_loader") or "",
+        "loader_version": "",
+        "warnings": warnings,
+        "recommended_memory_mb": None,
+    }

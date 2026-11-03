@@ -162,7 +162,14 @@ class Instance(models.Model):
 
     @property
     def container_memory_mb(self) -> int:
-        overhead = self.memory_overhead_mb or max(512, int(self.memory_mb * 0.25))
+        # Off-heap memory (metaspace, threads, GC, direct buffers) grows with mod count: a
+        # 311-mod Forge pack used ~1.3 GB above a 6 GB heap in testing, so leave generous room.
+        if self.memory_overhead_mb:
+            overhead = self.memory_overhead_mb
+        elif self.content_kind == "mods":
+            overhead = max(1536, int(self.memory_mb * 0.4))
+        else:
+            overhead = max(768, int(self.memory_mb * 0.3))
         return self.memory_mb + overhead
 
 

@@ -292,8 +292,9 @@ class CreateInstanceSerializer(serializers.Serializer):
     loader_version = serializers.CharField(max_length=60, required=False, allow_blank=True)
     # modpack
     modpack_provider = serializers.ChoiceField(choices=["modrinth", "curseforge", "ftb"], required=False)
-    modpack_project_id = serializers.CharField(max_length=64, required=False)
-    modpack_version_id = serializers.CharField(max_length=64, required=False)
+    modpack_project_id = serializers.CharField(max_length=300, required=False)
+    modpack_version_id = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    modpack_loader = serializers.ChoiceField(choices=["forge", "neoforge", "fabric", "quilt"], required=False)
     # resources / runtime
     java_version = serializers.IntegerField(required=False)
     memory_mb = serializers.IntegerField(min_value=512, max_value=262144, required=False)
@@ -337,9 +338,44 @@ class CreateInstanceSerializer(serializers.Serializer):
         else:
             if not attrs.get("modpack_provider") or not attrs.get("modpack_project_id"):
                 raise serializers.ValidationError({"modpack_project_id": ["Choose a modpack"]})
-            if not attrs.get("modpack_version_id"):
+            from apps.modpacks.providers import curseforge_key
+
+            if attrs["modpack_provider"] == "curseforge" and not curseforge_key():
+                # Keyless CurseForge: identify the pack by page URL or slug; the runtime image's
+                # built-in key installs it and the installed file is pinned after first install.
+                parsed = parse_curseforge_ref(attrs["modpack_project_id"])
+                if parsed is None:
+                    raise serializers.ValidationError(
+                        {"modpack_project_id": ["Enter the CurseForge modpack page URL or its slug"]}
+                    )
+                attrs["curseforge_slug"], file_id = parsed
+                if file_id and not attrs.get("modpack_version_id"):
+                    attrs["modpack_version_id"] = file_id
+                if attrs.get("modpack_version_id") and not str(attrs["modpack_version_id"]).isdigit():
+                    raise serializers.ValidationError({"modpack_version_id": ["CurseForge file ids are numbers"]})
+                if not attrs.get("minecraft_version"):
+                    raise serializers.ValidationError(
+                        {"minecraft_version": ["Enter the pack's Minecraft version (shown on its CurseForge page)"]}
+                    )
+            elif not attrs.get("modpack_version_id"):
                 raise serializers.ValidationError({"modpack_version_id": ["Choose a modpack release (releases are pinned)"]})
         return attrs
+
+
+CF_URL = re.compile(
+    r"^https://(?:www\.)?curseforge\.com/minecraft/modpacks/([a-z0-9-]{1,128})(?:/files/(\d{1,12}))?/?(?:[?#].*)?$"
+)
+CF_SLUG = re.compile(r"^[a-z0-9][a-z0-9-]{0,127}$")
+
+
+def parse_curseforge_ref(value: str) -> tuple[str, str | None] | None:
+    value = (value or "").strip()
+    m = CF_URL.match(value)
+    if m:
+        return m.group(1), m.group(2)
+    if CF_SLUG.match(value):
+        return value, None
+    return None
 
 
 class ScheduleSerializer(serializers.ModelSerializer):

@@ -51,6 +51,7 @@ MANAGED_ENV = {
     "RCON_PASSWORD",
     "RCON_PASSWORD_FILE",
     "SKIP_SUDO",
+    "CF_DOWNLOADS_REPO",
     "LOAD_ENV_FROM_FILE",
     "LOAD_ENV_FROM_ARCHIVE",
     "LOAD_ENV_FROM_GENERIC_PACK",
@@ -117,6 +118,8 @@ def build_env(instance: Instance) -> dict[str, str]:
         key = SystemSetting.get_secret("curseforge_api_key") or settings.CURSEFORGE_API_KEY or ""
         if key:
             env["CF_API_KEY"] = key
+        # Manually downloaded files (author-restricted mods) are uploaded to /data/downloads.
+        env["CF_DOWNLOADS_REPO"] = "/data/downloads"
     elif st == ServerType.FTBA:
         env["FTB_MODPACK_ID"] = instance.modpack_project_id
         if instance.modpack_version_id:
