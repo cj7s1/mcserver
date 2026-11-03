@@ -64,8 +64,11 @@ MCPANEL_ALLOWED_HOSTS=panel.example.com
 MCPANEL_CSRF_TRUSTED_ORIGINS=https://panel.example.com
 ```
 
-The proxy must forward WebSockets for `/ws/` (Upgrade/Connection headers). A VPN such as WireGuard or
-Tailscale is safer than exposing the panel publicly.
+The proxy must forward WebSockets for `/ws/` (Upgrade/Connection headers). Raise its body-size limit
+and its read/send timeouts. Uploads (worlds, archives) can be several GB, and installing a mod with
+dependencies or downloading a world zip can take several minutes. For nginx, for example:
+`client_max_body_size 4g; proxy_read_timeout 900s; proxy_send_timeout 900s; proxy_request_buffering off;`.
+A VPN such as WireGuard or Tailscale is safer than exposing the panel publicly.
 
 Game ports are separate. The panel publishes each server's port on the Docker host only. Players outside
 your LAN need a router port forward for that TCP port, which you configure yourself.
