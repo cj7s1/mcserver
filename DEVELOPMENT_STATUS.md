@@ -30,6 +30,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | **Better MC [FORGE] BMC4 v62hf via CurseForge (keyless)** | ~3.5 min install, 311 mods, 20 TPS, auto-pinned to file 9104992 |
 | **Better MC [FABRIC] BMC2 v40 via CurseForge (keyless)** | ~2 min install, 294 mods, auto-pinned to file 7517035 |
 | Better MC BMC4 v59 **Modrinth** edition | needs 51 CurseForge-only files: the crash loop is detected and auto-stopped, diagnostics name the cause, manual-downloads list with links; the wizard preflight now warns *before* deploying |
+| **FTB StoneBlock 3 v1.11.6 (Forge 1.18.2)** | ~2.5 min install, 220 mods, pinned `FTB_MODPACK_VERSION_ID=100359`, Java 17 |
 | btrfs snapshots: create (save-off coordinated) → modify → rollback (with safety snapshot) | through the second node |
 | Multi-node: second agent registered as a node, server created/deleted there | |
 | Webhook notifications (test + real backup event) | local receiver |
@@ -40,7 +41,6 @@ and the worker+beat. All tests pass on `main` of this branch:
 * Frontend pages in a browser (the page workstream is in progress; see below).
 * Running on real Unraid hardware (docs/UNRAID.md is based on Unraid conventions).
 * CurseForge **with** an API key (no key available). The keyless path is verified.
-* FTB deployment (adapter unit-tested against recorded API shapes; no server started).
 * GitHub Actions CI on GitHub (the workflow file passes actionlint locally).
 * ZFS snapshots (not implemented).
 

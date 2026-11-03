@@ -31,7 +31,7 @@ Minecraft server through the real API · **N** not yet verified. Nothing here ha
 | 9 | Restart app services, instances intact | R | agent/API/worker restarted many times during development; containers kept running and were re-discovered by the reconciler |
 | 10 | Failure handling | U, R | crash loop → failed + auto-stop + diagnosis; downgrade/invalid version rejected; port conflict 409; corrupt archives rejected |
 
-Extra verified flows (R): import an existing server from a zip, software update 1.20.4 → 1.21.1 with
+Extra verified flows (R): FTB StoneBlock 3 (FTBA, pinned version), btrfs snapshot/rollback, multi-node, import an existing server from a zip, software update 1.20.4 → 1.21.1 with
 Java 17 → 21 and a pre-update backup, webhook notifications, Docker Compose deployment smoke test.
 
 ## Heavy tests
