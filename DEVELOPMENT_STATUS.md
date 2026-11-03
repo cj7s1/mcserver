@@ -11,9 +11,9 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **397 passed** |
+| `backend: uv run pytest -q -m "not integration"` | **408 passed** (incl. OpenAPI fail-on-warn) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **307 passed** (btrfs + restic tests included) |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **309 passed** (btrfs + restic tests included) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -37,6 +37,8 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
 | World export as zip (`/files/archive?path=world`) | zip validated |
+| Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
+| Docker daemon restart with a running server | status "unknown: Docker is not reachable" during the outage, then the container came back and the panel went to running on its own |
 
 ### Not yet verified
 
@@ -65,7 +67,8 @@ and the worker+beat. All tests pass on `main` of this branch:
    * snapshots (`/snapshots…`)
    * metrics charts (`/metrics?range=`) and player history (`/players/history`)
    * notifications admin (`/notifications/…`), nodes admin (`/nodes…`), job abandon
-     (`POST /jobs/<id>/abandon`)
+     (`POST /jobs/<id>/abandon`), migrate to another node (`POST /migrate`), Hangar plugin tab
+     (`content/hangar/*`), folder zip download (`/files/archive`), archive extract (`/files/extract`)
    * wizard: CurseForge URL/slug mode without a key, show `preflight` warnings, and the new container
      memory formula (mods: heap + max(1536, 40%); others: heap + max(768, 30%))
 3. (On hold until the user asks) Phase 10 security audit of backend + agent.
