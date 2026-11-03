@@ -1,6 +1,6 @@
 # Development status
 
-_Last updated: 2026-11-03, end of session 1 work block._ Keep this file honest. Implemented,
+_Last updated: 2026-11-03, end of session 1 (wrap-up at the user's request)._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
 
@@ -11,9 +11,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **408 passed** (incl. OpenAPI fail-on-warn) |
+| `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **309 passed** (btrfs + restic tests included) |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -38,42 +39,27 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
 | World export as zip (`/files/archive?path=world`) | zip validated |
 | Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
+| TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
+| `deploy/docker-compose.node.yml` agent container (healthy, TLS-aware healthcheck) added with a pin; a real vanilla 1.21.1 server ran there (RCON ok); instance-network containers get 403 | |
 | Docker daemon restart with a running server | status "unknown: Docker is not reachable" during the outage, then the container came back and the panel went to running on its own |
 
 ### Not yet verified
 
-* Frontend pages in a browser (the page workstream is in progress; see below).
-* Running on real Unraid hardware (docs/UNRAID.md is based on Unraid conventions).
-* CurseForge **with** an API key (no key available). The keyless path is verified.
-* GitHub Actions CI on GitHub (the workflow file passes actionlint locally).
-* ZFS snapshots (not implemented).
-
-## In flight
-
-* Workflow `frontend-pages`: all screens, then browser integration testing plus UX and correctness
-  reviews. The frontend **must** then add UI for features added after its spec (task list below).
-* Security audit (Phase 10 workflow) was **stopped at the user's request** during its read-only
-  finding phase; no audit changes were applied. **Do not run it again until the user asks.**
+* **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).
+* Frontend screens added in the last block (overview diagnostics/metrics, modpack tab, backup
+  browser, snapshots, files zip/extract, Hangar tab, migrate dialog, CurseForge-by-URL wizard) were
+  checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
+  stopped to save credits.
+* CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub. ZFS snapshots.
 
 ## Next recommended tasks (in order)
 
-1. Merge the frontend workflow output; `npx tsc -b && npm run lint && npm run build`; Playwright pass.
-2. Frontend for the newer backend features:
-   * diagnostics card (`GET /instances/<id>/diagnostics`) and manual downloads (`/manual-downloads`)
-   * modpack tab (`/modpack`, `/modpack/plan/<v>`, `/modpack/update`, `/modpack/rollback`)
-   * software update (`POST /software`)
-   * import an existing server (`POST /instances/<id>/import`)
-   * backup browser (`/backups/<id>/files|download|restore-path`)
-   * snapshots (`/snapshots…`)
-   * metrics charts (`/metrics?range=`) and player history (`/players/history`)
-   * notifications admin (`/notifications/…`), nodes admin (`/nodes…`), job abandon
-     (`POST /jobs/<id>/abandon`), migrate to another node (`POST /migrate`), Hangar plugin tab
-     (`content/hangar/*`), folder zip download (`/files/archive`), archive extract (`/files/extract`)
-   * wizard: CurseForge URL/slug mode without a key, show `preflight` warnings, and the new container
-     memory formula (mods: heap + max(1536, 40%); others: heap + max(768, 30%))
-3. (On hold until the user asks) Phase 10 security audit of backend + agent.
-4. Remaining roadmap: ZFS snapshots, Hangar/CurseForge mod sources, world import/export UI, Unraid
-   validation.
+1. Browser pass over the new screens (Playwright, 1440 and 390 px, dark/light) and fix what it finds.
+2. Admin UI still missing: Nodes screen (API + `manage.py add_node` exist), notifications channels
+   screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
+   wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).
+3. Validate on Unraid; then (only when the user asks) the Phase 10 security audit.
+4. Roadmap: ZFS snapshots, SpigotMC source, CurseForge per-mod search (needs a key).
 
 ## Environment notes (cloud sandbox)
 
@@ -97,3 +83,7 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   and `POST /jobs/<id>/abandon` exists for stuck jobs.
 * `pkill -f` patterns in a shell whose command line contains the same text kill that shell. Use the
   bracket trick (`[c]elery`) and run `scripts/cloud-dev/restart.sh` by path.
+* The sandbox proxy port changes when the container restarts; `bootstrap.sh` reads it from
+  `$HTTPS_PROXY` for the egress forwarder (a stale port silently breaks downloads in containers).
+* A published agent port must arrive through a network that is not an instance network, or the
+  agent's own instance-network guard refuses it (`docker-compose.node.yml` uses a dedicated `api` net).

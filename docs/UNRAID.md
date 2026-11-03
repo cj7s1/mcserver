@@ -28,6 +28,10 @@ array), otherwise the mover may relocate live world files.
 
 ## 3. Configure
 
+Open a terminal (Unraid web UI → the `>_` icon). If `git --version` fails, install git with a plugin
+(for example NerdTools or un-get), or download the repository as a zip from GitHub and unpack it.
+If the repository is private, clone with a GitHub personal access token.
+
 ```bash
 cd /mnt/user/appdata
 git clone https://github.com/cj7s1/mcserver.git mcpanel-src
@@ -67,6 +71,15 @@ Open `http://192.168.1.10:8080`, create the owner account, and create your first
 containers appear in Unraid's Docker tab as `mcpanel-<id>`. **Manage them from the panel, not from the
 Docker tab.** Changes made to them outside the panel are overwritten when the panel recreates the container.
 
+### First modpack server: Better MC
+
+**Create server → Modpack.** Without a CurseForge API key, choose **CurseForge page URL** and paste
+`https://www.curseforge.com/minecraft/modpacks/better-mc-forge-bmc4` (Minecraft `1.20.1`), or the
+Fabric edition `better-mc-fabric-bmc2`. Give it at least 8 GB of memory. The first install takes a few
+minutes (about 300 mods); the overview shows progress, and the server turns **running** only once
+Minecraft answers its health check. Avoid the Modrinth editions of Better MC: they need dozens of
+files you would have to download by hand (the panel detects this and lists them).
+
 ## 5. Ports and players
 
 * Every server gets a host port from `MCPANEL_PORT_RANGE_START`–`END` (default 25565–25665). LAN
@@ -79,8 +92,8 @@ Docker tab.** Changes made to them outside the panel are overwritten when the pa
 ## 6. Snapshots on Unraid
 
 On a **btrfs** pool, MCPanel creates each new server folder as a btrfs subvolume and offers instant
-snapshots and rollback alongside restic backups. To enable this, the agent image needs `btrfs-progs`, and
-the agent needs permission to delete subvolumes. Add this to `deploy/docker-compose.override.yml`:
+snapshots and rollback alongside restic backups. The agent image already contains `btrfs-progs`; the
+agent only needs permission to delete subvolumes. Add this to `deploy/docker-compose.override.yml`:
 
 ```yaml
 services:
@@ -92,7 +105,12 @@ Snapshots only work when `MCPANEL_DATA_DIR` is a pool path (`/mnt/cache/...`). T
 `/mnt/user/...` FUSE paths or on XFS. ZFS pools are not supported yet. Snapshots live on the same disk
 as the server, so they are **not** backups.
 
-## 7. Updating
+## 7. More than one server box
+
+A second Unraid or Linux machine can run only the agent (`deploy/docker-compose.node.yml`) and be
+managed from this panel over HTTPS with a pinned certificate. See DEPLOYMENT.md, "Additional nodes".
+
+## 8. Updating
 
 ```bash
 cd /mnt/user/appdata/mcpanel-src && git pull && cd deploy && docker compose up -d --build
@@ -100,7 +118,7 @@ cd /mnt/user/appdata/mcpanel-src && git pull && cd deploy && docker compose up -
 
 Running Minecraft servers are not restarted by updates.
 
-## 8. Troubleshooting on Unraid
+## 9. Troubleshooting on Unraid
 
 * **Permission denied in server files:** confirm `MC_UID=99`/`MC_GID=100`, then restart the server.
   The runtime fixes ownership of `/data` on start.

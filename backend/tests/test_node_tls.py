@@ -350,3 +350,19 @@ def test_default_node_follows_the_fingerprint_setting(agent_a):
     with override_settings(MCPANEL_AGENT_URL="http://agent:8700", MCPANEL_AGENT_TLS_FINGERPRINT=""):
         node = Node.default()
         assert node.tls_fingerprint == "" and node.tls_cert_pem == "" and tls.transport(node) == "plain"
+
+
+def test_add_node_command_pins_and_checks(agent_a, agent_b):
+    from io import StringIO
+
+    from django.core.management import CommandError, call_command
+
+    out = StringIO()
+    call_command("add_node", name="cli-node", url=agent_a.url, token=TOKEN, fingerprint=agent_a.fp, stdout=out)
+    assert "pinned=True" in out.getvalue() and "Agent reachable" in out.getvalue()
+    node = Node.objects.get(name="cli-node")
+    assert node.tls_cert_pem and node.agent_token == TOKEN
+    with pytest.raises(CommandError, match="does not match"):
+        call_command("add_node", name="cli-node", url=agent_b.url, fingerprint=agent_a.fp, stdout=StringIO())
+    node.refresh_from_db()
+    assert node.agent_url == agent_a.url  # unchanged after the refused update

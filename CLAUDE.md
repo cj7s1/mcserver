@@ -37,7 +37,8 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 * Start daemons: `dockerd &`, `service postgresql start`, `service redis-server start`
   (DB `mcpanel`/user `mcpanel`/pw `mcpanel`, CREATEDB).
 * Containers can only reach the internet through the sandbox proxy:
-  `python3 scripts/cloud-dev/egress_forwarder.py 0.0.0.0 3128 127.0.0.1 37231 &`; the agent injects proxy
+  `python3 scripts/cloud-dev/egress_forwarder.py 0.0.0.0 3128 127.0.0.1 <port of $HTTPS_PROXY> &` (the port
+  changes between container restarts; bootstrap.sh derives it); the agent injects proxy
   env + CA via `scripts/cloud-dev/agent.env` (`AGENT_RUNTIME_EXTRA_ENV`, `AGENT_RUNTIME_CA_BUNDLE`,
   `AGENT_RUNTIME_JAVA_TRUSTSTORE`). Network `mcpanel_instances` gateway is 172.18.0.1.
 * After a container restart run `scripts/cloud-dev/bootstrap.sh` (daemons, btrfs mount, egress forwarder,

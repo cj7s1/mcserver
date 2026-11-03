@@ -91,14 +91,18 @@ docker compose -f docker-compose.node.yml --env-file node.env up -d --build
 docker compose -f docker-compose.node.yml --env-file node.env exec agent python -m mcagent fingerprint
 ```
 
-In the panel, open **System → Nodes → Add node** and enter:
+Then register it on the **panel host** (a Nodes screen in the UI is planned; the API
+`POST /api/nodes` does the same):
 
-* URL: `https://<node address>:<MCPANEL_NODE_PORT>` (default port 8700)
-* Token: `AGENT_TOKEN` from `node.env`
-* Fingerprint: the `AB:CD:…` line printed above. The panel reads the certificate the agent presents
-  and refuses to save the node if it does not match.
+```bash
+cd mcserver/deploy
+MCPANEL_NODE_TOKEN=<AGENT_TOKEN from node.env> docker compose exec -e MCPANEL_NODE_TOKEN panel \
+  python manage.py add_node --name node2 --url https://<node address>:8700 \
+  --fingerprint <the AB:CD:… line printed above> --lan-address <node LAN IP>
+```
 
-Then run **Check**. Servers can be created on the node from the create wizard and moved between nodes
+The panel reads the certificate the agent presents and refuses to save the node if it does not match
+the fingerprint, then checks that the agent answers. Servers can be created on the node from the create wizard and moved between nodes
 (**Settings → Danger zone → Move to another node**). Each node keeps its own restic backups.
 
 Notes:

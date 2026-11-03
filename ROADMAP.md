@@ -21,7 +21,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] FTB adapter (public API) + pinned deployment (`FTBA`)
 - [x] Install progress (job + status `installing` until first healthy check)
 - [x] Better MC acceptance: BMC4 Forge + BMC2 Fabric via CurseForge running (real servers); Modrinth editions diagnosed + preflight warning
-- [x] Manual-download detection API (missing_mods_checker / MODS_NEED_DOWNLOAD.txt, CF_DOWNLOADS_REPO=/data/downloads)  — [ ] UI
+- [x] Manual-download detection API + UI (missing_mods_checker / MODS_NEED_DOWNLOAD.txt, CF_DOWNLOADS_REPO=/data/downloads)
 - [x] Import server / server pack from archive (safe extraction)  — [ ] wizard UI
 
 ## Phase 3 — Core administration
@@ -44,7 +44,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Pre-update backups (modpack updates)
 - [x] Backup end-to-end validation on a real server (API + worker + restic)
 - [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules) — [ ] ZFS
-- [x] Backup browser API (list/download/restore single path) — [ ] UI
+- [x] Backup browser (list/download/restore single path) incl. UI
 
 ## Phase 5 — Mods, plugins, players
 - [x] Mods/plugins inventory, Modrinth identification by hash, update check, compatible search/install/remove/toggle/upload
@@ -76,12 +76,12 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 
 ## Multi-node
 - [x] Node model + management API, per-node tokens, server creation on a chosen node (verified with a 2nd agent)
-- [ ] Node admin UI; TLS guidance for remote agents
+- [x] TLS + certificate pinning for remote agents, agent-only node compose, `add_node` command — [ ] Node admin UI
 
 ## Phase 9 — UX refinement
 - [ ] Command palette, keyboard shortcuts
 - [x] Notifications (webhooks/Discord) for crashes, failed backups — [ ] admin UI
-- [x] Player activity history + metrics history (1-min sampling) — [ ] charts UI
+- [x] Player activity history + metrics history (1-min sampling) incl. charts
 
 ## Phase 10 — Hardening
 - [~] Systematic security review of agent + API (full audit ON HOLD until the user asks; earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard)
