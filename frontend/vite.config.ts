@@ -7,7 +7,7 @@ const backend = process.env.MCPANEL_BACKEND ?? "http://127.0.0.1:8000";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
+  resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
   server: {
     port: 5173,
     proxy: {

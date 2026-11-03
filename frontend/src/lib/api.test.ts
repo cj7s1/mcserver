@@ -29,7 +29,7 @@ describe("api client", () => {
     mockFetch(400, {
       error: { code: "validation_error", message: "Some fields are invalid.", details: { fields: { name: ["Required"] } } },
     });
-    const err = await api.post("/instances/", {}).catch((e) => e);
+    const err = (await api.post("/instances/", {}).catch((e) => e)) as ApiError;
     expect(err).toBeInstanceOf(ApiError);
     expect(err.status).toBe(400);
     expect(err.code).toBe("validation_error");

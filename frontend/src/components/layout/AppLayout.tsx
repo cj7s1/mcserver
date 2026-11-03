@@ -104,7 +104,7 @@ function ServerShortcuts({ onNavigate }: { onNavigate?: () => void }) {
   const { data } = useInstances();
   if (!data?.length) return null;
   return (
-    <div className="grid gap-0.5">
+    <div className="grid grid-cols-1 gap-0.5">
       <div className="px-2.5 pb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Servers</div>
       {data.slice(0, 12).map((inst) => (
         <NavLink
@@ -113,13 +113,13 @@ function ServerShortcuts({ onNavigate }: { onNavigate?: () => void }) {
           onClick={onNavigate}
           className={({ isActive }) =>
             cn(
-              "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent",
+              "flex min-w-0 items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm text-sidebar-foreground/80 hover:bg-sidebar-accent",
               isActive && "bg-sidebar-accent text-sidebar-foreground",
             )
           }
         >
           <StatusDot status={inst.status} />
-          <span className="truncate">{inst.name}</span>
+          <span className="min-w-0 truncate" title={inst.name}>{inst.name}</span>
         </NavLink>
       ))}
     </div>

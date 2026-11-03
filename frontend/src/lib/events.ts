@@ -17,7 +17,7 @@ export function useLiveEvents(enabled: boolean): boolean {
     if (!enabled) return;
     let ws: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let closed = false;
+    const life = { closed: false };
 
     const connect = () => {
       ws = new WebSocket(wsUrl("/ws/events/"));
@@ -48,14 +48,14 @@ export function useLiveEvents(enabled: boolean): boolean {
       };
       ws.onclose = () => {
         setConnected(false);
-        if (closed) return;
+        if (life.closed) return;
         timer = setTimeout(connect, retry.current);
         retry.current = Math.min(retry.current * 2, 30_000);
       };
     };
     connect();
     return () => {
-      closed = true;
+      life.closed = true;
       if (timer) clearTimeout(timer);
       ws?.close();
     };

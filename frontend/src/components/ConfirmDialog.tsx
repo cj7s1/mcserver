@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useId, useState, type ReactNode } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,15 +42,18 @@ export function ConfirmDialog({
 }) {
   const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
+  const [innerOpen, setInnerOpen] = useState(false);
+  const inputId = useId();
+  const controlled = open !== undefined;
+  const isOpen = controlled ? open : innerOpen;
+  const setOpen = (o: boolean) => {
+    if (!o) setTyped("");
+    if (!controlled) setInnerOpen(o);
+    onOpenChange?.(o);
+  };
   const blocked = confirmText !== undefined && typed !== confirmText;
   return (
-    <AlertDialog
-      open={open}
-      onOpenChange={(o) => {
-        if (!o) setTyped("");
-        onOpenChange?.(o);
-      }}
-    >
+    <AlertDialog open={isOpen} onOpenChange={(o) => (busy && !o ? undefined : setOpen(o))}>
       {trigger && <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>}
       <AlertDialogContent>
         <AlertDialogHeader>
@@ -60,25 +63,31 @@ export function ConfirmDialog({
         {children}
         {confirmText !== undefined && (
           <div className="grid gap-2">
-            <Label htmlFor="confirm-text">
-              Type <span className="font-mono font-semibold">{confirmText}</span> to confirm
+            <Label htmlFor={inputId}>
+              Type <span className="font-mono font-semibold break-all">{confirmText}</span> to confirm
             </Label>
-            <Input id="confirm-text" value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" />
+            <Input id={inputId} value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
           </div>
         )}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
           <AlertDialogAction
             disabled={blocked || busy}
-            className={destructive ? "bg-destructive text-white hover:bg-destructive/90" : undefined}
+            className={
+              destructive
+                ? "bg-destructive text-white hover:bg-destructive/90 focus-visible:border-destructive/40 focus-visible:ring-destructive/30"
+                : undefined
+            }
             onClick={async (e) => {
               e.preventDefault();
+              if (blocked || busy) return;
               setBusy(true);
               try {
                 await onConfirm();
-                onOpenChange?.(false);
-                setTyped("");
-              } finally {
+                setBusy(false);
+                setOpen(false);
+              } catch {
+                // The caller reports the error (mutation onError / toast); keep the dialog open.
                 setBusy(false);
               }
             }}

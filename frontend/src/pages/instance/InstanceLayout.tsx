@@ -104,8 +104,8 @@ export function InstanceLayout() {
   const can = (code: PermissionCode) => hasPerm(instance.permissions, code);
   const ctx: InstanceContext = { instance, can };
   return (
-    <div className="grid gap-4">
-      <div>
+    <div className="grid min-w-0 grid-cols-1 gap-4">
+      <div className="min-w-0">
         <NavLink to="/servers" className="mb-3 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
           <ChevronLeft className="size-3.5" /> All servers
         </NavLink>

@@ -1,0 +1,127 @@
+import { ArchiveRestore, Info, Loader2, MoreHorizontal, Play, RotateCw, Settings, Square, Terminal } from "lucide-react";
+import { Link } from "react-router";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { hasPerm } from "@/lib/queries";
+import type { Instance, PermissionCode } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { isRunningLike, useServerPower, useUnarchive } from "./server-utils";
+
+/**
+ * Per-server quick actions: an inline Start/Stop button (when the user may control the server)
+ * plus a menu with restart, console, settings and unarchive. Permission-aware via instance.permissions.
+ */
+export function ServerQuickActions({
+  instance,
+  showInline = true,
+  inlineLabel = true,
+  className,
+}: {
+  instance: Instance;
+  showInline?: boolean;
+  inlineLabel?: boolean;
+  className?: string;
+}) {
+  const power = useServerPower(instance);
+  const unarchive = useUnarchive(instance);
+  const can = (code: PermissionCode) => hasPerm(instance.permissions, code);
+  const archived = !!instance.archived_at;
+  const canControl = can("instance.control") && !archived;
+  const running = isRunningLike(instance);
+  const stopping = instance.status === "stopping";
+  const busy = !!instance.active_job || power.isPending;
+  const base = `/servers/${instance.id}`;
+
+  return (
+    <div className={cn("flex items-center gap-1", className)}>
+      {showInline &&
+        canControl &&
+        !stopping &&
+        (running ? (
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => power.mutate("stop")}
+            aria-label={`Stop ${instance.name}`}
+          >
+            {power.isPending ? <Loader2 className="animate-spin" /> : <Square />}
+            {inlineLabel && <span className="hidden sm:inline">Stop</span>}
+          </Button>
+        ) : (
+          <Button size="sm" disabled={busy} onClick={() => power.mutate("start")} aria-label={`Start ${instance.name}`}>
+            {power.isPending ? <Loader2 className="animate-spin" /> : <Play />}
+            {inlineLabel && <span className="hidden sm:inline">Start</span>}
+          </Button>
+        ))}
+      {showInline && archived && can("instance.delete") && (
+        <Button size="sm" variant="outline" disabled={unarchive.isPending} onClick={() => unarchive.mutate()}>
+          {unarchive.isPending ? <Loader2 className="animate-spin" /> : <ArchiveRestore />}
+          {inlineLabel && <span className="hidden sm:inline">Unarchive</span>}
+        </Button>
+      )}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${instance.name}`}>
+            <MoreHorizontal />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-48">
+          <DropdownMenuLabel className="truncate">{instance.name}</DropdownMenuLabel>
+          {canControl && (
+            <>
+              {!running && !stopping && (
+                <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("start")}>
+                  <Play /> Start
+                </DropdownMenuItem>
+              )}
+              {running && (
+                <>
+                  <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("restart")}>
+                    <RotateCw /> Restart
+                  </DropdownMenuItem>
+                  <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("stop")}>
+                    <Square /> Stop
+                  </DropdownMenuItem>
+                </>
+              )}
+              <DropdownMenuSeparator />
+            </>
+          )}
+          {archived && can("instance.delete") && (
+            <>
+              <DropdownMenuItem disabled={unarchive.isPending} onSelect={() => unarchive.mutate()}>
+                <ArchiveRestore /> Unarchive
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+            </>
+          )}
+          <DropdownMenuItem asChild>
+            <Link to={base}>
+              <Info /> Overview
+            </Link>
+          </DropdownMenuItem>
+          {can("instance.console") && (
+            <DropdownMenuItem asChild>
+              <Link to={`${base}/console`}>
+                <Terminal /> Open console
+              </Link>
+            </DropdownMenuItem>
+          )}
+          <DropdownMenuItem asChild>
+            <Link to={`${base}/settings`}>
+              <Settings /> Settings
+            </Link>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
