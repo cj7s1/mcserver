@@ -48,6 +48,11 @@ instance_patterns = [
     path("<uuid:pk>/backups/<uuid:bid>", backups.BackupDetailView.as_view()),
     path("<uuid:pk>/backups/<uuid:bid>/restore", backups.BackupRestoreView.as_view()),
     path("<uuid:pk>/backups/<uuid:bid>/restore-as-new", backups.BackupRestoreNewView.as_view()),
+    path("<uuid:pk>/content/", include("apps.content.urls")),
+    path("<uuid:pk>/modpack", modpacks.InstanceModpackView.as_view()),
+    path("<uuid:pk>/modpack/plan/<str:version_id>", modpacks.InstanceModpackPlanView.as_view()),
+    path("<uuid:pk>/modpack/update", modpacks.InstanceModpackUpdateView.as_view()),
+    path("<uuid:pk>/modpack/rollback", modpacks.InstanceModpackRollbackView.as_view()),
     path("<uuid:pk>/<str:action>", instances.InstanceActionView.as_view()),
 ]
 

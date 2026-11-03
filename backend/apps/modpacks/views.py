@@ -107,3 +107,112 @@ class ReleaseDetailView(APIView):
         if rel is None:
             raise ApiError("Release not found", code="not_found", status_code=404)
         return Response(rel)
+
+
+class InstanceModpackView(APIView):
+    """Current pin, available releases and update history for a modpack server."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from apps.backups.models import Backup, BackupKind, BackupStatus
+        from apps.core.permissions import get_instance_for
+
+        instance = get_instance_for(request.user, pk, "instance.view")
+        if not instance.is_modpack:
+            raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
+        provider = get_provider(instance.modpack_provider)
+        releases = provider.releases(instance.modpack_project_id)
+        if request.query_params.get("include_prerelease") != "true":
+            releases = [r for r in releases if r.get("version_type") in (None, "release")] or releases
+        current = next((r for r in releases if r["id"] == instance.modpack_version_id), None)
+        # releases are sorted newest first by the provider adapters
+        newer = releases[: releases.index(current)] if current is not None else []
+        rollback_points = [
+            {"backup_id": str(b.id), "name": b.name, "created_at": b.created_at, "before": (b.meta or {}).get("modpack_before")}
+            for b in Backup.objects.filter(instance=instance, kind=BackupKind.PRE_UPDATE, status=BackupStatus.SUCCEEDED)
+            if (b.meta or {}).get("modpack_before")
+        ]
+        return Response(
+            {
+                "provider": instance.modpack_provider,
+                "project_id": instance.modpack_project_id,
+                "name": instance.modpack_name,
+                "current": current or {"id": instance.modpack_version_id, "version_number": instance.modpack_version_name},
+                "releases": releases[:50],
+                "updates_available": len(newer),
+                "history": (instance.modpack_meta or {}).get("history", []),
+                "rollback_points": rollback_points,
+            }
+        )
+
+
+class InstanceModpackPlanView(APIView):
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str, version_id: str) -> Response:
+        from apps.core.permissions import get_instance_for
+
+        from .handlers import plan_update
+
+        instance = get_instance_for(request.user, pk, "instance.content")
+        return Response(plan_update(instance, version_id))
+
+
+class InstanceModpackUpdateView(APIView):
+    @extend_schema(request=dict, responses={202: dict})
+    def post(self, request: Request, pk: str) -> Response:
+        from apps.audit import service as audit
+        from apps.core.permissions import get_instance_for
+        from apps.jobs.runner import enqueue
+        from apps.jobs.serializers import JobSerializer
+
+        instance = get_instance_for(request.user, pk, "instance.content")
+        version_id = str(request.data.get("version_id") or "")
+        if not version_id:
+            raise ApiError("version_id is required", code="missing_params")
+        job = enqueue(
+            "modpack_update",
+            title=f"Update {instance.modpack_name or instance.name}",
+            instance=instance,
+            user=request.user,
+            params={
+                "version_id": version_id,
+                "backup": bool(request.data.get("backup", True)),
+                "allow_minecraft_change": bool(request.data.get("allow_minecraft_change", False)),
+                "start": bool(request.data.get("start", False)),
+            },
+        )
+        audit.record(
+            "modpack.update",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"from": instance.modpack_version_id, "to": version_id},
+        )
+        return Response(JobSerializer(job).data, status=202)
+
+
+class InstanceModpackRollbackView(APIView):
+    @extend_schema(request=dict, responses={202: dict})
+    def post(self, request: Request, pk: str) -> Response:
+        from apps.audit import service as audit
+        from apps.core.permissions import get_instance_for, require
+        from apps.jobs.runner import enqueue
+        from apps.jobs.serializers import JobSerializer
+
+        instance = get_instance_for(request.user, pk, "instance.content")
+        require(request.user, "instance.restore", instance)
+        if request.data.get("confirm") is not True:
+            raise ApiError(
+                "Rollback replaces the current server files with the pre-update backup. Confirm to continue.",
+                code="confirmation_required",
+            )
+        backup_id = str(request.data.get("backup_id") or "")
+        job = enqueue(
+            "modpack_rollback",
+            title=f"Roll back {instance.modpack_name or instance.name}",
+            instance=instance,
+            user=request.user,
+            params={"backup_id": backup_id},
+        )
+        audit.record("modpack.rollback", request=request, instance=instance, target=instance, details={"backup": backup_id})
+        return Response(JobSerializer(job).data, status=202)
