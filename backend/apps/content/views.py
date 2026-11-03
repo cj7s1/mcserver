@@ -76,7 +76,9 @@ def _audited(
 
 
 class ContentListView(APIView):
-    @extend_schema(responses={200: dict}, summary="Installed mods/plugins, identified on Modrinth")
+    @extend_schema(
+        operation_id="content_inventory", responses={200: dict}, summary="Installed mods/plugins, identified on Modrinth"
+    )
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, READ)
         from . import hangar_source
@@ -319,3 +321,9 @@ class HangarInstallView(APIView):
             details={"slug": slug[:64], "version": result["installed"]["version"]},
         )
         return Response(result)
+
+
+class ContentListAliasView(ContentListView):
+    """Same as ContentListView, mounted without the trailing slash; hidden from the schema."""
+
+    schema = None

@@ -5,6 +5,7 @@ from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.http import StreamingHttpResponse
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -49,7 +50,7 @@ class InstanceListView(APIView):
             qs = qs.filter(archived_at__isnull=True)
         return Response(InstanceSerializer(qs, many=True, context={"request": request}).data)
 
-    @extend_schema(request=CreateInstanceSerializer, responses={201: dict})
+    @extend_schema(operation_id="instances_create", request=CreateInstanceSerializer, responses={201: dict})
     def post(self, request: Request) -> Response:
         require(request.user, "instance.create")
         ser = CreateInstanceSerializer(data=request.data)
@@ -246,7 +247,7 @@ class InstanceActionView(APIView):
         "unarchive": ("instance.delete", "Unarchive server"),
     }
 
-    @extend_schema(request=None, responses={202: JobSerializer})
+    @extend_schema(operation_id="instances_action", request=None, responses={202: JobSerializer})
     def post(self, request: Request, pk: str, action: str) -> Response:
         if action not in self.ACTIONS:
             raise ApiError("Unknown action", code="invalid_action", status_code=404)
@@ -483,6 +484,7 @@ class FilesTextView(APIView):
 
 
 class FilesDownloadView(APIView):
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
         instance = get_instance_for(request.user, pk, "instance.files.read")
         path = request.query_params.get("path", "")
@@ -891,6 +893,7 @@ def pinned_loader(server_type: str, minecraft_version: str) -> str:
 class FilesArchiveView(APIView):
     """Download a folder (e.g. a world) as a zip built on the fly by the agent."""
 
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
         instance = get_instance_for(request.user, pk, "instance.files.read")
         path = request.query_params.get("path", "")

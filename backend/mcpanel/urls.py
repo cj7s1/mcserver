@@ -67,7 +67,7 @@ instance_patterns = [
     path("<uuid:pk>/backups/<uuid:bid>/download", backups.BackupFileDownloadView.as_view()),
     path("<uuid:pk>/backups/<uuid:bid>/restore-path", backups.BackupRestorePathView.as_view()),
     # without the slash GET .../content would fall through to the instance-action route below
-    path("<uuid:pk>/content", content.ContentListView.as_view()),
+    path("<uuid:pk>/content", content.ContentListAliasView.as_view()),
     path("<uuid:pk>/content/", include("apps.content.urls")),
     path("<uuid:pk>/modpack", modpacks.InstanceModpackView.as_view()),
     path("<uuid:pk>/modpack/plan/<str:version_id>", modpacks.InstanceModpackPlanView.as_view()),

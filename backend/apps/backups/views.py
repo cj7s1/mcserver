@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.db import transaction
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.request import Request
@@ -271,6 +272,7 @@ class BackupBrowseView(APIView):
 
 
 class BackupFileDownloadView(APIView):
+    @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str, bid: str):  # type: ignore[no-untyped-def]
         from django.http import StreamingHttpResponse
 
@@ -321,7 +323,7 @@ class SnapshotListView(APIView):
         instance = get_instance_for(request.user, pk, "instance.backup")
         return Response(AgentClient(instance.node).snapshots(instance.id))
 
-    @extend_schema(request=dict, responses={202: JobSerializer})
+    @extend_schema(operation_id="snapshots_create", request=dict, responses={202: JobSerializer})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.backup")
         label = str(request.data.get("label") or "")[:120]
@@ -369,7 +371,7 @@ class SnapshotDetailView(APIView):
         audit.record("snapshot.delete", request=request, instance=instance, target=instance, details={"name": name})
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
-    @extend_schema(request=dict, responses={202: JobSerializer})
+    @extend_schema(operation_id="snapshots_rollback", request=dict, responses={202: JobSerializer})
     def post(self, request: Request, pk: str, name: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.restore")
         if request.data.get("confirm") is not True:

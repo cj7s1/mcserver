@@ -68,7 +68,7 @@ class ProjectView(APIView):
 
 
 class ReleasesView(APIView):
-    @extend_schema(responses={200: dict})
+    @extend_schema(operation_id="modpack_releases_list", responses={200: dict})
     def get(self, request: Request, provider: str, project_id: str) -> Response:
         qp = request.query_params
         loaders = [x for x in qp.get("loaders", "").split(",") if x] or None
@@ -94,7 +94,7 @@ class ResolveView(APIView):
 
 
 class ReleaseDetailView(APIView):
-    @extend_schema(responses={200: dict})
+    @extend_schema(operation_id="modpack_release_detail", responses={200: dict})
     def get(self, request: Request, provider: str, project_id: str, version_id: str) -> Response:
         p = get_provider(provider)
         if provider == "modrinth":
