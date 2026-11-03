@@ -11,7 +11,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **393 passed** |
+| `backend: uv run pytest -q -m "not integration"` | **397 passed** |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
 | `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **307 passed** (btrfs + restic tests included) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
@@ -35,6 +35,8 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Multi-node: second agent registered as a node, server created/deleted there | |
 | Webhook notifications (test + real backup event) | local receiver |
 | Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
+| Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
+| World export as zip (`/files/archive?path=world`) | zip validated |
 
 ### Not yet verified
 
@@ -48,8 +50,8 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 * Workflow `frontend-pages`: all screens, then browser integration testing plus UX and correctness
   reviews. The frontend **must** then add UI for features added after its spec (task list below).
-* Workflow `security-audit`: five audit lenses over backend and agent with adversarial verification
-  and fixes.
+* Security audit (Phase 10 workflow) was **stopped at the user's request** during its read-only
+  finding phase; no audit changes were applied. **Do not run it again until the user asks.**
 
 ## Next recommended tasks (in order)
 
@@ -66,7 +68,7 @@ and the worker+beat. All tests pass on `main` of this branch:
      (`POST /jobs/<id>/abandon`)
    * wizard: CurseForge URL/slug mode without a key, show `preflight` warnings, and the new container
      memory formula (mods: heap + max(1536, 40%); others: heap + max(768, 30%))
-3. Merge the security-audit fixes; re-run all suites.
+3. (On hold until the user asks) Phase 10 security audit of backend + agent.
 4. Remaining roadmap: ZFS snapshots, Hangar/CurseForge mod sources, world import/export UI, Unraid
    validation.
 

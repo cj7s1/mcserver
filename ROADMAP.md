@@ -51,7 +51,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Whitelist / operators / bans / kick (RCON when running, JSON files when stopped)
 - [x] Online players (RCON `list`)
 - [ ] CurseForge mod search for individual mods
-- [ ] Hangar / SpigotMC plugin sources
+- [x] Hangar plugin source (search/versions/install) — [ ] SpigotMC
 
 ## Phase 6 — Multi-user
 - [x] Permission matrix, system roles, custom roles, per-server grants
@@ -84,7 +84,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Player activity history + metrics history (1-min sampling) — [ ] charts UI
 
 ## Phase 10 — Hardening
-- [~] Systematic security review of agent + API (audit workflow running; earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard)
+- [~] Systematic security review of agent + API (full audit ON HOLD until the user asks; earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard)
 - [x] Dependency scanning in CI (pip-audit, npm audit, non-blocking)
 - [ ] Upgrade/reinstall test (data survives image upgrades)
 - [ ] Load test of console fan-out
