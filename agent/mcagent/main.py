@@ -22,6 +22,8 @@ from collections import OrderedDict
 from typing import Any
 from uuid import UUID
 
+import docker.errors
+import requests.exceptions
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi import Path as PathParam
 from fastapi.concurrency import run_in_threadpool
@@ -110,6 +112,38 @@ async def _refuse_instance_networks(request: Request, call_next):  # type: ignor
 @app.exception_handler(AgentError)
 async def _agent_error(_request: Request, exc: AgentError) -> JSONResponse:
     return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
+
+
+@app.exception_handler(requests.exceptions.ConnectionError)
+async def _docker_connection_error(_request: Request, _exc: Exception) -> JSONResponse:
+    # docker-py surfaces a vanished/unreachable daemon socket as a requests ConnectionError
+    return JSONResponse(
+        {
+            "error": {
+                "code": "docker_unavailable",
+                "message": "The Docker daemon on this node is not reachable",
+            }
+        },
+        status_code=503,
+    )
+
+
+@app.exception_handler(docker.errors.DockerException)
+async def _docker_error(_request: Request, exc: docker.errors.DockerException) -> JSONResponse:
+    if isinstance(exc, docker.errors.APIError):
+        return JSONResponse(
+            {"error": {"code": "docker_error", "message": f"Docker error: {exc.explanation or exc}"}},
+            status_code=502,
+        )
+    return JSONResponse(
+        {
+            "error": {
+                "code": "docker_unavailable",
+                "message": "The Docker daemon on this node is not reachable",
+            }
+        },
+        status_code=503,
+    )
 
 
 @app.exception_handler(PathError)

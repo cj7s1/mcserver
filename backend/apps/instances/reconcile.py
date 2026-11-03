@@ -99,7 +99,9 @@ def _stop_crash_loop(instance: Instance, restarts: int) -> None:
     )
 
 
-def apply_observation(instance: Instance, container: dict[str, Any] | None, *, agent_ok: bool = True) -> bool:
+def apply_observation(
+    instance: Instance, container: dict[str, Any] | None, *, agent_ok: bool = True, agent_error: str = ""
+) -> bool:
     """Update an instance from an agent container description. Returns True if changed."""
     job_kind = None
     if instance.active_job_id:
@@ -107,7 +109,7 @@ def apply_observation(instance: Instance, container: dict[str, Any] | None, *, a
         job_kind = job.kind if job else None
     before = (instance.status, instance.status_detail, instance.container_state, instance.health)
     if not agent_ok:
-        instance.status, instance.status_detail = Status.UNKNOWN, "Node agent unreachable"
+        instance.status, instance.status_detail = Status.UNKNOWN, (agent_error or "Node agent unreachable")[:500]
     else:
         restarts = crash_restarts(instance, container) if not job_kind else 0
         status, detail = state.compute(instance, container, job_kind, crash_restarts=restarts)
@@ -199,6 +201,14 @@ def _notify_transition(instance: Instance, old: str, new: str) -> None:
         )
 
 
+def _agent_problem(exc: ApiError) -> str:
+    if exc.error_code == "docker_unavailable":
+        return "Docker is not reachable on this node (state unknown until it is back)"
+    if exc.error_code == "agent_unavailable":
+        return "Node agent unreachable (state unknown until it is back)"
+    return f"Node agent error: {exc.detail}"
+
+
 def reconcile_instance(instance_id: Any) -> Instance | None:
     instance = Instance.objects.select_related("node").filter(pk=instance_id).first()
     if instance is None:
@@ -210,7 +220,7 @@ def reconcile_instance(instance_id: Any) -> Instance | None:
         container = AgentClient(instance.node).status(instance.id)
     except ApiError as exc:
         log.warning("reconcile %s: agent error %s", instance_id, exc)
-        apply_observation(instance, None, agent_ok=False)
+        apply_observation(instance, None, agent_ok=False, agent_error=_agent_problem(exc))
         return instance
     apply_observation(instance, container)
     return instance
@@ -225,7 +235,7 @@ def reconcile_node(node: Node) -> dict[str, int]:
         node.save(update_fields=["last_error"])
         for inst in instances:
             if not inst.archived_at:
-                apply_observation(inst, None, agent_ok=False)
+                apply_observation(inst, None, agent_ok=False, agent_error=_agent_problem(exc))
         return {"instances": len(instances), "changed": 0, "orphans": 0}
     node.last_seen_at = timezone.now()
     node.last_error = ""
