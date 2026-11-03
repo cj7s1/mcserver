@@ -4,6 +4,8 @@ from django.contrib.auth import authenticate, login, logout, password_validation
 from django.db import connection, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_protect
 from drf_spectacular.utils import extend_schema
 from rest_framework import generics, serializers, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
@@ -59,6 +61,7 @@ class AuthStateView(APIView):
 SETUP_LOCK_KEY = 0x4D43_5345_5455_5000  # arbitrary, stable advisory-lock id for first-run setup
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class SetupView(APIView):
     """Create the owner account. Only possible while no users exist."""
 
@@ -93,6 +96,7 @@ class SetupView(APIView):
         return Response(MeSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class LoginView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -146,6 +150,7 @@ class PasswordChangeView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+@method_decorator(csrf_protect, name="dispatch")
 class PasswordResetView(APIView):
     """Complete a reset using a one-time token issued by an administrator."""
 

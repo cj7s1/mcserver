@@ -136,7 +136,11 @@ def test_csrf_enforced_for_session_requests(users, make_instance, fake_agent):
     inst = make_instance()
     client = APIClient(enforce_csrf_checks=True)
     assert client.get("/api/auth/state").status_code == 200
-    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 200
+    pre_token = client.cookies["mcpanel_csrftoken"].value
+    # login itself is CSRF-protected (prevents login CSRF)
+    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 403
+    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD},
+                       HTTP_X_CSRFTOKEN=pre_token).status_code == 200
     token = client.cookies["mcpanel_csrftoken"].value
 
     # safe methods need no token
@@ -339,3 +343,22 @@ def test_superuser_accounts_count_as_root(user_manager, make_user):
     root = make_user("root2")
     User.objects.filter(pk=root.pk).update(is_superuser=True)  # e.g. made with `manage.py createsuperuser`
     assert client.post(f"/api/users/{root.id}/reset-link").status_code == 403
+
+
+@pytest.mark.django_db
+def test_only_one_owner_can_exist(users):
+    from django.db import IntegrityError, transaction
+
+    from apps.accounts.models import User
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        User.objects.create_user("second-owner", password="x" * 12, is_owner=True)
+
+
+@pytest.mark.django_db
+def test_oversized_upload_rejected_before_parsing(users, make_instance, settings, client_for):
+    settings.MCPANEL_MAX_UPLOAD_BYTES = 1000
+    inst = make_instance()
+    c = client_for(users["owner"])
+    r = c.generic("POST", f"/api/instances/{inst.id}/files/upload", b"x" * 2000, content_type="application/octet-stream")
+    assert r.status_code == 413 and r.json()["error"]["code"] == "file_too_large"

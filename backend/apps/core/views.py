@@ -152,3 +152,14 @@ class PortsView(APIView):
                 "suggested": suggestion,
             }
         )
+
+
+def csrf_failure(request, reason: str = ""):  # type: ignore[no-untyped-def]
+    """JSON CSRF failure response in the API error format (Django's default is an HTML page)."""
+    from django.http import JsonResponse
+
+    return JsonResponse(
+        {"error": {"code": "csrf_failed", "message": f"CSRF check failed: {reason}. Reload the page and try again.",
+                   "details": {}}},
+        status=403,
+    )

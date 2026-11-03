@@ -41,6 +41,10 @@ class User(AbstractUser):
 
     class Meta:
         ordering = ["username"]
+        constraints = [
+            # At most one owner, enforced by the database (closes the concurrent first-run setup race).
+            models.UniqueConstraint(fields=["is_owner"], condition=models.Q(is_owner=True), name="single_owner"),
+        ]
 
     # -- permission evaluation -------------------------------------------------
     def global_permissions(self) -> frozenset[str]:

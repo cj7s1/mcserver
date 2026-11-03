@@ -83,6 +83,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "apps.core.middleware.UploadLimitMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -190,6 +191,7 @@ SESSION_COOKIE_SECURE = env_bool("MCPANEL_SECURE_COOKIES", False)
 CSRF_COOKIE_NAME = "mcpanel_csrftoken"
 CSRF_COOKIE_HTTPONLY = False  # SPA reads it to send X-CSRFToken
 CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_FAILURE_VIEW = "apps.core.views.csrf_failure"
 CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
