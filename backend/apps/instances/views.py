@@ -72,7 +72,7 @@ class InstanceListView(APIView):
             fields.update(
                 server_type=data["server_type"],
                 minecraft_version=data["minecraft_version"],
-                loader_version=data.get("loader_version", ""),
+                loader_version=data.get("loader_version") or pinned_loader(data["server_type"], data["minecraft_version"]),
                 source=Source.STANDARD,
             )
             java_info = resolve_java(data["minecraft_version"], data["server_type"])
@@ -840,3 +840,22 @@ class SoftwareUpdateView(APIView):
             details={"from": instance.minecraft_version, "to": mc, "loader": loader, "java": java},
         )
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+def pinned_loader(server_type: str, minecraft_version: str) -> str:
+    """Resolve 'latest/recommended' to a concrete loader/build so the config is reproducible.
+
+    Falls back to '' (runtime default) if the catalog is unreachable; the user can pin later.
+    """
+    from apps.catalog.providers import loader_versions
+
+    if server_type == "VANILLA" or minecraft_version.upper() == "LATEST":
+        return ""
+    try:
+        versions = loader_versions(server_type, minecraft_version)
+    except ApiError:
+        return ""
+    if not versions:
+        return ""
+    preferred = next((v for v in versions if v.get("recommended")), None) or next((v for v in versions if v.get("stable")), None)
+    return str((preferred or versions[0])["version"])
