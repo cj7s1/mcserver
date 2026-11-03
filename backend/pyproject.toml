@@ -1,0 +1,57 @@
+[project]
+name = "mcpanel-backend"
+version = "0.1.0"
+description = "Management API, WebSocket gateway and background worker for the MCPanel Minecraft server platform"
+requires-python = ">=3.12"
+dependencies = [
+    "django>=5.2,<5.3",
+    "djangorestframework>=3.15",
+    "drf-spectacular>=0.28",
+    "channels>=4.2",
+    "channels-redis>=4.2",
+    "uvicorn[standard]>=0.32",
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    "psycopg[binary]>=3.2",
+    "httpx>=0.28",
+    "websockets>=14",
+    "cryptography>=44",
+    "croniter>=5",
+    "whitenoise>=6.8",
+    "python-json-logger>=3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-django>=4.9",
+    "pytest-asyncio>=0.25",
+    "ruff>=0.8",
+    "respx>=0.22",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "mcpanel.settings"
+python_files = ["test_*.py"]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: requires a running agent + Docker daemon (deselect with -m 'not integration')",
+    "network: requires outbound internet access to upstream providers",
+]
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "DJ", "RUF"]
+ignore = ["S101", "S105", "S106", "RUF012", "DJ001", "S311", "E501", "DJ008", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+"**/migrations/**" = ["E501", "RUF", "S104"]

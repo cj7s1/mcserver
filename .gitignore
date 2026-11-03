@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+backend/staticfiles/
+backend/frontend_dist/
+# Node
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+# Env / secrets
+.env
+*.env.local
+deploy/.env
+deploy/secrets/
+# Local data
+/data/
+*.log
+.DS_Store
