@@ -46,6 +46,21 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 * restic binary: copy from the `restic/restic` image (`docker create` + `docker cp`); github.com
   release downloads are blocked. Docker Hub sometimes returns 429 — retry later.
 
+## Subsystem map (where things live)
+
+| Area | Backend | Agent |
+|---|---|---|
+| Lifecycle, spec, status, crash loops | `apps/instances/{handlers,spec,state,reconcile}.py` | `docker_ops.py` |
+| Diagnostics / manual downloads | `apps/instances/diagnostics.py` | (reads logs/files) |
+| Modpacks (Modrinth/CurseForge/FTB), preflight, pinning, update/rollback | `apps/modpacks/{providers,mrpack,pinning,handlers}.py` | — |
+| Mods/plugins (Modrinth + Hangar) | `apps/content/{service,hangar_source}.py`, `apps/modpacks/hangar.py` | `fetch.py`, `/files/hashes` |
+| Backups (restic), backup browser, retention | `apps/backups/{handlers,retention,views}.py` | `backups.py` |
+| Snapshots (btrfs) | `apps/backups/handlers.py` (snapshot_*) | `snapshots.py` |
+| Import / export (archives) | `apps/instances/views.py` (Import/Extract/Archive) | `archive.py` |
+| Metrics + player history | `apps/metrics` | `/stats` |
+| Notifications | `apps/notifications` | — |
+| Nodes (multi-host) | `apps/nodes` | one agent per host |
+
 ## Conventions
 
 * **No mock functionality in product paths.** If something is not implemented, the UI says so.
@@ -63,6 +78,9 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 * Frontend: API calls via `src/lib/api.ts`, query keys in `src/lib/queries.ts`, types in `src/lib/types.ts`,
   shared UI in `src/components/`, instance pages get `{instance, can}` from `useInstanceContext()`.
 * Keep `DEVELOPMENT_STATUS.md` and `ROADMAP.md` updated when a feature lands; commit often.
+
+* Never run the Phase 10 security-audit workflow unless the user explicitly asks (user instruction,
+  session 1).
 
 ## Security rules (non-negotiable)
 
