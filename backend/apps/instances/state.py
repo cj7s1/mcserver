@@ -25,6 +25,7 @@ JOB_STATUS = {
     "modpack_update": Status.UPDATING,
     "software_update": Status.UPDATING,
     "recreate": Status.UPDATING,
+    "migrate": Status.UPDATING,
     "install": Status.INSTALLING,
     "delete": Status.STOPPING,
 }

@@ -904,3 +904,37 @@ class FilesArchiveView(APIView):
         response["X-Content-Type-Options"] = "nosniff"
         audit.record("files.download_archive", request=request, instance=instance, target=instance, details={"path": path})
         return response
+
+
+class MigrateView(APIView):
+    """Move a server to another node (admin: needs system.nodes and instance.configure)."""
+
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.configure")
+        require(request.user, "system.nodes")
+        data = request.data if isinstance(request.data, dict) else {}
+        target = Node.objects.filter(pk=data.get("node")).first()
+        if target is None:
+            raise ValidationError({"node": ["Choose a target node"]})
+        if target.pk == instance.node_id:
+            raise ConflictError("The server is already on that node", code="same_node")
+        if data.get("confirm") is not True:
+            raise ApiError(
+                "Migration stops the server and copies all of its files. Confirm to continue.", code="confirmation_required"
+            )
+        job = enqueue(
+            "migrate",
+            title=f"Move {instance.name} to {target.name}",
+            instance=instance,
+            user=request.user,
+            params={"target_node": target.pk, "delete_source": bool(data.get("delete_source"))},
+        )
+        audit.record(
+            "instance.migrate",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"from": instance.node.name, "to": target.name, "delete_source": bool(data.get("delete_source"))},
+        )
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)

@@ -261,3 +261,74 @@ def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.6, f"Recreating container for {instance.server_type} {instance.minecraft_version}", force=True)
     apply_container(instance, ctx, start=was_running or bool(p.get("start")), span=(0.6, 0.97))
     return {"before": before, "after": {k: getattr(instance, k) for k in before}, "backup_id": backup_id}
+
+
+@register("migrate")
+def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Move a server to another node: stream its folder agent-to-agent, then recreate it there.
+
+    restic backups stay in the source node's repository (they are not copied), so a fresh
+    backup is taken on the target afterwards when requested.
+    """
+    import secrets as _secrets
+
+    from apps.nodes.models import Node
+
+    from .services import allocate_port, ports_in_use
+
+    instance = _instance(job)
+    source = AgentClient(instance.node)
+    target_node = Node.objects.get(pk=job.params["target_node"])
+    target = AgentClient(target_node)
+    if target_node.pk == instance.node_id:
+        raise ApiError("The server is already on that node", code="same_node", status_code=409)
+    target.info()  # fail fast if the target agent is unreachable or rejects the token
+    was_running = ensure_stopped(instance, ctx)
+
+    ctx.progress(0.05, f"Preparing {target_node.name}", force=True)
+    target.prepare(instance.id)
+    archive = f".mcpanel-migrate-{_secrets.token_hex(6)}.zip"
+    ctx.progress(0.1, "Copying server files to the target node (streamed)", force=True)
+    chunks, _length, _resp = source.download(instance.id, "", endpoint="archive")
+    uploaded = target.upload(instance.id, archive, chunks, overwrite=False)
+    ctx.log(f"Transferred {uploaded.get('size', 0)} bytes")
+    ctx.progress(0.6, "Unpacking on the target node")
+    op = target.extract(instance.id, archive, "", strip="auto", overwrite=True, delete_archive=True)
+    target.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.6, 0.25))
+
+    old_node = instance.node
+    port_changed = None
+    if instance.game_port in ports_in_use(target_node, exclude=instance):
+        new_port = allocate_port(target_node, exclude=instance)
+        port_changed = (instance.game_port, new_port)
+        instance.game_port = new_port
+    instance.node = target_node
+    instance.container_spec_hash = ""
+    instance.save(update_fields=["node", "game_port", "container_spec_hash"])
+    ctx.progress(0.88, f"Creating the container on {target_node.name}")
+    apply_container(instance, ctx, start=was_running, span=(0.88, 0.97))
+
+    source.remove_container(instance.id, timeout=30)
+    if job.params.get("delete_source"):
+        ctx.log(f"Deleting the server folder and backups on {old_node.name}")
+        op = source.delete_data(instance.id)
+        source.wait_operation(op["id"], timeout=3600)
+    from apps.backups.models import Backup, BackupStatus
+
+    stale = Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED)
+    stale_count = stale.count()
+    if stale_count:
+        meta_note = {"left_on_node": old_node.name}
+        for b in stale:
+            b.meta = {**(b.meta or {}), **meta_note}
+            b.status = BackupStatus.DELETED if job.params.get("delete_source") else b.status
+            b.save(update_fields=["meta", "status"])
+    return {
+        "from": old_node.name,
+        "to": target_node.name,
+        "bytes": uploaded.get("size"),
+        "port_changed": port_changed,
+        "restarted": was_running,
+        "source_data_deleted": bool(job.params.get("delete_source")),
+        "backups_left_on_source": 0 if job.params.get("delete_source") else stale_count,
+    }
