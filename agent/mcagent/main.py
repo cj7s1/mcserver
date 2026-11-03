@@ -18,6 +18,7 @@ import os
 import shutil
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 from uuid import UUID
 
@@ -651,6 +652,12 @@ async def files_search(
     return {"results": results}
 
 
+# (instance, path, size, mtime, algorithm) -> digest. A file that changes gets a new mtime
+# (or size), so stale entries are never returned for modified files; LRU-bounded.
+_hash_cache: OrderedDict[tuple[str, str, int, float, str], str] = OrderedDict()
+HASH_CACHE_MAX = 50_000
+
+
 @app.get("/v1/instances/{instance_id}/files/hashes", dependencies=[Depends(require_token)])
 async def files_hashes(
     instance_id: UUID,
@@ -666,6 +673,12 @@ async def files_hashes(
         for entry in root.list(path):
             if entry.type != "file":
                 continue
+            key = (str(instance_id), entry.path, entry.size, entry.modified, algorithm)
+            cached = _hash_cache.get(key)
+            if cached is not None:
+                _hash_cache.move_to_end(key)
+                out.append({**entry.as_dict(), "hash": cached})
+                continue
             h = hashlib.new(algorithm)
             try:
                 with root.open_read(entry.path) as (fh, _size):
@@ -677,7 +690,11 @@ async def files_hashes(
                 if exc.code in ("not_found", "symlink", "not_a_file"):
                     continue
                 raise
-            out.append({**entry.as_dict(), "hash": h.hexdigest()})
+            digest = h.hexdigest()
+            _hash_cache[key] = digest
+            while len(_hash_cache) > HASH_CACHE_MAX:
+                _hash_cache.popitem(last=False)
+            out.append({**entry.as_dict(), "hash": digest})
         return out
 
     try:
