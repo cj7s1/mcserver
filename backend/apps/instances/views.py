@@ -20,6 +20,7 @@ from apps.catalog.providers import resolve_java
 from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.core.permissions import get_instance_for, require, visible_instances
+from apps.core.utils import content_disposition
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
 from apps.nodes.client import AgentClient
@@ -488,8 +489,7 @@ class FilesDownloadView(APIView):
         chunks, length, _resp = AgentClient(instance.node).download(instance.id, path)
         filename = path.rsplit("/", 1)[-1] or "download"
         response = StreamingHttpResponse(chunks, content_type=mimetypes.guess_type(filename)[0] or "application/octet-stream")
-        safe = filename.replace('"', "").replace("\\", "")
-        response["Content-Disposition"] = f'attachment; filename="{safe}"'
+        response["Content-Disposition"] = content_disposition(filename)
         if length is not None:
             response["Content-Length"] = str(length)
         response["X-Content-Type-Options"] = "nosniff"
@@ -886,3 +886,18 @@ def pinned_loader(server_type: str, minecraft_version: str) -> str:
         return ""
     preferred = next((v for v in versions if v.get("recommended")), None) or next((v for v in versions if v.get("stable")), None)
     return str((preferred or versions[0])["version"])
+
+
+class FilesArchiveView(APIView):
+    """Download a folder (e.g. a world) as a zip built on the fly by the agent."""
+
+    def get(self, request: Request, pk: str) -> StreamingHttpResponse:
+        instance = get_instance_for(request.user, pk, "instance.files.read")
+        path = request.query_params.get("path", "")
+        chunks, _length, _resp = AgentClient(instance.node).download(instance.id, path, endpoint="archive")
+        name = path.strip("/").rsplit("/", 1)[-1] or instance.name
+        response = StreamingHttpResponse(chunks, content_type="application/zip")
+        response["Content-Disposition"] = content_disposition(f"{name}.zip")
+        response["X-Content-Type-Options"] = "nosniff"
+        audit.record("files.download_archive", request=request, instance=instance, target=instance, details={"path": path})
+        return response

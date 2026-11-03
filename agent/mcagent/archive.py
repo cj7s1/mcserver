@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import stat
 import tarfile
+import time
 import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -222,3 +223,71 @@ def _extract_members(
     result = stats.as_dict()
     result["stripped_prefix"] = strip_prefix
     return result
+
+
+class _PipeWriter:
+    """Unseekable file-like sink that hands written bytes to a queue (for streaming zips)."""
+
+    def __init__(self, q) -> None:  # type: ignore[no-untyped-def]
+        self.q = q
+        self.pos = 0
+
+    def write(self, data: bytes) -> int:
+        if data:
+            self.q.put(bytes(data))
+            self.pos += len(data)
+        return len(data)
+
+    def tell(self) -> int:
+        return self.pos
+
+    def flush(self) -> None:
+        pass
+
+
+def stream_zip(root: SafeRoot, rel: str, *, max_bytes: int = MAX_TOTAL_BYTES) -> Iterator[bytes]:
+    """Yield a zip of a directory inside the instance, built on the fly.
+
+    Only regular files are included (symlinks are never followed); paths in the archive
+    are relative to the chosen directory's parent so the folder name is preserved.
+    """
+    import queue
+    import threading
+
+    parts = split_path(rel)
+    prefix = parts[-1] if parts else "server"
+    files = list(root.walk_files("/".join(parts), max_depth=64))
+    if sum(st.st_size for _p, st in files) > max_bytes:
+        raise AgentError("Folder is too large to download as a zip", "archive_too_large", 413)
+    q: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=64)
+
+    def produce() -> None:
+        try:
+            with zipfile.ZipFile(
+                _PipeWriter(q), "w", zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True
+            ) as zf:
+                base = len(parts)
+                for path, st in files:
+                    arcname = "/".join([prefix, *split_path(path)[base:]])
+                    try:
+                        with root.open_read(path) as (fh, _size):
+                            info = zipfile.ZipInfo(arcname, date_time=time.localtime(st.st_mtime)[:6])
+                            info.compress_type = zipfile.ZIP_DEFLATED
+                            info.external_attr = (stat.S_IFREG | 0o644) << 16
+                            with zf.open(info, "w", force_zip64=st.st_size > 2**31) as out:
+                                while chunk := fh.read(CHUNK):
+                                    out.write(chunk)
+                    except PathError:
+                        continue  # vanished or replaced by a symlink meanwhile: skip
+            q.put(None)
+        except BaseException as exc:
+            q.put(exc)
+
+    threading.Thread(target=produce, daemon=True, name="zip-stream").start()
+    while True:
+        item = q.get()
+        if item is None:
+            return
+        if isinstance(item, BaseException):
+            raise item
+        yield item

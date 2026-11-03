@@ -152,10 +152,12 @@ class AgentClient:
             "PUT", f"/v1/instances/{instance_id}/files/text", json={"path": path, "content": content, "create_only": create_only}
         )
 
-    def download(self, instance_id: UUID, path: str) -> tuple[Iterator[bytes], int | None, httpx.Response]:
+    def download(
+        self, instance_id: UUID, path: str, *, endpoint: str = "download"
+    ) -> tuple[Iterator[bytes], int | None, httpx.Response]:
         client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=300))
         try:
-            req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/download", params={"path": path})
+            req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/{endpoint}", params={"path": path})
             resp = client.send(req, stream=True)
         except httpx.HTTPError as exc:
             client.close()

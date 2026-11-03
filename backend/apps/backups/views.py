@@ -282,7 +282,9 @@ class BackupFileDownloadView(APIView):
         chunks, _resp = AgentClient(instance.node).backup_download(instance.id, backup.snapshot_id, path)
         filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
         response = StreamingHttpResponse(chunks, content_type="application/octet-stream")
-        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        from apps.core.utils import content_disposition
+
+        response["Content-Disposition"] = content_disposition(filename)
         response["X-Content-Type-Options"] = "nosniff"
         audit.record("backup.file_download", request=request, instance=instance, target=backup, details={"path": path})
         return response

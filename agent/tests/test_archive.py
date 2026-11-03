@@ -121,3 +121,21 @@ def test_zip_symlink_entry_skipped(root):
     result = extract(sr, "l.zip", strip="none")
     assert not os.path.lexists(inst / "evil-link")
     assert result["skipped_count"] == 1
+
+
+def test_stream_zip_roundtrip_skips_symlinks(root):
+    from mcagent.archive import stream_zip
+
+    sr, inst, tmp = root
+    (inst / "world" / "region").mkdir(parents=True)
+    (inst / "world" / "level.dat").write_bytes(b"L" * 5000)
+    (inst / "world" / "region" / "r.0.0.mca").write_bytes(b"\x02" * 70000)
+    os.symlink(tmp, inst / "world" / "escape")
+    data = b"".join(stream_zip(sr, "world"))
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    assert sorted(zf.namelist()) == ["world/level.dat", "world/region/r.0.0.mca"]
+    assert zf.read("world/region/r.0.0.mca") == b"\x02" * 70000
+    # the exported zip can be imported back with the safe extractor
+    (inst / "export.zip").write_bytes(data)
+    extract(sr, "export.zip", "copy", strip="none")
+    assert (inst / "copy" / "world" / "level.dat").read_bytes() == b"L" * 5000

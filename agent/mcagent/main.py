@@ -574,6 +574,21 @@ async def files_download(
     )
 
 
+@app.get("/v1/instances/{instance_id}/files/archive", dependencies=[Depends(require_token)])
+async def files_archive(
+    instance_id: UUID, path: str = "", settings: Settings = Depends(get_settings)
+) -> StreamingResponse:
+    """Download a directory (e.g. a world) as a zip streamed on the fly."""
+    from .archive import stream_zip
+
+    root = _root(settings, instance_id)
+    entry = await run_in_threadpool(root.stat, path)
+    if entry.type != "directory":
+        raise AgentError("Only folders can be downloaded as a zip", "not_a_directory", 400)
+    gen = await run_in_threadpool(lambda: stream_zip(root, path))
+    return StreamingResponse(gen, media_type="application/zip")
+
+
 @app.put("/v1/instances/{instance_id}/files/upload", dependencies=[Depends(require_token)])
 async def files_upload(
     request: Request,
