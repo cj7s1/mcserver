@@ -158,3 +158,11 @@ class CloneRequest(BaseModel):
 
 class PrepareInstanceRequest(BaseModel):
     files: dict[str, str] = Field(default_factory=dict)  # relative path -> text content (initial config)
+
+
+class ExtractRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+    destination: str = Field(default="", max_length=4096)
+    strip: Literal["auto", "none"] = "auto"
+    overwrite: bool = False
+    delete_archive: bool = False

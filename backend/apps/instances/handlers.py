@@ -185,3 +185,27 @@ def require_not_running(instance: Instance) -> None:
     status = AgentClient(instance.node).status(instance.id)
     if status.get("running"):
         raise ApiError("The server must be stopped for this operation", code="must_stop", status_code=409)
+
+
+@register("extract_archive")
+def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Safely extract an uploaded archive inside the instance (import server / world / server pack)."""
+    instance = _instance(job)
+    client = AgentClient(instance.node)
+    require_not_running(instance)
+    p = job.params
+    ctx.progress(0.02, f"Extracting {p['path']}", force=True)
+    op = client.extract(instance.id, p["path"], p.get("destination", ""), strip=p.get("strip", "auto"),
+                        overwrite=bool(p.get("overwrite")), delete_archive=bool(p.get("delete_archive")))
+    done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.02, 0.95))
+    result = done.get("result") or {}
+    if result.get("existing_count"):
+        ctx.log(f"{result['existing_count']} existing file(s) were kept (overwrite was off)")
+    if result.get("skipped_count"):
+        ctx.log(f"{result['skipped_count']} unsafe entries skipped (links, special files or unsafe paths)")
+    if p.get("mark_installed") and instance.installed_at is None:
+        from django.utils import timezone
+
+        instance.installed_at = timezone.now()
+        instance.save(update_fields=["installed_at"])
+    return result

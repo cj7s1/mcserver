@@ -228,6 +228,15 @@ class AgentClient:
             timeout=900,
         )
 
+    def extract(self, instance_id: UUID, path: str, destination: str = "", *, strip: str = "auto",
+                overwrite: bool = False, delete_archive: bool = False) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/v1/instances/{instance_id}/files/extract",
+            json={"path": path, "destination": destination, "strip": strip, "overwrite": overwrite,
+                  "delete_archive": delete_archive},
+        )["operation"]
+
     # -- backups -------------------------------------------------------------------------
     def list_backups(self, instance_id: UUID) -> list[dict[str, Any]]:
         return self._json("GET", f"/v1/instances/{instance_id}/backups", timeout=300)["snapshots"]

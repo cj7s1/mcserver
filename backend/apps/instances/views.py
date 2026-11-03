@@ -7,13 +7,14 @@ from django.db import IntegrityError, transaction
 from django.http import StreamingHttpResponse
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.parsers import FileUploadParser, JSONParser, MultiPartParser
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.accounts.models import InstanceAccess, Role
+from apps.accounts.permissions import INSTANCE_CODES
 from apps.audit import service as audit
 from apps.catalog.providers import resolve_java
 from apps.core.errors import ApiError, ConflictError
@@ -618,6 +619,9 @@ class AccessListView(APIView):
             raise ValidationError({"detail": ["A valid user and role are required"]})
         if "instance.access" in role.permission_set and not request.user.has_panel_perm("system.users"):
             raise ValidationError({"role": ["Only user administrators can grant access-management rights"]})
+        missing = sorted((role.permission_set & INSTANCE_CODES) - request.user.instance_permissions(instance.pk))
+        if missing:
+            raise PermissionDenied(f"You cannot grant permissions you do not have on this server: {', '.join(missing)}")
         grant, _ = InstanceAccess.objects.update_or_create(
             user=user, instance=instance, defaults={"role": role, "created_by": request.user}
         )
@@ -639,3 +643,62 @@ class InstanceJobsView(APIView):
         instance = get_instance_for(request.user, pk)
         jobs = instance.jobs.all()[:50]
         return Response(JobSerializer(jobs, many=True).data)
+
+
+ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz")
+
+
+class ExtractView(APIView):
+    """Extract an archive that is already in the server folder (uploaded via the file manager)."""
+
+    parser_classes = [JSONParser]
+
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.files.write")
+        data = request.data if isinstance(request.data, dict) else {}
+        path = str(data.get("path", ""))
+        if not path.lower().endswith(ARCHIVE_SUFFIXES):
+            raise ValidationError({"path": ["Choose a .zip, .tar, .tar.gz or .tar.xz archive"]})
+        strip = data.get("strip", "auto")
+        if strip not in ("auto", "none"):
+            raise ValidationError({"strip": ["Must be auto or none"]})
+        job = enqueue("extract_archive", title=f"Extract {path.rsplit('/', 1)[-1]}", instance=instance, user=request.user,
+                      params={"path": path, "destination": str(data.get("destination", "")), "strip": strip,
+                              "overwrite": bool(data.get("overwrite")), "delete_archive": bool(data.get("delete_archive"))})
+        audit.record("files.extract", request=request, instance=instance, target=instance, details={"path": path})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class ImportArchiveView(APIView):
+    """Import an existing server: upload an archive of its folder and extract it into /data.
+
+    The server must be stopped. Existing files are kept unless ``overwrite=true``.
+    """
+
+    parser_classes = [MultiPartParser, FileUploadParser]
+
+    @extend_schema(request=None, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.files.write")
+        upload = request.FILES.get("file")
+        if upload is None:
+            raise ValidationError({"file": ["Upload an archive in the 'file' field"]})
+        name = upload.name.lower()
+        if not name.endswith(ARCHIVE_SUFFIXES):
+            raise ValidationError({"file": ["Supported archives: .zip, .tar, .tar.gz, .tar.xz"]})
+        if instance.status in ("running", "starting", "installing", "unhealthy"):
+            raise ConflictError("Stop the server before importing files into it", code="must_stop")
+        import secrets as _secrets
+
+        suffix = next(s for s in ARCHIVE_SUFFIXES if name.endswith(s))
+        temp_name = f".mcpanel-import-{_secrets.token_hex(6)}{suffix}"
+        client = AgentClient(instance.node)
+        client.upload(instance.id, temp_name, upload.chunks(1024 * 1024), overwrite=False)
+        overwrite = request.query_params.get("overwrite") == "true"
+        job = enqueue("extract_archive", title=f"Import {upload.name}", instance=instance, user=request.user,
+                      params={"path": temp_name, "destination": "", "strip": "auto", "overwrite": overwrite,
+                              "delete_archive": True, "mark_installed": True})
+        audit.record("instance.imported", request=request, instance=instance, target=instance,
+                     details={"archive": upload.name[:200], "size": upload.size, "overwrite": overwrite})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)

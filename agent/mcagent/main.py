@@ -40,6 +40,7 @@ from .schemas import (
     CommandRequest,
     DeleteDataRequest,
     DeleteRequest,
+    ExtractRequest,
     ForgetRequest,
     MkdirRequest,
     PrepareInstanceRequest,
@@ -627,6 +628,31 @@ async def files_fetch(
 
     root = _root(settings, instance_id)
     return await run_in_threadpool(fetch_into, root, body)
+
+
+@app.post("/v1/instances/{instance_id}/files/extract", dependencies=[Depends(require_token)])
+async def files_extract(instance_id: UUID, body: ExtractRequest, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Safely extract an archive that is already inside the instance (import server/world/server pack)."""
+    from .archive import extract
+
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    if status.get("running"):
+        raise AgentError("Stop the server before extracting archives into it", "must_stop", 409)
+    root = _root(settings, instance_id)
+    entry = await run_in_threadpool(root.stat, body.path)
+    if entry.type != "file":
+        raise AgentError("The archive must be a regular file", "not_a_file", 400)
+
+    def _do(op: Operation) -> dict[str, Any]:
+        op.update(0.01, f"Extracting {body.path}")
+        result = extract(root, body.path, body.destination, strip=body.strip, overwrite=body.overwrite,
+                         progress=lambda p, m: op.update(p * 0.98, m))
+        if body.delete_archive:
+            root.delete(body.path)
+        return result
+
+    op = registry.start("import", [instance_id], _do)
+    return {"operation": op.as_dict()}
 
 
 # --- backups -------------------------------------------------------------------------
