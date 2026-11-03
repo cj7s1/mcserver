@@ -40,6 +40,8 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
   `python3 scripts/cloud-dev/egress_forwarder.py 0.0.0.0 3128 127.0.0.1 37231 &`; the agent injects proxy
   env + CA via `scripts/cloud-dev/agent.env` (`AGENT_RUNTIME_EXTRA_ENV`, `AGENT_RUNTIME_CA_BUNDLE`,
   `AGENT_RUNTIME_JAVA_TRUSTSTORE`). Network `mcpanel_instances` gateway is 172.18.0.1.
+* After a container restart run `scripts/cloud-dev/bootstrap.sh` (daemons, btrfs mount, egress forwarder,
+  agents :8700/:8701, API, worker, Vite). Files under /srv and the venvs/node_modules persist.
 * `scripts/cloud-dev/start-services.sh` (run it by path; don't inline its `pkill` lines in a shell whose
   command line contains the same pattern) starts agent :8700, API :8000, worker+beat.
 * `git push` may hang on `push.negotiate`; use `git -c push.negotiate=false push -u origin <branch>`.
