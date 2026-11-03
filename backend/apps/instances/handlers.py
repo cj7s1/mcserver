@@ -195,8 +195,14 @@ def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
     require_not_running(instance)
     p = job.params
     ctx.progress(0.02, f"Extracting {p['path']}", force=True)
-    op = client.extract(instance.id, p["path"], p.get("destination", ""), strip=p.get("strip", "auto"),
-                        overwrite=bool(p.get("overwrite")), delete_archive=bool(p.get("delete_archive")))
+    op = client.extract(
+        instance.id,
+        p["path"],
+        p.get("destination", ""),
+        strip=p.get("strip", "auto"),
+        overwrite=bool(p.get("overwrite")),
+        delete_archive=bool(p.get("delete_archive")),
+    )
     done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.02, 0.95))
     result = done.get("result") or {}
     if result.get("existing_count"):
@@ -209,3 +215,49 @@ def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
         instance.installed_at = timezone.now()
         instance.save(update_fields=["installed_at"])
     return result
+
+
+@register("software_update")
+def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Change Minecraft/loader/Java versions of a standard server, protected by a pre-update backup."""
+    from apps.backups.handlers import run_backup
+    from apps.backups.models import BackupKind
+
+    from .spec import image_for
+
+    instance = _instance(job)
+    p = job.params
+    before = {
+        "minecraft_version": instance.minecraft_version,
+        "loader_version": instance.loader_version,
+        "java_version": instance.java_version,
+        "image": instance.image,
+    }
+    was_running = ensure_stopped(instance, ctx)
+    backup_id = None
+    if p.get("backup", True):
+        ctx.progress(0.05, "Creating a pre-update backup")
+        backup = run_backup(
+            instance,
+            ctx,
+            name=f"Before update to {p['minecraft_version']}",
+            kind=BackupKind.PRE_UPDATE,
+            user=job.user,
+            span=(0.05, 0.55),
+            job=job,
+        )
+        backup.meta = {"software_before": before}
+        backup.save(update_fields=["meta"])
+        backup_id = str(backup.id)
+    instance.minecraft_version = p["minecraft_version"]
+    instance.loader_version = p.get("loader_version", "")
+    instance.java_version = int(p["java_version"])
+    instance.image = image_for(instance.java_version)
+    instance.save(update_fields=["minecraft_version", "loader_version", "java_version", "image"])
+    from .services import bump_revision
+
+    bump_revision(instance)
+    instance.refresh_from_db()
+    ctx.progress(0.6, f"Recreating container for {instance.server_type} {instance.minecraft_version}", force=True)
+    apply_container(instance, ctx, start=was_running or bool(p.get("start")), span=(0.6, 0.97))
+    return {"before": before, "after": {k: getattr(instance, k) for k in before}, "backup_id": backup_id}

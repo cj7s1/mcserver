@@ -780,3 +780,63 @@ def keyless_curseforge(data: dict[str, Any]) -> dict[str, Any]:
         "warnings": warnings,
         "recommended_memory_mb": None,
     }
+
+
+class SoftwareUpdateView(APIView):
+    """Explicit version change for standard servers with a pre-update backup (default on)."""
+
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        from apps.catalog.providers import game_versions, loader_versions, version_key
+
+        instance = get_instance_for(request.user, pk, "instance.configure")
+        if instance.is_modpack:
+            raise ApiError("Modpack servers are updated through the modpack release picker", code="use_modpack_update")
+        data = request.data if isinstance(request.data, dict) else {}
+        mc = str(data.get("minecraft_version") or "").strip()
+        loader = str(data.get("loader_version") or "").strip()
+        if not mc:
+            raise ValidationError({"minecraft_version": ["Choose a Minecraft version"]})
+        known = {v["version"] for v in game_versions(instance.server_type, include_snapshots=True)}
+        if mc.upper() != "LATEST" and mc not in known:
+            raise ValidationError({"minecraft_version": [f"{mc} is not available for {instance.server_type}"]})
+        if loader and instance.server_type != "VANILLA":
+            loaders = {v["version"] for v in loader_versions(instance.server_type, mc)}
+            if loaders and loader not in loaders:
+                raise ValidationError({"loader_version": [f"{loader} is not available for {mc}"]})
+        java = data.get("java_version") or resolve_java(mc, instance.server_type)["java_version"]
+        if int(java) not in (8, 11, 16, 17, 21, 25):
+            raise ValidationError({"java_version": ["Unsupported Java version"]})
+        downgrade = (
+            instance.minecraft_version.upper() != "LATEST"
+            and mc.upper() != "LATEST"
+            and version_key(mc) < version_key(instance.minecraft_version)
+        )
+        if downgrade and data.get("allow_downgrade") is not True:
+            raise ApiError(
+                f"Downgrading from {instance.minecraft_version} to {mc} can corrupt worlds. Restore an older backup "
+                "instead, or confirm the downgrade explicitly.",
+                code="downgrade_unconfirmed",
+                status_code=409,
+            )
+        job = enqueue(
+            "software_update",
+            title=f"Update {instance.name} to {mc}",
+            instance=instance,
+            user=request.user,
+            params={
+                "minecraft_version": mc,
+                "loader_version": loader,
+                "java_version": int(java),
+                "backup": data.get("backup", True) is not False,
+                "start": bool(data.get("start")),
+            },
+        )
+        audit.record(
+            "instance.software_update",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"from": instance.minecraft_version, "to": mc, "loader": loader, "java": java},
+        )
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
