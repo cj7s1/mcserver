@@ -10,6 +10,7 @@ from apps.catalog import views as catalog
 from apps.core import views as core
 from apps.instances import views as instances
 from apps.jobs import views as jobs
+from apps.metrics import views as metrics
 from apps.modpacks import views as modpacks
 from apps.notifications import views as notifications
 from apps.players import views as players
@@ -36,6 +37,8 @@ instance_patterns = [
     path("<uuid:pk>/jobs", instances.InstanceJobsView.as_view()),
     path("<uuid:pk>/access", instances.AccessListView.as_view()),
     path("<uuid:pk>/players", players.PlayersView.as_view()),
+    path("<uuid:pk>/players/history", metrics.PlayerHistoryView.as_view()),
+    path("<uuid:pk>/metrics", metrics.MetricsView.as_view()),
     path("<uuid:pk>/files", instances.FilesListView.as_view()),
     path("<uuid:pk>/files/text", instances.FilesTextView.as_view()),
     path("<uuid:pk>/files/download", instances.FilesDownloadView.as_view()),

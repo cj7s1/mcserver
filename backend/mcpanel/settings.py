@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     "apps.players",
     "apps.console",
     "apps.notifications",
+    "apps.metrics",
 ]
 
 MIDDLEWARE = [
@@ -230,6 +231,8 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-instances": {"task": "apps.instances.tasks.reconcile_all", "schedule": 10.0},
     "scheduler-tick": {"task": "apps.instances.tasks.scheduler_tick", "schedule": 60.0},
     "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0},
+    "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0},
+    "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0},
 }
 
 # --- Agent / node defaults ---------------------------------------------------
