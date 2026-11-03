@@ -231,10 +231,18 @@ class Modrinth:
         )
         return {h: self._release(v) for h, v in data.items()}
 
-    def latest_for_files(self, sha1_hashes: list[str], loaders: list[str], game_versions: list[str]) -> dict[str, dict[str, Any]]:
+    def latest_for_files(
+        self,
+        sha1_hashes: list[str],
+        loaders: list[str],
+        game_versions: list[str],
+        version_types: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         if not sha1_hashes:
             return {}
-        body = {"hashes": sha1_hashes, "algorithm": "sha1", "loaders": loaders, "game_versions": game_versions}
+        body: dict[str, Any] = {"hashes": sha1_hashes, "algorithm": "sha1", "loaders": loaders, "game_versions": game_versions}
+        if version_types:
+            body["version_types"] = version_types
         data = _request("POST", f"{MODRINTH_API}/version_files/update", json=body, provider="Modrinth") or {}
         return {h: self._release(v) for h, v in data.items()}
 
@@ -273,6 +281,13 @@ class Modrinth:
             raise ApiError("This modpack is marked client-only on Modrinth and cannot run as a server", code="client_only")
         if len(release["game_versions"]) > 1:
             warnings.append(f"Release lists several Minecraft versions; using {release['game_versions'][0]}")
+        preflight: dict[str, Any] = {"available": False}
+        file = release.get("file") or {}
+        if file.get("url"):
+            from .mrpack import inspect_mrpack
+
+            preflight = inspect_mrpack(file["url"], file.get("sha1"))
+            warnings.extend(preflight.get("warnings") or [])
         return {
             "provider": "modrinth",
             "server_type": "MODRINTH",
@@ -284,10 +299,11 @@ class Modrinth:
             "version_name": release.get("version_number") or release.get("name"),
             "minecraft_version": release["game_versions"][0],
             "loader": loaders[0],
-            "loader_version": "",
+            "loader_version": preflight.get("loader_version") or "",
             "file": release.get("file"),
             "warnings": warnings,
             "recommended_memory_mb": None,
+            "preflight": preflight,
         }
 
 
