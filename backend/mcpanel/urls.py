@@ -11,6 +11,7 @@ from apps.core import views as core
 from apps.instances import views as instances
 from apps.jobs import views as jobs
 from apps.modpacks import views as modpacks
+from apps.notifications import views as notifications
 from apps.players import views as players
 
 auth_patterns = [
@@ -90,6 +91,10 @@ api_patterns = [
     path("system/info", core.SystemInfoView.as_view()),
     path("system/settings", core.SystemSettingsView.as_view()),
     path("system/ports", core.PortsView.as_view()),
+    path("notifications/events", notifications.EventsView.as_view()),
+    path("notifications/channels", notifications.ChannelListView.as_view()),
+    path("notifications/channels/<int:pk>", notifications.ChannelDetailView.as_view()),
+    path("notifications/channels/<int:pk>/test", notifications.ChannelTestView.as_view()),
     path("schema", SpectacularAPIView.as_view(), name="schema"),
     path("docs", SpectacularSwaggerView.as_view(url_name="schema")),
 ]

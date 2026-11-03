@@ -139,6 +139,26 @@ def finish(job: Job, status: str, *, error: str = "", error_code: str = "", resu
     job.save(update_fields=["status", "finished_at", "error", "error_code", "result", "progress", "log", "message"])
     _release(job)
     broadcast("job.finished", job_payload(job), str(job.instance_id) if job.instance_id else None)
+    _notify_job(job)
+
+
+def _notify_job(job: Job) -> None:
+    from apps.notifications.service import notify
+
+    instance = job.instance if job.instance_id else None
+    data = {"job": job.title, "status": job.status, "error": job.error[:500]}
+    if job.status == JobStatus.FAILED:
+        notify("job.failed", f"Failed: {job.title}", job.error[:1500] or "The job failed.", instance=instance, data=data)
+        if job.kind == "backup":
+            notify("backup.failed", f"Backup failed: {job.title}", job.error[:1500], instance=instance, data=data)
+    elif job.status == JobStatus.SUCCEEDED and job.kind == "backup":
+        notify(
+            "backup.succeeded",
+            f"Backup completed: {job.title}",
+            "The backup finished successfully.",
+            instance=instance,
+            data=data,
+        )
 
 
 @shared_task(name="apps.jobs.runner.run_job", acks_late=True)

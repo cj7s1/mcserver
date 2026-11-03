@@ -77,6 +77,7 @@ INSTALLED_APPS = [
     "apps.backups",
     "apps.players",
     "apps.console",
+    "apps.notifications",
 ]
 
 MIDDLEWARE = [

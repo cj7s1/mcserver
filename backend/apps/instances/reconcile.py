@@ -88,6 +88,15 @@ def _stop_crash_loop(instance: Instance, restarts: int) -> None:
     instance.status = Status.FAILED
     instance.status_detail = (f"Stopped automatically after {restarts} crashes during startup.{summary}")[:500]
     audit.record("instance.crash_loop_stopped", instance=instance, target=instance, success=False, details={"restarts": restarts})
+    from apps.notifications.service import notify
+
+    notify(
+        "instance.crash_loop_stopped",
+        f"{instance.name} stopped after repeated crashes",
+        instance.status_detail,
+        instance=instance,
+        data={"status": "failed", "detail": instance.status_detail},
+    )
 
 
 def apply_observation(instance: Instance, container: dict[str, Any] | None, *, agent_ok: bool = True) -> bool:
@@ -149,8 +158,45 @@ def apply_observation(instance: Instance, container: dict[str, Any] | None, *, a
     )
     if before != after:
         broadcast("instance.status", instance_payload(instance), str(instance.id))
+        _notify_transition(instance, before[0], after[0])
         return True
     return False
+
+
+def _notify_transition(instance: Instance, old: str, new: str) -> None:
+    if old == new:
+        return
+    from apps.notifications.service import notify
+
+    data = {"status": new, "detail": instance.status_detail}
+    if new == Status.FAILED:
+        notify(
+            "instance.failed",
+            f"{instance.name} failed",
+            instance.status_detail or "The server failed.",
+            instance=instance,
+            data=data,
+        )
+    elif new == Status.RUNNING and old in (
+        Status.STARTING,
+        Status.INSTALLING,
+        Status.RESTARTING,
+        Status.UPDATING,
+        Status.CREATED,
+        Status.STOPPED,
+        Status.UNHEALTHY,
+    ):
+        notify(
+            "instance.running", f"{instance.name} is online", "The server is accepting connections.", instance=instance, data=data
+        )
+    elif new == Status.STOPPED and old in (Status.RUNNING, Status.STOPPING, Status.UNHEALTHY):
+        notify(
+            "instance.stopped",
+            f"{instance.name} stopped",
+            instance.status_detail or "The server stopped.",
+            instance=instance,
+            data=data,
+        )
 
 
 def reconcile_instance(instance_id: Any) -> Instance | None:
