@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -65,6 +66,44 @@ TEXT_LIMIT = 5 * 1024 * 1024
 UPLOAD_LIMIT = int(os.environ.get("AGENT_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 1024)))
 
 
+_blocked_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+
+
+def _load_blocked_networks(settings: Settings) -> None:
+    """Subnets of the Minecraft instance network(s): requests from there are refused.
+
+    Minecraft containers run third-party code and share a network with the agent (needed
+    for RCON); they must never be able to talk to the agent API, token or not.
+    """
+    nets = []
+    for name in {settings.instance_network, *settings.allowed_networks} - {"host"}:
+        try:
+            net = docker_ops.client().networks.get(name)
+        except Exception as exc:  # network may not exist yet
+            log.debug("cannot inspect network %s: %s", name, exc)
+            continue
+        for cfg in (net.attrs.get("IPAM") or {}).get("Config") or []:
+            with contextlib.suppress(ValueError, TypeError):
+                nets.append(ipaddress.ip_network(cfg.get("Subnet"), strict=False))
+    _blocked_networks[:] = nets
+    if nets:
+        log.info("Refusing agent API requests from instance networks: %s", ", ".join(map(str, nets)))
+
+
+@app.middleware("http")
+async def _refuse_instance_networks(request: Request, call_next):  # type: ignore[no-untyped-def]
+    client_ip = request.client.host if request.client else None
+    if client_ip and _blocked_networks:
+        try:
+            ip = ipaddress.ip_address(client_ip)
+        except ValueError:
+            ip = None
+        if ip is not None and any(ip in net for net in _blocked_networks):
+            log.warning("Refused agent API request from instance network address %s", client_ip)
+            return JSONResponse({"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403)
+    return await call_next(request)
+
+
 @app.exception_handler(AgentError)
 async def _agent_error(_request: Request, exc: AgentError) -> JSONResponse:
     return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
@@ -90,6 +129,7 @@ async def _startup() -> None:
         log.error("AGENT_TOKEN is not configured; all requests will be rejected")
     try:
         await run_in_threadpool(docker_ops.ensure_network, settings)
+        await run_in_threadpool(_load_blocked_networks, settings)
     except Exception as exc:  # docker not reachable yet; health endpoint will report it
         log.warning("Could not ensure instance network: %s", exc)
 
