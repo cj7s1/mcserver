@@ -34,7 +34,7 @@ dev = [
 package = false
 
 [tool.pytest.ini_options]
-DJANGO_SETTINGS_MODULE = "mcpanel.settings"
+DJANGO_SETTINGS_MODULE = "tests.settings"
 python_files = ["test_*.py"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
@@ -43,6 +43,8 @@ markers = [
     "network: requires outbound internet access to upstream providers",
 ]
 asyncio_default_fixture_loop_scope = "function"
+# whitenoise warns when collectstatic has not been run (irrelevant for API tests)
+filterwarnings = ["ignore:No directory at:UserWarning"]
 
 [tool.ruff]
 line-length = 130

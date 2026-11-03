@@ -68,6 +68,12 @@ class JobAbandonView(APIView):
         if job.status not in ACTIVE_STATUSES:
             raise ApiError("Only queued or running jobs can be abandoned", code="not_active", status_code=409)
         finish(job, JobStatus.FAILED, error=f"Marked as failed by {request.user.username}", error_code="abandoned")
-        audit.record("job.abandoned", request=request, instance=job.instance, target_type="job", target_id=str(job.id),
-                     details={"kind": job.kind})
+        audit.record(
+            "job.abandoned",
+            request=request,
+            instance=job.instance,
+            target_type="job",
+            target_id=str(job.id),
+            details={"kind": job.kind},
+        )
         return Response(JobSerializer(job).data)

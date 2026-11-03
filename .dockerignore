@@ -1,0 +1,49 @@
+# Build context is the repository root for both images:
+#   docker build -f backend/Dockerfile -t mcpanel/panel .
+#   docker build -f agent/Dockerfile   -t mcpanel/agent .
+# Keep the context small and never ship local state, secrets or build output.
+
+# VCS / editors / OS
+.git
+.github
+.gitignore
+**/.DS_Store
+**/.idea
+**/.vscode
+**/*.swp
+
+# Secrets and local environment
+**/.env
+**/.env.*
+deploy/secrets
+**/*.pem
+**/*.key
+
+# Python
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+**/*.egg-info
+**/celerybeat-schedule*
+backend/staticfiles
+backend/frontend_dist
+backend/tests
+agent/tests
+
+# Node (dependencies are installed inside the build with `npm ci`)
+**/node_modules
+frontend/dist
+frontend/coverage
+frontend/test-results
+frontend/playwright-report
+
+# Not needed inside images
+docs
+scripts
+deploy
+*.md
+**/*.log
+/data

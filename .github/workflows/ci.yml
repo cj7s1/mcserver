@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (ruff + pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: mcpanel
+          POSTGRES_USER: mcpanel
+          POSTGRES_PASSWORD: mcpanel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mcpanel -d mcpanel"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      MCPANEL_TESTING: "1"
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: mcpanel
+      POSTGRES_USER: mcpanel
+      POSTGRES_PASSWORD: mcpanel
+      MCPANEL_REDIS_URL: redis://localhost:6379/0
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Tests (without integration)
+        run: uv run pytest -q -m "not integration"
+
+  agent:
+    name: Agent (ruff + pytest)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+          cache-dependency-glob: agent/uv.lock
+      - name: Install dependencies (locked)
+        run: uv sync --locked
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format
+        run: uv run ruff format --check .
+      - name: Tests
+        # `minecraft`-marked tests start real servers and download jars; run them manually.
+        run: uv run pytest -q -m "not minecraft"
+
+  frontend:
+    name: Frontend (lint + build + tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies (locked)
+        run: npm ci --no-audit --no-fund
+      - name: Lint
+        run: npm run lint
+      - name: Type check + build
+        run: npm run build
+      - name: Unit tests (vitest)
+        run: |
+          if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+            npm test
+          else
+            echo "package.json has no \"test\" script; skipping unit tests."
+          fi
+
+  docker:
+    name: Docker images + Compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shellcheck deployment scripts
+        run: shellcheck deploy/scripts/generate-secrets.sh backend/container/entrypoint.sh
+      - name: Generate a throw-away .env
+        run: deploy/scripts/generate-secrets.sh "$RUNNER_TEMP/ci.env"
+      - name: Validate Compose files
+        run: |
+          docker compose -f deploy/docker-compose.yml --env-file "$RUNNER_TEMP/ci.env" config -q
+          docker compose -f deploy/docker-compose.dev.yml config -q
+      - uses: docker/setup-buildx-action@v4
+      - name: Build panel image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: backend/Dockerfile
+          push: false
+          load: true
+          tags: mcpanel/panel:local
+          cache-from: type=gha,scope=panel
+          cache-to: type=gha,mode=max,scope=panel
+      - name: Build agent image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: agent/Dockerfile
+          push: false
+          load: true
+          tags: mcpanel/agent:local
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+      - name: Smoke test the Compose stack
+        run: |
+          mkdir -p "$RUNNER_TEMP/mcpanel-data"
+          sed -i "s|^MCPANEL_DATA_DIR=.*|MCPANEL_DATA_DIR=$RUNNER_TEMP/mcpanel-data|" "$RUNNER_TEMP/ci.env"
+          compose() { docker compose -f deploy/docker-compose.yml --env-file "$RUNNER_TEMP/ci.env" "$@"; }
+          if ! compose up -d --no-build --wait --wait-timeout 300; then
+            compose ps -a
+            compose logs --no-color --tail 200
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:8080/api/health
+          curl -fsS -o /dev/null http://127.0.0.1:8080/
+          compose ps
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml --env-file "$RUNNER_TEMP/ci.env" down -v --remove-orphans || true
+
+  security:
+    name: Dependency audit (non-blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+      - name: pip-audit (backend)
+        continue-on-error: true
+        working-directory: backend
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/backend-requirements.txt"
+          uvx pip-audit --disable-pip --require-hashes -r "$RUNNER_TEMP/backend-requirements.txt"
+      - name: pip-audit (agent)
+        continue-on-error: true
+        working-directory: agent
+        run: |
+          uv export --locked --no-dev --no-emit-project --format requirements-txt -o "$RUNNER_TEMP/agent-requirements.txt"
+          uvx pip-audit --disable-pip --require-hashes -r "$RUNNER_TEMP/agent-requirements.txt"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: npm audit (frontend)
+        continue-on-error: true
+        working-directory: frontend
+        run: npm audit --audit-level=high

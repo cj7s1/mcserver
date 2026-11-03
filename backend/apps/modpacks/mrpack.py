@@ -49,21 +49,22 @@ def _central_directory(client: httpx.Client, url: str, size: int) -> dict[str, t
     pos = tail.rfind(EOCD_SIG)
     if pos < 0:
         raise InspectError("Not a zip file (no end-of-central-directory record)")
-    _, _, _, _, total, cd_size, cd_offset, _ = struct.unpack("<4sHHHHIIH", tail[pos:pos + 22])
+    _, _, _, _, total, cd_size, cd_offset, _ = struct.unpack("<4sHHHHIIH", tail[pos : pos + 22])
     if cd_offset == 0xFFFFFFFF or cd_size > MAX_CD_BYTES:
         raise InspectError("Zip64 or oversized central directory is not supported for preview")
     if cd_offset >= tail_start:
-        cd = tail[cd_offset - tail_start: cd_offset - tail_start + cd_size]
+        cd = tail[cd_offset - tail_start : cd_offset - tail_start + cd_size]
     else:
         cd = _range(client, url, cd_offset, cd_offset + cd_size - 1)
     entries: dict[str, tuple[int, int, int, int]] = {}
     p = 0
     for _ in range(total):
-        if cd[p:p + 4] != CDH_SIG:
+        if cd[p : p + 4] != CDH_SIG:
             break
         (method, _t, _d, _crc, csize, usize, nlen, elen, clen, _disk, _ia, _ea, offset) = struct.unpack(
-            "<HHHIIIHHHHHII", cd[p + 10:p + 46])
-        name = cd[p + 46:p + 46 + nlen].decode("utf-8", errors="replace")
+            "<HHHIIIHHHHHII", cd[p + 10 : p + 46]
+        )
+        name = cd[p + 46 : p + 46 + nlen].decode("utf-8", errors="replace")
         entries[name] = (method, csize, usize, offset)
         p += 46 + nlen + elen + clen
     return entries
@@ -128,8 +129,11 @@ def inspect_mrpack(url: str, sha1: str | None = None) -> dict[str, Any]:
     override_mods = [n for n in entries if n.startswith(("overrides/mods/", "server-overrides/mods/")) and n.endswith(".jar")]
     deps = index.get("dependencies") or {}
     warnings: list[str] = []
-    manual = [{"name": e.get("displayName") or e.get("pattern"), "filename": e.get("pattern"), "url": e.get("url")}
-              for e in (checker or []) if isinstance(e, dict)]
+    manual = [
+        {"name": e.get("displayName") or e.get("pattern"), "filename": e.get("pattern"), "url": e.get("url")}
+        for e in (checker or [])
+        if isinstance(e, dict)
+    ]
     if checker is not None:
         warnings.append(
             f"This release ships a 'Missing Mods Checker' that expects {len(manual)} file(s) to be downloaded "
@@ -141,7 +145,9 @@ def inspect_mrpack(url: str, sha1: str | None = None) -> dict[str, Any]:
         "available": True,
         "pack_name": index.get("name"),
         "minecraft_version": deps.get("minecraft"),
-        "loader": {"neoforge": "neoforge", "forge": "forge", "fabric-loader": "fabric", "quilt-loader": "quilt"}.get(loader or ""),
+        "loader": {"neoforge": "neoforge", "forge": "forge", "fabric-loader": "fabric", "quilt-loader": "quilt"}.get(
+            loader or ""
+        ),
         "loader_version": deps.get(loader) if loader else None,
         "files_total": len(files),
         "files_server_unsupported": len(server_unsupported),

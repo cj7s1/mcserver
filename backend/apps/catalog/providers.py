@@ -93,13 +93,14 @@ def latest_release() -> str:
 
 def java_requirement(mc_version: str) -> int | None:
     """Mojang's declared Java major version for a Minecraft version (None if unknown)."""
+    if mc_version.upper() == "LATEST":
+        # resolve first: caching under "LATEST" would pin an old Java for 30 days
+        mc_version = latest_release()
     key = f"catalog:mojang:java:{mc_version}"
     cached_value = cache.get(key)
     if cached_value is not None:
         return cached_value
     manifest = mojang_manifest()
-    if mc_version.upper() == "LATEST":
-        mc_version = manifest["latest"]["release"]
     entry = next((v for v in manifest.get("versions", []) if v["id"] == mc_version), None)
     if entry is None:
         return None

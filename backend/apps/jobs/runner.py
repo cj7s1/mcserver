@@ -187,8 +187,13 @@ def run_job(job_id: str) -> None:
     if handler is None:
         # e.g. the API was upgraded before the worker: fail cleanly so the instance lock is released
         log.error("No handler for job kind %s (worker out of date?)", job.kind)
-        finish(job, JobStatus.FAILED, error=f"This worker does not know how to run '{job.kind}' jobs. "
-               "Restart/upgrade the worker so it matches the API version.", error_code="unknown_job_kind")
+        finish(
+            job,
+            JobStatus.FAILED,
+            error=f"This worker does not know how to run '{job.kind}' jobs. "
+            "Restart/upgrade the worker so it matches the API version.",
+            error_code="unknown_job_kind",
+        )
         return
     try:
         result = handler(job, ctx) or {}

@@ -19,8 +19,15 @@ MISSING_MODS = [
 
 
 def make(**kw) -> Instance:
-    values = {"name": "t", "game_port": 25600, "server_type": ServerType.FORGE, "minecraft_version": "1.20.1",
-              "java_version": 17, "image": "itzg/minecraft-server:stable-java17", "memory_mb": 4096}
+    values = {
+        "name": "t",
+        "game_port": 25600,
+        "server_type": ServerType.FORGE,
+        "minecraft_version": "1.20.1",
+        "java_version": 17,
+        "image": "itzg/minecraft-server:stable-java17",
+        "memory_mb": 4096,
+    }
     values.update(kw)
     return Instance(**values)
 
@@ -37,8 +44,10 @@ def test_missing_mods_checker_detected():
 
 
 def test_java_class_version_maps_to_required_java():
-    lines = ["java.lang.UnsupportedClassVersionError: x has been compiled by a more recent version of the Java Runtime "
-             "(class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 61.0"]
+    lines = [
+        "java.lang.UnsupportedClassVersionError: x has been compiled by a more recent version of the Java Runtime "
+        "(class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 61.0"
+    ]
     issue = analyze_logs(make(java_version=17), lines)[0]
     assert issue.code == "java_too_old"
     assert issue.actions[0]["value"] == 21

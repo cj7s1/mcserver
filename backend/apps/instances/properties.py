@@ -53,19 +53,22 @@ def parse(text: str) -> dict[str, str]:
 def update(text: str, changes: dict[str, str | None]) -> str:
     """Apply changes (None deletes) while keeping comments, order and unknown keys."""
     lines = text.splitlines()
-    remaining = dict(changes)
+    seen: set[str] = set()
     out: list[str] = []
     for line in lines:
         kv = _split(line)
-        if kv and kv[0] in remaining:
-            value = remaining.pop(kv[0])
-            if value is None:
-                continue
-            out.append(f"{kv[0]}={_escape_value(str(value))}")
+        if kv and kv[0] in changes:
+            key = kv[0]
+            value = changes[key]
+            # Java Properties (and parse()) use the *last* occurrence of a duplicated key, so
+            # write the new value at the first occurrence and drop any later duplicates.
+            if value is not None and key not in seen:
+                out.append(f"{key}={_escape_value(str(value))}")
+            seen.add(key)
         else:
             out.append(line)
-    for key, value in remaining.items():
-        if value is not None:
+    for key, value in changes.items():
+        if value is not None and key not in seen:
             out.append(f"{key}={_escape_value(str(value))}")
     return "\n".join(out) + "\n"
 

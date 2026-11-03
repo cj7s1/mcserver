@@ -259,8 +259,51 @@ def remove_container(instance_id: UUID, *, timeout: int = 60) -> bool:
     return True
 
 
+_BUILTIN_NETWORKS = frozenset({"host", "none", "bridge"})
+
+
+def reattach_recreated_networks(c: Container) -> list[str]:
+    """Point a stopped container at the current network of every name it is attached to.
+
+    Docker lets a network be removed while only *stopped* containers use it (for example
+    ``docker compose down`` of the MCPanel stack while every server is stopped, or
+    ``docker network prune``). A container that has run before still holds the old
+    network ID, so once a network with the same name exists again ``start`` fails with
+    "network <id> not found". Disconnecting and reconnecting by name repairs that; nothing
+    else about the container changes. Returns the names of the repaired networks.
+    """
+    c.reload()
+    if c.status not in ("created", "exited", "dead"):
+        return []
+    networks = (c.attrs.get("NetworkSettings") or {}).get("Networks") or {}
+    repaired: list[str] = []
+    for name, endpoint in networks.items():
+        old_id = (endpoint or {}).get("NetworkID") or ""
+        if not old_id or name in _BUILTIN_NETWORKS:
+            continue  # never started (resolved by name at start) or a built-in network
+        try:
+            current = client().networks.get(name)
+        except NotFound:
+            continue  # nothing to reattach to; start() reports the missing network
+        if current.name != name or current.id == old_id:
+            continue
+        log.warning("Network %s was recreated; reconnecting container %s to it", name, c.name)
+        try:
+            client().api.disconnect_container_from_network(c.id, name, force=True)
+            client().api.connect_container_to_network(c.id, name)
+        except APIError as exc:
+            raise AgentError(
+                f"Could not reconnect the container to network '{name}': {exc.explanation or exc}",
+                "start_failed",
+                502,
+            ) from exc
+        repaired.append(name)
+    return repaired
+
+
 def start(instance_id: UUID) -> None:
     c = require_container(instance_id)
+    reattach_recreated_networks(c)
     try:
         c.start()
     except APIError as exc:

@@ -133,7 +133,11 @@ class PortsView(APIView):
         from apps.instances.services import allocate_port, port_range, ports_in_use
         from apps.nodes.models import Node
 
-        node = Node.objects.filter(pk=request.query_params.get("node")).first() if request.query_params.get("node") else Node.default()
+        node = (
+            Node.objects.filter(pk=request.query_params.get("node")).first()
+            if request.query_params.get("node")
+            else Node.default()
+        )
         if node is None:
             raise ApiError("Unknown node", code="not_found", status_code=404)
         used = ports_in_use(node)

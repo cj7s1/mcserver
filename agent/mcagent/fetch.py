@@ -33,14 +33,34 @@ def allowed_hosts() -> set[str]:
     return DEFAULT_ALLOWED_HOSTS | extra
 
 
+def _host_allowed(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and (parsed.hostname or "").lower() in allowed_hosts()
+
+
+class _AllowListRedirects(urllib.request.HTTPRedirectHandler):
+    """Check every redirect hop *before* following it; urllib would otherwise request any
+    host (including http:// and internal addresses) a CDN redirects to."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        if not _host_allowed(newurl):
+            fp.close()
+            raise AgentError("Download redirected to a non-allowed host", "url_not_allowed", 403)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(req: urllib.request.Request, timeout: float):  # type: ignore[no-untyped-def]
+    # built per call so proxy environment changes are honoured, like urllib.request.urlopen
+    return urllib.request.build_opener(_AllowListRedirects()).open(req, timeout=timeout)
+
+
 def fetch_into(root: SafeRoot, body: dict[str, Any]) -> dict[str, Any]:
     url = str(body.get("url", ""))
     path = str(body.get("path", ""))
     sha1 = body.get("sha1")
     sha512 = body.get("sha512")
     overwrite = bool(body.get("overwrite", False))
-    parsed = urlparse(url)
-    if parsed.scheme != "https" or (parsed.hostname or "").lower() not in allowed_hosts():
+    if not _host_allowed(url):
         raise AgentError("Download URL is not on an allowed provider host", "url_not_allowed", 403)
     if not (sha1 or sha512):
         raise AgentError("A sha1 or sha512 hash is required to verify downloads", "hash_required", 400)
@@ -51,9 +71,8 @@ def fetch_into(root: SafeRoot, body: dict[str, Any]) -> dict[str, Any]:
     h512 = hashlib.sha512()
     writer = root.open_writer(path, overwrite=overwrite, max_bytes=MAX_FETCH_BYTES)
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
-            final = urlparse(resp.geturl())
-            if final.scheme != "https" or (final.hostname or "").lower() not in allowed_hosts():
+        with _open(req, timeout=60) as resp:
+            if not _host_allowed(resp.geturl()):  # defence in depth; hops are checked in _AllowListRedirects
                 raise AgentError("Download redirected to a non-allowed host", "url_not_allowed", 403)
             while chunk := resp.read(256 * 1024):
                 h1.update(chunk)

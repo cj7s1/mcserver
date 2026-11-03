@@ -1,0 +1,224 @@
+# MCPanel production stack (single node).
+#
+#   cd deploy
+#   ./scripts/generate-secrets.sh          # creates .env with random secrets (once)
+#   $EDITOR .env                           # data dir, bind address, hosts, UID/GID
+#   docker compose up -d --build
+#
+# Services: postgres, redis, panel (web UI + API + WebSockets), worker (Celery jobs),
+# beat (Celery scheduler, exactly one), agent (the ONLY service with the Docker socket).
+#
+# Networks:
+#   internal           panel, worker, beat, agent, postgres, redis. Not marked
+#                      `internal: true` because the panel and worker need outbound
+#                      HTTPS to Mojang/Modrinth/CurseForge/FTB.
+#   mcpanel_instances  shared by the agent and every Minecraft container it creates,
+#                      so the agent reaches RCON (25575) via the container IP without
+#                      publishing it. Postgres/Redis/panel are NOT on this network.
+#                      Minecraft containers (third-party mod code) can reach the agent
+#                      port on it; every agent request except /v1/health requires
+#                      the bearer token, so keep MCPANEL_AGENT_TOKEN long and secret.
+#
+# Minecraft server containers are created by the agent through the Docker API, not by
+# Compose: `docker compose down` leaves running servers alone (and Compose will report
+# that mcpanel_instances is still in use). Stop servers from the panel first if you
+# want everything down. If no server is running, `down` removes mcpanel_instances and
+# `up` creates it again; the agent reconnects stopped servers to the new network when
+# they are next started.
+#
+# If an agent run outside Compose already created the `mcpanel_instances` network,
+# Compose warns that it "was not created by compose" and reuses it; that is harmless.
+
+name: mcpanel
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# Environment shared by panel, worker and beat (see backend/mcpanel/settings.py).
+x-panel-env: &panel-env
+  TZ: ${TZ:-UTC}
+  MCPANEL_SECRET_KEY: ${MCPANEL_SECRET_KEY:?MCPANEL_SECRET_KEY is not set - run deploy/scripts/generate-secrets.sh}
+  MCPANEL_AGENT_URL: http://agent:8700
+  MCPANEL_AGENT_TOKEN: ${MCPANEL_AGENT_TOKEN:?MCPANEL_AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh}
+  MCPANEL_AGENT_TIMEOUT: ${MCPANEL_AGENT_TIMEOUT:-}
+  MCPANEL_REDIS_URL: redis://redis:6379/0
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ${POSTGRES_DB:-mcpanel}
+  POSTGRES_USER: ${POSTGRES_USER:-mcpanel}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run deploy/scripts/generate-secrets.sh}
+  MCPANEL_ALLOWED_HOSTS: ${MCPANEL_ALLOWED_HOSTS:-localhost,127.0.0.1}
+  MCPANEL_CSRF_TRUSTED_ORIGINS: ${MCPANEL_CSRF_TRUSTED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+  MCPANEL_BEHIND_TLS_PROXY: ${MCPANEL_BEHIND_TLS_PROXY:-false}
+  # Empty = loopback and private ranges (see backend/container/entrypoint.sh).
+  MCPANEL_FORWARDED_ALLOW_IPS: ${MCPANEL_FORWARDED_ALLOW_IPS:-}
+  MCPANEL_SECURE_COOKIES: ${MCPANEL_SECURE_COOKIES:-false}
+  MCPANEL_SESSION_AGE_SECONDS: ${MCPANEL_SESSION_AGE_SECONDS:-}
+  MCPANEL_PUBLIC_HOSTNAME: ${MCPANEL_PUBLIC_HOSTNAME:-}
+  MCPANEL_LAN_ADDRESS: ${MCPANEL_LAN_ADDRESS:-}
+  MCPANEL_PORT_RANGE_START: ${MCPANEL_PORT_RANGE_START:-25565}
+  MCPANEL_PORT_RANGE_END: ${MCPANEL_PORT_RANGE_END:-25665}
+  MCPANEL_MAX_UPLOAD_BYTES: ${MCPANEL_MAX_UPLOAD_BYTES:-}
+  CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+  MCPANEL_LOG_LEVEL: ${MCPANEL_LOG_LEVEL:-INFO}
+  MCPANEL_LOG_JSON: ${MCPANEL_LOG_JSON:-true}
+  MCPANEL_WORKER_CONCURRENCY: ${MCPANEL_WORKER_CONCURRENCY:-}
+
+# The panel processes run as UID 10001 and need no Linux capabilities.
+x-panel-hardening: &panel-hardening
+  init: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      POSTGRES_DB: ${POSTGRES_DB:-mcpanel}
+      POSTGRES_USER: ${POSTGRES_USER:-mcpanel}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set - run deploy/scripts/generate-secrets.sh}
+    volumes:
+      # Named volume by default; set MCPANEL_POSTGRES_DIR to an absolute host path
+      # (e.g. /mnt/user/appdata/mcpanel-db on Unraid) to use a bind mount instead.
+      - ${MCPANEL_POSTGRES_DIR:-postgres_data}:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      # TCP check: during first-time initdb the server only listens on the Unix socket,
+      # so this stays unhealthy until the real server is up.
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Cache, Channels layer and Celery broker. RDB snapshots keep queued tasks across
+    # restarts; job state itself lives in Postgres.
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging: *logging
+
+  agent:
+    build:
+      context: ..
+      dockerfile: agent/Dockerfile
+    image: mcpanel/agent:${MCPANEL_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    # Root inside the container is required (Docker socket, chown of instance data);
+    # see agent/Dockerfile. no-new-privileges still applies to everything it execs.
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TZ: ${TZ:-UTC}
+      AGENT_TOKEN: ${MCPANEL_AGENT_TOKEN:?MCPANEL_AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh}
+      # Same absolute path inside and outside the container: the agent hands instance
+      # directories to the Docker daemon as bind-mount sources.
+      AGENT_DATA_ROOT: ${MCPANEL_DATA_DIR:?MCPANEL_DATA_DIR is not set in .env}
+      AGENT_BACKUP_ROOT: ${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}
+      AGENT_INSTANCE_NETWORK: mcpanel_instances
+      AGENT_RUNTIME_UID: ${MC_UID:-1000}
+      AGENT_RUNTIME_GID: ${MC_GID:-1000}
+      AGENT_RESTIC_PASSWORD: ${AGENT_RESTIC_PASSWORD:?AGENT_RESTIC_PASSWORD is not set - run deploy/scripts/generate-secrets.sh}
+      AGENT_PORT_MIN: ${AGENT_PORT_MIN:-1024}
+      AGENT_PORT_MAX: ${AGENT_PORT_MAX:-65535}
+      AGENT_MAX_MEMORY_MB: ${AGENT_MAX_MEMORY_MB:-65536}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}
+      - ${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}:${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}
+    networks: [internal, instances]
+    # No `ports:` on purpose - the agent API must never be published on the host.
+    stop_grace_period: 30s
+    logging: *logging
+
+  panel:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
+    command: ["web"]
+    restart: unless-stopped
+    <<: *panel-hardening
+    environment: *panel-env
+    ports:
+      - "${MCPANEL_BIND:-127.0.0.1}:${MCPANEL_PORT:-8080}:8000"
+    networks: [internal]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      agent:
+        condition: service_started
+    # Health check: /api/health (database + cache), defined in backend/Dockerfile.
+    logging: *logging
+
+  worker:
+    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
+    command: ["worker"]
+    restart: unless-stopped
+    <<: *panel-hardening
+    environment: *panel-env
+    networks: [internal]
+    depends_on:
+      # The web container applies migrations; start jobs only after it is healthy.
+      panel:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A mcpanel inspect ping --destination \"celery@$${HOSTNAME}\" --timeout 10 > /dev/null"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    # Celery finishes running tasks on SIGTERM (warm shutdown). Jobs cut off by a
+    # hard kill are marked failed by the job runner instead of being re-run blindly.
+    stop_grace_period: 2m
+    logging: *logging
+
+  beat:
+    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
+    command: ["beat"]
+    restart: unless-stopped
+    <<: *panel-hardening
+    environment: *panel-env
+    networks: [internal]
+    depends_on:
+      panel:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Beat serves no HTTP and has no ping endpoint; the image's /api/health check
+    # does not apply. Crashes are handled by the restart policy.
+    healthcheck:
+      disable: true
+    logging: *logging
+
+networks:
+  internal: {}
+  instances:
+    name: mcpanel_instances
+
+volumes:
+  postgres_data: {}
+  redis_data: {}

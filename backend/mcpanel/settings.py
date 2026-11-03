@@ -206,6 +206,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": None,
     "EXCEPTION_HANDLER": "apps.core.errors.exception_handler",
     "DEFAULT_THROTTLE_RATES": {"login": "10/min", "setup": "10/min"},
+    # Identify clients by REMOTE_ADDR only. Without this DRF trusts any client-supplied
+    # X-Forwarded-For, which makes the login throttle trivially bypassable. Behind a
+    # reverse proxy, uvicorn --proxy-headers (MCPANEL_BEHIND_TLS_PROXY) already sets
+    # REMOTE_ADDR to the real client for trusted proxies only.
+    "NUM_PROXIES": 0,
     "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }
 

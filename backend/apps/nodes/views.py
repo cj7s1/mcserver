@@ -23,8 +23,20 @@ class NodeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Node
-        fields = ["id", "name", "agent_url", "agent_token", "use_settings_token", "is_default", "public_address",
-                  "lan_address", "last_seen_at", "last_error", "instance_count", "created_at"]
+        fields = [
+            "id",
+            "name",
+            "agent_url",
+            "agent_token",
+            "use_settings_token",
+            "is_default",
+            "public_address",
+            "lan_address",
+            "last_seen_at",
+            "last_error",
+            "instance_count",
+            "created_at",
+        ]
         read_only_fields = ["last_seen_at", "last_error", "created_at", "is_default"]
 
     def get_instance_count(self, obj: Node) -> int:

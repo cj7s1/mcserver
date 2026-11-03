@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.auth import authenticate, login, logout, password_validation, update_session_auth_hash
-from django.db import transaction
+from django.db import connection, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
@@ -16,8 +16,8 @@ from apps.audit import service as audit
 from apps.core.errors import ApiError
 from apps.core.permissions import HasGlobalPermission
 
-from .models import PasswordResetToken, Role, User
-from .permissions import PERMISSIONS, SYSTEM_ROLES
+from .models import InstanceAccess, PasswordResetToken, Role, User
+from .permissions import ALL_CODES, INSTANCE_CODES, PERMISSIONS, SYSTEM_ROLES
 from .serializers import (
     LoginSerializer,
     MeSerializer,
@@ -56,6 +56,9 @@ class AuthStateView(APIView):
         return Response(data)
 
 
+SETUP_LOCK_KEY = 0x4D43_5345_5455_5000  # arbitrary, stable advisory-lock id for first-run setup
+
+
 class SetupView(APIView):
     """Create the owner account. Only possible while no users exist."""
 
@@ -68,8 +71,12 @@ class SetupView(APIView):
         ser = SetupSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         with transaction.atomic():
-            # lock-free guard: a unique username + this check inside a transaction
-            if User.objects.select_for_update().exists():
+            # Row locks cannot guard an empty table, so serialise concurrent first-run setups
+            # with a transaction-scoped advisory lock; the check below then sees the winner.
+            if connection.vendor == "postgresql":
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_advisory_xact_lock(%s)", [SETUP_LOCK_KEY])
+            if User.objects.exists():
                 raise ApiError("Setup has already been completed", code="setup_complete", status_code=409)
             ensure_system_roles()
             user = User(
@@ -169,9 +176,49 @@ class PasswordResetView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+def _is_root(user: User) -> bool:
+    return bool(user.is_owner or user.is_superuser)
+
+
+def _assignable_perms(user: User) -> frozenset[str]:
+    """Permissions a user holds through their account (independent of is_active)."""
+    if _is_root(user):
+        return ALL_CODES
+    return user.role.permission_set if user.role_id else frozenset()
+
+
 def _guard_owner(request, target: User) -> None:  # type: ignore[no-untyped-def]
+    """Only the owner may touch the owner; nobody may manage a user who out-ranks them.
+
+    "Out-ranks" covers per-server grants too: a reset link or re-enabling an account
+    hands its server access to whoever controls it.
+    """
     if target.is_owner and not request.user.is_owner:
         raise PermissionDenied("Only the owner can modify the owner account")
+    if _is_root(request.user):
+        return
+    if not _assignable_perms(target) <= request.user.global_permissions():
+        raise PermissionDenied("You cannot manage a user who has permissions you do not have")
+    for grant in InstanceAccess.objects.filter(user=target).select_related("role"):
+        if not (grant.role.permission_set & INSTANCE_CODES) <= request.user.instance_permissions(grant.instance_id):
+            raise PermissionDenied("You cannot manage a user who has server access you do not have")
+
+
+def _guard_permission_grant(request, codes, what: str = "a role") -> None:  # type: ignore[no-untyped-def]
+    """Prevent privilege escalation: users can only hand out permissions they hold themselves."""
+    if _is_root(request.user):
+        return
+    missing = sorted(set(codes) - request.user.global_permissions())
+    if missing:
+        raise PermissionDenied(f"You cannot grant {what} with permissions you do not have: {', '.join(missing)}")
+
+
+def _guard_role_assignment(request, role: Role | None) -> None:  # type: ignore[no-untyped-def]
+    if role is None:
+        return
+    if role.key == "administrator" and not _is_root(request.user):
+        raise PermissionDenied("Only the owner can assign the Administrator role")
+    _guard_permission_grant(request, role.permission_set, "a role")
 
 
 class UserListCreateView(generics.ListCreateAPIView):
@@ -184,8 +231,7 @@ class UserListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):  # type: ignore[no-untyped-def]
         role = serializer.validated_data.get("role")
-        if role and role.key == "administrator" and not self.request.user.is_owner and not self.request.user.is_superuser:
-            raise PermissionDenied("Only the owner can create administrators")
+        _guard_role_assignment(self.request, role)
         user = serializer.save()
         audit.record("user.created", request=self.request, target=user, details={"role": role.key if role else None})
 
@@ -203,6 +249,8 @@ class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
             raise ValidationError({"is_active": ["You cannot disable your own account"]})
         if target == self.request.user and "role" in serializer.validated_data and not target.is_owner:
             raise ValidationError({"role": ["You cannot change your own role"]})
+        if "role" in serializer.validated_data and serializer.validated_data["role"] != target.role:
+            _guard_role_assignment(self.request, serializer.validated_data["role"])
         user = serializer.save()
         audit.record(
             "user.updated", request=self.request, target=user, details={k: str(v) for k, v in serializer.validated_data.items()}
@@ -243,6 +291,7 @@ class RoleListCreateView(generics.ListCreateAPIView):
         return super().get_permissions()
 
     def perform_create(self, serializer):  # type: ignore[no-untyped-def]
+        _guard_permission_grant(self.request, serializer.validated_data.get("permissions", []))
         role = serializer.save(is_system=False)
         audit.record("role.created", request=self.request, target=role, details={"permissions": role.permissions})
 
@@ -256,6 +305,8 @@ class RoleDetailView(generics.RetrieveUpdateDestroyAPIView):
     def perform_update(self, serializer):  # type: ignore[no-untyped-def]
         if serializer.instance.is_system:
             raise ValidationError({"detail": ["Built-in roles cannot be modified; create a custom role instead"]})
+        if "permissions" in serializer.validated_data:
+            _guard_permission_grant(self.request, serializer.validated_data["permissions"])
         role = serializer.save()
         audit.record("role.updated", request=self.request, target=role, details={"permissions": role.permissions})
 

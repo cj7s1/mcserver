@@ -1,0 +1,43 @@
+# Backing services for native development (backend/agent/frontend run on the host).
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d
+#
+# Ports are bound to 127.0.0.1 only. Credentials match the development defaults in
+# backend/mcpanel/settings.py (database/user/password "mcpanel"); the user is a
+# superuser inside this throw-away container, so the test suite can create its
+# test database. Never use this file for a real deployment.
+
+name: mcpanel-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mcpanel
+      POSTGRES_USER: mcpanel
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcpanel}
+    ports:
+      - "127.0.0.1:${MCPANEL_DEV_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - dev_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -U mcpanel -d mcpanel"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MCPANEL_DEV_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  dev_postgres_data: {}

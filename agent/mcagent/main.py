@@ -100,7 +100,9 @@ async def _refuse_instance_networks(request: Request, call_next):  # type: ignor
             ip = None
         if ip is not None and any(ip in net for net in _blocked_networks):
             log.warning("Refused agent API request from instance network address %s", client_ip)
-            return JSONResponse({"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403)
+            return JSONResponse(
+                {"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403
+            )
     return await call_next(request)
 
 

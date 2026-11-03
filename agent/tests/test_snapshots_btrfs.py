@@ -17,7 +17,9 @@ from mcagent.docker_ops import AgentError
 from mcagent.snapshots import BtrfsSnapshots, ensure_instance_dir, is_subvolume
 
 ROOT = os.environ.get("MCPANEL_TEST_BTRFS")
-pytestmark = pytest.mark.skipif(not ROOT or not shutil.which("btrfs"), reason="needs MCPANEL_TEST_BTRFS btrfs mount")
+pytestmark = pytest.mark.skipif(
+    not ROOT or not shutil.which("btrfs"), reason="needs MCPANEL_TEST_BTRFS btrfs mount"
+)
 
 
 @pytest.fixture

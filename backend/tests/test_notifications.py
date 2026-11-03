@@ -27,8 +27,9 @@ def test_notify_filters_by_event_and_scope(monkeypatch):
     sent = []
     monkeypatch.setattr("apps.notifications.service.deliver.delay", lambda *a: sent.append(a))
     NotificationChannel.objects.create(name="all", kind="webhook", url="https://x.test/h", events=["backup.failed"])
-    NotificationChannel.objects.create(name="off", kind="webhook", url="https://x.test/h", events=["backup.failed"],
-                                       enabled=False)
+    NotificationChannel.objects.create(
+        name="off", kind="webhook", url="https://x.test/h", events=["backup.failed"], enabled=False
+    )
     NotificationChannel.objects.create(name="other", kind="webhook", url="https://x.test/h", events=["instance.running"])
     assert notify("backup.failed", "t", "m") == 1
     assert notify("unknown.event", "t", "m") == 0

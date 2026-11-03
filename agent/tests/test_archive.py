@@ -25,8 +25,14 @@ def _zip(path, entries):
 
 def test_zip_extract_with_auto_strip(root):
     sr, inst, _ = root
-    _zip(inst / "upload.zip", {"myserver/server.properties": "motd=x\n", "myserver/world/level.dat": b"\x00\x01",
-                                "myserver/mods/": ""})
+    _zip(
+        inst / "upload.zip",
+        {
+            "myserver/server.properties": "motd=x\n",
+            "myserver/world/level.dat": b"\x00\x01",
+            "myserver/mods/": "",
+        },
+    )
     result = extract(sr, "upload.zip")
     assert result["stripped_prefix"] == "myserver"
     assert (inst / "server.properties").read_text() == "motd=x\n"
@@ -109,7 +115,7 @@ def test_zip_symlink_entry_skipped(root):
     sr, inst, tmp = root
     with zipfile.ZipFile(inst / "l.zip", "w") as zf:
         info = zipfile.ZipInfo("evil-link")
-        info.external_attr = (0o120777 << 16)
+        info.external_attr = 0o120777 << 16
         zf.writestr(info, str(tmp))
         zf.writestr("fine.txt", "ok")
     result = extract(sr, "l.zip", strip="none")
