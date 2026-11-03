@@ -37,6 +37,13 @@ ENV PYTHONUNBUFFERED=1 \
 # Version verified against https://hub.docker.com/v2/repositories/restic/restic/tags
 COPY --from=restic/restic:0.19.1 /usr/bin/restic /usr/local/bin/restic
 
+# btrfs-progs enables native snapshots when the data directory is on a btrfs pool
+# (used only if the filesystem is btrfs; deleting subvolumes also needs CAP_SYS_ADMIN,
+# see docs/UNRAID.md). Build behind a TLS-intercepting proxy: see backend/Dockerfile.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends btrfs-progs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=python-deps /opt/venv /opt/venv
 COPY agent/mcagent ./mcagent
