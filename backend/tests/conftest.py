@@ -84,6 +84,11 @@ class FakeAgent:
         "restore_backup",
         "forget_backups",
         "check_backups",
+        "snapshots",
+        "create_snapshot",
+        "delete_snapshot",
+        "restore_snapshot",
+        "convert_snapshots",
         "operation",
     )
 
@@ -91,6 +96,7 @@ class FakeAgent:
         self.containers: dict[str, dict[str, Any]] = {}
         self.fs: dict[str, dict[str, Any]] = {}
         self.repos: dict[str, list[dict[str, Any]]] = {}
+        self.snaps: dict[str, list[dict[str, Any]]] = {}
         self.operations: dict[str, dict[str, Any]] = {}
         self.foreign_ports: list[dict[str, Any]] = []
         self.remote_files: dict[str, bytes] = {}
@@ -710,6 +716,61 @@ class FakeAgent:
             raise self._err("Downloaded file failed SHA-256 verification", "hash_mismatch", 502)
         size = self._write(str(instance_id), path, data, overwrite=overwrite)
         return {"path": path, "size": size, "sha1": h1, "sha512": h512}
+
+    # -- snapshots (btrfs semantics) -----------------------------------------------------
+    def snapshots(self, instance_id: Any) -> dict[str, Any]:
+        iid = str(instance_id)
+        return {
+            "capability": {
+                "provider": "btrfs",
+                "available": True,
+                "fstype": "btrfs",
+                "reason": None,
+                "instance_is_subvolume": iid in self.fs,
+            },
+            "snapshots": [{k: v for k, v in s.items() if k != "tree"} for s in reversed(self.snaps.get(iid, []))],
+        }
+
+    def create_snapshot(
+        self, instance_id: Any, label: str = "", consistency: str = "auto", kind: str = "manual"
+    ) -> dict[str, Any]:
+        iid = str(instance_id)
+        if iid not in self.fs:
+            raise self._err("This server's folder is a plain directory", "not_subvolume", 409)
+        n = len(self.snaps.get(iid, [])) + 1
+        slug = "-".join("".join(ch if ch.isalnum() else " " for ch in label.lower()).split())[:40]
+        name = f"20261103T{n:06d}Z" + (f"-{slug}" if slug else "")
+        running = bool(self.containers.get(iid, {}).get("running"))
+        info = {
+            "name": name,
+            "label": label,
+            "created_at": self._now(),
+            "kind": kind,
+            "consistent": (consistency != "none") or not running,
+        }
+        self.snaps.setdefault(iid, []).append({**info, "tree": copy.deepcopy(self.fs[iid])})
+        return self._op("snapshot", iid, {**info, "warnings": []})
+
+    def delete_snapshot(self, instance_id: Any, name: str) -> dict[str, Any]:
+        iid = str(instance_id)
+        before = len(self.snaps.get(iid, []))
+        self.snaps[iid] = [s for s in self.snaps.get(iid, []) if s["name"] != name]
+        if len(self.snaps[iid]) == before:
+            raise self._err("Snapshot not found", "snapshot_not_found", 404)
+        return {"deleted": name}
+
+    def restore_snapshot(self, instance_id: Any, name: str) -> dict[str, Any]:
+        iid = str(instance_id)
+        if self.containers.get(iid, {}).get("running"):
+            raise self._err("Stop the server before rolling back to a snapshot", "must_stop", 409)
+        snap = next((s for s in self.snaps.get(iid, []) if s["name"] == name), None)
+        if snap is None:
+            raise self._err("Snapshot not found", "snapshot_not_found", 404)
+        self.fs[iid] = copy.deepcopy(snap["tree"])
+        return self._op("restore", iid, {"restored": name})
+
+    def convert_snapshots(self, instance_id: Any) -> dict[str, Any]:
+        return self._op("import", str(instance_id), {"converted": True})
 
     # -- backups -----------------------------------------------------------------------
     def list_backups(self, instance_id: Any) -> list[dict[str, Any]]:
