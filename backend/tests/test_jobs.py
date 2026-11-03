@@ -291,7 +291,17 @@ def test_reconcile_agent_down_is_unknown(inst, fake_agent):
     reconcile_instance(inst.id)
     inst.refresh_from_db()
     assert inst.status == "unknown"
-    assert inst.status_detail == "Node agent unreachable"
+    assert inst.status_detail.startswith("Node agent unreachable")
+
+
+def test_reconcile_docker_down_is_unknown_with_reason(inst, fake_agent):
+    from apps.nodes.client import AgentError
+
+    fake_agent.failures["status"] = AgentError("The Docker daemon on this node is not reachable", "docker_unavailable", 503)
+    reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert inst.status == "unknown"
+    assert "Docker is not reachable" in inst.status_detail
 
 
 def test_reconcile_node_counts_orphans(inst, fake_agent, node):
