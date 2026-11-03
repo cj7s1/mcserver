@@ -7,7 +7,7 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 | Boundary | What protects it |
 |---|---|
 | Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation, login throttling (10/min), scrypt password hashing. |
-| Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison, agent reachable only on the internal Compose network (no published port). |
+| Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
 | Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-512. |
 | Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). |
@@ -31,7 +31,12 @@ JARs are treated as untrusted and are never executed by the panel itself.
 
 Anything that can talk to the Docker socket is effectively root on the host. The agent therefore:
 
-* is never published on a host port and only listens on the internal network,
+* is never published on a host port in the single-host stack and only listens on the internal network.
+  An additional node (`deploy/docker-compose.node.yml`) must publish it so the panel can reach it; it
+  then serves HTTPS with a pinned certificate. Bind it to the LAN/VPN interface the panel uses
+  (`MCPANEL_NODE_BIND`) and never forward it to the internet,
+* refuses API requests whose source address is on an instance network (Minecraft containers run
+  third-party code), even with a valid token,
 * exposes only the narrow operations listed in `agent/mcagent/main.py` (no arbitrary exec, no arbitrary
   mounts, no arbitrary images),
 * requires the bearer token on every request (except the unauthenticated `/v1/health`, which reveals

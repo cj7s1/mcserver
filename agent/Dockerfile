@@ -65,4 +65,6 @@ USER 0:0
 EXPOSE 8700
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD ["python", "/usr/local/bin/mcagent-healthcheck.py"]
-CMD ["uvicorn", "mcagent.main:app", "--host", "0.0.0.0", "--port", "8700", "--no-proxy-headers", "--no-server-header"]
+# `python -m mcagent` runs uvicorn on AGENT_LISTEN_HOST:AGENT_LISTEN_PORT (default 0.0.0.0:8700),
+# over HTTPS when AGENT_TLS=auto|files (remote nodes, see DEPLOYMENT.md "Additional nodes").
+CMD ["python", "-m", "mcagent"]

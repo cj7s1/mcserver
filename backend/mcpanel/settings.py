@@ -8,6 +8,7 @@ deploy/.env.example for the documented variables.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -251,6 +252,13 @@ MCPANEL_AGENT_TOKEN = read_secret("MCPANEL_AGENT_TOKEN", "dev-agent-token" if (D
 if not MCPANEL_AGENT_TOKEN:
     raise ImproperlyConfigured("MCPANEL_AGENT_TOKEN (or MCPANEL_AGENT_TOKEN_FILE) must be set")
 MCPANEL_AGENT_TIMEOUT = float(env("MCPANEL_AGENT_TIMEOUT", "30") or 30)
+# TLS for agents reached over https:// (see apps/nodes/tls.py). The fingerprint pins the
+# default node's certificate (python -m mcagent fingerprint); the CA bundle adds a private CA
+# for agents with CA-issued certificates. Neither is needed for the single-host stack.
+MCPANEL_AGENT_TLS_FINGERPRINT = re.sub(r"[\s:]", "", env("MCPANEL_AGENT_TLS_FINGERPRINT", "") or "").lower()
+if MCPANEL_AGENT_TLS_FINGERPRINT and not re.fullmatch(r"[0-9a-f]{64}", MCPANEL_AGENT_TLS_FINGERPRINT):
+    raise ImproperlyConfigured("MCPANEL_AGENT_TLS_FINGERPRINT must be a SHA-256 fingerprint (64 hex digits)")
+MCPANEL_AGENT_CA_BUNDLE = env("MCPANEL_AGENT_CA_BUNDLE", "") or ""
 
 # Host addresses shown to users for connecting (purely informational).
 MCPANEL_PUBLIC_HOSTNAME = env("MCPANEL_PUBLIC_HOSTNAME", "")

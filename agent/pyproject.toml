@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.10",
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.18",
+    "cryptography>=44",
 ]
 
 [dependency-groups]

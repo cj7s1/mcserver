@@ -9,17 +9,33 @@ ignored so the loopback probe can never be sent to an egress proxy.
 from __future__ import annotations
 
 import json
+import os
+import ssl
 import sys
 import urllib.error
 import urllib.request
 
-URL = "http://127.0.0.1:8700/v1/health"
+
+def _target() -> tuple[str, ssl.SSLContext | None]:
+    port = int(os.environ.get("AGENT_LISTEN_PORT", "8700"))
+    if os.environ.get("AGENT_TLS", "off").strip().lower() in ("", "off"):
+        return f"http://127.0.0.1:{port}/v1/health", None
+    # Loopback liveness probe of our own listener: no credentials are sent and nothing
+    # but the status is read, so the certificate is not verified here.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return f"https://127.0.0.1:{port}/v1/health", ctx
 
 
 def main() -> int:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    url, ctx = _target()
+    handlers: list[urllib.request.BaseHandler] = [urllib.request.ProxyHandler({})]
+    if ctx is not None:
+        handlers.append(urllib.request.HTTPSHandler(context=ctx))
+    opener = urllib.request.build_opener(*handlers)
     try:
-        with opener.open(URL, timeout=8) as response:
+        with opener.open(url, timeout=8) as response:
             body = json.loads(response.read(65536) or b"{}")
     except urllib.error.HTTPError as exc:
         print(f"unhealthy: HTTP {exc.code}", file=sys.stderr)

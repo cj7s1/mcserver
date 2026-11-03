@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -13,6 +14,7 @@ from django.conf import settings
 
 from apps.core.errors import ApiError, ServiceUnavailable, UpstreamError
 
+from . import tls
 from .models import Node
 
 log = logging.getLogger(__name__)
@@ -39,16 +41,42 @@ class AgentClient:
         self.base = self.node.agent_url.rstrip("/")
         self.timeout = timeout or settings.MCPANEL_AGENT_TIMEOUT
         self.headers = {"Authorization": f"Bearer {self.node.token}", "User-Agent": "mcpanel-api"}
+        self._ssl: ssl.SSLContext | bool | None = False  # resolved lazily (may read the agent cert)
 
     # -- plumbing --------------------------------------------------------------------
+    @property
+    def ssl_context(self) -> ssl.SSLContext | None:
+        """TLS trust for this node (pinned or CA-verified); ``None`` for plain HTTP."""
+        if self._ssl is False:
+            self._ssl = tls.ssl_context(self.node)
+        return self._ssl  # type: ignore[return-value]
+
+    @property
+    def verify(self) -> ssl.SSLContext | bool:
+        return self.ssl_context or True
+
+    def _transport_error(self, exc: httpx.HTTPError) -> ApiError:
+        if tls.is_verification_failure(exc):
+            pinned = tls.transport(self.node) == "tls_pinned"
+            return tls.AgentTlsError(
+                f"The node agent at {self.base} did not present "
+                + (
+                    "the pinned certificate. If its certificate was regenerated, update the fingerprint of node "
+                    f"'{self.node.name}'."
+                    if pinned
+                    else "a certificate trusted by the panel (set its fingerprint to pin it)."
+                )
+            )
+        return AgentUnavailable(f"Cannot reach the node agent at {self.base}: {exc}")
+
     def _request(self, method: str, path: str, *, timeout: float | None = None, **kwargs: Any) -> httpx.Response:
         url = f"{self.base}{path}"
         try:
-            resp = httpx.request(method, url, headers=self.headers, timeout=timeout or self.timeout, **kwargs)
+            resp = httpx.request(method, url, headers=self.headers, timeout=timeout or self.timeout, verify=self.verify, **kwargs)
         except httpx.TimeoutException as exc:
             raise AgentUnavailable(f"The node agent did not respond in time ({method} {path})") from exc
         except httpx.HTTPError as exc:
-            raise AgentUnavailable(f"Cannot reach the node agent at {self.base}: {exc}") from exc
+            raise self._transport_error(exc) from exc
         if resp.status_code >= 400:
             code, message = "agent_error", resp.text[:500]
             try:
@@ -155,13 +183,13 @@ class AgentClient:
     def download(
         self, instance_id: UUID, path: str, *, endpoint: str = "download"
     ) -> tuple[Iterator[bytes], int | None, httpx.Response]:
-        client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=300))
+        client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=300), verify=self.verify)
         try:
             req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/{endpoint}", params={"path": path})
             resp = client.send(req, stream=True)
         except httpx.HTTPError as exc:
             client.close()
-            raise AgentUnavailable(f"Cannot reach the node agent: {exc}") from exc
+            raise self._transport_error(exc) from exc
         if resp.status_code >= 400:
             resp.read()
             client.close()
@@ -285,7 +313,7 @@ class AgentClient:
         return self._json("GET", f"/v1/instances/{instance_id}/backups/{snapshot_id}/files", params={"path": path}, timeout=600)
 
     def backup_download(self, instance_id: UUID, snapshot_id: str, path: str) -> tuple[Iterator[bytes], httpx.Response]:
-        client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=600))
+        client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=600), verify=self.verify)
         req = client.build_request(
             "GET", f"{self.base}/v1/instances/{instance_id}/backups/{snapshot_id}/download", params={"path": path}
         )
@@ -293,7 +321,7 @@ class AgentClient:
             resp = client.send(req, stream=True)
         except httpx.HTTPError as exc:
             client.close()
-            raise AgentUnavailable(f"Cannot reach the node agent: {exc}") from exc
+            raise self._transport_error(exc) from exc
         if resp.status_code >= 400:
             resp.read()
             client.close()

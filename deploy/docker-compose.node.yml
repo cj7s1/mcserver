@@ -1,0 +1,69 @@
+# Agent-only stack for an ADDITIONAL node: another Docker host whose Minecraft servers are
+# managed by the panel running elsewhere. Nothing else (no panel, database or Redis) runs here.
+#
+#   deploy/scripts/generate-secrets.sh --node
+#   cd deploy && docker compose -f docker-compose.node.yml --env-file node.env up -d --build
+#   docker compose -f docker-compose.node.yml --env-file node.env exec agent python -m mcagent fingerprint
+#
+# Then in the panel: System -> Nodes -> Add node with URL https://<this host>:<MCPANEL_NODE_PORT>,
+# the AGENT_TOKEN from node.env and the fingerprint printed above. See DEPLOYMENT.md.
+#
+# Unlike the single-host stack, the agent port IS published here (the panel must reach it),
+# so it is protected by HTTPS with a pinned certificate plus the bearer token. Bind it to the
+# LAN/VPN interface the panel uses (MCPANEL_NODE_BIND) and never forward it to the internet.
+#
+# Networks:
+#   api                carries only the published agent port. It is listed first and has
+#                      the highest priority so Docker publishes the port through it: requests
+#                      arriving via mcpanel_instances are refused by the agent on purpose.
+#   mcpanel_instances  shared with the Minecraft containers this agent creates (RCON via the
+#                      container IP); they cannot use the agent API from it.
+
+name: mcpanel-node
+
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: agent/Dockerfile
+    image: mcpanel/agent:${MCPANEL_IMAGE_TAG:-local}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      TZ: ${TZ:-UTC}
+      AGENT_TOKEN: ${AGENT_TOKEN:?AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh --node}
+      AGENT_TLS: auto
+      AGENT_TLS_HOSTNAMES: ${MCPANEL_NODE_HOSTNAMES:-}
+      AGENT_DATA_ROOT: ${MCPANEL_DATA_DIR:?MCPANEL_DATA_DIR is not set in node.env}
+      AGENT_BACKUP_ROOT: ${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}
+      AGENT_INSTANCE_NETWORK: mcpanel_instances
+      AGENT_RUNTIME_UID: ${MC_UID:-1000}
+      AGENT_RUNTIME_GID: ${MC_GID:-1000}
+      AGENT_RESTIC_PASSWORD: ${AGENT_RESTIC_PASSWORD:?AGENT_RESTIC_PASSWORD is not set - run deploy/scripts/generate-secrets.sh --node}
+      AGENT_PORT_MIN: ${AGENT_PORT_MIN:-1024}
+      AGENT_PORT_MAX: ${AGENT_PORT_MAX:-65535}
+      AGENT_MAX_MEMORY_MB: ${AGENT_MAX_MEMORY_MB:-65536}
+      AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}
+      - ${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}:${MCPANEL_BACKUP_DIR:-${MCPANEL_DATA_DIR}/backups}
+    ports:
+      - "${MCPANEL_NODE_BIND:-0.0.0.0}:${MCPANEL_NODE_PORT:-8700}:8700"
+    networks:
+      api:
+        priority: 1000
+      instances:
+        priority: 0
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  api: {}
+  instances:
+    name: mcpanel_instances

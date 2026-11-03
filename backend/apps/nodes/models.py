@@ -20,6 +20,10 @@ class Node(models.Model):
     is_default = models.BooleanField(default=False)
     public_address = models.CharField(max_length=255, blank=True, help_text="Hostname/IP players use to connect")
     lan_address = models.CharField(max_length=255, blank=True)
+    # https:// agents: SHA-256 of the pinned certificate (lower-case hex) and the certificate
+    # itself, read from the agent and checked against the fingerprint (see apps/nodes/tls.py).
+    tls_fingerprint = models.CharField(max_length=64, blank=True)
+    tls_cert_pem = models.TextField(blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     last_error = models.TextField(blank=True)
     info = models.JSONField(default=dict, blank=True)
@@ -53,7 +57,22 @@ class Node(models.Model):
                     "public_address": settings.MCPANEL_PUBLIC_HOSTNAME or "",
                 },
             )
-        elif node.use_settings_token and node.agent_url != settings.MCPANEL_AGENT_URL and node.name == "local":
-            node.agent_url = settings.MCPANEL_AGENT_URL
-            node.save(update_fields=["agent_url"])
+        if node.use_settings_token and node.name == "local":
+            node._sync_from_settings()
         return node
+
+    def _sync_from_settings(self) -> None:
+        """Keep the settings-managed local node in line with MCPANEL_AGENT_URL / _TLS_FINGERPRINT."""
+        from django.conf import settings
+
+        changed: list[str] = []
+        if self.agent_url != settings.MCPANEL_AGENT_URL:
+            self.agent_url = settings.MCPANEL_AGENT_URL
+            changed.append("agent_url")
+        fp = settings.MCPANEL_AGENT_TLS_FINGERPRINT  # normalized in settings.py
+        if fp != self.tls_fingerprint:
+            self.tls_fingerprint = fp
+            self.tls_cert_pem = ""
+            changed += ["tls_fingerprint", "tls_cert_pem"]
+        if changed:
+            self.save(update_fields=changed)

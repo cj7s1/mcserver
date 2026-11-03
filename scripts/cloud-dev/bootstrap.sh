@@ -14,17 +14,24 @@ if [ -f /srv/btrfs.img ] && ! mountpoint -q /srv/btrfs-test; then
   mkdir -p /srv/btrfs-test && mount -o loop /srv/btrfs.img /srv/btrfs-test
 fi
 
-# containers reach the sandbox HTTPS proxy through this forwarder (see egress_forwarder.py)
-pgrep -f "[e]gress_forwarder.py" >/dev/null || \
-  (nohup python3 "$ROOT/scripts/cloud-dev/egress_forwarder.py" 0.0.0.0 3128 127.0.0.1 37231 > /tmp/forwarder.log 2>&1 &)
+# containers reach the sandbox HTTPS proxy through this forwarder (see egress_forwarder.py).
+# The proxy's local port changes between container restarts: take it from $HTTPS_PROXY.
+proxy_port=$(printf '%s' "${HTTPS_PROXY:-http://127.0.0.1:37231}" | sed -E 's#^.*:([0-9]+)/?$#\1#')
+if ! pgrep -f "[e]gress_forwarder.py 0.0.0.0 3128 127.0.0.1 $proxy_port\$" >/dev/null; then
+  pkill -f "[e]gress_forwarder.py" || true
+  (nohup python3 "$ROOT/scripts/cloud-dev/egress_forwarder.py" 0.0.0.0 3128 127.0.0.1 "$proxy_port" > /tmp/forwarder.log 2>&1 &)
+fi
 
 "$ROOT/scripts/cloud-dev/start-services.sh"
 
-# second agent ("btrfs-node") on :8701
-if [ -d /srv/btrfs-test ] && ! pgrep -f "[m]cagent.main:app --host 127.0.0.1 --port 8701" >/dev/null; then
+# second agent ("btrfs-node") on :8701, served over HTTPS (AGENT_TLS=auto); the panel pins
+# its certificate (fingerprint: AGENT_DATA_ROOT=/srv/btrfs-test/data AGENT_TLS=auto
+# uv run python -m mcagent fingerprint)
+if [ -d /srv/btrfs-test ] && ! curl -skf https://127.0.0.1:8701/v1/health >/dev/null; then
   (cd "$ROOT/agent" && set -a && . "$ROOT/scripts/cloud-dev/agent.env" && \
-   AGENT_DATA_ROOT=/srv/btrfs-test/data AGENT_TOKEN=btrfs-node-token && set +a && \
-   nohup uv run uvicorn mcagent.main:app --host 127.0.0.1 --port 8701 > /tmp/agent2.log 2>&1 &)
+   AGENT_DATA_ROOT=/srv/btrfs-test/data AGENT_TOKEN=btrfs-node-token AGENT_TLS=auto \
+   AGENT_LISTEN_HOST=127.0.0.1 AGENT_LISTEN_PORT=8701 && set +a && \
+   nohup uv run python -m mcagent > /tmp/agent2.log 2>&1 &)
 fi
 
 # frontend dev server

@@ -82,12 +82,21 @@ class ConsoleConsumer(AsyncJsonWebsocketConsumer):
 
         client = await database_sync_to_async(AgentClient)(self.instance.node)
         url = client.ws_url(f"/v1/instances/{self.instance.id}/logs/stream?tail=300")
+        tls_kwargs: dict[str, Any] = {}
         backoff = 1.0
         first = True
         while True:
             try:
+                if url.startswith("wss://") and not tls_kwargs:
+                    # may read and pin the agent certificate (blocking I/O + DB) on first use
+                    tls_kwargs["ssl"] = await database_sync_to_async(lambda: client.ssl_context)()
                 async with websockets.connect(
-                    url, additional_headers=client.headers, open_timeout=10, ping_interval=20, max_size=8 * 1024 * 1024
+                    url,
+                    additional_headers=client.headers,
+                    open_timeout=10,
+                    ping_interval=20,
+                    max_size=8 * 1024 * 1024,
+                    **tls_kwargs,
                 ) as ws:
                     await self.send_json({"type": "agent", "connected": True})
                     backoff = 1.0

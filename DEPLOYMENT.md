@@ -73,12 +73,59 @@ A VPN such as WireGuard or Tailscale is safer than exposing the panel publicly.
 Game ports are separate. The panel publishes each server's port on the Docker host only. Players outside
 your LAN need a router port forward for that TCP port, which you configure yourself.
 
+## Additional nodes (more Docker hosts)
+
+One panel can manage Minecraft servers on several Docker hosts. Every extra host ("node") runs only
+the agent, from `deploy/docker-compose.node.yml`. The panel reaches it over **HTTPS with a pinned
+certificate**: the agent generates a self-signed certificate on first start (`AGENT_TLS=auto`, kept in
+`<MCPANEL_DATA_DIR>/agent/tls/`), and the panel trusts exactly that certificate. The token is sent only
+after the TLS handshake has matched the pin.
+
+On the new host:
+
+```bash
+git clone https://github.com/cj7s1/mcserver.git && cd mcserver/deploy
+./scripts/generate-secrets.sh --node        # writes node.env (AGENT_TOKEN, AGENT_RESTIC_PASSWORD)
+# edit node.env: MCPANEL_DATA_DIR, MC_UID/MC_GID, MCPANEL_NODE_BIND (the LAN/VPN address), port
+docker compose -f docker-compose.node.yml --env-file node.env up -d --build
+docker compose -f docker-compose.node.yml --env-file node.env exec agent python -m mcagent fingerprint
+```
+
+In the panel, open **System → Nodes → Add node** and enter:
+
+* URL: `https://<node address>:<MCPANEL_NODE_PORT>` (default port 8700)
+* Token: `AGENT_TOKEN` from `node.env`
+* Fingerprint: the `AB:CD:…` line printed above. The panel reads the certificate the agent presents
+  and refuses to save the node if it does not match.
+
+Then run **Check**. Servers can be created on the node from the create wizard and moved between nodes
+(**Settings → Danger zone → Move to another node**). Each node keeps its own restic backups.
+
+Notes:
+
+* The agent port must be reachable from the panel host only. Bind it to the LAN or VPN interface
+  (`MCPANEL_NODE_BIND`) and do not forward it on your router. A WireGuard/Tailscale link between the
+  hosts is a good fit.
+* If the node's certificate is regenerated (deleting `agent/tls/`), the panel stops talking to it with
+  an `agent_tls` error until you paste the new fingerprint into the node.
+* Using your own certificate instead: set `AGENT_TLS=files`, `AGENT_TLS_CERT_FILE` and
+  `AGENT_TLS_KEY_FILE` in a compose override. Pin it the same way, or leave the fingerprint empty and
+  let the panel verify it against public CAs plus `MCPANEL_AGENT_CA_BUNDLE` (a PEM file mounted into
+  panel and worker), in which case the URL's host name must match the certificate.
+* A plain `http://` node still works but the API flags it with a warning: its token and console
+  traffic cross the network unencrypted.
+* If the **default** node is remote (`MCPANEL_AGENT_URL=https://…`), pin it with
+  `MCPANEL_AGENT_TLS_FINGERPRINT` in `.env`.
+
 ## Upgrading
 
 ```bash
 cd mcserver && git pull
 cd deploy && docker compose up -d --build
 ```
+
+On additional nodes: `docker compose -f docker-compose.node.yml --env-file node.env up -d --build`.
+The certificate (and so the pin) survives upgrades because it lives in the data directory.
 
 Migrations run automatically when `panel` starts, and `worker`/`beat` wait for it. Running Minecraft
 servers are not restarted by an upgrade. Before major upgrades, back up the database:

@@ -30,7 +30,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
-from . import __version__, docker_ops, storage
+from . import __version__, docker_ops, storage, tls
 from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
@@ -193,6 +193,13 @@ async def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return {"status": "ok" if docker_ok else "degraded", "docker": docker_ok, "version": __version__}
 
 
+def _tls_fingerprint(settings: Settings) -> str | None:
+    try:
+        return tls.server_fingerprint(settings)
+    except (tls.TlsConfigError, OSError, ValueError):
+        return None
+
+
 @app.get("/v1/info", dependencies=[Depends(require_token)])
 async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     docker_info = await run_in_threadpool(docker_ops.docker_info)
@@ -202,6 +209,7 @@ async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "docker": docker_info,
         "restic": await run_in_threadpool(restic_available, settings),
         "storage": caps,
+        "tls": {"mode": settings.tls, "fingerprint": await run_in_threadpool(_tls_fingerprint, settings)},
         "policy": {
             "allowed_images": settings.allowed_images,
             "networks": sorted(settings.effective_networks()),

@@ -105,6 +105,7 @@ api_patterns = [
     path("system/settings", core.SystemSettingsView.as_view()),
     path("system/ports", core.PortsView.as_view()),
     path("nodes", nodes.NodeListView.as_view()),
+    path("nodes/tls-probe", nodes.NodeTlsProbeView.as_view()),
     path("nodes/<int:pk>", nodes.NodeDetailView.as_view()),
     path("nodes/<int:pk>/check", nodes.NodeCheckView.as_view()),
     path("notifications/events", notifications.EventsView.as_view()),

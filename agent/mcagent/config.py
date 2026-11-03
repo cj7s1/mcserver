@@ -6,9 +6,10 @@ import json
 import secrets
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -28,11 +29,11 @@ class Settings(BaseSettings):
     backup_root: Path | None = None
 
     # Container runtime policy ---------------------------------------------------
-    allowed_images: list[str] = Field(
+    allowed_images: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["itzg/minecraft-server", "docker.io/itzg/minecraft-server"]
     )
     instance_network: str = "mcpanel_instances"
-    allowed_networks: list[str] = Field(default_factory=list)
+    allowed_networks: Annotated[list[str], NoDecode] = Field(default_factory=list)
     allow_host_network: bool = False
     port_min: int = 1024
     port_max: int = 65535
@@ -53,12 +54,23 @@ class Settings(BaseSettings):
     # runs on the host) or "published" (connect to 127.0.0.1:<published rcon port>).
     rcon_mode: str = "container_ip"
 
+    # API listener (used by ``python -m mcagent``) --------------------------------
+    listen_host: str = "0.0.0.0"  # noqa: S104 - inside the agent container; see docs
+    listen_port: int = 8700
+    # TLS for the agent API: "off", "auto" (self-signed, pinned by the panel) or "files".
+    tls: str = "off"
+    tls_cert_file: Path | None = None
+    tls_key_file: Path | None = None
+    # Extra DNS names / IPs for the self-signed certificate's SAN (informational: the
+    # panel pins the certificate itself, so names do not have to match).
+    tls_hostnames: Annotated[list[str], NoDecode] = Field(default_factory=list)
+
     # Backups ---------------------------------------------------------------------
     restic_binary: str = "restic"
     restic_password: str = ""
     restic_password_file: Path | None = None
 
-    @field_validator("allowed_images", "allowed_networks", mode="before")
+    @field_validator("allowed_images", "allowed_networks", "tls_hostnames", mode="before")
     @classmethod
     def _split_csv(cls, value: object) -> object:
         if isinstance(value, str):
@@ -66,6 +78,14 @@ class Settings(BaseSettings):
             if value.startswith("["):
                 return json.loads(value)
             return [v.strip() for v in value.split(",") if v.strip()]
+        return value
+
+    @field_validator("tls")
+    @classmethod
+    def _tls_mode(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in ("off", "auto", "files"):
+            raise ValueError("AGENT_TLS must be off, auto or files")
         return value
 
     @field_validator("runtime_extra_env", mode="before")
