@@ -1,8 +1,9 @@
-/** Instance schedules: cron-based restarts, backups and console commands. */
+/** Instance schedules: cron-based restarts, backups, snapshots and console commands. */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
   CalendarClock,
+  Camera,
   Clock,
   Lock,
   Pencil,
@@ -29,8 +30,15 @@ import { qk } from "@/lib/queries";
 import type { Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useInstanceContext } from "./InstanceLayout";
+import { snapshotState, useSnapshots } from "./backups/snapshot-utils";
 import { browserOffset, describeCron, offsetFromIso } from "./schedules/cron";
-import { ACTION_INFO, RUNNING_ONLY_ACTIONS, type ScheduleDraft } from "./schedules/schedule-meta";
+import {
+  ACTION_INFO,
+  DEFAULT_SNAPSHOT_KEEP,
+  RUNNING_ONLY_ACTIONS,
+  snapshotKeep,
+  type ScheduleDraft,
+} from "./schedules/schedule-meta";
 import { ScheduleDialog } from "./schedules/ScheduleDialog";
 
 const ACTION_ICONS: Record<string, LucideIcon> = {
@@ -39,11 +47,16 @@ const ACTION_ICONS: Record<string, LucideIcon> = {
   stop: Square,
   backup: Archive,
   command: Terminal,
-  snapshot: Archive,
+  snapshot: Camera,
 };
 
-const TEMPLATES: { label: string; draft: Partial<ScheduleDraft>; needsBackup?: boolean }[] = [
+const TEMPLATES: { label: string; draft: Partial<ScheduleDraft>; needsBackup?: boolean; needsSnapshots?: boolean }[] = [
   { label: "Nightly backup", draft: { name: "Nightly backup", action: "backup", cron: "0 4 * * *" }, needsBackup: true },
+  {
+    label: "Hourly snapshot",
+    draft: { name: "Hourly snapshot", action: "snapshot", cron: "0 * * * *", keep: String(DEFAULT_SNAPSHOT_KEEP) },
+    needsSnapshots: true,
+  },
   { label: "Daily restart", draft: { name: "Daily restart", action: "restart", cron: "0 5 * * *" } },
   {
     label: "Restart warning",
@@ -60,6 +73,12 @@ function resultTone(result: string): string {
 function payloadSummary(s: Schedule): string | null {
   if (s.action === "command" && typeof s.payload?.command === "string") return `/${s.payload.command}`;
   if (s.action === "backup") return typeof s.payload?.name === "string" && s.payload.name ? `Named “${s.payload.name}”` : null;
+  if ((s.action as string) === "snapshot") {
+    // backend: keep defaults to 24 when missing; 0 disables pruning
+    if (s.payload?.keep === 0) return "Keeps all scheduled snapshots";
+    const n = snapshotKeep(s) ?? DEFAULT_SNAPSHOT_KEEP;
+    return `Keeps the newest ${n} scheduled snapshot${n === 1 ? "" : "s"}`;
+  }
   return null;
 }
 
@@ -220,6 +239,9 @@ export default function Schedules() {
   const panelTz = offsetFromIso(schedules.find((s) => s.next_run_at)?.next_run_at ?? instance.updated_at);
   const localTz = browserOffset();
   const openNew = (template?: Partial<ScheduleDraft>) => setDialog({ key: Date.now(), template });
+  // only offer the snapshot template where snapshots actually work (GET /snapshots needs instance.backup)
+  const snaps = useSnapshots(instance.id, { enabled: canManage && canBackup && query.data?.length === 0 });
+  const snapshotsReady = snapshotState(snaps.data?.capability) === "ready";
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -227,7 +249,7 @@ export default function Schedules() {
         title="Schedules"
         description={
           <>
-            Automate restarts, backups and console commands with cron expressions. Times use the panel server's timezone
+            Automate restarts, backups, snapshots and console commands with cron expressions. Times use the panel server's timezone
             {panelTz ? ` (${panelTz})` : ""}
             {panelTz && panelTz !== localTz ? `; run times below are shown in your browser's time (${localTz})` : ""}.
           </>
@@ -260,7 +282,7 @@ export default function Schedules() {
               action={
                 canManage && (
                   <div className="flex flex-wrap justify-center gap-2">
-                    {TEMPLATES.filter((t) => !t.needsBackup || canBackup).map((t) => (
+                    {TEMPLATES.filter((t) => (!t.needsBackup || canBackup) && (!t.needsSnapshots || snapshotsReady)).map((t) => (
                       <Button key={t.label} size="sm" variant="outline" onClick={() => openNew(t.draft)}>
                         <Plus /> {t.label}
                       </Button>
@@ -300,6 +322,11 @@ export default function Schedules() {
             <code className="font-mono">30 3 * * 1-5</code> runs at 03:30 on weekdays. Sunday is 0 or 7.
           </li>
           <li>Scheduled backups follow the retention policy configured on the Backups page.</li>
+          <li>
+            Snapshot schedules take instant btrfs snapshots (where enabled on the Backups page) and keep only the newest scheduled
+            snapshots, as set per schedule (default {DEFAULT_SNAPSHOT_KEEP}). Manual and “before rollback” snapshots are never
+            pruned.
+          </li>
         </ul>
         {!canManage && (
           <p className="flex items-center gap-1.5">

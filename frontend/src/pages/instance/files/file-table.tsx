@@ -5,6 +5,7 @@ import {
   Copy,
   Download,
   File,
+  FileArchive,
   FileCode2,
   FileText,
   Folder,
@@ -41,6 +42,8 @@ export interface FileActions {
   remove: (entries: FileEntry[]) => void;
   extract: (entry: FileEntry) => void;
   downloadHref: (entry: FileEntry) => string;
+  /** Zip of a folder, built on the fly by the agent (GET /files/archive). */
+  archiveHref: (entry: FileEntry) => string;
 }
 
 function EntryIcon({ entry, world }: { entry: FileEntry; world: boolean }) {
@@ -140,6 +143,11 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
       <DropdownMenuItem key="open" onSelect={() => actions.open(entry)}>
         <FolderOpen /> Open
       </DropdownMenuItem>,
+      <DropdownMenuItem key="zip" asChild>
+        <a href={actions.archiveHref(entry)} download={`${entry.name}.zip`}>
+          <FileArchive /> Download as .zip
+        </a>
+      </DropdownMenuItem>,
     );
   }
   if (entry.type === "file") {
@@ -181,7 +189,7 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
     if (isArchive(entry)) {
       items.push(
         <DropdownMenuItem key="extract" onSelect={() => actions.extract(entry)}>
-          <PackageOpen /> Extract…
+          <PackageOpen /> Extract here…
         </DropdownMenuItem>,
       );
     }

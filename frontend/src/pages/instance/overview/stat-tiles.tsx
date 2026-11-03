@@ -8,7 +8,7 @@ import { errorMessage } from "@/lib/api";
 import { formatBytes, formatDateTime, formatDuration, formatMemoryMb, relativeTime, toDate, uptimeSince } from "@/lib/format";
 import type { Instance, Stats } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import type { StatSample } from "./resource-charts";
+import type { StatSample } from "./live-samples";
 
 function Tile({
   icon,

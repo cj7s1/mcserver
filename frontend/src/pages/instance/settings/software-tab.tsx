@@ -1,7 +1,8 @@
 /** Minecraft / loader / Java versions. Version changes go through POST /instances/{id}/software (job with pre-update backup). */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Coffee, Loader2, Package, Undo2 } from "lucide-react";
+import { ArrowRight, Coffee, Loader2, Package, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
@@ -41,6 +42,7 @@ function isDowngrade(from: string, to: string): boolean {
 }
 
 function ModpackInfo({ instance }: { instance: Instance }) {
+  const canChange = instance.permissions.includes("instance.content");
   const rows: [string, string][] = [
     ["Modpack", instance.modpack_name || instance.modpack_slug || "—"],
     ["Release", instance.modpack_version_name || instance.modpack_version_id || "—"],
@@ -67,10 +69,22 @@ function ModpackInfo({ instance }: { instance: Instance }) {
             </div>
           ))}
         </dl>
-        <Notice title="Versions come from the pinned modpack release">
+        <Notice
+          title="Versions come from the pinned modpack release"
+          action={
+            <Button asChild size="sm" variant="outline">
+              <Link to={`/servers/${instance.id}/modpack`}>
+                Open Modpack tab <ArrowRight aria-hidden />
+              </Link>
+            </Button>
+          }
+        >
           The Minecraft and loader versions of a modpack server are defined by the modpack release it was installed from, so they
-          cannot be changed here. Switching this server to another modpack release is not yet available in the panel. The Java
-          version below can still be changed.
+          cannot be changed here.{" "}
+          {canChange
+            ? "Update or switch the release on the Modpack tab: it shows what changes, backs up first and can roll back."
+            : "The Modpack tab lists the available releases; changing the release needs the “Manage mods/plugins” permission."}{" "}
+          The Java version below can still be changed.
         </Notice>
       </div>
     </Section>
@@ -92,7 +106,8 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
   const [backup, setBackup] = useState(true);
   const [startAfter, setStartAfter] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [serverSaysDowngrade, setServerSaysDowngrade] = useState(false);
+  /** Message of a 409 downgrade_unconfirmed response; opens the explicit "Downgrade anyway" confirmation. */
+  const [downgradeMessage, setDowngradeMessage] = useState<string | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
 
   const mc = mcDraft ?? instance.minecraft_version;
@@ -136,7 +151,7 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
   const javaChanged = javaValue !== instance.java_version;
   const versionChange = versionsEditable && (mcChanged || loaderChanged);
   const dirty = versionChange || javaChanged;
-  const downgrade = (mcChanged && isDowngrade(instance.minecraft_version, mc)) || (mcChanged && serverSaysDowngrade);
+  const downgrade = mcChanged && isDowngrade(instance.minecraft_version, mc);
   useReportDirty(dirty, onDirtyChange);
 
   const job = useJob(jobId);
@@ -211,9 +226,30 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
     setMcDraft(null);
     setLoaderDraft(null);
     setJavaDraft(null);
-    setServerSaysDowngrade(false);
+    setDowngradeMessage(null);
     update.reset();
     patch.reset();
+  };
+
+  /** POST /software; the first attempt never allows a downgrade, so the backend decides and we ask explicitly. */
+  const submit = async (allowDowngrade: boolean) => {
+    try {
+      const j = await update.mutateAsync(allowDowngrade);
+      setJobId(j.id);
+      setMcDraft(null);
+      setLoaderDraft(null);
+      setJavaDraft(null);
+      setDowngradeMessage(null);
+      invalidate(instance.id);
+      toast.success(allowDowngrade ? "Downgrade started" : "Update started");
+    } catch (err) {
+      if (!allowDowngrade && err instanceof ApiError && err.code === "downgrade_unconfirmed") {
+        setDowngradeMessage(err.message);
+        return;
+      }
+      toast.error(errorMessage(err));
+      if (allowDowngrade) throw err;
+    }
   };
 
   const apply = () => {
@@ -283,7 +319,7 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
                       setMcDraft(v === instance.minecraft_version ? null : v);
                       setLoaderDraft(null);
                       setJavaDraft(null);
-                      setServerSaysDowngrade(false);
+                      setDowngradeMessage(null);
                     }}
                   />
                 </Field>
@@ -397,10 +433,9 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={`Update to Minecraft ${mc}?`}
-        confirmLabel={downgrade ? "Downgrade server" : "Update server"}
+        title={downgrade ? `Downgrade to Minecraft ${mc}?` : `Update to Minecraft ${mc}?`}
+        confirmLabel={downgrade ? "Continue" : "Update server"}
         destructive={downgrade}
-        confirmText={downgrade ? "downgrade" : undefined}
         description={
           <div className="grid gap-2 text-sm">
             <p>
@@ -417,25 +452,7 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
             {!backup && <p className="font-medium text-destructive">No backup will be made — you cannot roll back.</p>}
           </div>
         }
-        onConfirm={async () => {
-          try {
-            const j = await update.mutateAsync(downgrade);
-            setJobId(j.id);
-            setMcDraft(null);
-            setLoaderDraft(null);
-            setJavaDraft(null);
-            setServerSaysDowngrade(false);
-            invalidate(instance.id);
-            toast.success("Update started");
-          } catch (err) {
-            if (err instanceof ApiError && err.code === "downgrade_unconfirmed") {
-              setServerSaysDowngrade(true);
-              toast.error(`${err.message} Confirm the downgrade to continue.`);
-            } else {
-              toast.error(errorMessage(err));
-            }
-          }
-        }}
+        onConfirm={() => submit(false)}
       >
         <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
           <div className="flex items-start gap-2">
@@ -454,6 +471,29 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
           </div>
         </div>
       </ConfirmDialog>
+
+      <ConfirmDialog
+        open={downgradeMessage !== null}
+        onOpenChange={(o) => !o && setDowngradeMessage(null)}
+        title="Downgrade anyway?"
+        confirmLabel="Downgrade anyway"
+        destructive
+        description={
+          <div className="grid gap-2 text-sm">
+            <p className="font-medium text-destructive">{downgradeMessage}</p>
+            <p>
+              {instance.minecraft_version} → {mc}. Chunks and player data saved by the newer version may fail to load or be reset,
+              and some blocks and items can disappear. Restoring a backup made before the upgrade is the safer way back.
+            </p>
+            <p className="text-muted-foreground">
+              {backup
+                ? "A pre-update backup is created first, so you can restore the current state if the downgrade goes wrong."
+                : "No backup will be made: there is no way back if the world is damaged."}
+            </p>
+          </div>
+        }
+        onConfirm={() => submit(true)}
+      />
 
       {instance.installed_at && (
         <p className="text-xs text-muted-foreground">Server software first installed {formatDateTime(instance.installed_at)}.</p>

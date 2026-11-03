@@ -87,6 +87,7 @@ const TABS: { to: string; label: string; perm?: PermissionCode; when?: (i: Insta
   { to: "files", label: "Files", perm: "instance.files.read" },
   { to: "content", label: "Mods", when: (i) => i.content_kind === "mods" },
   { to: "content", label: "Plugins", when: (i) => i.content_kind === "plugins" },
+  { to: "modpack", label: "Modpack", when: (i) => i.is_modpack },
   { to: "players", label: "Players" },
   { to: "backups", label: "Backups", perm: "instance.backup" },
   { to: "schedules", label: "Schedules" },

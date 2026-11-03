@@ -43,6 +43,7 @@ export const router = createBrowserRouter([
               { path: "console", element: page(() => import("@/pages/instance/Console")) },
               { path: "files", element: page(() => import("@/pages/instance/Files")) },
               { path: "content", element: page(() => import("@/pages/instance/Content")) },
+              { path: "modpack", element: page(() => import("@/pages/instance/Modpack")) },
               { path: "players", element: page(() => import("@/pages/instance/Players")) },
               { path: "backups", element: page(() => import("@/pages/instance/Backups")) },
               { path: "schedules", element: page(() => import("@/pages/instance/Schedules")) },

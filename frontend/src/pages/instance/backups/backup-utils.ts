@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Backup, Instance, Job, RetentionPolicy } from "@/lib/types";
+import { SNAPSHOT_JOB_KINDS, snapshotsKey } from "./snapshot-utils";
 
 export interface BackupsResponse {
   backups: Backup[];
@@ -35,8 +36,19 @@ export interface PortsResponse {
   suggested: number | null;
 }
 
-/** Job kinds that change the backup list (used to pick up jobs started elsewhere, e.g. by a schedule). */
-export const BACKUP_JOB_KINDS = ["backup", "backup_delete", "backup_verify", "restore", "restore_new", "restore_path"];
+/**
+ * Job kinds that change the backup or snapshot lists (used to pick up jobs started elsewhere,
+ * e.g. by a schedule).
+ */
+export const BACKUP_JOB_KINDS = [
+  "backup",
+  "backup_delete",
+  "backup_verify",
+  "restore",
+  "restore_new",
+  "restore_path",
+  ...SNAPSHOT_JOB_KINDS,
+];
 
 /** restic excludes always applied by the backend (backend/apps/backups/handlers.py DEFAULT_EXCLUDES). */
 export const BUILTIN_EXCLUDES = ["logs/*.log.gz", "crash-reports", ".cache", "cache", "debug", "*.tmp", "modernfix/classCache*"];
@@ -110,6 +122,7 @@ export function useTrackedJob(instance: Instance) {
     if (!job || !FINISHED.includes(job.status) || handled.current === job.id) return;
     handled.current = job.id;
     qc.invalidateQueries({ queryKey: qk.backups(instance.id) });
+    qc.invalidateQueries({ queryKey: snapshotsKey(instance.id) });
     invalidate(instance.id);
     if (job.status === "succeeded") toast.success(`${job.title}: done`);
     else if (job.status === "failed") toast.error(`${job.title} failed${job.error ? `: ${job.error}` : ""}`);

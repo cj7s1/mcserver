@@ -46,8 +46,10 @@ export interface ContentFile {
   size: number;
   modified: number | null;
   sha1: string;
-  /** modrinth = identified by hash; manual = not on Modrinth; unknown = identification failed */
-  source: "modrinth" | "manual" | "unknown";
+  /** modrinth = identified by hash; hangar = installed from Hangar by the panel; manual = not on Modrinth; unknown = identification failed */
+  source: "modrinth" | "hangar" | "manual" | "unknown";
+  /** Set when source is "hangar" (recorded at install time; Hangar has no hash lookup). */
+  hangar?: { slug: string; version: string };
   project: ContentProjectSummary | null;
   version: ContentVersion | null;
   compatibility: { loader: boolean; minecraft: boolean | null } | null;
@@ -63,7 +65,7 @@ export interface ContentInventory {
   restart_required_for_changes: boolean;
   identification: { available: boolean; error: string | null };
   warnings: string[];
-  summary: { total: number; enabled: number; disabled: number; identified: number; manual: number };
+  summary: { total: number; enabled: number; disabled: number; identified: number; manual: number; hangar?: number };
   files: ContentFile[];
 }
 
@@ -208,12 +210,70 @@ export interface UploadResponse {
 
 export type SearchSort = "relevance" | "downloads" | "follows" | "newest" | "updated";
 
+// --- Hangar (hangar.papermc.io, Paper-family plugin servers only) ---------------------------
+export interface HangarSearchHit {
+  id: string;
+  slug: string;
+  title: string | null;
+  description: string | null;
+  author: string | null;
+  icon_url: string | null;
+  downloads: number | null;
+  /** Hangar stars. */
+  follows?: number | null;
+  categories?: string[];
+  game_versions: string[];
+  updated: string | null;
+  url: string | null;
+  installed: boolean;
+}
+
+export interface HangarSearchResponse {
+  total: number;
+  offset: number;
+  limit: number;
+  results: HangarSearchHit[];
+}
+
+export interface HangarDependency {
+  name: string | null;
+  type: "required" | "optional";
+  external_url: string | null;
+}
+
+export interface HangarVersion {
+  name: string;
+  version_type: string | null;
+  game_versions: string[];
+  published: string | null;
+  file: { filename: string | null; size: number | null; url: string | null; sha256: string | null; external_url: string | null } | null;
+  dependencies: HangarDependency[];
+  installable: boolean;
+  reason?: string;
+}
+
+export interface HangarVersionsResponse {
+  versions: HangarVersion[];
+  minecraft_version: string | null;
+}
+
+export interface HangarInstallResponse {
+  installed: { filename: string; slug: string; version: string; size: number | null };
+  required_dependencies: HangarDependency[];
+  notes: string[];
+}
+
+/** Hangar search pages are fixed at 20 results by the backend. */
+export const HANGAR_PAGE_SIZE = 20;
+
 // --- keys and paths ---------------------------------------------------------------------
 export const contentKeys = {
   inventory: (id: string) => [...qk.content(id), "inventory"] as const,
   updates: (id: string) => [...qk.content(id), "updates"] as const,
   search: (id: string, params: { q: string; offset: number; sort: SearchSort }) => [...qk.content(id), "search", params] as const,
   versions: (id: string, projectId: string) => [...qk.content(id), "versions", projectId] as const,
+  hangarSearch: (id: string, params: { q: string; offset: number }) => [...qk.content(id), "hangar", "search", params] as const,
+  hangarVersions: (id: string, slug: string) => [...qk.content(id), "hangar", "versions", slug] as const,
 };
 
 export const contentPath = (id: string, sub = "") => `/instances/${id}/content/${sub}`;
@@ -265,6 +325,30 @@ export function useProjectVersions(instanceId: string, projectId: string | null)
     queryKey: contentKeys.versions(instanceId, projectId ?? ""),
     queryFn: () => api.get<ProjectVersionsResponse>(contentPath(instanceId, `projects/${encodeURIComponent(projectId ?? "")}/versions`)),
     enabled: !!projectId,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+export function useHangarSearch(instanceId: string, params: { q: string; offset: number }, enabled = true) {
+  return useQuery({
+    queryKey: contentKeys.hangarSearch(instanceId, params),
+    queryFn: ({ signal }) =>
+      api.get<HangarSearchResponse>(contentPath(instanceId, "hangar/search"), { q: params.q, offset: params.offset }, signal),
+    enabled,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+export function useHangarVersions(instanceId: string, slug: string | null) {
+  return useQuery({
+    queryKey: contentKeys.hangarVersions(instanceId, slug ?? ""),
+    queryFn: () => api.get<HangarVersionsResponse>(contentPath(instanceId, `hangar/projects/${encodeURIComponent(slug ?? "")}/versions`)),
+    enabled: !!slug,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -332,7 +416,7 @@ export function useRestartServer(instance: Instance) {
 
 // --- small formatting helpers -----------------------------------------------------------
 export function displayTitle(file: ContentFile): string {
-  return file.project?.title || file.filename.replace(/\.jar(\.disabled)?$/, "");
+  return file.project?.title || file.hangar?.slug || file.filename.replace(/\.jar(\.disabled)?$/, "");
 }
 
 export function modrinthUrl(project: { url?: string | null; slug?: string | null; id?: string | null } | null | undefined) {
@@ -340,6 +424,17 @@ export function modrinthUrl(project: { url?: string | null; slug?: string | null
   if (project.url) return project.url;
   const ref = project.slug || project.id;
   return ref ? `https://modrinth.com/project/${ref}` : null;
+}
+
+/** Only http(s) links from provider data are rendered as links (never javascript: or data: URLs). */
+export function safeHttpUrl(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.href : null;
+  } catch {
+    return null;
+  }
 }
 
 export function versionTypeClass(type: string | null | undefined): string {

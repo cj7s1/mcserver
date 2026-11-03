@@ -1,9 +1,8 @@
-/** Instance backups: restic snapshots, restore, retention policy and integrity checks. */
+/** Instance backups: restic backups, restore, file browser, retention, integrity checks and btrfs snapshots. */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Archive, Clock, HardDrive, KeyRound, Lock, Pin, Plus, ShieldCheck, X } from "lucide-react";
+import { Archive, Camera, Clock, HardDrive, KeyRound, Lock, Pin, Plus, ShieldCheck } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
-import { JobProgress } from "@/components/JobProgress";
 import { Section } from "@/components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
@@ -19,7 +18,10 @@ import { BackupTable, type BackupAction } from "./backups/BackupTable";
 import { BrowseBackupDialog } from "./backups/BrowseBackupDialog";
 import { DeleteBackupDialog, RestoreAsNewDialog, RestoreDialog } from "./backups/RestoreDialogs";
 import { RetentionPolicyForm } from "./backups/RetentionPolicyForm";
+import { SnapshotsSection } from "./backups/SnapshotsSection";
+import { TrackedJobBanner } from "./backups/TrackedJobBanner";
 import { useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
+import { isSnapshotJob } from "./backups/snapshot-utils";
 
 type DialogState = { type: BackupAction | "create" | "verify"; backup?: Backup; key: number } | null;
 
@@ -116,6 +118,8 @@ export default function Backups() {
   const backups = query.data?.backups ?? [];
   const restorable = backups.filter((b) => b.status === "succeeded").length;
   const onStarted = tracked.track;
+  // jobs are exclusive per instance, so one tracker serves both sections; show it where it belongs
+  const snapshotJob = !!tracked.jobId && isSnapshotJob(tracked.job?.kind ?? instance.active_job?.kind);
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -137,21 +141,12 @@ export default function Backups() {
         }
         className="min-w-0 [&>div:last-child]:p-0"
       >
-        {busy && !tracked.jobId && (
+        {busy && (!tracked.jobId || snapshotJob) && (
           <p className="border-b px-4 py-2 text-xs text-muted-foreground">
             Another operation is running ({instance.active_job?.title}). Backup actions are available when it finishes.
           </p>
         )}
-        {tracked.jobId && (
-          <div className="flex items-start gap-2 border-b p-3">
-            <JobProgress jobId={tracked.jobId} showLog={tracked.finished} className="min-w-0 flex-1" />
-            {tracked.finished && (
-              <Button variant="ghost" size="icon-sm" onClick={tracked.dismiss} aria-label="Dismiss job result">
-                <X />
-              </Button>
-            )}
-          </div>
-        )}
+        {!snapshotJob && <TrackedJobBanner tracked={tracked} />}
         {query.isLoading ? (
           <LoadingState label="Loading backups…" />
         ) : query.error ? (
@@ -198,6 +193,13 @@ export default function Backups() {
         </Section>
       )}
 
+      <SnapshotsSection
+        instance={instance}
+        perms={{ backup: perms.backup, restore: perms.restore }}
+        tracked={tracked}
+        showTracked={snapshotJob}
+      />
+
       <section className="grid gap-3 rounded-xl border bg-muted/30 p-4 text-xs text-muted-foreground md:grid-cols-2">
         <div className="grid content-start gap-1.5">
           <p className="flex items-center gap-1.5 font-medium text-foreground">
@@ -223,7 +225,11 @@ export default function Backups() {
             Without it, no backup can be restored. Store a copy off the host, and copy the backup directory elsewhere for
             off-site protection.
           </p>
-          <p className="opacity-80">Instant filesystem snapshots (btrfs/ZFS) are not available yet.</p>
+          <p>
+            <Camera className="mr-1 inline size-3" aria-hidden />
+            On btrfs, instant snapshots (above) complement backups for quick rollbacks; they stay on the same disk. ZFS snapshots
+            are not supported yet.
+          </p>
         </div>
       </section>
 

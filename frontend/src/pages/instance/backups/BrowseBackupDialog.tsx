@@ -50,10 +50,12 @@ export function BrowseBackupDialog({
   const parts = path ? path.split("/") : [];
   const running = RUNNING.includes(instance.status);
   const entries = list.data?.entries ?? [];
+  const restoreBlocked = !!instance.active_job || restorePath.isPending;
+  const folderCount = entries.filter((e) => e.type === "directory").length;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="grid max-h-[85svh] grid-rows-[auto_auto_minmax(0,1fr)] sm:max-w-3xl">
+      <DialogContent className="grid max-h-[85svh] grid-rows-[auto_auto_minmax(0,1fr)_auto] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <FolderOpen className="size-4 text-muted-foreground" aria-hidden /> Files in “{backup.name}”
@@ -64,22 +66,45 @@ export function BrowseBackupDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <nav aria-label="Folder path" className="flex min-w-0 flex-wrap items-center gap-0.5 rounded-lg border bg-muted/40 px-2 py-1 text-xs">
-          <Button variant="ghost" size="xs" onClick={() => setPath("")} aria-label="Server folder root" aria-current={!path ? "page" : undefined}>
-            <Home />
-          </Button>
-          {parts.map((p, i) => {
-            const to = parts.slice(0, i + 1).join("/");
-            return (
-              <span key={to} className="flex items-center gap-0.5">
-                <ChevronRight className="size-3 text-muted-foreground" aria-hidden />
-                <Button variant="ghost" size="xs" onClick={() => setPath(to)} aria-current={i === parts.length - 1 ? "page" : undefined}>
-                  {p}
-                </Button>
-              </span>
-            );
-          })}
-        </nav>
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <nav
+            aria-label="Folder path"
+            className="flex min-w-0 flex-1 flex-wrap items-center gap-0.5 rounded-lg border bg-muted/40 px-2 py-1 text-xs"
+          >
+            <Button variant="ghost" size="xs" onClick={() => setPath("")} aria-label="Server folder root" aria-current={!path ? "page" : undefined}>
+              <Home />
+            </Button>
+            {parts.map((p, i) => {
+              const to = parts.slice(0, i + 1).join("/");
+              return (
+                <span key={to} className="flex min-w-0 items-center gap-0.5">
+                  <ChevronRight className="size-3 shrink-0 text-muted-foreground" aria-hidden />
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="max-w-48 min-w-0"
+                    onClick={() => setPath(to)}
+                    aria-current={i === parts.length - 1 ? "page" : undefined}
+                    title={p}
+                  >
+                    <span className="truncate">{p}</span>
+                  </Button>
+                </span>
+              );
+            })}
+          </nav>
+          {canRestore && path && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={restoreBlocked}
+              onClick={() => setTarget({ name: parts[parts.length - 1], path, type: "directory", size: 0, modified: null })}
+              title="Restore this whole folder from the backup"
+            >
+              <RotateCcw /> Restore this folder
+            </Button>
+          )}
+        </div>
 
         <div className="min-h-0 overflow-auto rounded-lg border">
           {list.isLoading ? (
@@ -156,7 +181,7 @@ export function BrowseBackupDialog({
                             size="icon-xs"
                             aria-label={`Restore ${e.path} from this backup`}
                             title="Restore this item over the current one"
-                            disabled={!!instance.active_job || restorePath.isPending}
+                            disabled={restoreBlocked}
                             onClick={() => setTarget(e)}
                           >
                             <RotateCcw />
@@ -171,6 +196,17 @@ export function BrowseBackupDialog({
           )}
         </div>
 
+        <p className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-muted-foreground" aria-live="polite">
+          <span>
+            {list.data
+              ? `${entries.length} item${entries.length === 1 ? "" : "s"}${folderCount ? ` · ${folderCount} folder${folderCount === 1 ? "" : "s"}` : ""}`
+              : "\u00a0"}
+          </span>
+          {canRestore && instance.active_job && (
+            <span>Restoring is available when the current operation ({instance.active_job.title}) finishes.</span>
+          )}
+        </p>
+
         {target && (
           <ConfirmDialog
             open
@@ -179,15 +215,26 @@ export function BrowseBackupDialog({
             destructive
             confirmLabel="Restore"
             description={
-              <ul className="grid list-disc gap-1 pl-5 text-sm text-muted-foreground">
-                {running && <li>The server is stopped first and started again afterwards.</li>}
-                <li>
-                  The current <code className="font-mono text-foreground">{target.path}</code> is replaced with the version from{" "}
-                  {formatDateTime(backup.created_at)}
-                  {target.type === "directory" ? ", including everything inside it" : ""}.
-                </li>
-                <li>Everything else on the server is left unchanged. No safety backup is taken: create one first if unsure.</li>
-              </ul>
+              <div className="grid gap-2">
+                <ol className="grid list-decimal gap-1.5 pl-5 text-sm text-muted-foreground">
+                  <li>
+                    {running
+                      ? "The server is stopped first (players are disconnected)."
+                      : "The server is not running and stays stopped while restoring."}
+                  </li>
+                  <li>
+                    The current <code className="font-mono [overflow-wrap:anywhere] text-foreground">{target.path}</code> is
+                    replaced with the version from {formatDateTime(backup.created_at)}
+                    {target.type === "directory" ? ", including everything inside it" : ""}. Everything else on the server is
+                    left unchanged.
+                  </li>
+                  <li>{running ? "The server is started again afterwards." : "The server is left stopped."}</li>
+                </ol>
+                <p className="text-xs text-muted-foreground">
+                  No safety backup is taken for a single-item restore: create a backup first if you might need the current
+                  version.
+                </p>
+              </div>
             }
             onConfirm={async () => {
               try {

@@ -9,10 +9,12 @@ import { api, errorMessage } from "@/lib/api";
 import { qk, useStats } from "@/lib/queries";
 import type { Instance, PermissionCode, Stats } from "@/lib/types";
 import { useInstanceContext } from "./InstanceLayout";
+import { DiagnosticsCard } from "./overview/diagnostics";
 import { JobItem, useInstanceJobs } from "./overview/instance-jobs";
 import { ConnectionCard, SoftwareCard } from "./overview/info-cards";
 import { useNow } from "./overview/overview-utils";
-import { ResourceCharts, useStatSamples } from "./overview/resource-charts";
+import { useStatSamples } from "./overview/live-samples";
+import { ResourceCharts } from "./overview/resource-charts";
 import { StatTiles } from "./overview/stat-tiles";
 
 /** Disk usage is expensive to measure (directory walk on the node), so it is polled separately and rarely. */
@@ -151,9 +153,11 @@ function OverviewContent() {
         </div>
       )}
 
+      <DiagnosticsCard instance={instance} can={can} now={now} />
+
       <StatTiles instance={instance} stats={stats.data} latest={latest} disk={disk} now={now} />
 
-      {!instance.archived_at && <ResourceCharts samples={samples} running={running} />}
+      {!instance.archived_at && <ResourceCharts instanceId={instance.id} samples={samples} running={running} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <ConnectionCard instance={instance} />
@@ -170,6 +174,6 @@ function OverviewContent() {
 
 export default function Overview() {
   const { instance } = useInstanceContext();
-  // Keyed by instance so the client-side sample buffer never mixes servers.
+  // Keyed by instance so the client-side sample buffer (and chosen history range) never mixes servers.
   return <OverviewContent key={instance.id} />;
 }

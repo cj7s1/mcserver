@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowUp,
   FileSearch,
+  FolderArchive,
   FolderPlus,
   FolderX,
   Globe2,
@@ -28,6 +29,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { api, ApiError, downloadUrl, errorMessage } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
@@ -187,7 +189,10 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
     remove: (list) => setDeleteTargets(list),
     extract: (e) => setExtractTarget(e),
     downloadHref: (e) => downloadUrl(`/instances/${instance.id}/files/download`, { path: e.path }),
+    archiveHref: (e) => downloadUrl(`/instances/${instance.id}/files/archive`, { path: e.path }),
   };
+  const folderZipHref = downloadUrl(`/instances/${instance.id}/files/archive`, { path });
+  const folderZipName = `${baseName(path) || "server"}.zip`;
 
   const doRename = async (source: string, destination: string, overwrite = false) => {
     await api.post(`/instances/${instance.id}/files/rename`, { source, destination, overwrite });
@@ -269,6 +274,29 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
               <span className="hidden sm:inline">Search contents</span>
             </Button>
             <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
+              {listing.error || entries.length === 0 ? (
+                <Button variant="outline" size="sm" disabled aria-label="Download this folder as a .zip">
+                  <FolderArchive /> <span className="hidden sm:inline">Download .zip</span>
+                </Button>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button asChild variant="outline" size="sm">
+                      <a
+                        href={folderZipHref}
+                        download={folderZipName}
+                        aria-label={path ? `Download the folder ${baseName(path)} as a .zip` : "Download the whole server folder as a .zip"}
+                      >
+                        <FolderArchive /> <span className="hidden sm:inline">Download .zip</span>
+                      </a>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-64">
+                    {path ? "This folder and everything inside it" : "The whole server folder"}, zipped on the fly.
+                    {live ? " The server is running, so files that change during the download may be inconsistent." : ""}
+                  </TooltipContent>
+                </Tooltip>
+              )}
               {canWrite && (
                 <>
                   <Button

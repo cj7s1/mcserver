@@ -290,6 +290,18 @@ export function BackupTable({
                       <RotateCcw /> <span className="hidden 2xl:inline">Restore</span>
                     </Button>
                   )}
+                  {perms.files && ok && (
+                    <Button
+                      variant="ghost"
+                      size="icon-xs"
+                      className="hidden sm:inline-flex"
+                      onClick={() => onAction("browse", b)}
+                      aria-label={`Browse files in ${b.name}`}
+                      title="Browse files"
+                    >
+                      <FolderOpen />
+                    </Button>
+                  )}
                   <DropdownMenu modal={false}>
                     <DropdownMenuTrigger asChild>
                       <Button variant="ghost" size="icon-xs" aria-label={`More actions for ${b.name}`}>

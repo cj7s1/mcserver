@@ -1,7 +1,8 @@
 /** Create / edit dialog for an instance schedule (POST /instances/{id}/schedules, PATCH .../schedules/{sid}). */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CalendarClock, Loader2 } from "lucide-react";
+import { AlertTriangle, CalendarClock, Info, Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
+import { Link } from "react-router";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -14,10 +15,21 @@ import { qk } from "@/lib/queries";
 import type { Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CRON_PRESETS, cronError, describeCron, normalizeCron } from "./cron";
-import { ACTION_INFO, draftFrom, RUNNING_ONLY_ACTIONS, type ScheduleAction, type ScheduleDraft } from "./schedule-meta";
+import { snapshotState, useSnapshots } from "../backups/snapshot-utils";
+import {
+  ACTION_INFO,
+  DEFAULT_SNAPSHOT_KEEP,
+  draftFrom,
+  MAX_SNAPSHOT_KEEP,
+  RUNNING_ONLY_ACTIONS,
+  type ScheduleAction,
+  type ScheduleDraft,
+} from "./schedule-meta";
 
-function validate(d: ScheduleDraft): Partial<Record<"name" | "cron" | "command" | "backupName", string>> {
-  const e: Partial<Record<"name" | "cron" | "command" | "backupName", string>> = {};
+type FieldKey = "name" | "cron" | "command" | "backupName" | "keep";
+
+function validate(d: ScheduleDraft): Partial<Record<FieldKey, string>> {
+  const e: Partial<Record<FieldKey, string>> = {};
   if (!d.name.trim()) e.name = "Give the schedule a name";
   else if (d.name.length > 80) e.name = "At most 80 characters";
   const c = cronError(d.cron);
@@ -28,6 +40,11 @@ function validate(d: ScheduleDraft): Partial<Record<"name" | "cron" | "command" 
     else if (cmd.length > 1400) e.command = "At most 1400 characters";
   }
   if (d.action === "backup" && d.backupName.length > 120) e.backupName = "At most 120 characters";
+  if (d.action === "snapshot") {
+    const n = Number(d.keep.trim());
+    if (!/^\d+$/.test(d.keep.trim()) || !Number.isInteger(n) || n < 1 || n > MAX_SNAPSHOT_KEEP)
+      e.keep = `Enter a whole number from 1 to ${MAX_SNAPSHOT_KEEP}`;
+  }
   return e;
 }
 
@@ -62,7 +79,8 @@ export function ScheduleDialog({
         payload = { ...keep };
         if (draft.backupName.trim()) payload.name = draft.backupName.trim();
         else delete payload.name;
-      } else payload = keep;
+      } else if (draft.action === "snapshot") payload = { ...keep, keep: Number(draft.keep.trim()) };
+      else payload = keep;
       const body = {
         name: draft.name.trim(),
         action: draft.action,
@@ -99,7 +117,7 @@ export function ScheduleDialog({
     if (Object.keys(errors).length) return;
     save.mutate();
   };
-  const actions: ScheduleAction[] = ["restart", "start", "stop", "backup", "command"];
+  const actions: ScheduleAction[] = ["restart", "start", "stop", "backup", "snapshot", "command"];
   const generalError = server.non_field_errors ?? server.detail;
 
   return (
@@ -148,11 +166,6 @@ export function ScheduleDialog({
                     {a === "backup" && !canBackup ? " (needs backup permission)" : ""}
                   </SelectItem>
                 ))}
-                {(schedule?.action as ScheduleAction | undefined) === "snapshot" && (
-                  <SelectItem value="snapshot" disabled>
-                    Snapshot
-                  </SelectItem>
-                )}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">{ACTION_INFO[draft.action]?.description}</p>
@@ -198,6 +211,17 @@ export function ScheduleDialog({
               />
               {err("backupName") && <p className="text-xs text-destructive">{err("backupName")}</p>}
             </div>
+          )}
+
+          {draft.action === "snapshot" && (
+            <SnapshotFields
+              instanceId={instanceId}
+              canBackup={canBackup}
+              keep={draft.keep}
+              error={err("keep", "payload")}
+              onKeep={(v) => set("keep", v)}
+              onNavigate={() => onOpenChange(false)}
+            />
           )}
 
           <div className="grid gap-1.5">
@@ -283,5 +307,78 @@ export function ScheduleDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** Keep-count input plus a live check that snapshots are usable on this server. */
+function SnapshotFields({
+  instanceId,
+  canBackup,
+  keep,
+  error,
+  onKeep,
+  onNavigate,
+}: {
+  instanceId: string;
+  canBackup: boolean;
+  keep: string;
+  error?: string;
+  onKeep: (v: string) => void;
+  onNavigate: () => void;
+}) {
+  // GET /snapshots needs the backup permission; without it the readiness check is skipped
+  const snaps = useSnapshots(instanceId, { enabled: canBackup });
+  const state = snapshotState(snaps.data?.capability);
+  const reason = snaps.data?.capability.reason;
+  return (
+    <div className="grid gap-3">
+      <div className="grid gap-1.5">
+        <Label htmlFor="sched-keep">Scheduled snapshots to keep</Label>
+        <Input
+          id="sched-keep"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={MAX_SNAPSHOT_KEEP}
+          step={1}
+          className="w-32 tabular-nums"
+          value={keep}
+          placeholder={String(DEFAULT_SNAPSHOT_KEEP)}
+          onChange={(e) => onKeep(e.target.value)}
+          aria-invalid={!!error || undefined}
+          aria-describedby="sched-keep-help"
+        />
+        <p id="sched-keep-help" className={cn("text-xs", error ? "text-destructive" : "text-muted-foreground")}>
+          {error ??
+            `After each run only the newest ${/^\d+$/.test(keep.trim()) && Number(keep) > 0 ? Number(keep) : "N"} scheduled snapshots are kept; older scheduled ones are deleted. Manual and “before rollback” snapshots are never removed automatically. Default ${DEFAULT_SNAPSHOT_KEEP} (e.g. one day of hourly snapshots).`}
+        </p>
+      </div>
+
+      {state && state !== "ready" ? (
+        <div
+          role="status"
+          className="flex gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-800 dark:text-amber-200"
+        >
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <p className="[overflow-wrap:anywhere]">
+            {state === "unavailable"
+              ? `Snapshots are not available for this server${reason ? `: ${reason}` : ""}. Runs of this schedule will fail.`
+              : "Snapshots are not enabled for this server yet, so runs will fail until they are."}{" "}
+            <Link to={`/servers/${instanceId}/backups`} onClick={onNavigate} className="font-medium underline underline-offset-2">
+              {state === "convert" ? "Enable them on the Backups page" : "Backups page"}
+            </Link>
+          </p>
+        </div>
+      ) : (
+        <p className="flex gap-2 rounded-md border bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground">
+          <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+          <span>
+            Snapshots are instant and space-efficient but live on the same disk as the server; they complement backups, they
+            don't replace them.
+            {!canBackup && " Snapshot support on this server could not be checked (needs the backup permission)."}
+          </span>
+        </p>
+      )}
+    </div>
   );
 }

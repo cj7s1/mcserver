@@ -1,6 +1,6 @@
 /** Extract an uploaded archive inside the server folder (POST /instances/{id}/files/extract -> job). */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, Loader2, PackageOpen } from "lucide-react";
+import { AlertTriangle, Loader2, PackageOpen } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { JobProgress } from "@/components/JobProgress";
@@ -9,19 +9,41 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { api, errorMessage } from "@/lib/api";
+import { ApiError, api, errorMessage } from "@/lib/api";
 import { useInvalidateInstance, useJob } from "@/lib/queries";
 import type { FileEntry, Instance, Job } from "@/lib/types";
-import { cn } from "@/lib/utils";
 import { normalizePath } from "./file-utils";
 
 const LIVE = ["running", "starting", "unhealthy", "restarting", "stopping"];
+
+function OptionSwitch({
+  id,
+  title,
+  help,
+  checked,
+  onChange,
+}: {
+  id: string;
+  title: string;
+  help: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4">
+      <Label htmlFor={id} className="grid gap-1 font-normal">
+        <span className="font-medium">{title}</span>
+        <span className="text-xs text-muted-foreground">{help}</span>
+      </Label>
+      <Switch id={id} checked={checked} onCheckedChange={onChange} />
+    </div>
+  );
+}
 
 export function ExtractDialog({ instance, entry, dir, onClose }: { instance: Instance; entry: FileEntry; dir: string; onClose: () => void }) {
   const qc = useQueryClient();
   const invalidate = useInvalidateInstance();
   const [destination, setDestination] = useState(dir);
-  const [advanced, setAdvanced] = useState(false);
   const [strip, setStrip] = useState(true);
   const [overwrite, setOverwrite] = useState(false);
   const [deleteArchive, setDeleteArchive] = useState(false);
@@ -42,9 +64,13 @@ export function ExtractDialog({ instance, entry, dir, onClose }: { instance: Ins
       setJobId(j.id);
       invalidate(instance.id);
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: (err) => {
+      // must_stop and other conflicts are shown inline; anything else also gets a toast
+      if (!(err instanceof ApiError && err.status === 409)) toast.error(errorMessage(err));
+    },
   });
 
+  const refreshFiles = () => qc.invalidateQueries({ queryKey: filesPrefix(instance.id) });
   const status = job.data?.status;
   useEffect(() => {
     if (status === "succeeded") {
@@ -56,29 +82,52 @@ export function ExtractDialog({ instance, entry, dir, onClose }: { instance: Ins
   }, [status, entry.name, instance.id, qc]);
 
   const finished = status === "succeeded" || status === "failed";
+  const close = () => {
+    // the job keeps running after the dialog closes; refresh so the listing catches up
+    if (jobId) refreshFiles();
+    onClose();
+  };
+  const conflict = extract.error instanceof ApiError && extract.error.status === 409 ? extract.error : null;
+  const target = normalizePath(destination);
+
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
+    <Dialog open onOpenChange={(o) => !o && close()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <PackageOpen className="size-4 text-muted-foreground" aria-hidden /> Extract archive
           </DialogTitle>
           <DialogDescription>
-            Unpack <span className="font-mono">{entry.name}</span> on the server. Links, special files and paths that would escape
-            the server folder are skipped.
+            Unpack <span className="font-mono break-all">{entry.name}</span> on the server. Links, special files and paths that
+            would escape the server folder are skipped.
           </DialogDescription>
         </DialogHeader>
         {jobId ? (
-          <JobProgress jobId={jobId} showLog={finished} />
+          <div className="grid gap-2">
+            <JobProgress jobId={jobId} showLog={finished} />
+            {!finished && (
+              <p className="text-xs text-muted-foreground">You can close this dialog; extraction continues in the background.</p>
+            )}
+          </div>
         ) : (
           <div className="grid gap-4">
             {running && (
-              <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+              <p
+                className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200"
+                role="note"
+              >
+                <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
                 Stop the server first — archives can only be extracted while it is stopped.
               </p>
             )}
+            {conflict && (
+              <p className="flex gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" role="alert">
+                <AlertTriangle className="mt-px size-3.5 shrink-0" aria-hidden />
+                {conflict.display}
+              </p>
+            )}
             <div className="grid gap-2">
-              <Label htmlFor="extract-destination">Destination folder</Label>
+              <Label htmlFor="extract-destination">Extract into</Label>
               <Input
                 id="extract-destination"
                 value={destination}
@@ -88,53 +137,41 @@ export function ExtractDialog({ instance, entry, dir, onClose }: { instance: Ins
                 autoComplete="off"
                 spellCheck={false}
               />
-              <p className="text-xs text-muted-foreground">Relative to the server folder. Leave empty for the root.</p>
+              <p className="text-xs text-muted-foreground">
+                Folder relative to the server folder (defaults to the current folder):{" "}
+                <span className="font-mono break-all">/{target}</span>
+              </p>
             </div>
-            <div className="flex items-center justify-between gap-4">
-              <Label htmlFor="extract-overwrite" className="grid gap-1 font-normal">
-                <span className="font-medium">Overwrite existing files</span>
-                <span className="text-xs text-muted-foreground">Off keeps files that already exist.</span>
-              </Label>
-              <Switch id="extract-overwrite" checked={overwrite} onCheckedChange={setOverwrite} />
-            </div>
-            <button
-              type="button"
-              className="flex items-center gap-1 justify-self-start rounded text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-              aria-expanded={advanced}
-              aria-controls="extract-advanced"
-              onClick={() => setAdvanced((v) => !v)}
-            >
-              <ChevronDown className={cn("size-3.5 transition-transform", advanced && "rotate-180")} aria-hidden /> Advanced
-            </button>
-            {advanced && (
-              <div id="extract-advanced" className="grid gap-4 rounded-lg border bg-muted/30 p-3">
-                <div className="flex items-center justify-between gap-4">
-                  <Label htmlFor="extract-strip" className="grid gap-1 font-normal">
-                    <span className="font-medium">Remove a single top-level folder</span>
-                    <span className="text-xs text-muted-foreground">
-                      When everything in the archive sits inside one folder, extract its contents directly.
-                    </span>
-                  </Label>
-                  <Switch id="extract-strip" checked={strip} onCheckedChange={setStrip} />
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <Label htmlFor="extract-delete" className="grid gap-1 font-normal">
-                    <span className="font-medium">Delete the archive afterwards</span>
-                    <span className="text-xs text-muted-foreground">Only after a successful extraction.</span>
-                  </Label>
-                  <Switch id="extract-delete" checked={deleteArchive} onCheckedChange={setDeleteArchive} />
-                </div>
-              </div>
-            )}
+            <OptionSwitch
+              id="extract-strip"
+              title="Remove a single top-level folder"
+              help="When everything in the archive sits inside one folder, extract its contents directly (auto). Off keeps the archive's layout."
+              checked={strip}
+              onChange={setStrip}
+            />
+            <OptionSwitch
+              id="extract-overwrite"
+              title="Overwrite existing files"
+              help="Off keeps files that already exist and skips those entries."
+              checked={overwrite}
+              onChange={setOverwrite}
+            />
+            <OptionSwitch
+              id="extract-delete"
+              title="Delete the archive afterwards"
+              help="Only after a successful extraction."
+              checked={deleteArchive}
+              onChange={setDeleteArchive}
+            />
           </div>
         )}
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>
+          <Button variant="outline" onClick={close}>
             {jobId ? "Close" : "Cancel"}
           </Button>
           {!jobId && (
             <Button onClick={() => extract.mutate()} disabled={running || extract.isPending}>
-              {extract.isPending && <Loader2 className="animate-spin" />} Extract
+              {extract.isPending ? <Loader2 className="animate-spin" /> : <PackageOpen />} Extract
             </Button>
           )}
         </DialogFooter>

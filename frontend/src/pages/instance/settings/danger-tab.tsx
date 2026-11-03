@@ -1,6 +1,6 @@
-/** Recreate, clone, archive/unarchive and permanent delete. */
+/** Recreate, clone, move to another node, archive/unarchive and permanent delete. */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, Copy, Loader2, RefreshCcw, Trash2 } from "lucide-react";
+import { Archive, ArchiveRestore, ArrowRightLeft, Copy, Loader2, RefreshCcw, Trash2 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -16,6 +16,8 @@ import { api, errorMessage } from "@/lib/api";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useMigrationOutcome, useNodes } from "./migrate-api";
+import { MigrateDialog } from "./migrate-dialog";
 import { Field, fieldErrorsOf, InlineField, Notice, parseNum, type TabProps } from "./settings-ui";
 
 const LIVE = ["running", "starting", "unhealthy", "restarting", "stopping"];
@@ -172,6 +174,7 @@ export function DangerTab({ instance, can }: TabProps) {
   const invalidate = useInvalidateInstance();
   const [jobId, setJobId] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
+  const [migrateOpen, setMigrateOpen] = useState(false);
   const live = LIVE.includes(instance.status);
   const busy = !!instance.active_job;
   const archived = !!instance.archived_at;
@@ -179,6 +182,11 @@ export function DangerTab({ instance, can }: TabProps) {
   const canConfigure = can("instance.configure");
   const canDelete = can("instance.delete");
   const canClone = auth.can("instance.create") && can("instance.files.read");
+  const canMigrate = canConfigure && auth.can("system.nodes");
+  const nodes = useNodes(canMigrate);
+  const otherNodes = (nodes.data ?? []).filter((n) => n.id !== instance.node);
+  const job = useJob(jobId);
+  useMigrationOutcome(job.data, instance.id);
 
   const action = useMutation({
     mutationFn: (kind: "recreate" | "archive") => api.post<Job>(`/instances/${instance.id}/${kind}`),
@@ -255,6 +263,23 @@ export function DangerTab({ instance, can }: TabProps) {
               action={
                 <Button variant="outline" size="sm" onClick={() => setCloneOpen(true)} disabled={live || busy || archived}>
                   <Copy /> Clone…
+                </Button>
+              }
+            />
+          )}
+          {canMigrate && otherNodes.length > 0 && (
+            <ActionRow
+              title="Move to another node"
+              description={
+                <>
+                  Copies all files to another host and recreates the server there (currently on{" "}
+                  <span className="font-medium text-foreground">{instance.node_name}</span>). Existing backups stay on this node and are
+                  not copied.
+                </>
+              }
+              action={
+                <Button variant="outline" size="sm" onClick={() => setMigrateOpen(true)} disabled={busy || archived}>
+                  <ArrowRightLeft /> Move…
                 </Button>
               }
             />
@@ -353,6 +378,18 @@ export function DangerTab({ instance, can }: TabProps) {
 
       {busy && <Notice>Another operation is running on this server; these actions are available when it finishes.</Notice>}
       {cloneOpen && <CloneDialog instance={instance} onClose={() => setCloneOpen(false)} />}
+      {migrateOpen && nodes.data && (
+        <MigrateDialog
+          instance={instance}
+          nodes={nodes.data}
+          live={live}
+          onOpenChange={(o) => !o && setMigrateOpen(false)}
+          onStarted={(j) => {
+            setJobId(j.id);
+            invalidate(instance.id);
+          }}
+        />
+      )}
     </div>
   );
 }

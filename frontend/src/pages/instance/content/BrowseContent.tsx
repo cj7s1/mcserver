@@ -13,7 +13,7 @@ import { SEARCH_PAGE_SIZE, useContentSearch, type ContentSearchHit, type SearchS
 import { Notice, ProjectIcon, type ContentEnv } from "./content-ui";
 import { InstallContentDialog, type InstallTarget } from "./InstallContentDialog";
 
-function useDebounced<T>(value: T, delay: number): T {
+export function useDebounced<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
     const t = setTimeout(() => setDebounced(value), delay);
