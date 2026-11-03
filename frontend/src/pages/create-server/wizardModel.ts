@@ -3,9 +3,22 @@
  * POST /instances/ payload (CreateInstanceSerializer in backend/apps/instances/serializers.py).
  */
 import { z } from "zod";
-import type { Instance, Job, JavaInfo, Project, Provider, ServerType } from "@/lib/types";
-import { DEFAULT_MODPACK_FILTERS, type ModpackFilters } from "../modpacks/ModpackBrowser";
-import type { PortsInfo, ResolvedModpackData } from "../modpacks/modpackQueries";
+import type {
+  Instance,
+  Job,
+  JavaInfo,
+  Project,
+  Provider,
+  ServerType,
+} from "@/lib/types";
+import {
+  DEFAULT_MODPACK_FILTERS,
+  type ModpackFilters,
+} from "../modpacks/ModpackBrowser";
+import type {
+  PortsInfo,
+  ResolvedModpackData,
+} from "../modpacks/modpackQueries";
 
 export type Category = "vanilla" | "plugins" | "mods" | "modpack" | "import";
 export type StandardCategory = "vanilla" | "plugins" | "mods";
@@ -46,12 +59,46 @@ export const DEFAULT_MEMORY_MODPACK = 6144;
 
 /** Environment keys the backend refuses (backend/apps/instances/spec.py MANAGED_ENV). */
 export const MANAGED_ENV = new Set([
-  "EULA", "TYPE", "VERSION", "MEMORY", "INIT_MEMORY", "MAX_MEMORY", "JVM_OPTS", "USE_AIKAR_FLAGS", "USE_MEOWICE_FLAGS",
-  "FABRIC_LOADER_VERSION", "QUILT_LOADER_VERSION", "FORGE_VERSION", "NEOFORGE_VERSION", "PAPER_BUILD", "PURPUR_BUILD",
-  "FOLIABUILD", "MODRINTH_MODPACK", "MODRINTH_VERSION", "MODRINTH_PROJECT", "MODRINTH_VERSION_ID", "CF_API_KEY", "CF_SLUG",
-  "CF_FILE_ID", "CF_PAGE_URL", "FTB_MODPACK_ID", "FTB_MODPACK_VERSION_ID", "STOP_DURATION", "MODPACK_PLATFORM",
-  "MOD_PLATFORM", "UID", "GID", "SERVER_PORT", "RCON_PORT", "ENABLE_RCON", "RCON_PASSWORD", "RCON_PASSWORD_FILE",
-  "SKIP_SUDO", "LOAD_ENV_FROM_FILE", "LOAD_ENV_FROM_ARCHIVE", "LOAD_ENV_FROM_GENERIC_PACK",
+  "EULA",
+  "TYPE",
+  "VERSION",
+  "MEMORY",
+  "INIT_MEMORY",
+  "MAX_MEMORY",
+  "JVM_OPTS",
+  "USE_AIKAR_FLAGS",
+  "USE_MEOWICE_FLAGS",
+  "FABRIC_LOADER_VERSION",
+  "QUILT_LOADER_VERSION",
+  "FORGE_VERSION",
+  "NEOFORGE_VERSION",
+  "PAPER_BUILD",
+  "PURPUR_BUILD",
+  "FOLIABUILD",
+  "MODRINTH_MODPACK",
+  "MODRINTH_VERSION",
+  "MODRINTH_PROJECT",
+  "MODRINTH_VERSION_ID",
+  "CF_API_KEY",
+  "CF_SLUG",
+  "CF_FILE_ID",
+  "CF_PAGE_URL",
+  "FTB_MODPACK_ID",
+  "FTB_MODPACK_VERSION_ID",
+  "STOP_DURATION",
+  "MODPACK_PLATFORM",
+  "MOD_PLATFORM",
+  "UID",
+  "GID",
+  "SERVER_PORT",
+  "RCON_PORT",
+  "ENABLE_RCON",
+  "RCON_PASSWORD",
+  "RCON_PASSWORD_FILE",
+  "SKIP_SUDO",
+  "LOAD_ENV_FROM_FILE",
+  "LOAD_ENV_FROM_ARCHIVE",
+  "LOAD_ENV_FROM_GENERIC_PACK",
 ]);
 
 export interface EnvRow {
@@ -76,6 +123,11 @@ export interface WizardState {
   projectId: string;
   projectHit: Project | null;
   versionId: string;
+  /** "url": deploy a CurseForge pack by page URL/slug (no API key needed; the runtime installs it). */
+  modpackSource: "browse" | "url";
+  cfRef: string;
+  cfMinecraftVersion: string;
+  cfFileId: string;
   // resources & network
   name: string | null;
   memoryMb: number | null;
@@ -100,7 +152,11 @@ export interface WizardState {
   acceptEula: boolean;
 }
 
-export const GAMEPLAY_DEFAULTS = { difficulty: "easy", gamemode: "survival", maxPlayers: "20" } as const;
+export const GAMEPLAY_DEFAULTS = {
+  difficulty: "easy",
+  gamemode: "survival",
+  maxPlayers: "20",
+} as const;
 
 export function initialState(): WizardState {
   return {
@@ -115,6 +171,10 @@ export function initialState(): WizardState {
     projectId: "",
     projectHit: null,
     versionId: "",
+    modpackSource: "browse",
+    cfRef: "",
+    cfMinecraftVersion: "",
+    cfFileId: "",
     name: null,
     memoryMb: null,
     gamePort: null,
@@ -178,10 +238,13 @@ function issuesToErrors(error: z.ZodError): FieldErrors {
 }
 
 export function validateJvmArgs(value: string): string | null {
-  if (/[\r\n\0]/.test(value.trim())) return "JVM arguments must be on a single line";
+  if (/[\r\n\0]/.test(value.trim()))
+    return "JVM arguments must be on a single line";
   for (const arg of value.split(/\s+/).filter(Boolean)) {
-    if (!arg.startsWith("-")) return `'${arg}' does not look like a JVM option (must start with '-')`;
-    if (arg.startsWith("-Xmx") || arg.startsWith("-Xms")) return "Set heap size with the memory setting, not -Xmx/-Xms";
+    if (!arg.startsWith("-"))
+      return `'${arg}' does not look like a JVM option (must start with '-')`;
+    if (arg.startsWith("-Xmx") || arg.startsWith("-Xms"))
+      return "Set heap size with the memory setting, not -Xmx/-Xms";
   }
   return null;
 }
@@ -192,25 +255,72 @@ const intInRange = (label: string, min: number, max: number) =>
     .trim()
     .min(1, `${label} is required`)
     .regex(/^\d+$/, `${label} must be a whole number`)
-    .refine((v) => Number(v) >= min && Number(v) <= max, `${label} must be between ${min} and ${max}`);
+    .refine(
+      (v) => Number(v) >= min && Number(v) <= max,
+      `${label} must be between ${min} and ${max}`,
+    );
 
-export function validateStep(step: StepId, state: WizardState, d: Derived): FieldErrors {
+export function validateStep(
+  step: StepId,
+  state: WizardState,
+  d: Derived,
+): FieldErrors {
   if (step === "type") {
-    if (!state.category) return { category: "Choose what kind of server to create" };
-    if (state.category === "import") return { category: "Importing happens after creation — see the steps below" };
+    if (!state.category)
+      return { category: "Choose what kind of server to create" };
+    if (state.category === "import")
+      return {
+        category: "Importing happens after creation — see the steps below",
+      };
     return {};
   }
   if (step === "software") {
+    if (d.isModpack && state.modpackSource === "url") {
+      const r = z
+        .object({
+          cfRef: z
+            .string()
+            .trim()
+            .refine(
+              (v) => CF_REF.test(v),
+              "Paste the CurseForge modpack page URL (curseforge.com/minecraft/modpacks/…) or its slug",
+            ),
+          cfMinecraftVersion: z
+            .string()
+            .trim()
+            .regex(
+              /^\d+\.\d+(\.\d+)?$/,
+              "Enter the pack's Minecraft version, e.g. 1.20.1 (shown on its CurseForge page)",
+            ),
+          cfFileId: z
+            .string()
+            .trim()
+            .regex(
+              /^\d{0,12}$/,
+              "File ids are numbers (from the …/files/<id> URL)",
+            ),
+        })
+        .safeParse({
+          cfRef: state.cfRef,
+          cfMinecraftVersion: state.cfMinecraftVersion,
+          cfFileId: state.cfFileId,
+        });
+      return r.success ? {} : issuesToErrors(r.error);
+    }
     if (d.isModpack) {
       const r = z
         .object({
           projectId: z.string().min(1, "Choose a modpack"),
-          versionId: z.string().min(1, "Choose a release (releases are pinned)"),
+          versionId: z
+            .string()
+            .min(1, "Choose a release (releases are pinned)"),
         })
         .safeParse({ projectId: state.projectId, versionId: state.versionId });
       const errors = r.success ? {} : issuesToErrors(r.error);
       if (r.success && !d.resolveOk) {
-        errors.versionId = d.resolvePending ? "Still checking this release…" : "This release cannot be deployed; pick another release";
+        errors.versionId = d.resolvePending
+          ? "Still checking this release…"
+          : "This release cannot be deployed; pick another release";
       }
       return errors;
     }
@@ -219,14 +329,23 @@ export function validateStep(step: StepId, state: WizardState, d: Derived): Fiel
         serverType: z.string().min(1, "Choose the server software"),
         minecraftVersion: z.string().min(1, "Choose a Minecraft version"),
       })
-      .safeParse({ serverType: d.serverType ?? "", minecraftVersion: d.minecraftVersion });
+      .safeParse({
+        serverType: d.serverType ?? "",
+        minecraftVersion: d.minecraftVersion,
+      });
     return r.success ? {} : issuesToErrors(r.error);
   }
   if (step === "resources") {
-    const inUse = new Map((d.ports?.in_use ?? []).map((p) => [p.port, p.used_by]));
+    const inUse = new Map(
+      (d.ports?.in_use ?? []).map((p) => [p.port, p.used_by]),
+    );
     const r = z
       .object({
-        name: z.string().trim().min(1, "Give the server a name").max(80, "Name must be at most 80 characters"),
+        name: z
+          .string()
+          .trim()
+          .min(1, "Give the server a name")
+          .max(80, "Name must be at most 80 characters"),
         memoryMb: z
           .number({ error: "Memory is required" })
           .int("Memory must be a whole number of MB")
@@ -234,11 +353,22 @@ export function validateStep(step: StepId, state: WizardState, d: Derived): Fiel
           .max(262144, "Memory must be at most 256 GB"),
         gamePort: intInRange("Port", 1024, 65535).superRefine((v, ctx) => {
           const owner = inUse.get(Number(v));
-          if (owner) ctx.addIssue({ code: "custom", message: `Port ${v} is already used by ${owner}` });
+          if (owner)
+            ctx.addIssue({
+              code: "custom",
+              message: `Port ${v} is already used by ${owner}`,
+            });
         }),
-        hostIp: z.union([z.literal(""), z.ipv4(), z.ipv6()], { error: "Enter a valid IPv4 or IPv6 address" }),
+        hostIp: z.union([z.literal(""), z.ipv4(), z.ipv6()], {
+          error: "Enter a valid IPv4 or IPv6 address",
+        }),
       })
-      .safeParse({ name: d.name, memoryMb: d.memoryMb, gamePort: d.gamePort, hostIp: state.hostIp.trim() });
+      .safeParse({
+        name: d.name,
+        memoryMb: d.memoryMb,
+        gamePort: d.gamePort,
+        hostIp: state.hostIp.trim(),
+      });
     return r.success ? {} : issuesToErrors(r.error);
   }
   if (step === "gameplay") {
@@ -262,17 +392,44 @@ export function validateStep(step: StepId, state: WizardState, d: Derived): Fiel
             rows.forEach((row, i) => {
               const key = row.key.trim();
               if (!key && !row.value) return;
-              if (!ENV_KEY.test(key)) ctx.addIssue({ code: "custom", path: [i], message: "Use letters, digits and _ (not starting with a digit)" });
+              if (!ENV_KEY.test(key))
+                ctx.addIssue({
+                  code: "custom",
+                  path: [i],
+                  message:
+                    "Use letters, digits and _ (not starting with a digit)",
+                });
               else if (MANAGED_ENV.has(key.toUpperCase()))
-                ctx.addIssue({ code: "custom", path: [i], message: `${key} is managed by MCPanel; use the dedicated setting` });
-              else if (seen.has(key)) ctx.addIssue({ code: "custom", path: [i], message: `${key} is defined twice` });
-              else if (row.value.length > 8192) ctx.addIssue({ code: "custom", path: [i], message: "Value is too long" });
+                ctx.addIssue({
+                  code: "custom",
+                  path: [i],
+                  message: `${key} is managed by MCPanel; use the dedicated setting`,
+                });
+              else if (seen.has(key))
+                ctx.addIssue({
+                  code: "custom",
+                  path: [i],
+                  message: `${key} is defined twice`,
+                });
+              else if (row.value.length > 8192)
+                ctx.addIssue({
+                  code: "custom",
+                  path: [i],
+                  message: "Value is too long",
+                });
               seen.add(key);
             });
           }),
-        description: z.string().max(2000, "Description must be at most 2000 characters"),
+        description: z
+          .string()
+          .max(2000, "Description must be at most 2000 characters"),
         group: z.string().max(60, "Group must be at most 60 characters"),
-        iconUrl: z.union([z.literal(""), z.url({ protocol: /^https?$/, error: "Enter a full http(s) URL" }).max(500, "URL is too long")]),
+        iconUrl: z.union([
+          z.literal(""),
+          z
+            .url({ protocol: /^https?$/, error: "Enter a full http(s) URL" })
+            .max(500, "URL is too long"),
+        ]),
       })
       .safeParse({
         motd: state.motd,
@@ -287,15 +444,35 @@ export function validateStep(step: StepId, state: WizardState, d: Derived): Fiel
     return r.success ? {} : issuesToErrors(r.error);
   }
   // review
-  return state.acceptEula ? {} : { acceptEula: "You must accept the Minecraft EULA to deploy a server" };
+  return state.acceptEula
+    ? {}
+    : { acceptEula: "You must accept the Minecraft EULA to deploy a server" };
 }
+
+/** CurseForge modpack page URL (optionally …/files/<id>) or bare slug; mirrors the backend parser. */
+export const CF_REF =
+  /^(?:https:\/\/(?:www\.)?curseforge\.com\/minecraft\/modpacks\/[a-z0-9-]{1,128}(?:\/files\/\d{1,12})?\/?(?:[?#].*)?|[a-z0-9][a-z0-9-]{0,127})$/;
 
 /** Which step owns a (client or server) error key, used to jump to the first error. */
 export function stepForField(key: string): StepId {
   const k = key.split(".")[0];
   if (k === "category") return "type";
-  if (["serverType", "minecraftVersion", "loaderVersion", "projectId", "versionId", "javaOverride"].includes(k)) return "software";
-  if (["name", "memoryMb", "gamePort", "hostIp", "start"].includes(k)) return "resources";
+  if (
+    [
+      "serverType",
+      "minecraftVersion",
+      "loaderVersion",
+      "projectId",
+      "versionId",
+      "javaOverride",
+      "cfRef",
+      "cfMinecraftVersion",
+      "cfFileId",
+    ].includes(k)
+  )
+    return "software";
+  if (["name", "memoryMb", "gamePort", "hostIp", "start"].includes(k))
+    return "resources";
   if (k === "acceptEula" || k === "form") return "review";
   return "gameplay";
 }
@@ -359,12 +536,17 @@ export interface CreateResponse {
   java: JavaInfo;
 }
 
-export function serverProperties(state: WizardState): Record<string, string | number | boolean> {
+export function serverProperties(
+  state: WizardState,
+): Record<string, string | number | boolean> {
   const props: Record<string, string | number | boolean> = {};
   if (state.motd.trim()) props.motd = state.motd.trim();
-  if (state.difficulty !== GAMEPLAY_DEFAULTS.difficulty) props.difficulty = state.difficulty;
-  if (state.gamemode !== GAMEPLAY_DEFAULTS.gamemode) props.gamemode = state.gamemode;
-  if (state.maxPlayers.trim() !== GAMEPLAY_DEFAULTS.maxPlayers) props["max-players"] = Number(state.maxPlayers);
+  if (state.difficulty !== GAMEPLAY_DEFAULTS.difficulty)
+    props.difficulty = state.difficulty;
+  if (state.gamemode !== GAMEPLAY_DEFAULTS.gamemode)
+    props.gamemode = state.gamemode;
+  if (state.maxPlayers.trim() !== GAMEPLAY_DEFAULTS.maxPlayers)
+    props["max-players"] = Number(state.maxPlayers);
   if (!state.onlineMode) props["online-mode"] = false;
   if (state.seed.trim()) props["level-seed"] = state.seed.trim();
   if (state.whitelist) {
@@ -390,7 +572,13 @@ export function buildPayload(state: WizardState, d: Derived): CreatePayload {
     game_port: Number(d.gamePort),
     start: state.start,
   };
-  if (d.isModpack) {
+  if (d.isModpack && state.modpackSource === "url") {
+    payload.modpack_provider = "curseforge";
+    payload.modpack_project_id = state.cfRef.trim();
+    payload.minecraft_version = state.cfMinecraftVersion.trim();
+    if (state.cfFileId.trim())
+      payload.modpack_version_id = state.cfFileId.trim();
+  } else if (d.isModpack) {
     payload.modpack_provider = state.provider;
     payload.modpack_project_id = state.projectId;
     payload.modpack_version_id = state.versionId;

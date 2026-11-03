@@ -15,7 +15,11 @@ import { cn } from "@/lib/utils";
 import { StepGameplay } from "./create-server/StepGameplay";
 import { StepResources } from "./create-server/StepResources";
 import { softwareRows, StepReview } from "./create-server/StepReview";
-import { defaultLoaderVersion, defaultMinecraftVersion, StepSoftware } from "./create-server/StepSoftware";
+import {
+  defaultLoaderVersion,
+  defaultMinecraftVersion,
+  StepSoftware,
+} from "./create-server/StepSoftware";
 import { StepType } from "./create-server/StepType";
 import { Stepper, SummaryList } from "./create-server/WizardBits";
 import {
@@ -50,14 +54,25 @@ import {
 } from "./modpacks/modpackQueries";
 
 const PROVIDERS: Provider[] = ["modrinth", "curseforge", "ftb"];
-const GAMEPLAY_KEYS = ["motd", "difficulty", "gamemode", "maxPlayers", "onlineMode", "seed", "whitelist"];
+const GAMEPLAY_KEYS = [
+  "motd",
+  "difficulty",
+  "gamemode",
+  "maxPlayers",
+  "onlineMode",
+  "seed",
+  "whitelist",
+];
 
 /**
  * Deep links:
  *   /servers/new?provider=modrinth&project=<id>&version=<id>  -> modpack mode with that project/release
  *   /servers/new?type=PAPER                                   -> standard mode with that software
  */
-function stateFromParams(sp: URLSearchParams): { state: WizardState; step: StepId } {
+function stateFromParams(sp: URLSearchParams): {
+  state: WizardState;
+  step: StepId;
+} {
   const s = initialState();
   const provider = sp.get("provider") as Provider | null;
   const project = sp.get("project");
@@ -71,7 +86,9 @@ function stateFromParams(sp: URLSearchParams): { state: WizardState; step: StepI
   }
   const type = sp.get("type")?.toUpperCase() as ServerType | undefined;
   if (type) {
-    const cat = (Object.keys(CATEGORY_TYPES) as StandardCategory[]).find((c) => CATEGORY_TYPES[c].includes(type));
+    const cat = (Object.keys(CATEGORY_TYPES) as StandardCategory[]).find((c) =>
+      CATEGORY_TYPES[c].includes(type),
+    );
     if (cat) {
       s.category = cat;
       s.serverType = type;
@@ -87,7 +104,10 @@ function stateFromParams(sp: URLSearchParams): { state: WizardState; step: StepI
 
 function useDerived(state: WizardState): Derived {
   const isModpack = state.category === "modpack";
-  const types = state.category && state.category in CATEGORY_TYPES ? CATEGORY_TYPES[state.category as StandardCategory] : [];
+  const types =
+    state.category && state.category in CATEGORY_TYPES
+      ? CATEGORY_TYPES[state.category as StandardCategory]
+      : [];
   const serverType: ServerType | null = isModpack
     ? null
     : state.serverType && types.includes(state.serverType)
@@ -99,11 +119,15 @@ function useDerived(state: WizardState): Derived {
   const listed = versions.data?.versions;
   const minecraftVersion = !serverType
     ? ""
-    : state.minecraftVersion && (!listed || listed.some((v) => v.version === state.minecraftVersion))
+    : state.minecraftVersion &&
+        (!listed || listed.some((v) => v.version === state.minecraftVersion))
       ? state.minecraftVersion
       : defaultMinecraftVersion(versions.data);
   const hasLoader = !!serverType && serverType !== "VANILLA";
-  const loaders = useLoaderVersions(hasLoader ? serverType : null, minecraftVersion || null);
+  const loaders = useLoaderVersions(
+    hasLoader ? serverType : null,
+    minecraftVersion || null,
+  );
   const loaderVersion = !hasLoader
     ? ""
     : state.loaderVersion !== null
@@ -111,41 +135,65 @@ function useDerived(state: WizardState): Derived {
       : loaders.isSuccess
         ? defaultLoaderVersion(loaders.data)
         : "";
-  const javaQ = useJavaInfo(!isModpack && minecraftVersion ? minecraftVersion : null, serverType);
-  const resolve = useResolveRelease(state.provider, isModpack ? state.projectId : null, isModpack ? state.versionId : null);
+  const javaQ = useJavaInfo(
+    !isModpack && minecraftVersion ? minecraftVersion : null,
+    serverType,
+  );
+  const resolve = useResolveRelease(
+    state.provider,
+    isModpack ? state.projectId : null,
+    isModpack ? state.versionId : null,
+  );
   const ports = usePorts();
 
   return useMemo(() => {
     const resolved = isModpack ? resolve.data : undefined;
     const java = isModpack ? (resolved?.java ?? null) : (javaQ.data ?? null);
+    const byUrl = isModpack && state.modpackSource === "url";
+    const cfSlug = byUrl
+      ? (state.cfRef.trim().match(/modpacks\/([a-z0-9-]+)/)?.[1] ??
+        state.cfRef.trim())
+      : "";
     const suggestedName = (
-      isModpack
-        ? (resolved?.name ?? state.projectHit?.title ?? "")
-        : serverType && minecraftVersion
-          ? `${TYPE_LABELS[serverType]} ${minecraftVersion}`
-          : ""
+      byUrl
+        ? cfSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+        : isModpack
+          ? (resolved?.name ?? state.projectHit?.title ?? "")
+          : serverType && minecraftVersion
+            ? `${TYPE_LABELS[serverType]} ${minecraftVersion}`
+            : ""
     ).slice(0, 80);
-    const defaultMemoryMb = isModpack ? (resolved?.recommended_memory_mb ?? DEFAULT_MEMORY_MODPACK) : DEFAULT_MEMORY_STANDARD;
-    const softwareSummary = isModpack
-      ? resolved
-        ? `${resolved.name} ${resolved.version_name} · Minecraft ${resolved.minecraft_version} · ${loaderLabel(resolved.loader)}`
-        : "Modpack"
-      : serverType
-        ? `${TYPE_LABELS[serverType]} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
-        : "";
+    const defaultMemoryMb = isModpack
+      ? (resolved?.recommended_memory_mb ?? DEFAULT_MEMORY_MODPACK)
+      : DEFAULT_MEMORY_STANDARD;
+    const softwareSummary = byUrl
+      ? `CurseForge ${cfSlug || "modpack"}${state.cfMinecraftVersion.trim() ? ` · Minecraft ${state.cfMinecraftVersion.trim()}` : ""}`
+      : isModpack
+        ? resolved
+          ? `${resolved.name} ${resolved.version_name} · Minecraft ${resolved.minecraft_version} · ${loaderLabel(resolved.loader)}`
+          : "Modpack"
+        : serverType
+          ? `${TYPE_LABELS[serverType]} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
+          : "";
     return {
       isModpack,
       serverType,
       minecraftVersion,
       loaderVersion,
-      loaderLabel: serverTypes.data?.find((t) => t.id === serverType)?.loader_label ?? null,
+      loaderLabel:
+        serverTypes.data?.find((t) => t.id === serverType)?.loader_label ??
+        null,
       java,
-      javaVersion: state.javaOverride ? Number(state.javaOverride) : (java?.java_version ?? null),
+      javaVersion: state.javaOverride
+        ? Number(state.javaOverride)
+        : (java?.java_version ?? null),
       name: state.name ?? suggestedName,
       suggestedName,
       memoryMb: state.memoryMb ?? defaultMemoryMb,
       defaultMemoryMb,
-      gamePort: state.gamePort ?? (ports.data?.suggested ? String(ports.data.suggested) : ""),
+      gamePort:
+        state.gamePort ??
+        (ports.data?.suggested ? String(ports.data.suggested) : ""),
       ports: ports.data,
       resolved,
       resolveOk: isModpack && resolve.isSuccess,
@@ -159,6 +207,9 @@ function useDerived(state: WizardState): Derived {
     resolve.isLoading,
     javaQ.data,
     state.projectHit,
+    state.modpackSource,
+    state.cfRef,
+    state.cfMinecraftVersion,
     state.javaOverride,
     state.name,
     state.memoryMb,
@@ -175,10 +226,15 @@ function useDerived(state: WizardState): Derived {
 /** Map a failed POST /instances/ to wizard field errors. */
 function serverErrorsFrom(err: unknown): FieldErrors {
   if (!(err instanceof ApiError)) return { form: errorMessage(err) };
-  if (err.code === "port_conflict" || err.code === "no_free_ports") return { gamePort: err.message };
+  if (err.code === "port_conflict" || err.code === "no_free_ports")
+    return { gamePort: err.message };
   const out: FieldErrors = {};
   for (const [field, msg] of Object.entries(err.fieldErrors)) {
-    out[SERVER_FIELD_MAP[field] ?? "form"] = out[SERVER_FIELD_MAP[field] ?? "form"] ? `${out[SERVER_FIELD_MAP[field] ?? "form"]} ${msg}` : msg;
+    out[SERVER_FIELD_MAP[field] ?? "form"] = out[
+      SERVER_FIELD_MAP[field] ?? "form"
+    ]
+      ? `${out[SERVER_FIELD_MAP[field] ?? "form"]} ${msg}`
+      : msg;
   }
   if (!Object.keys(out).length) out.form = err.display;
   return out;
@@ -212,7 +268,11 @@ export default function CreateServer() {
       for (const k of Object.keys(next)) {
         const base = k.split(".")[0];
         if (keys.includes(base)) delete next[k];
-        if (k === "serverProperties" && keys.some((x) => GAMEPLAY_KEYS.includes(x))) delete next[k];
+        if (
+          k === "serverProperties" &&
+          keys.some((x) => GAMEPLAY_KEYS.includes(x))
+        )
+          delete next[k];
         if (base === "versionId" && keys.includes("projectId")) delete next[k];
       }
       delete next.form;
@@ -253,10 +313,13 @@ export default function CreateServer() {
   };
 
   const create = useMutation({
-    mutationFn: (payload: CreatePayload) => api.post<CreateResponse>("/instances/", payload),
+    mutationFn: (payload: CreatePayload) =>
+      api.post<CreateResponse>("/instances/", payload),
     onSuccess: (res) => {
       toast.success(`Deploying ${res.instance.name}`, {
-        description: state.start ? "Installing now; the server starts when the install finishes." : "Installing now; it will stay stopped.",
+        description: state.start
+          ? "Installing now; the server starts when the install finishes."
+          : "Installing now; it will stay stopped.",
       });
       for (const w of res.warnings ?? []) toast.warning(w);
       qc.setQueryData(qk.instance(res.instance.id), res.instance);
@@ -268,11 +331,16 @@ export default function CreateServer() {
     onError: (err) => {
       toast.error(errorMessage(err));
       const errs = serverErrorsFrom(err);
-      if (err instanceof ApiError && (err.code === "port_conflict" || err.code === "no_free_ports")) {
+      if (
+        err instanceof ApiError &&
+        (err.code === "port_conflict" || err.code === "no_free_ports")
+      ) {
         qc.invalidateQueries({ queryKey: mpk.ports });
       }
       setServerErrors(errs);
-      const first = STEPS.find((s) => Object.keys(errs).some((k) => stepForField(k) === s.id));
+      const first = STEPS.find((s) =>
+        Object.keys(errs).some((k) => stepForField(k) === s.id),
+      );
       if (first && first.id !== step) setStep(first.id);
     },
   });
@@ -293,7 +361,8 @@ export default function CreateServer() {
     if (c === state.category) return;
     patch({
       category: c,
-      serverType: c in CATEGORY_TYPES ? CATEGORY_TYPES[c as StandardCategory][0] : null,
+      serverType:
+        c in CATEGORY_TYPES ? CATEGORY_TYPES[c as StandardCategory][0] : null,
       minecraftVersion: null,
       loaderVersion: null,
       javaOverride: "",
@@ -324,9 +393,11 @@ export default function CreateServer() {
   const isLast = idx === STEPS.length - 1;
   const importMode = state.category === "import";
   const wide = step === "software" && d.isModpack;
-  const showSummary = !wide && step !== "review" && !!state.category && !importMode;
+  const showSummary =
+    !wide && step !== "review" && !!state.category && !importMode;
   const stepLabels = { software: d.isModpack ? "Modpack" : "Software" };
-  const stepTitle = d.isModpack && step === "software" ? "Modpack & release" : STEPS[idx].label;
+  const stepTitle =
+    d.isModpack && step === "software" ? "Modpack & release" : STEPS[idx].label;
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 pb-2">
@@ -340,18 +411,48 @@ export default function CreateServer() {
         }
         className="pb-0"
       />
-      <Stepper current={step} maxReached={importMode ? 0 : maxReached} onGo={goTo} labels={stepLabels} />
+      <Stepper
+        current={step}
+        maxReached={importMode ? 0 : maxReached}
+        onGo={goTo}
+        labels={stepLabels}
+      />
       <h2 ref={headingRef} tabIndex={-1} className="sr-only">
         Step {idx + 1} of {STEPS.length}: {stepTitle}
       </h2>
 
-      <div className={cn("grid items-start gap-4", showSummary && "lg:grid-cols-[minmax(0,1fr)_17rem]")}>
+      <div
+        className={cn(
+          "grid items-start gap-4",
+          showSummary && "lg:grid-cols-[minmax(0,1fr)_17rem]",
+        )}
+      >
         <div className="min-w-0">
-          {step === "type" && <StepType category={state.category} onChange={onCategory} error={errors.category} />}
-          {step === "software" && <StepSoftware state={state} patch={patch} d={d} errors={errors} />}
-          {step === "resources" && <StepResources state={state} patch={patch} d={d} errors={errors} />}
-          {step === "gameplay" && <StepGameplay state={state} patch={patch} d={d} errors={errors} />}
-          {step === "review" && <StepReview state={state} patch={patch} d={d} errors={errors} onEdit={goTo} />}
+          {step === "type" && (
+            <StepType
+              category={state.category}
+              onChange={onCategory}
+              error={errors.category}
+            />
+          )}
+          {step === "software" && (
+            <StepSoftware state={state} patch={patch} d={d} errors={errors} />
+          )}
+          {step === "resources" && (
+            <StepResources state={state} patch={patch} d={d} errors={errors} />
+          )}
+          {step === "gameplay" && (
+            <StepGameplay state={state} patch={patch} d={d} errors={errors} />
+          )}
+          {step === "review" && (
+            <StepReview
+              state={state}
+              patch={patch}
+              d={d}
+              errors={errors}
+              onEdit={goTo}
+            />
+          )}
         </div>
         {showSummary && (
           <aside className="sticky top-16 hidden lg:block" aria-label="Summary">
@@ -363,7 +464,12 @@ export default function CreateServer() {
                   ...(idx >= 2
                     ? ([
                         ["Name", d.name || "—"],
-                        ["Memory", Number.isFinite(d.memoryMb) ? formatMemoryMb(d.memoryMb) : "—"],
+                        [
+                          "Memory",
+                          Number.isFinite(d.memoryMb)
+                            ? formatMemoryMb(d.memoryMb)
+                            : "—",
+                        ],
                         ["Port", d.gamePort || "—"],
                       ] as [string, string][])
                     : []),
@@ -375,7 +481,12 @@ export default function CreateServer() {
       </div>
 
       <div className="sticky bottom-0 z-20 -mx-3 flex items-center gap-2 border-t bg-background/90 px-3 py-3 backdrop-blur md:-mx-6 md:px-6">
-        <Button type="button" variant="outline" onClick={back} disabled={idx === 0 || create.isPending}>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={back}
+          disabled={idx === 0 || create.isPending}
+        >
           <ArrowLeft /> Back
         </Button>
         <div className="min-w-0 flex-1 truncate text-center text-xs text-muted-foreground">
@@ -388,8 +499,17 @@ export default function CreateServer() {
                 : ""}
         </div>
         {isLast ? (
-          <Button type="button" onClick={deploy} disabled={create.isPending} className="min-w-28">
-            {create.isPending ? <Loader2 className="animate-spin" /> : <Rocket />}
+          <Button
+            type="button"
+            onClick={deploy}
+            disabled={create.isPending}
+            className="min-w-28"
+          >
+            {create.isPending ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Rocket />
+            )}
             {create.isPending ? "Deploying…" : "Deploy server"}
           </Button>
         ) : (
