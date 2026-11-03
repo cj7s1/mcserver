@@ -13,6 +13,7 @@ from apps.instances import views as instances
 from apps.jobs import views as jobs
 from apps.metrics import views as metrics
 from apps.modpacks import views as modpacks
+from apps.nodes import views as nodes
 from apps.notifications import views as notifications
 from apps.players import views as players
 
@@ -101,6 +102,9 @@ api_patterns = [
     path("system/info", core.SystemInfoView.as_view()),
     path("system/settings", core.SystemSettingsView.as_view()),
     path("system/ports", core.PortsView.as_view()),
+    path("nodes", nodes.NodeListView.as_view()),
+    path("nodes/<int:pk>", nodes.NodeDetailView.as_view()),
+    path("nodes/<int:pk>/check", nodes.NodeCheckView.as_view()),
     path("notifications/events", notifications.EventsView.as_view()),
     path("notifications/channels", notifications.ChannelListView.as_view()),
     path("notifications/channels/<int:pk>", notifications.ChannelDetailView.as_view()),

@@ -307,6 +307,7 @@ class CreateInstanceSerializer(serializers.Serializer):
     # initial server.properties values
     server_properties = serializers.DictField(child=serializers.JSONField(), required=False)
     start = serializers.BooleanField(default=True)
+    node = serializers.IntegerField(required=False, help_text="Node id (default node when omitted)")
 
     def validate_accept_eula(self, value: bool) -> bool:
         if not value:

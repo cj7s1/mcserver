@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 case "${1:-}" in
-  agent)  PATTERN='[u]vicorn mcagent.main' ;;
+  agent)  PATTERN='[u]vicorn mcagent.main:app --host 127.0.0.1 --port 8700' ;;
   api)    PATTERN='[u]vicorn mcpanel.asgi' ;;
   worker) PATTERN='[c]elery -A mcpanel' ;;
   *) echo "usage: $0 agent|api|worker"; exit 2 ;;

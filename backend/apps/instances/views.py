@@ -54,7 +54,9 @@ class InstanceListView(APIView):
         ser = CreateInstanceSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
-        node = Node.default()
+        node = Node.objects.filter(pk=data["node"]).first() if data.get("node") else Node.default()
+        if node is None:
+            raise ValidationError({"node": ["Unknown node"]})
         fields: dict[str, Any] = {
             "name": data["name"],
             "description": data.get("description", ""),
@@ -601,6 +603,24 @@ class ScheduleDetailView(APIView):
 
 
 # --- access grants -------------------------------------------------------------------------
+def _positive_int(value: Any) -> int | None:
+    """Primary keys from JSON or a query string; anything else is invalid (not a 500)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 < value < 2**63 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 18:
+        return int(value) or None
+    return None
+
+
+def _guard_existing_grant(instance: Instance, user_id: int, own: frozenset[str]) -> None:
+    """Nobody may replace or revoke a grant that carries permissions they do not hold themselves."""
+    existing = InstanceAccess.objects.filter(instance=instance, user_id=user_id).select_related("role").first()
+    if existing is not None and not (existing.role.permission_set & INSTANCE_CODES) <= own:
+        raise PermissionDenied("You cannot change the access of a user who has permissions you do not have on this server")
+
+
 class AccessListView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
@@ -616,15 +636,19 @@ class AccessListView(APIView):
         from apps.accounts.models import User
         from apps.accounts.serializers import InstanceAccessSerializer
 
-        user = User.objects.filter(pk=request.data.get("user")).first()
-        role = Role.objects.filter(pk=request.data.get("role")).first()
+        data = request.data if isinstance(request.data, dict) else {}
+        user_id, role_id = _positive_int(data.get("user")), _positive_int(data.get("role"))
+        user = User.objects.filter(pk=user_id).first() if user_id else None
+        role = Role.objects.filter(pk=role_id).first() if role_id else None
         if user is None or role is None:
             raise ValidationError({"detail": ["A valid user and role are required"]})
         if "instance.access" in role.permission_set and not request.user.has_panel_perm("system.users"):
             raise ValidationError({"role": ["Only user administrators can grant access-management rights"]})
-        missing = sorted((role.permission_set & INSTANCE_CODES) - request.user.instance_permissions(instance.pk))
+        own = request.user.instance_permissions(instance.pk)
+        missing = sorted((role.permission_set & INSTANCE_CODES) - own)
         if missing:
             raise PermissionDenied(f"You cannot grant permissions you do not have on this server: {', '.join(missing)}")
+        _guard_existing_grant(instance, user.pk, own)
         grant, _ = InstanceAccess.objects.update_or_create(
             user=user, instance=instance, defaults={"role": role, "created_by": request.user}
         )
@@ -634,7 +658,10 @@ class AccessListView(APIView):
     @extend_schema(responses={204: None})
     def delete(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.access")
-        user_id = request.query_params.get("user")
+        user_id = _positive_int(request.query_params.get("user"))
+        if user_id is None:
+            raise ValidationError({"user": ["A valid user id is required"]})
+        _guard_existing_grant(instance, user_id, request.user.instance_permissions(instance.pk))
         InstanceAccess.objects.filter(instance=instance, user_id=user_id).delete()
         audit.record("instance.access_revoked", request=request, instance=instance, target_type="user", target_id=str(user_id))
         return Response(status=status.HTTP_204_NO_CONTENT)
