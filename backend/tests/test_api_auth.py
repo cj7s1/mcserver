@@ -139,8 +139,9 @@ def test_csrf_enforced_for_session_requests(users, make_instance, fake_agent):
     pre_token = client.cookies["mcpanel_csrftoken"].value
     # login itself is CSRF-protected (prevents login CSRF)
     assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 403
-    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD},
-                       HTTP_X_CSRFTOKEN=pre_token).status_code == 200
+    assert (
+        client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}, HTTP_X_CSRFTOKEN=pre_token).status_code == 200
+    )
     token = client.cookies["mcpanel_csrftoken"].value
 
     # safe methods need no token

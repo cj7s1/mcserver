@@ -110,14 +110,21 @@ def test_successful_download_is_verified_and_written(root, served):
     result = fetch.fetch_into(
         sr, {"url": URL, "path": "mods/sodium.jar", "sha1": SHA1.upper(), "sha512": SHA512}
     )
-    assert result == {"path": "mods/sodium.jar", "size": len(DATA), "sha1": SHA1, "sha512": SHA512}
+    assert result == {
+        "path": "mods/sodium.jar",
+        "size": len(DATA),
+        "sha1": SHA1,
+        "sha512": SHA512,
+        "sha256": hashlib.sha256(DATA).hexdigest(),
+    }
     assert (inst / "mods" / "sodium.jar").read_bytes() == DATA
     assert leftovers(inst) == ["sodium.jar"]  # no temp files left behind
     assert served.requests[0].get_header("User-agent").startswith("mcpanel-agent/")
 
 
 @pytest.mark.parametrize(
-    "hashes", [{"sha1": "0" * 40}, {"sha512": "0" * 128}, {"sha1": SHA1, "sha512": "0" * 128}]
+    "hashes",
+    [{"sha1": "0" * 40}, {"sha512": "0" * 128}, {"sha1": SHA1, "sha512": "0" * 128}, {"sha256": "0" * 64}],
 )
 def test_hash_mismatch_leaves_nothing_behind(root, served, hashes):
     sr, inst = root
@@ -227,3 +234,13 @@ def test_real_opener_uses_the_checking_redirect_handler(monkeypatch):
     with pytest.raises(OSError):
         fetch._open(urllib.request.Request(URL), timeout=1)
     assert any(isinstance(h, fetch._AllowListRedirects) for h in seen["handlers"])
+
+
+def test_sha256_only_download_verified(root, served):
+    """Hangar publishes SHA-256 only."""
+    sr, inst = root
+    result = fetch.fetch_into(
+        sr, {"url": URL, "path": "mods/x.jar", "sha256": hashlib.sha256(DATA).hexdigest()}
+    )
+    assert result["size"] == len(DATA)
+    assert (inst / "mods" / "x.jar").read_bytes() == DATA

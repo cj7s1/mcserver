@@ -221,12 +221,13 @@ class AgentClient:
         path: str,
         sha1: str | None = None,
         sha512: str | None = None,
+        sha256: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         return self._json(
             "POST",
             f"/v1/instances/{instance_id}/files/fetch",
-            json={"url": url, "path": path, "sha1": sha1, "sha512": sha512, "overwrite": overwrite},
+            json={"url": url, "path": path, "sha1": sha1, "sha512": sha512, "sha256": sha256, "overwrite": overwrite},
             timeout=900,
         )
 

@@ -21,6 +21,7 @@ DEFAULT_ALLOWED_HOSTS = {
     "edge.forgecdn.net",
     "mediafilez.forgecdn.net",
     "media.forgecdn.net",
+    "hangarcdn.papermc.io",
 }
 MAX_FETCH_BYTES = int(os.environ.get("AGENT_MAX_FETCH_BYTES", str(1024 * 1024 * 1024)))
 USER_AGENT = "mcpanel-agent/0.1 (+https://github.com/cj7s1/mcserver)"
@@ -59,16 +60,20 @@ def fetch_into(root: SafeRoot, body: dict[str, Any]) -> dict[str, Any]:
     path = str(body.get("path", ""))
     sha1 = body.get("sha1")
     sha512 = body.get("sha512")
+    sha256 = body.get("sha256")
     overwrite = bool(body.get("overwrite", False))
     if not _host_allowed(url):
         raise AgentError("Download URL is not on an allowed provider host", "url_not_allowed", 403)
-    if not (sha1 or sha512):
-        raise AgentError("A sha1 or sha512 hash is required to verify downloads", "hash_required", 400)
+    if not (sha1 or sha512 or sha256):
+        raise AgentError(
+            "A sha1, sha256 or sha512 hash is required to verify downloads", "hash_required", 400
+        )
     if not path:
         raise AgentError("Destination path is required", "invalid_path", 400)
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})  # noqa: S310 - scheme/host checked above
     h1 = hashlib.sha1()  # noqa: S324 - provider-published hash, integrity check only
     h512 = hashlib.sha512()
+    h256 = hashlib.sha256()
     writer = root.open_writer(path, overwrite=overwrite, max_bytes=MAX_FETCH_BYTES)
     try:
         with _open(req, timeout=60) as resp:
@@ -77,11 +82,14 @@ def fetch_into(root: SafeRoot, body: dict[str, Any]) -> dict[str, Any]:
             while chunk := resp.read(256 * 1024):
                 h1.update(chunk)
                 h512.update(chunk)
+                h256.update(chunk)
                 writer.write(chunk)
         if sha1 and h1.hexdigest() != str(sha1).lower():
             raise AgentError("Downloaded file failed SHA-1 verification", "hash_mismatch", 502)
         if sha512 and h512.hexdigest() != str(sha512).lower():
             raise AgentError("Downloaded file failed SHA-512 verification", "hash_mismatch", 502)
+        if sha256 and h256.hexdigest() != str(sha256).lower():
+            raise AgentError("Downloaded file failed SHA-256 verification", "hash_mismatch", 502)
         size = writer.commit()
     except AgentError:
         writer.abort()
@@ -92,4 +100,10 @@ def fetch_into(root: SafeRoot, body: dict[str, Any]) -> dict[str, Any]:
     except BaseException:
         writer.abort()
         raise
-    return {"path": path, "size": size, "sha1": h1.hexdigest(), "sha512": h512.hexdigest()}
+    return {
+        "path": path,
+        "size": size,
+        "sha1": h1.hexdigest(),
+        "sha256": h256.hexdigest(),
+        "sha512": h512.hexdigest(),
+    }

@@ -79,7 +79,9 @@ class ContentListView(APIView):
     @extend_schema(responses={200: dict}, summary="Installed mods/plugins, identified on Modrinth")
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, READ)
-        return Response(service.inventory(instance))
+        from . import hangar_source
+
+        return Response(hangar_source.annotate_inventory(instance, service.inventory(instance)))
 
 
 class ContentUpdatesView(APIView):
@@ -265,3 +267,55 @@ class ContentUploadView(APIView):
             },
         )
         return Response(result, status=status.HTTP_201_CREATED)
+
+
+class HangarSearchView(APIView):
+    @extend_schema(responses={200: dict}, summary="Search Hangar for compatible Paper plugins")
+    def get(self, request: Request, pk: str) -> Response:
+        from . import hangar_source
+
+        instance = get_instance_for(request.user, pk, READ)
+        try:
+            offset = max(0, min(int(request.query_params.get("offset", "0")), 10000))
+        except ValueError:
+            offset = 0
+        return Response(hangar_source.search(instance, request.query_params.get("q", "")[:100], offset))
+
+
+class HangarVersionsView(APIView):
+    @extend_schema(responses={200: dict}, summary="Compatible versions of a Hangar plugin")
+    def get(self, request: Request, pk: str, slug: str) -> Response:
+        from . import hangar_source
+
+        instance = get_instance_for(request.user, pk, READ)
+        return Response(hangar_source.versions(instance, slug))
+
+
+class HangarInstallView(APIView):
+    @extend_schema(request=dict, responses={200: dict}, summary="Install a plugin from Hangar (SHA-256 verified)")
+    def post(self, request: Request, pk: str) -> Response:
+        from . import hangar_source
+
+        instance = get_instance_for(request.user, pk, WRITE)
+        slug = str(request.data.get("slug") or "")
+        version = request.data.get("version") or None
+        try:
+            result = hangar_source.install(instance, slug, str(version) if version else None)
+        except Exception:
+            audit.record(
+                "content.hangar_install",
+                request=request,
+                instance=instance,
+                target=instance,
+                success=False,
+                details={"slug": slug[:64], "version": str(version)[:64]},
+            )
+            raise
+        audit.record(
+            "content.hangar_install",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"slug": slug[:64], "version": result["installed"]["version"]},
+        )
+        return Response(result)

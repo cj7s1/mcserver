@@ -159,7 +159,12 @@ def csrf_failure(request, reason: str = ""):  # type: ignore[no-untyped-def]
     from django.http import JsonResponse
 
     return JsonResponse(
-        {"error": {"code": "csrf_failed", "message": f"CSRF check failed: {reason.rstrip('.')}. Reload the page and try again.",
-                   "details": {}}},
+        {
+            "error": {
+                "code": "csrf_failed",
+                "message": f"CSRF check failed: {reason.rstrip('.')}. Reload the page and try again.",
+                "details": {},
+            }
+        },
         status=403,
     )

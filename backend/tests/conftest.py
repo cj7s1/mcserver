@@ -32,7 +32,13 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 PASSWORD = "Correct-Horse-Battery-42"
-ALLOWED_FETCH_HOSTS = {"cdn.modrinth.com", "cdn-raw.modrinth.com", "edge.forgecdn.net", "mediafilez.forgecdn.net"}
+ALLOWED_FETCH_HOSTS = {
+    "cdn.modrinth.com",
+    "cdn-raw.modrinth.com",
+    "edge.forgecdn.net",
+    "mediafilez.forgecdn.net",
+    "hangarcdn.papermc.io",
+}
 
 
 # --------------------------------------------------------------------------------------
@@ -683,13 +689,14 @@ class FakeAgent:
         path: str,
         sha1: str | None = None,
         sha512: str | None = None,
+        sha256: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
         parsed = urlparse(url)
         if parsed.scheme != "https" or (parsed.hostname or "").lower() not in ALLOWED_FETCH_HOSTS:
             raise self._err("Download URL is not on an allowed provider host", "url_not_allowed", 403)
-        if not (sha1 or sha512):
-            raise self._err("A sha1 or sha512 hash is required to verify downloads", "hash_required", 400)
+        if not (sha1 or sha512 or sha256):
+            raise self._err("A sha1, sha256 or sha512 hash is required to verify downloads", "hash_required", 400)
         if url not in self.remote_files:
             raise self._err("Download failed: HTTP Error 404: Not Found", "download_failed", 502)
         data = self.remote_files[url]
@@ -699,6 +706,8 @@ class FakeAgent:
             raise self._err("Downloaded file failed SHA-1 verification", "hash_mismatch", 502)
         if sha512 and h512 != sha512.lower():
             raise self._err("Downloaded file failed SHA-512 verification", "hash_mismatch", 502)
+        if sha256 and hashlib.sha256(data).hexdigest() != sha256.lower():
+            raise self._err("Downloaded file failed SHA-256 verification", "hash_mismatch", 502)
         size = self._write(str(instance_id), path, data, overwrite=overwrite)
         return {"path": path, "size": size, "sha1": h1, "sha512": h512}
 

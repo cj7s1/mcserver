@@ -56,9 +56,15 @@ class UploadLimitMiddleware:
             is_upload = any(h in request.path for h in self.UPLOAD_HINTS)
             if (length is not None and length > limit) or (length is None and is_upload):
                 return JsonResponse(
-                    {"error": {"code": "file_too_large" if length else "length_required",
-                               "message": f"Uploads are limited to {limit // (1024 * 1024)} MB"
-                               if length else "Uploads must declare a Content-Length", "details": {}}},
+                    {
+                        "error": {
+                            "code": "file_too_large" if length else "length_required",
+                            "message": f"Uploads are limited to {limit // (1024 * 1024)} MB"
+                            if length
+                            else "Uploads must declare a Content-Length",
+                            "details": {},
+                        }
+                    },
                     status=413 if length else 411,
                 )
         return self.get_response(request)

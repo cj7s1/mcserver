@@ -14,4 +14,7 @@ urlpatterns = [
     path("toggle", views.ContentToggleView.as_view()),
     path("files", views.ContentFilesView.as_view()),
     path("upload", views.ContentUploadView.as_view()),
+    path("hangar/search", views.HangarSearchView.as_view()),
+    path("hangar/projects/<str:slug>/versions", views.HangarVersionsView.as_view()),
+    path("hangar/install", views.HangarInstallView.as_view()),
 ]

@@ -61,14 +61,23 @@ def _project(p: dict[str, Any]) -> dict[str, Any]:
 
 
 def search(query: str, *, server_type: str, minecraft_version: str, offset: int = 0, limit: int = 20) -> dict[str, Any]:
-    params: dict[str, Any] = {"q": query[:100], "platform": platform_for(server_type), "limit": min(limit, 25),
-                              "offset": max(0, offset), "sort": "-downloads"}
+    params: dict[str, Any] = {
+        "q": query[:100],
+        "platform": platform_for(server_type),
+        "limit": min(limit, 25),
+        "offset": max(0, offset),
+        "sort": "-downloads",
+    }
     if minecraft_version and minecraft_version.upper() != "LATEST":
         params["version"] = minecraft_version
     key = f"hangar:search:{hash(tuple(sorted(params.items())))}"
     data = _cached(key, 120, lambda: _request("GET", f"{HANGAR_API}/projects", params=params, provider="Hangar"))
-    return {"total": (data.get("pagination") or {}).get("count", 0), "offset": offset, "limit": limit,
-            "results": [_project(p) for p in data.get("result", [])]}
+    return {
+        "total": (data.get("pagination") or {}).get("count", 0),
+        "offset": offset,
+        "limit": limit,
+        "results": [_project(p) for p in data.get("result", [])],
+    }
 
 
 def _version(v: dict[str, Any], platform: str) -> dict[str, Any]:
@@ -81,14 +90,25 @@ def _version(v: dict[str, Any], platform: str) -> dict[str, Any]:
         "id": v.get("name"),
         "name": v.get("name"),
         "version_number": v.get("name"),
-        "version_type": "release" if channel == "release" else ("beta" if channel in ("beta", "snapshot") else channel or "release"),
+        "version_type": "release"
+        if channel == "release"
+        else ("beta" if channel in ("beta", "snapshot") else channel or "release"),
         "game_versions": (v.get("platformDependencies") or {}).get(platform, []),
         "loaders": ["paper"],
         "published": v.get("createdAt"),
-        "file": {"filename": info.get("name"), "url": dl.get("downloadUrl"), "size": info.get("sizeBytes"),
-                 "sha256": info.get("sha256Hash"), "external_url": dl.get("externalUrl")} if dl else None,
-        "dependencies": [{"name": d.get("name"), "type": "required" if d.get("required") else "optional",
-                          "external_url": d.get("externalUrl")} for d in deps],
+        "file": {
+            "filename": info.get("name"),
+            "url": dl.get("downloadUrl"),
+            "size": info.get("sizeBytes"),
+            "sha256": info.get("sha256Hash"),
+            "external_url": dl.get("externalUrl"),
+        }
+        if dl
+        else None,
+        "dependencies": [
+            {"name": d.get("name"), "type": "required" if d.get("required") else "optional", "external_url": d.get("externalUrl")}
+            for d in deps
+        ],
     }
 
 
@@ -98,8 +118,7 @@ def versions(slug: str, *, server_type: str, minecraft_version: str) -> list[dic
     if minecraft_version and minecraft_version.upper() != "LATEST":
         params["platformVersion"] = minecraft_version
     key = f"hangar:versions:{_slug(slug)}:{hash(tuple(sorted(params.items())))}"
-    data = _cached(key, 300, lambda: _request("GET", f"{HANGAR_API}/projects/{slug}/versions", params=params,
-                                               provider="Hangar"))
+    data = _cached(key, 300, lambda: _request("GET", f"{HANGAR_API}/projects/{slug}/versions", params=params, provider="Hangar"))
     out = [_version(v, platform) for v in data.get("result", []) if v.get("visibility", "public") == "public"]
     if minecraft_version and minecraft_version.upper() != "LATEST":
         out = [v for v in out if minecraft_version in v["game_versions"]]  # re-check locally
