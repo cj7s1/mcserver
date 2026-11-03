@@ -11,7 +11,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Agent: validated container spec, create/start/stop/restart/kill/recreate, status, health-based readiness
 - [x] Job system with per-instance locks and interruption handling
 - [x] Frontend shell (auth, layout, routing, theme)
-- [~] Dashboard (built by page workstream)
+- [~] Dashboard (frontend page workstream)
 
 ## Phase 2 — Modded support
 - [x] Server types: Vanilla, Paper, Purpur, Folia, Fabric, Quilt, Forge, NeoForge (itzg)
@@ -20,9 +20,9 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] CurseForge adapter (requires API key) + pinned deployment (`AUTO_CURSEFORGE`, `CF_FILE_ID`)
 - [x] FTB adapter (public API) + pinned deployment (`FTBA`)
 - [x] Install progress (job + status `installing` until first healthy check)
-- [~] Better MC acceptance run (metadata/resolve verified; full server start pending)
-- [ ] CurseForge "manual download" helper UI for mods that disallow distribution (`/downloads` mount)
-- [ ] Manual server-pack upload (zip) as instance source
+- [x] Better MC acceptance: BMC4 Forge + BMC2 Fabric via CurseForge running (real servers); Modrinth editions diagnosed + preflight warning
+- [x] Manual-download detection API (missing_mods_checker / MODS_NEED_DOWNLOAD.txt, CF_DOWNLOADS_REPO=/data/downloads)  — [ ] UI
+- [x] Import server / server pack from archive (safe extraction)  — [ ] wizard UI
 
 ## Phase 3 — Core administration
 - [x] Live console over WebSocket (agent log stream, survives restarts), RCON commands with audit
@@ -42,12 +42,12 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Restore in place (staging + swap, pre-restore safety backup), restore as new instance
 - [x] Integrity check (`restic check --read-data-subset`)
 - [x] Pre-update backups (modpack updates)
-- [ ] Backup end-to-end validation on a real server (needs restic binary in sandbox)
-- [ ] Btrfs / ZFS snapshot providers (capability detection exists)
-- [ ] Backup browser (list/restore individual files from a snapshot)
+- [x] Backup end-to-end validation on a real server (API + worker + restic)
+- [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules) — [ ] ZFS
+- [x] Backup browser API (list/download/restore single path) — [ ] UI
 
 ## Phase 5 — Mods, plugins, players
-- [~] Mods/plugins inventory, Modrinth identification by hash, update check, compatible search/install/remove/toggle/upload (backend in progress)
+- [x] Mods/plugins inventory, Modrinth identification by hash, update check, compatible search/install/remove/toggle/upload
 - [x] Whitelist / operators / bans / kick (RCON when running, JSON files when stopped)
 - [x] Online players (RCON `list`)
 - [ ] CurseForge mod search for individual mods
@@ -64,24 +64,28 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Archive / unarchive, delete with typed confirmation
 - [x] Modpack update with pre-update backup, history, rollback to pre-update backup
 - [x] Cron schedules: restart/start/stop/backup/command
-- [ ] Import an existing server folder/archive (upload + extract with safe extraction)
+- [x] Import an existing server folder/archive (upload + extract with safe extraction)
 - [ ] World import / export
-- [ ] Software (non-modpack) version update workflow with automatic pre-update backup
+- [x] Software (non-modpack) version update workflow with automatic pre-update backup
 
 ## Phase 8 — Unraid
-- [~] Compose deployment, UID/GID mapping (`MC_UID`/`MC_GID`), persistent paths (deploy workstream)
+- [x] Compose deployment, UID/GID mapping (`MC_UID`/`MC_GID`), persistent paths
 - [x] Storage capability detection (fs type, Unraid shfs warning, btrfs/zfs presence)
 - [ ] Unraid Community Applications template (XML)
 - [ ] docs/UNRAID.md validated on real Unraid  [!] needs real hardware
 
+## Multi-node
+- [x] Node model + management API, per-node tokens, server creation on a chosen node (verified with a 2nd agent)
+- [ ] Node admin UI; TLS guidance for remote agents
+
 ## Phase 9 — UX refinement
 - [ ] Command palette, keyboard shortcuts
-- [ ] Notifications (webhooks/Discord) for crashes, failed backups
-- [ ] Player activity history
+- [x] Notifications (webhooks/Discord) for crashes, failed backups — [ ] admin UI
+- [x] Player activity history + metrics history (1-min sampling) — [ ] charts UI
 
 ## Phase 10 — Hardening
-- [ ] Systematic security review of agent + API
-- [ ] Dependency scanning in CI (pip-audit, npm audit) — in deploy workstream
+- [~] Systematic security review of agent + API (audit workflow running; earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard)
+- [x] Dependency scanning in CI (pip-audit, npm audit, non-blocking)
 - [ ] Upgrade/reinstall test (data survives image upgrades)
 - [ ] Load test of console fan-out
 

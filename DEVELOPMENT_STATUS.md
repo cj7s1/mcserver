@@ -1,50 +1,94 @@
 # Development status
 
-_Last updated: 2026-11-03 (session 1)._ Keep this file honest: **implemented** ≠ **unit-tested** ≠
-**integration-tested** ≠ **validated on a real Minecraft server** ≠ **validated on Unraid**.
+_Last updated: 2026-11-03, end of session 1 work block._ Keep this file honest. Implemented,
+unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
+**different** levels, and nothing has been validated on Unraid yet.
 
 ## Last verified working state
 
-Verified manually through the real API against a real `itzg/minecraft-server` container in the cloud
-sandbox (commit `afce649` + later work):
+The sandbox runs the agent on :8700 (ext4), a second agent on :8701 (btrfs loopback), the API on :8000
+and the worker+beat. All tests pass on `main` of this branch:
 
-| Flow | Level |
+| Suite | Result |
 |---|---|
-| Owner setup → login (session + CSRF) | real server |
-| Create Vanilla 1.20.4 → install job → `installing` → health-checked `running` | real server |
-| RCON commands (`setblock`, `save-all flush`, `list`) via API | real server |
-| server.properties edit (typed + managed-key rejection) persisted across restart | real server |
-| Restart → world block still present (`execute if block` → "Test passed") | real server |
-| Graceful stop (exit 0, "All dimensions are saved") | real server |
-| Instance lock conflict → 409 `instance_busy` | real server |
-| Agent: dropped capabilities + no-new-privileges work with the itzg image | real server |
-| Agent log stream WebSocket, stats, disk usage | real server |
-| Modrinth search/releases/resolve for Better MC (BMC4 `4BV47HRn` v59 `bdRIjRgs` → Forge 1.20.1, Java 17) | live provider API |
-| Agent `safefs` symlink/traversal protections | unit tests (12) |
+| `backend: uv run pytest -q -m "not integration"` | **393 passed** |
+| `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **307 passed** (btrfs + restic tests included) |
+| `ruff check` / `ruff format --check` | clean (backend, agent) |
+| Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
-Not yet verified: backups/restore on a real server (restic binary not yet in sandbox), Better MC
-full start, frontend pages in a browser, Docker Compose deployment, Unraid.
+### Verified on real Minecraft servers through the real API (sandbox)
 
-## In flight (session 1)
+| Flow | Notes |
+|---|---|
+| Vanilla 1.20.4: install → `installing` → health-checked `running` → RCON → properties edit → restart → stop | block placed before restart still present |
+| Import existing server from a zip (`POST /instances/<id>/import`) | world + settings came across |
+| Backup (consistent, server running) → modify → restore (with safety backup) | `restic`, via worker jobs |
+| Backup browser: list snapshot, download a file, restore a single file | |
+| Software update 1.20.4 → 1.21.1 (Java 17 → 21 image switch, pre-update backup) | downgrade refused without confirmation |
+| Fabric 1.21.1 with pinned loader 0.19.4 (restart-required → recreate) | log confirms the loader version |
+| **Better MC [FORGE] BMC4 v62hf via CurseForge (keyless)** | ~3.5 min install, 311 mods, 20 TPS, auto-pinned to file 9104992 |
+| **Better MC [FABRIC] BMC2 v40 via CurseForge (keyless)** | ~2 min install, 294 mods, auto-pinned to file 7517035 |
+| Better MC BMC4 v59 **Modrinth** edition | needs 51 CurseForge-only files: the crash loop is detected and auto-stopped, diagnostics name the cause, manual-downloads list with links; the wizard preflight now warns *before* deploying |
+| btrfs snapshots: create (save-off coordinated) → modify → rollback (with safety snapshot) | through the second node |
+| Multi-node: second agent registered as a node, server created/deleted there | |
+| Webhook notifications (test + real backup event) | local receiver |
+| Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
 
-* Workflow `backend-parallel-build`: content manager backend, test suites (unit/API/integration),
-  deployment packaging (Dockerfiles, compose, CI). Results to be merged and recorded here.
-* Workflow `frontend-pages`: all screens (dashboard, library, wizard, modpack browser, instance tabs,
-  admin), followed by browser-based integration testing and UX/correctness reviews.
+### Not yet verified
 
-## Next recommended tasks
+* Frontend pages in a browser (the page workstream is in progress; see below).
+* Running on real Unraid hardware (docs/UNRAID.md is based on Unraid conventions).
+* CurseForge **with** an API key (no key available). The keyless path is verified.
+* FTB deployment (adapter unit-tested against recorded API shapes; no server started).
+* GitHub Actions CI on GitHub (the workflow file passes actionlint locally).
+* ZFS snapshots (not implemented).
 
-1. Merge workflow outputs; run all suites; record results above.
-2. Backup → modify → restore validation on a real server (scenario 7).
-3. Better MC BMC4 or BMC2 full deployment and startup attempt (scenario 4) — record RAM/time.
-4. Import existing server (archive upload + safe extraction) and world import.
-5. Unraid CA template + docs/UNRAID.md review.
+## In flight
+
+* Workflow `frontend-pages`: all screens, then browser integration testing plus UX and correctness
+  reviews. The frontend **must** then add UI for features added after its spec (task list below).
+* Workflow `security-audit`: five audit lenses over backend and agent with adversarial verification
+  and fixes.
+
+## Next recommended tasks (in order)
+
+1. Merge the frontend workflow output; `npx tsc -b && npm run lint && npm run build`; Playwright pass.
+2. Frontend for the newer backend features:
+   * diagnostics card (`GET /instances/<id>/diagnostics`) and manual downloads (`/manual-downloads`)
+   * modpack tab (`/modpack`, `/modpack/plan/<v>`, `/modpack/update`, `/modpack/rollback`)
+   * software update (`POST /software`)
+   * import an existing server (`POST /instances/<id>/import`)
+   * backup browser (`/backups/<id>/files|download|restore-path`)
+   * snapshots (`/snapshots…`)
+   * metrics charts (`/metrics?range=`) and player history (`/players/history`)
+   * notifications admin (`/notifications/…`), nodes admin (`/nodes…`), job abandon
+     (`POST /jobs/<id>/abandon`)
+   * wizard: CurseForge URL/slug mode without a key, show `preflight` warnings, and the new container
+     memory formula (mods: heap + max(1536, 40%); others: heap + max(768, 30%))
+3. Merge the security-audit fixes; re-run all suites.
+4. Remaining roadmap: ZFS snapshots, Hangar/CurseForge mod sources, world import/export UI, Unraid
+   validation.
 
 ## Environment notes (cloud sandbox)
 
-See `CLAUDE.md` → "Cloud sandbox specifics". Dev data root: `/srv/mcpanel-dev`. Dev owner account:
-`admin` / `correct-horse-battery-9` (sandbox only).
+See `CLAUDE.md` → "Cloud sandbox specifics". Dev data root `/srv/mcpanel-dev`; btrfs test mount
+`/srv/btrfs-test` (loopback `/srv/btrfs.img`; remount after a container restart:
+`mount -o loop /srv/btrfs.img /srv/btrfs-test`). Second agent:
+`AGENT_DATA_ROOT=/srv/btrfs-test/data AGENT_TOKEN=btrfs-node-token`, port 8701. Dev owner:
+`admin` / `correct-horse-battery-9` (sandbox only). Test servers in the dev DB: Vanilla Test, Imported
+Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Better MC 2 Fabric
+(CurseForge), Fabric Test, Btrfs Snapshot Test (node 2). All stopped.
 
-## Decisions not to revisit without evidence
+## Lessons recorded (do not relearn)
 
-See `ARCHITECTURE.md` → "Key design decisions".
+* Modrinth Better MC editions require manual CurseForge downloads. Recommend the CurseForge editions,
+  which the runtime's built-in key installs automatically.
+* Docker's `RestartCount` is cumulative, so crash-loop detection must track a baseline per not-ready
+  streak (`apps/instances/reconcile.py`).
+* Off-heap memory for a 300-mod pack is about 1.3 GB above heap, so container limits need generous
+  overhead.
+* A newer API with an older worker leaves unknown job kinds behind. The runner now fails them cleanly,
+  and `POST /jobs/<id>/abandon` exists for stuck jobs.
+* `pkill -f` patterns in a shell whose command line contains the same text kill that shell. Use the
+  bracket trick (`[c]elery`) and run `scripts/cloud-dev/restart.sh` by path.
