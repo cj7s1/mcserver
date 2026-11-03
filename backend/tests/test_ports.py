@@ -103,3 +103,13 @@ def test_agent_unreachable_still_checks_panel_ports(fake_agent, node, make_insta
     assert set(used) == {25630}
     with pytest.raises(ConflictError):
         services.check_port_available(node, 25630)
+
+
+@pytest.mark.django_db
+def test_ports_endpoint_hides_names_of_invisible_servers(make_instance, fake_agent, client_for, users):
+    make_instance(name="Secret Server", game_port=25570)
+    owner = client_for(users["owner"]).get("/api/system/ports").json()
+    assert any(p["used_by"] == "server 'Secret Server'" for p in owner["in_use"])
+    stranger = client_for(users["norole"]).get("/api/system/ports").json()
+    assert all("Secret Server" not in p["used_by"] for p in stranger["in_use"])
+    assert any(p["port"] == 25570 and p["used_by"] == "another server" for p in stranger["in_use"])

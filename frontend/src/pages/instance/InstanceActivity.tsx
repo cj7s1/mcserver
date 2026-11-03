@@ -166,14 +166,14 @@ function AuditSection({ instance, now }: { instance: Instance; now: number }) {
       ) : (
         <div className="grid min-w-0 grid-cols-1 gap-3">
           <div className="-mx-4 min-w-0 sm:mx-0">
-            <Table className="min-w-[720px]">
+            <Table className="table-fixed sm:min-w-[720px] sm:table-auto">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-40 pl-4 sm:pl-2">Time</TableHead>
-                  <TableHead className="w-32">User</TableHead>
-                  <TableHead className="w-48">Action</TableHead>
-                  <TableHead>Details</TableHead>
-                  <TableHead className="w-28 pr-4 text-right sm:pr-2">Result</TableHead>
+                  <TableHead className="w-28 pl-4 sm:w-40 sm:pl-2">Time</TableHead>
+                  <TableHead className="hidden w-32 sm:table-cell">User</TableHead>
+                  <TableHead className="w-24 sm:w-48">Action</TableHead>
+                  <TableHead className="pr-4 sm:pr-2">Details</TableHead>
+                  <TableHead className="hidden w-28 pr-2 text-right sm:table-cell">Result</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -182,23 +182,27 @@ function AuditSection({ instance, now }: { instance: Instance; now: number }) {
                   return (
                     <TableRow key={e.id} className="align-top">
                       <TableCell className="pl-4 whitespace-nowrap sm:pl-2">
-                        <div className="text-xs">{relativeTime(e.created_at, now)}</div>
-                        <div className="text-[11px] text-muted-foreground">{formatDateTime(e.created_at)}</div>
+                        <div className="text-xs" title={formatDateTime(e.created_at)}>
+                          {relativeTime(e.created_at, now)}
+                        </div>
+                        <div className="hidden text-[11px] text-muted-foreground sm:block">{formatDateTime(e.created_at)}</div>
+                        <div className="mt-0.5 max-w-28 truncate text-[11px] sm:hidden">{e.actor_username || "system"}</div>
                       </TableCell>
-                      <TableCell className="text-xs">
+                      <TableCell className="hidden text-xs sm:table-cell">
                         <div className="truncate">{e.actor_username || <span className="text-muted-foreground">system</span>}</div>
                         {e.ip_address && <div className="font-mono text-[11px] text-muted-foreground">{e.ip_address}</div>}
                       </TableCell>
-                      <TableCell>
+                      <TableCell className="whitespace-normal sm:whitespace-nowrap">
                         <div className="text-xs font-medium">{verb}</div>
                         <div className="font-mono text-[11px] text-muted-foreground" title={e.action}>
                           {scope}
                         </div>
+                        {!e.success && <div className="text-[11px] font-medium text-destructive sm:hidden">Failed</div>}
                       </TableCell>
-                      <TableCell className="max-w-md whitespace-normal">
+                      <TableCell className="pr-4 whitespace-normal [overflow-wrap:anywhere] sm:max-w-md sm:min-w-32 sm:pr-2">
                         <AuditDetails event={e} />
                       </TableCell>
-                      <TableCell className="pr-4 text-right sm:pr-2">
+                      <TableCell className="hidden pr-2 text-right sm:table-cell">
                         <span
                           className={cn(
                             "inline-flex items-center gap-1 text-xs font-medium",

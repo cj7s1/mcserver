@@ -179,6 +179,44 @@ function InstalledRow({
   const link = modrinthUrl(file.project);
   const enabled = toggle.isPending ? !!toggle.variables : file.enabled;
 
+  const versionEl = (
+    <div className="flex flex-col items-start gap-1">
+      {file.version ? (
+        <span className="flex items-center gap-1.5">
+          <span className="max-w-40 truncate font-mono text-xs" title={file.version.name ?? undefined}>
+            {file.version.version_number ?? "—"}
+          </span>
+          {file.version.version_type && file.version.version_type !== "release" && (
+            <span className={cn("rounded px-1 text-[10px] font-medium uppercase", versionTypeClass(file.version.version_type))}>
+              {file.version.version_type}
+            </span>
+          )}
+        </span>
+      ) : (
+        <span className="text-xs text-muted-foreground">—</span>
+      )}
+      {update &&
+        (mutable ? (
+          <Button
+            size="xs"
+            variant="outline"
+            className="border-sky-500/40 text-sky-700 dark:text-sky-300"
+            disabled={updating}
+            onClick={onUpdate}
+            aria-label={`Update ${title} to ${update.latest.version_number ?? "the newest version"}`}
+            title={`Update to ${update.latest.version_number ?? "the newest version"} (${update.latest.version_type ?? "release"})`}
+          >
+            {updating ? <Loader2 className="animate-spin" /> : <ArrowUpCircle />}
+            <span className="max-w-32 truncate">{update.latest.version_number ?? "Update"}</span>
+          </Button>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-1.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+            <ArrowUpCircle className="size-3" aria-hidden /> {update.latest.version_number}
+          </span>
+        ))}
+    </div>
+  );
+
   return (
     <TableRow data-state={selected ? "selected" : undefined} className={cn(!file.enabled && "text-muted-foreground")}>
       {env.canEdit && (
@@ -192,7 +230,7 @@ function InstalledRow({
           />
         </TableCell>
       )}
-      <TableCell className="max-w-0 min-w-56 py-2">
+      <TableCell className="max-w-0 min-w-36 py-2 sm:min-w-56">
         <div className="flex min-w-0 items-center gap-2.5">
           <ProjectIcon url={file.project?.icon_url} className={cn("size-8", !file.enabled && "opacity-50 grayscale")} />
           <div className="min-w-0">
@@ -205,46 +243,11 @@ function InstalledRow({
             <p className="truncate font-mono text-[11px] text-muted-foreground" title={file.filename}>
               {file.filename}
             </p>
+            <div className="mt-1 sm:hidden">{versionEl}</div>
           </div>
         </div>
       </TableCell>
-      <TableCell className="py-2">
-        <div className="flex flex-col items-start gap-1">
-          {file.version ? (
-            <span className="flex items-center gap-1.5">
-              <span className="max-w-40 truncate font-mono text-xs" title={file.version.name ?? undefined}>
-                {file.version.version_number ?? "—"}
-              </span>
-              {file.version.version_type && file.version.version_type !== "release" && (
-                <span className={cn("rounded px-1 text-[10px] font-medium uppercase", versionTypeClass(file.version.version_type))}>
-                  {file.version.version_type}
-                </span>
-              )}
-            </span>
-          ) : (
-            <span className="text-xs text-muted-foreground">—</span>
-          )}
-          {update &&
-            (mutable ? (
-              <Button
-                size="xs"
-                variant="outline"
-                className="border-sky-500/40 text-sky-700 dark:text-sky-300"
-                disabled={updating}
-                onClick={onUpdate}
-                aria-label={`Update ${title} to ${update.latest.version_number ?? "the newest version"}`}
-                title={`Update to ${update.latest.version_number ?? "the newest version"} (${update.latest.version_type ?? "release"})`}
-              >
-                {updating ? <Loader2 className="animate-spin" /> : <ArrowUpCircle />}
-                <span className="max-w-32 truncate">{update.latest.version_number ?? "Update"}</span>
-              </Button>
-            ) : (
-              <span className="inline-flex items-center gap-1 rounded-full bg-sky-500/10 px-1.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
-                <ArrowUpCircle className="size-3" aria-hidden /> {update.latest.version_number}
-              </span>
-            ))}
-        </div>
-      </TableCell>
+      <TableCell className="hidden py-2 sm:table-cell">{versionEl}</TableCell>
       <TableCell className="hidden py-2 text-xs tabular-nums text-muted-foreground md:table-cell">{formatBytes(file.size)}</TableCell>
       <TableCell className="hidden py-2 text-xs text-muted-foreground lg:table-cell" title={formatDateTime(file.modified)}>
         {relativeTime(file.modified)}
@@ -533,7 +536,7 @@ export function InstalledContent({
                   </TableHead>
                 )}
                 <TableHead>{env.noun.One}</TableHead>
-                <TableHead>Version</TableHead>
+                <TableHead className="hidden sm:table-cell">Version</TableHead>
                 <TableHead className="hidden md:table-cell">Size</TableHead>
                 <TableHead className="hidden lg:table-cell">Changed</TableHead>
                 <TableHead>Enabled</TableHead>

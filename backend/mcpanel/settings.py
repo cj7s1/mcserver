@@ -134,7 +134,10 @@ REDIS_URL = env("MCPANEL_REDIS_URL", "redis://localhost:6379/0") or ""
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [REDIS_URL]},
+        # redis-py >= 8 defaults socket_timeout to 5 s, the same as channels_redis' 5 s
+        # BZPOPMIN wait, so idle consumers die with "Timeout reading from redis" and every
+        # WebSocket (console, live events) drops every 5-10 s. Keep the read timeout above it.
+        "CONFIG": {"hosts": [{"address": REDIS_URL, "socket_timeout": 30}]},
     }
 }
 if TESTING:

@@ -157,7 +157,9 @@ class BackupRestoreView(APIView):
             raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
         if request.data.get("confirm") is not True:
             raise ApiError("Restoring replaces the current server files. Confirm to continue.", code="confirmation_required")
-        pre = bool(request.data.get("pre_restore_backup", True))
+        from apps.core.models import SystemSetting
+
+        pre = bool(request.data.get("pre_restore_backup", SystemSetting.get("pre_restore_backup")))
         job = enqueue(
             "restore",
             title=f"Restore '{backup.name}' on {instance.name}",

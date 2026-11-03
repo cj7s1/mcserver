@@ -33,17 +33,17 @@ export function ServerTable({
   onToggle: (key: string) => void;
 }) {
   return (
-    <div className="rounded-xl border bg-card">
+    <div className="min-w-0 rounded-xl border bg-card">
       <Table className="text-[13px]">
         <TableHeader>
           <TableRow className="hover:bg-transparent">
             <TableHead className="pl-4">Server</TableHead>
-            <TableHead>Status</TableHead>
-            <TableHead>Minecraft</TableHead>
-            <TableHead>Loader</TableHead>
-            <TableHead className="text-right">Memory</TableHead>
-            <TableHead className="text-right">Port</TableHead>
-            <TableHead>Created</TableHead>
+            <TableHead className="hidden sm:table-cell">Status</TableHead>
+            <TableHead className="hidden sm:table-cell">Minecraft</TableHead>
+            <TableHead className="hidden lg:table-cell">Loader</TableHead>
+            <TableHead className="hidden text-right md:table-cell">Memory</TableHead>
+            <TableHead className="hidden text-right md:table-cell">Port</TableHead>
+            <TableHead className="hidden xl:table-cell">Created</TableHead>
             <TableHead className="pr-4 text-right">
               <span className="sr-only">Actions</span>
             </TableHead>
@@ -94,15 +94,16 @@ function ServerTableRow({ instance }: { instance: Instance }) {
             type={instance.server_type}
             className="size-8 rounded-md text-xs"
           />
-          <div className="min-w-0 max-w-[18rem]">
+          <div className="min-w-0 max-w-[10rem] sm:max-w-[18rem]">
             <Link to={`/servers/${instance.id}`} className="block truncate font-medium hover:underline">
               {instance.name}
             </Link>
             <div className="truncate text-xs text-muted-foreground">{softwareLabel(instance)}</div>
+            <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="mt-1 sm:hidden" />
           </div>
         </div>
       </TableCell>
-      <TableCell>
+      <TableCell className="hidden sm:table-cell">
         <div className="grid justify-items-start gap-1">
           <StatusBadge status={instance.status} title={instance.status_detail || undefined} />
           {job && (
@@ -113,13 +114,13 @@ function ServerTableRow({ instance }: { instance: Instance }) {
           )}
         </div>
       </TableCell>
-      <TableCell className="tabular-nums">{instance.minecraft_version || "—"}</TableCell>
-      <TableCell className="max-w-[12rem] truncate">{loaderText(instance)}</TableCell>
-      <TableCell className="text-right tabular-nums" title={`${formatMemoryMb(instance.container_memory_mb)} container limit`}>
+      <TableCell className="hidden tabular-nums sm:table-cell">{instance.minecraft_version || "—"}</TableCell>
+      <TableCell className="hidden max-w-[12rem] truncate lg:table-cell">{loaderText(instance)}</TableCell>
+      <TableCell className="hidden text-right tabular-nums md:table-cell" title={`${formatMemoryMb(instance.container_memory_mb)} container limit`}>
         {formatMemoryMb(instance.memory_mb)}
       </TableCell>
-      <TableCell className="text-right tabular-nums">{portText(instance)}</TableCell>
-      <TableCell className="text-muted-foreground" title={formatDateTime(instance.created_at)}>
+      <TableCell className="hidden text-right tabular-nums md:table-cell">{portText(instance)}</TableCell>
+      <TableCell className="hidden text-muted-foreground xl:table-cell" title={formatDateTime(instance.created_at)}>
         {relativeTime(instance.created_at)}
       </TableCell>
       <TableCell className="pr-4">

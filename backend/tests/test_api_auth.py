@@ -310,6 +310,25 @@ def test_password_change(clients, users):
     assert c.get("/api/auth/me").status_code == 200  # session survives the change
 
 
+def test_password_change_rejects_weak_password_as_field_error(clients, users):
+    """Django's password validators must surface as a 400 on new_password, not a 500."""
+    c = clients["viewer"]
+    weak = c.post("/api/auth/password", {"old_password": PASSWORD, "new_password": "1234567890"})
+    assert weak.status_code == 400
+    body = weak.json()["error"]
+    assert body["code"] == "validation_error"
+    assert body["details"]["fields"]["new_password"]
+    users["viewer"].refresh_from_db()
+    assert users["viewer"].check_password(PASSWORD)
+
+
+def test_password_reset_rejects_weak_password_as_field_error(clients, users):
+    raw = clients["owner"].post(f"/api/users/{users['viewer'].id}/reset-link").json()["token"]
+    res = APIClient().post("/api/auth/reset", {"token": raw, "new_password": "1234567890"})
+    assert res.status_code == 400
+    assert res.json()["error"]["details"]["fields"]["new_password"]
+
+
 def test_password_reset_token_is_single_use(clients, users):
     raw = clients["owner"].post(f"/api/users/{users['viewer'].id}/reset-link").json()["token"]
     anon = APIClient()

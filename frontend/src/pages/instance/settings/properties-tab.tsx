@@ -395,7 +395,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                 <table className="w-full text-sm">
                   <thead className="border-b bg-muted/30 text-xs text-muted-foreground">
                     <tr>
-                      <th scope="col" className="h-8 px-4 text-left font-medium">
+                      <th scope="col" className="h-8 px-3 text-left font-medium sm:px-4">
                         Key
                       </th>
                       <th scope="col" className="h-8 px-2 text-left font-medium">
@@ -414,7 +414,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                       const added = !(k in values);
                       return (
                         <tr key={k} className="border-b last:border-b-0">
-                          <td className="px-4 py-1.5 align-middle">
+                          <td className="px-3 py-1.5 align-middle sm:px-4">
                             <label
                               htmlFor={`other-${k}`}
                               className={cn("font-mono text-xs break-all", removed && "text-muted-foreground line-through")}
@@ -429,7 +429,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                               value={removed ? (values[k] ?? "") : (valueOf(k) ?? "")}
                               onChange={(e) => setDraft(k, e.target.value)}
                               disabled={!canEdit || removed}
-                              className="h-7 min-w-40 font-mono text-xs"
+                              className="h-7 min-w-28 font-mono text-xs sm:min-w-40"
                               spellCheck={false}
                             />
                           </td>
@@ -462,7 +462,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                     })}
                     {canEdit && (
                       <tr>
-                        <td className="px-4 py-2 align-top">
+                        <td className="px-3 py-2 align-top sm:px-4">
                           <Label htmlFor="new-prop-key" className="sr-only">
                             New property key
                           </Label>
@@ -471,7 +471,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                             value={newKey}
                             onChange={(e) => setNewKey(e.target.value.trim())}
                             placeholder="new-key"
-                            className="h-7 min-w-32 font-mono text-xs"
+                            className="h-7 min-w-24 font-mono text-xs sm:min-w-32"
                             aria-invalid={!!newKeyError || undefined}
                             spellCheck={false}
                           />
@@ -486,7 +486,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                             value={newValue}
                             onChange={(e) => setNewValue(e.target.value)}
                             placeholder="value"
-                            className="h-7 min-w-40 font-mono text-xs"
+                            className="h-7 min-w-28 font-mono text-xs sm:min-w-40"
                             spellCheck={false}
                           />
                         </td>

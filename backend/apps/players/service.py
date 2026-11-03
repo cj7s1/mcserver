@@ -45,7 +45,23 @@ def rcon(instance: Instance, command: str) -> str:
     return COLOR_CODES.sub("", AgentClient(instance.node).command(instance.id, command))
 
 
-def online_players(instance: Instance) -> dict[str, Any]:
+def online_players(instance: Instance, *, max_age: int = 20) -> dict[str, Any]:
+    """Online players via RCON ``list``, cached briefly.
+
+    Every RCON connection is logged by the server ("RCON Client started/shutting down"), so
+    dashboards polling every few seconds would otherwise flood the console.
+    """
+    from django.core.cache import cache
+
+    key = f"players:online:{instance.pk}"
+    if max_age and (hit := cache.get(key)) is not None:
+        return hit
+    result = _query_online(instance)
+    cache.set(key, result, max_age)
+    return result
+
+
+def _query_online(instance: Instance) -> dict[str, Any]:
     out = rcon(instance, "list")
     m = LIST_RE.search(out)
     if not m:
@@ -141,6 +157,9 @@ def mutate(instance: Instance, action: str, name: str, reason: str = "") -> dict
         if action not in commands:
             raise ApiError("Unknown player action", code="invalid_action")
         output = rcon(instance, commands[action])
+        from django.core.cache import cache
+
+        cache.delete(f"players:online:{instance.pk}")
         return {"via": "rcon", "output": output}
     if action == "kick":
         raise ApiError("The server is not running, so nobody can be kicked", code="not_running", status_code=409)

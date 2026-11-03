@@ -165,18 +165,18 @@ export function BackupTable({
           <TableHead className="w-8 px-2">
             <span className="sr-only">Pinned</span>
           </TableHead>
-          <TableHead className="min-w-44">Backup</TableHead>
+          <TableHead className="min-w-36 sm:min-w-44">Backup</TableHead>
           <TableHead>Status</TableHead>
-          <TableHead>Created</TableHead>
-          <TableHead className="text-right">
+          <TableHead className="hidden md:table-cell">Created</TableHead>
+          <TableHead className="hidden text-right sm:table-cell">
             <Tip label="Added: new data this backup stored after deduplication. Source: total size of the server files it covered.">
               <span tabIndex={0} className="cursor-help underline decoration-dotted underline-offset-2 outline-none">
                 Size
               </span>
             </Tip>
           </TableHead>
-          <TableHead className="text-right">Files · time</TableHead>
-          <TableHead>Integrity</TableHead>
+          <TableHead className="hidden text-right lg:table-cell">Files · time</TableHead>
+          <TableHead className="hidden md:table-cell">Integrity</TableHead>
           <TableHead className="text-right">
             <span className="sr-only">Actions</span>
           </TableHead>
@@ -205,9 +205,9 @@ export function BackupTable({
                   <Pin className="mx-auto size-3 fill-current text-primary" aria-label="Pinned" />
                 ) : null}
               </TableCell>
-              <TableCell className="max-w-72 whitespace-normal">
-                <div className="flex items-center gap-1.5">
-                  <span className="truncate font-medium text-sm" title={b.name}>
+              <TableCell className="max-w-72 min-w-36 whitespace-normal sm:min-w-44">
+                <div className="flex min-w-0 items-center gap-1.5">
+                  <span className="min-w-0 font-medium text-sm [overflow-wrap:anywhere] sm:truncate" title={b.name}>
                     {b.name}
                   </span>
                   {b.notes && (
@@ -231,15 +231,19 @@ export function BackupTable({
                     </code>
                   )}
                 </div>
+                <div className="mt-0.5 text-muted-foreground md:hidden" title={formatDateTime(b.created_at)}>
+                  {relativeTime(b.created_at)}
+                  {ok && <span className="sm:hidden"> · {formatBytes(b.total_bytes)}</span>}
+                </div>
               </TableCell>
               <TableCell>
                 <StatusCell b={b} />
               </TableCell>
-              <TableCell className="whitespace-nowrap" title={formatDateTime(b.created_at)}>
+              <TableCell className="hidden whitespace-nowrap md:table-cell" title={formatDateTime(b.created_at)}>
                 <div>{relativeTime(b.created_at)}</div>
                 <div className="text-muted-foreground">{formatDateTime(b.created_at)}</div>
               </TableCell>
-              <TableCell className="text-right whitespace-nowrap tabular-nums">
+              <TableCell className="hidden text-right whitespace-nowrap tabular-nums sm:table-cell">
                 {ok ? (
                   <>
                     <div>
@@ -251,7 +255,7 @@ export function BackupTable({
                   <span className="text-muted-foreground">—</span>
                 )}
               </TableCell>
-              <TableCell className="text-right whitespace-nowrap tabular-nums">
+              <TableCell className="hidden text-right whitespace-nowrap tabular-nums lg:table-cell">
                 {ok ? (
                   <>
                     <div>{b.files_count?.toLocaleString() ?? "—"} files</div>
@@ -263,7 +267,7 @@ export function BackupTable({
                   <span className="text-muted-foreground">—</span>
                 )}
               </TableCell>
-              <TableCell className="whitespace-nowrap">
+              <TableCell className="hidden whitespace-nowrap md:table-cell">
                 {ok ? (
                   <div className="grid justify-items-start gap-1">
                     <ConsistencyBadge consistent={b.consistent} />

@@ -165,7 +165,7 @@ export default function ServersPage() {
   );
 
   return (
-    <div className="grid gap-4">
+    <div className="grid min-w-0 grid-cols-1 gap-4">
       <PageHeader
         className="pb-0"
         title={archived ? "Archived servers" : "Servers"}

@@ -110,7 +110,7 @@ export function UsersTab({ users, roles, me }: { users: PanelUser[]; roles: Role
                 <TableHead className="text-xs text-muted-foreground">User</TableHead>
                 <TableHead className="hidden text-xs text-muted-foreground md:table-cell">Email</TableHead>
                 <TableHead className="text-xs text-muted-foreground">Global role</TableHead>
-                <TableHead className="text-xs text-muted-foreground">Status</TableHead>
+                <TableHead className="hidden text-xs text-muted-foreground sm:table-cell">Status</TableHead>
                 <TableHead className="hidden text-xs text-muted-foreground sm:table-cell">Last sign-in</TableHead>
                 <TableHead className="w-10">
                   <span className="sr-only">Actions</span>
@@ -203,6 +203,28 @@ function UserRow({
 }) {
   const isSelf = u.id === me.id;
   const name = fullName(u);
+  const statusEl = (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {u.is_active ? (
+        <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
+          <span className="size-2 rounded-full bg-emerald-500" aria-hidden /> Enabled
+        </span>
+      ) : (
+        <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="size-2 rounded-full bg-zinc-400" aria-hidden /> Disabled
+        </span>
+      )}
+      {u.must_change_password && (
+        <Badge
+          variant="outline"
+          className="border-amber-500/40 text-amber-700 dark:text-amber-300"
+          title="Will be asked to choose a new password"
+        >
+          <KeyRound /> Password change pending
+        </Badge>
+      )}
+    </div>
+  );
   return (
     <TableRow className={cn(!u.is_active && "text-muted-foreground")}>
       <TableCell>
@@ -227,6 +249,7 @@ function UserRow({
             </div>
             {name && <div className="max-w-48 truncate text-xs text-muted-foreground">{name}</div>}
             {u.email && <div className="max-w-48 truncate text-xs text-muted-foreground md:hidden">{u.email}</div>}
+            <div className="mt-1 sm:hidden">{statusEl}</div>
           </div>
         </div>
       </TableCell>
@@ -244,28 +267,7 @@ function UserRow({
           </span>
         )}
       </TableCell>
-      <TableCell>
-        <div className="flex flex-wrap items-center gap-1.5">
-          {u.is_active ? (
-            <span className="inline-flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-300">
-              <span className="size-2 rounded-full bg-emerald-500" aria-hidden /> Enabled
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="size-2 rounded-full bg-zinc-400" aria-hidden /> Disabled
-            </span>
-          )}
-          {u.must_change_password && (
-            <Badge
-              variant="outline"
-              className="border-amber-500/40 text-amber-700 dark:text-amber-300"
-              title="Will be asked to choose a new password"
-            >
-              <KeyRound /> Password change pending
-            </Badge>
-          )}
-        </div>
-      </TableCell>
+      <TableCell className="hidden sm:table-cell">{statusEl}</TableCell>
       <TableCell className="hidden text-xs sm:table-cell" title={u.last_login ? formatDateTime(u.last_login) : undefined}>
         {u.last_login ? relativeTime(u.last_login) : <span className="text-muted-foreground">Never</span>}
       </TableCell>

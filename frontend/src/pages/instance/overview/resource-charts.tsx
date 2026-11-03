@@ -151,7 +151,7 @@ function SparkArea({
             minTickGap={48}
           />
           <YAxis
-            width={52}
+            width={60}
             domain={[0, yMax]}
             ticks={ticks}
             tickFormatter={yTick}

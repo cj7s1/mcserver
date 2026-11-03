@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from django.contrib.auth import authenticate, login, logout, password_validation, update_session_auth_hash
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
@@ -133,6 +134,14 @@ class MeView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+def _validate_new_password(password: str, user: User) -> None:
+    """Run Django's password validators, reporting failures as a field error (not a 500)."""
+    try:
+        password_validation.validate_password(password, user)
+    except DjangoValidationError as exc:
+        raise ValidationError({"new_password": list(exc.messages)}) from exc
+
+
 class PasswordChangeView(APIView):
     @extend_schema(request=PasswordChangeSerializer, responses={204: None})
     def post(self, request):  # type: ignore[no-untyped-def]
@@ -141,7 +150,7 @@ class PasswordChangeView(APIView):
         user = request.user
         if not user.check_password(ser.validated_data["old_password"]):
             raise ValidationError({"old_password": ["Current password is incorrect"]})
-        password_validation.validate_password(ser.validated_data["new_password"], user)
+        _validate_new_password(ser.validated_data["new_password"], user)
         user.set_password(ser.validated_data["new_password"])
         user.must_change_password = False
         user.save(update_fields=["password", "must_change_password"])
@@ -169,7 +178,7 @@ class PasswordResetView(APIView):
         )
         if token is None or not token.is_valid:
             raise ApiError("This reset link is invalid or has expired", code="invalid_token", status_code=400)
-        password_validation.validate_password(ser.validated_data["new_password"], token.user)
+        _validate_new_password(ser.validated_data["new_password"], token.user)
         user = token.user
         user.set_password(ser.validated_data["new_password"])
         user.must_change_password = False

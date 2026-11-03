@@ -8,6 +8,22 @@ export function wsUrl(path: string): string {
   return `${proto}//${window.location.host}${path}`;
 }
 
+/**
+ * Close a socket without the browser's "closed before the connection is established"
+ * warning (React StrictMode mounts effects twice in development): a socket that is still
+ * connecting is closed as soon as it opens instead.
+ */
+export function closeSocket(sock: WebSocket | null | undefined): void {
+  if (!sock) return;
+  if (sock.readyState === WebSocket.CONNECTING) {
+    sock.onmessage = null;
+    sock.onerror = null;
+    sock.onopen = () => sock.close();
+  } else if (sock.readyState === WebSocket.OPEN) {
+    sock.close();
+  }
+}
+
 export function useLiveEvents(enabled: boolean): boolean {
   const qc = useQueryClient();
   const [connected, setConnected] = useState(false);
@@ -57,7 +73,7 @@ export function useLiveEvents(enabled: boolean): boolean {
     return () => {
       life.closed = true;
       if (timer) clearTimeout(timer);
-      ws?.close();
+      closeSocket(ws);
     };
   }, [enabled, qc]);
 

@@ -6,6 +6,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.errors import ApiError
+from apps.core.models import SystemSetting
 
 from .providers import PROVIDERS, curseforge_key, get_provider
 
@@ -176,7 +177,7 @@ class InstanceModpackUpdateView(APIView):
             user=request.user,
             params={
                 "version_id": version_id,
-                "backup": bool(request.data.get("backup", True)),
+                "backup": bool(request.data.get("backup", SystemSetting.get("pre_update_backup"))),
                 "allow_minecraft_change": bool(request.data.get("allow_minecraft_change", False)),
                 "start": bool(request.data.get("start", False)),
             },

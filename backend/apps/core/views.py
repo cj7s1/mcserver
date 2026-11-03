@@ -141,6 +141,19 @@ class PortsView(APIView):
         if node is None:
             raise ApiError("Unknown node", code="not_found", status_code=404)
         used = ports_in_use(node)
+        # Only reveal names of servers the user can see; others are just "in use".
+        from apps.core.permissions import visible_instances
+        from apps.instances.models import Instance
+
+        visible = {i.name for i in visible_instances(request.user, Instance.objects.filter(node=node)).only("name")}
+
+        def describe(desc: str) -> str:
+            if desc.startswith("server '"):
+                name = desc[len("server '") :].split("'", 1)[0]
+                return desc if name in visible else "another server"
+            return desc if request.user.has_panel_perm("system.nodes") else "another program on the host"
+
+        used = {p: describe(d) for p, d in used.items()}
         try:
             suggestion = allocate_port(node)
         except ApiError:

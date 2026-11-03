@@ -857,7 +857,7 @@ class SoftwareUpdateView(APIView):
                 "minecraft_version": mc,
                 "loader_version": loader,
                 "java_version": int(java),
-                "backup": data.get("backup", True) is not False,
+                "backup": bool(data.get("backup", SystemSetting.get("pre_update_backup"))),
                 "start": bool(data.get("start")),
             },
         )

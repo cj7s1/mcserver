@@ -10,7 +10,7 @@
  * drops us does not cause a tight loop.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { wsUrl } from "@/lib/events";
+import { closeSocket, wsUrl } from "@/lib/events";
 
 export type ConsoleServerMessage =
   | { type: "hello"; can_command: boolean }
@@ -131,7 +131,7 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
       clearTimeout(retryTimer);
       clearTimeout(healthyTimer);
       reconnectRef.current = () => {};
-      ws?.close();
+      closeSocket(ws);
       wsRef.current = null;
     };
   }, [instanceId]);
