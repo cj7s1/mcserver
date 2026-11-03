@@ -306,3 +306,81 @@ class BackupRestorePathView(APIView):
         )
         audit.record("backup.restore_path", request=request, instance=instance, target=backup, details={"path": path})
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+SNAPSHOT_NAME = r"^\d{8}T\d{6}Z(-[a-z0-9-]{1,40})?$"
+
+
+class SnapshotListView(APIView):
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from apps.nodes.client import AgentClient
+
+        instance = get_instance_for(request.user, pk, "instance.backup")
+        return Response(AgentClient(instance.node).snapshots(instance.id))
+
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.backup")
+        label = str(request.data.get("label") or "")[:120]
+        consistency = request.data.get("consistency", "auto")
+        if consistency not in ("auto", "require", "none"):
+            raise ApiError("consistency must be auto, require or none", code="invalid_consistency")
+        job = enqueue(
+            "snapshot_create",
+            title=f"Snapshot {instance.name}",
+            instance=instance,
+            user=request.user,
+            params={"label": label, "consistency": consistency, "kind": "manual"},
+        )
+        audit.record("snapshot.create", request=request, instance=instance, target=instance, details={"label": label})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class SnapshotConvertView(APIView):
+    @extend_schema(request=None, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        job = enqueue("snapshot_convert", title=f"Enable snapshots for {instance.name}", instance=instance, user=request.user)
+        audit.record("snapshot.convert", request=request, instance=instance, target=instance)
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class SnapshotDetailView(APIView):
+    def _check(self, name: str) -> str:
+        import re
+
+        if not re.match(SNAPSHOT_NAME, name):
+            raise ApiError("Invalid snapshot name", code="invalid_snapshot")
+        return name
+
+    @extend_schema(responses={202: JobSerializer})
+    def delete(self, request: Request, pk: str, name: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        job = enqueue(
+            "snapshot_delete",
+            title=f"Delete snapshot {self._check(name)}",
+            instance=instance,
+            user=request.user,
+            params={"name": name},
+        )
+        audit.record("snapshot.delete", request=request, instance=instance, target=instance, details={"name": name})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str, name: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        if request.data.get("confirm") is not True:
+            raise ApiError(
+                "Rolling back replaces the current server files with the snapshot. Confirm to continue.",
+                code="confirmation_required",
+            )
+        job = enqueue(
+            "snapshot_restore",
+            title=f"Roll back to snapshot {self._check(name)}",
+            instance=instance,
+            user=request.user,
+            params={"name": name},
+        )
+        audit.record("snapshot.restore", request=request, instance=instance, target=instance, details={"name": name})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)

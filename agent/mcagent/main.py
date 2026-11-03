@@ -48,6 +48,7 @@ from .schemas import (
     RenameRequest,
     RestorePathRequest,
     RestoreRequest,
+    SnapshotRequest,
     StopRequest,
     WriteTextRequest,
 )
@@ -154,9 +155,11 @@ async def prepare_instance(
     """Create the instance directory and write initial files that do not exist yet."""
 
     def _do() -> dict[str, Any]:
+        from .snapshots import ensure_instance_dir
+
         path = docker_ops.instance_dir(settings, instance_id)
         created = not path.exists()
-        path.mkdir(parents=True, exist_ok=True)
+        ensure_instance_dir(settings, path)
         with contextlib.suppress(PermissionError):
             os.chown(path, settings.runtime_uid, settings.runtime_gid)
         root = _root(settings, instance_id)
@@ -188,8 +191,10 @@ async def apply_spec(
             docker_ops.pull_image(image, lambda p, m: op.update(0.05 + p * 0.8, m))
         elif body.pull == "never" and not docker_ops.image_present(image):
             raise AgentError(f"Image {image} is not present and pulling is disabled", "image_missing", 409)
+        from .snapshots import ensure_instance_dir
+
         path = docker_ops.instance_dir(settings, instance_id)
-        path.mkdir(parents=True, exist_ok=True)
+        ensure_instance_dir(settings, path)
         with contextlib.suppress(PermissionError):
             os.chown(path, settings.runtime_uid, settings.runtime_gid)
         existing = docker_ops.get_container(instance_id)
@@ -605,9 +610,16 @@ async def files_hashes(
             if entry.type != "file":
                 continue
             h = hashlib.new(algorithm)
-            with root.open_read(entry.path) as (fh, _size):
-                while chunk := fh.read(1024 * 1024):
-                    h.update(chunk)
+            try:
+                with root.open_read(entry.path) as (fh, _size):
+                    while chunk := fh.read(1024 * 1024):
+                        h.update(chunk)
+            except PathError as exc:
+                # removed or replaced (e.g. by a symlink) after listing: skip just this entry,
+                # otherwise the outer not_found handler would report the whole folder as empty
+                if exc.code in ("not_found", "symlink", "not_a_file"):
+                    continue
+                raise
             out.append({**entry.as_dict(), "hash": h.hexdigest()})
         return out
 
@@ -897,6 +909,117 @@ async def backup_restore_path(
             shutil.rmtree(staging, ignore_errors=True)
 
     op = registry.start("restore", [instance_id], _do)
+    return {"operation": op.as_dict()}
+
+
+def _coordinated_save(
+    settings: Settings, instance_id: UUID, consistency: str, op: Operation
+) -> tuple[bool, list[str]]:
+    """save-off + save-all flush on a running server. Returns (paused, warnings)."""
+    warnings: list[str] = []
+    status = docker_ops.status(instance_id)
+    if not status.get("running") or consistency == "none":
+        return False, warnings
+    try:
+        host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
+        op.update(0.05, "Pausing world saving (save-off)")
+        asyncio.run(run_command(host, port, password, "save-off", timeout=30))
+        op.update(0.1, "Flushing world to disk (save-all flush)")
+        asyncio.run(run_command(host, port, password, "save-all flush", timeout=300))
+        time.sleep(1)
+        return True, warnings
+    except (RconError, AgentError) as exc:
+        if consistency == "require":
+            raise AgentError(f"Could not coordinate world saving: {exc}", "consistency_failed", 409) from exc
+        warnings.append(f"Could not pause world saving ({exc}); snapshot may be inconsistent")
+        return False, warnings
+
+
+def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -> None:
+    for attempt in range(5):
+        try:
+            host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
+            asyncio.run(run_command(host, port, password, "save-on", timeout=30))
+            return
+        except (RconError, AgentError) as exc:
+            if attempt == 4:
+                warnings.append(f"FAILED to re-enable world saving (save-on): {exc}")
+            time.sleep(2)
+
+
+@app.get("/v1/instances/{instance_id}/snapshots", dependencies=[Depends(require_token)])
+async def list_snapshots(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    from .snapshots import BtrfsSnapshots
+
+    snaps = BtrfsSnapshots(settings, instance_id)
+    cap = await run_in_threadpool(snaps.capability)
+    items = await run_in_threadpool(snaps.list) if cap.get("instance_is_subvolume") else []
+    return {"capability": cap, "snapshots": items}
+
+
+@app.post("/v1/instances/{instance_id}/snapshots", dependencies=[Depends(require_token)])
+async def create_snapshot(
+    instance_id: UUID, body: SnapshotRequest, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    from .snapshots import BtrfsSnapshots
+
+    snaps = BtrfsSnapshots(settings, instance_id)
+    await run_in_threadpool(snaps.require_ready)
+
+    def _do(op: Operation) -> dict[str, Any]:
+        paused, warnings = _coordinated_save(settings, instance_id, body.consistency, op)
+        try:
+            op.update(0.5, "Creating snapshot")
+            info = snaps.create(
+                body.label,
+                {
+                    "consistent": paused or not docker_ops.status(instance_id).get("running"),
+                    "kind": body.kind,
+                },
+            )
+        finally:
+            if paused:
+                _resume_saving(settings, instance_id, warnings)
+        info["warnings"] = warnings
+        return info
+
+    op = registry.start("snapshot", [instance_id], _do)
+    return {"operation": op.as_dict()}
+
+
+@app.delete("/v1/instances/{instance_id}/snapshots/{name}", dependencies=[Depends(require_token)])
+async def delete_snapshot(
+    instance_id: UUID, name: str, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    from .snapshots import BtrfsSnapshots
+
+    await run_in_threadpool(BtrfsSnapshots(settings, instance_id).delete, name)
+    return {"deleted": name}
+
+
+@app.post("/v1/instances/{instance_id}/snapshots/{name}/restore", dependencies=[Depends(require_token)])
+async def restore_snapshot(
+    instance_id: UUID, name: str, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    from .snapshots import BtrfsSnapshots
+
+    if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
+        raise AgentError("Stop the server before rolling back to a snapshot", "must_stop", 409)
+    snaps = BtrfsSnapshots(settings, instance_id)
+    op = registry.start("restore", [instance_id], lambda _op: snaps.restore(name))
+    return {"operation": op.as_dict()}
+
+
+@app.post("/v1/instances/{instance_id}/snapshots/convert", dependencies=[Depends(require_token)])
+async def convert_to_subvolume(
+    instance_id: UUID, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    from .snapshots import BtrfsSnapshots
+
+    if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
+        raise AgentError("Stop the server before enabling snapshots", "must_stop", 409)
+    snaps = BtrfsSnapshots(settings, instance_id)
+    op = registry.start("import", [instance_id], lambda _op: snaps.convert())
     return {"operation": op.as_dict()}
 
 

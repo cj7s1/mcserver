@@ -176,7 +176,7 @@ class Instance(models.Model):
 class Schedule(models.Model):
     """Cron-based automation (restart, backup, command, start/stop)."""
 
-    ACTIONS = ("restart", "start", "stop", "backup", "command")
+    ACTIONS = ("restart", "start", "stop", "backup", "snapshot", "command")
 
     instance = models.ForeignKey(Instance, on_delete=models.CASCADE, related_name="schedules")
     name = models.CharField(max_length=80)

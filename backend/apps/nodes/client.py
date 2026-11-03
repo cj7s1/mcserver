@@ -314,6 +314,26 @@ class AgentClient:
             "operation"
         ]
 
+    # -- snapshots -------------------------------------------------------------------------
+    def snapshots(self, instance_id: UUID) -> dict[str, Any]:
+        return self._json("GET", f"/v1/instances/{instance_id}/snapshots")
+
+    def create_snapshot(
+        self, instance_id: UUID, label: str = "", consistency: str = "auto", kind: str = "manual"
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST", f"/v1/instances/{instance_id}/snapshots", json={"label": label, "consistency": consistency, "kind": kind}
+        )["operation"]
+
+    def delete_snapshot(self, instance_id: UUID, name: str) -> dict[str, Any]:
+        return self._json("DELETE", f"/v1/instances/{instance_id}/snapshots/{name}")
+
+    def restore_snapshot(self, instance_id: UUID, name: str) -> dict[str, Any]:
+        return self._json("POST", f"/v1/instances/{instance_id}/snapshots/{name}/restore")["operation"]
+
+    def convert_snapshots(self, instance_id: UUID) -> dict[str, Any]:
+        return self._json("POST", f"/v1/instances/{instance_id}/snapshots/convert")["operation"]
+
     # -- operations ------------------------------------------------------------------------
     def operation(self, op_id: str) -> dict[str, Any]:
         return self._json("GET", f"/v1/operations/{op_id}")

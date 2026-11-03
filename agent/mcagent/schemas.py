@@ -180,3 +180,9 @@ class ExtractRequest(BaseModel):
 
 class RestorePathRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
+
+
+class SnapshotRequest(BaseModel):
+    label: str = Field(default="", max_length=120)
+    consistency: Literal["auto", "require", "none"] = "auto"
+    kind: Literal["manual", "scheduled", "pre_restore", "pre_update"] = "manual"

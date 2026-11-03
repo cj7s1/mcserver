@@ -42,3 +42,32 @@ class JobDetailView(APIView):
         if job is None:
             raise ApiError("Job not found", code="not_found", status_code=404)
         return Response(JobSerializer(job).data)
+
+
+class JobAbandonView(APIView):
+    """Mark a stuck queued/running job as failed so the server's operation lock is released.
+
+    This does not stop work the agent may still be doing; check the server afterwards.
+    """
+
+    @extend_schema(request=None, responses={200: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        from apps.audit import service as audit
+        from apps.core.permissions import require
+
+        from .models import ACTIVE_STATUSES, JobStatus
+        from .runner import finish
+
+        job = visible_jobs(request.user).filter(pk=pk).first()
+        if job is None:
+            raise ApiError("Job not found", code="not_found", status_code=404)
+        if job.instance_id:
+            require(request.user, "instance.control", job.instance)
+        else:
+            require(request.user, "system.settings")
+        if job.status not in ACTIVE_STATUSES:
+            raise ApiError("Only queued or running jobs can be abandoned", code="not_active", status_code=409)
+        finish(job, JobStatus.FAILED, error=f"Marked as failed by {request.user.username}", error_code="abandoned")
+        audit.record("job.abandoned", request=request, instance=job.instance, target_type="job", target_id=str(job.id),
+                     details={"kind": job.kind})
+        return Response(JobSerializer(job).data)

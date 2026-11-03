@@ -73,6 +73,14 @@ def execute(sched: Schedule) -> str:
             },
         )
         return f"Queued job {job.id}"
+    if sched.action == "snapshot":
+        job = enqueue(
+            "snapshot_create",
+            title=f"Scheduled snapshot: {sched.name}",
+            instance=inst,
+            params={"label": f"scheduled {sched.name}"[:120], "kind": "scheduled", "keep": sched.payload.get("keep", 24)},
+        )
+        return f"Queued job {job.id}"
     if sched.action == "command":
         from apps.nodes.client import AgentClient
 

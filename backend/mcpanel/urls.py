@@ -7,6 +7,7 @@ from apps.accounts import views as accounts
 from apps.audit import views as audit
 from apps.backups import views as backups
 from apps.catalog import views as catalog
+from apps.content import views as content
 from apps.core import views as core
 from apps.instances import views as instances
 from apps.jobs import views as jobs
@@ -51,6 +52,9 @@ instance_patterns = [
     path("<uuid:pk>/files/<str:op>", instances.FilesOpView.as_view()),
     path("<uuid:pk>/schedules", instances.ScheduleListView.as_view()),
     path("<uuid:pk>/schedules/<int:sid>", instances.ScheduleDetailView.as_view()),
+    path("<uuid:pk>/snapshots", backups.SnapshotListView.as_view()),
+    path("<uuid:pk>/snapshots/convert", backups.SnapshotConvertView.as_view()),
+    path("<uuid:pk>/snapshots/<str:name>", backups.SnapshotDetailView.as_view()),
     path("<uuid:pk>/backups", backups.BackupListView.as_view()),
     path("<uuid:pk>/backups/policy", backups.BackupPolicyView.as_view()),
     path("<uuid:pk>/backups/verify", backups.BackupVerifyView.as_view()),
@@ -60,6 +64,8 @@ instance_patterns = [
     path("<uuid:pk>/backups/<uuid:bid>/files", backups.BackupBrowseView.as_view()),
     path("<uuid:pk>/backups/<uuid:bid>/download", backups.BackupFileDownloadView.as_view()),
     path("<uuid:pk>/backups/<uuid:bid>/restore-path", backups.BackupRestorePathView.as_view()),
+    # without the slash GET .../content would fall through to the instance-action route below
+    path("<uuid:pk>/content", content.ContentListView.as_view()),
     path("<uuid:pk>/content/", include("apps.content.urls")),
     path("<uuid:pk>/modpack", modpacks.InstanceModpackView.as_view()),
     path("<uuid:pk>/modpack/plan/<str:version_id>", modpacks.InstanceModpackPlanView.as_view()),
@@ -80,6 +86,7 @@ api_patterns = [
     path("instances/", include(instance_patterns)),
     path("jobs", jobs.JobListView.as_view()),
     path("jobs/<uuid:pk>", jobs.JobDetailView.as_view()),
+    path("jobs/<uuid:pk>/abandon", jobs.JobAbandonView.as_view()),
     path("audit", audit.AuditListView.as_view()),
     path("catalog/server-types", catalog.ServerTypesView.as_view()),
     path("catalog/versions", catalog.GameVersionsView.as_view()),
