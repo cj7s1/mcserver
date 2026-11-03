@@ -11,6 +11,7 @@ import { loaderLabel, providerLabel } from "../modpacks/modpackMeta";
 import { SummaryList } from "./WizardBits";
 import {
   containerLimitMb,
+  isModded,
   type Derived,
   envObject,
   type FieldErrors,
@@ -150,7 +151,7 @@ export function StepReview({
   const props = serverProperties(state);
   const env = envObject(state.env);
   const limit = Number.isFinite(d.memoryMb)
-    ? containerLimitMb(d.memoryMb)
+    ? containerLimitMb(d.memoryMb, isModded(state, d))
     : null;
   const warnings: string[] = [...(d.resolved?.warnings ?? [])];
   if (!state.onlineMode)

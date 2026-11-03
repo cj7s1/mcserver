@@ -1,5 +1,9 @@
 # MCPanel
 
+> **New here?** Follow the illustrated [Unraid quickstart](docs/QUICKSTART-UNRAID.md): install, then a
+> Better MC modpack server your friends can join.
+
+
 A self-hosted Minecraft **Java Edition** server manager for a single Docker host. It's designed for
 Unraid first and also runs on any Linux Docker host. It combines Prism-Launcher-style instance management
 with game-panel administration, and it is built around **easy modpack servers**: search for *Better MC*,

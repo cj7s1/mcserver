@@ -11,7 +11,13 @@ import { formatBytes, formatMemoryMb } from "@/lib/format";
 import { useSystemInfo } from "@/lib/queries";
 import { usePorts } from "../modpacks/modpackQueries";
 import { Advanced, describedBy, Field } from "./WizardBits";
-import { containerLimitMb, type Derived, type FieldErrors, type WizardState } from "./wizardModel";
+import {
+  containerLimitMb,
+  isModded,
+  type Derived,
+  type FieldErrors,
+  type WizardState,
+} from "./wizardModel";
 
 type Patch = (p: Partial<WizardState>) => void;
 
@@ -53,7 +59,7 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
     Number.isFinite(d.memoryMb) ? d.memoryMb : 0,
   );
   const mem = d.memoryMb;
-  const limit = Number.isFinite(mem) ? containerLimitMb(mem) : null;
+  const limit = Number.isFinite(mem) ? containerLimitMb(mem, isModded(state, d)) : null;
   const overHost = limit !== null && hostMb !== null && limit > hostMb;
   const overPolicy = limit !== null && policyMax !== null && limit > policyMax;
 
@@ -172,7 +178,7 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
                 <span className="font-medium tabular-nums">{formatMemoryMb(limit)}</span>
               </div>
               <div className="text-muted-foreground">
-                heap + {formatMemoryMb(limit - mem)} overhead (max of 512 MB, 25%)
+                heap + {formatMemoryMb(limit - mem)} for the JVM itself ({isModded(state, d) ? "mods: 40%, at least 1.5 GB" : "30%, at least 768 MB"})
               </div>
               {hostBytes && (
                 <div className="sm:text-right">

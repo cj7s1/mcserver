@@ -218,8 +218,15 @@ export interface Derived {
   softwareSummary: string;
 }
 
-export function containerLimitMb(memoryMb: number): number {
-  return memoryMb + Math.max(512, Math.floor(memoryMb * 0.25));
+/** Container memory limit for a heap size; mirrors Instance.container_memory_mb in the backend
+ * (modded: heap + max(1536, 40%), others: heap + max(768, 30%) for off-heap memory). */
+export function containerLimitMb(memoryMb: number, modded: boolean): number {
+  return memoryMb + (modded ? Math.max(1536, Math.floor(memoryMb * 0.4)) : Math.max(768, Math.floor(memoryMb * 0.3)));
+}
+
+/** Whether the wizard selection runs mods (modded loaders and modpacks). */
+export function isModded(state: WizardState, d: Derived): boolean {
+  return d.isModpack || state.category === "mods";
 }
 
 // --- validation ---------------------------------------------------------------------

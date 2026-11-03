@@ -156,7 +156,12 @@ function useDerived(state: WizardState): Derived {
       : "";
     const suggestedName = (
       byUrl
-        ? cfSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+        ? cfSlug
+            .split("-")
+            .filter(Boolean)
+            // short words and words with digits are usually acronyms/editions: "better-mc-forge-bmc4" -> "Better MC Forge BMC4"
+            .map((w) => (w.length <= 3 || /\d/.test(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1)))
+            .join(" ")
         : isModpack
           ? (resolved?.name ?? state.projectHit?.title ?? "")
           : serverType && minecraftVersion

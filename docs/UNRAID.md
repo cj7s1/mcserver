@@ -1,5 +1,7 @@
 # Running MCPanel on Unraid
 
+> Step-by-step with screenshots: [QUICKSTART-UNRAID.md](QUICKSTART-UNRAID.md). This page is the reference.
+
 > **Validation status:** the Compose stack has been tested on a generic Linux Docker host, but **not
 > yet on real Unraid hardware**. The paths and settings below follow Unraid conventions. Please
 > report anything that differs.

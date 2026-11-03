@@ -31,3 +31,13 @@ describe("CurseForge by page URL (no API key)", () => {
     });
   });
 });
+
+describe("container memory limit", () => {
+  it("matches the backend formula", async () => {
+    const { containerLimitMb } = await import("./wizardModel");
+    expect(containerLimitMb(6144, true)).toBe(6144 + 2457); // mods: 40%
+    expect(containerLimitMb(2048, true)).toBe(2048 + 1536); // mods: at least 1.5 GB
+    expect(containerLimitMb(4096, false)).toBe(4096 + 1228); // others: 30%
+    expect(containerLimitMb(1024, false)).toBe(1024 + 768);
+  });
+});

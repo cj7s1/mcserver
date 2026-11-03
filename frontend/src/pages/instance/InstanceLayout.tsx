@@ -133,7 +133,9 @@ export function InstanceLayout() {
         {instance.restart_required && !instance.active_job && (
           <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
             <AlertTriangle className="size-4 shrink-0" />
-            Configuration changed. Restart the server to apply it (the container is recreated; world data is kept).
+            {instance.status === "stopped" || instance.status === "failed"
+              ? "Configuration changed. It is applied the next time the server starts (the container is recreated; world data is kept)."
+              : "Configuration changed. Restart the server to apply it (the container is recreated; world data is kept)."}
           </div>
         )}
         {instance.active_job && <JobProgress job={instance.active_job} className="mt-3" />}
