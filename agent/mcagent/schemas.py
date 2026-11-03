@@ -11,8 +11,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 IMAGE_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
-# Environment keys that the agent owns and refuses to let callers override.
-RESERVED_ENV = {"UID", "GID", "SERVER_PORT", "RCON_PORT", "ENABLE_RCON"}
+# Environment keys that the agent owns and refuses to let callers override. The RCON
+# password travels in ``rcon_password``; RCON_PASSWORD_FILE would silently replace it
+# (and break the agent's own RCON access, which reads RCON_PASSWORD from the container).
+RESERVED_ENV = {
+    "UID",
+    "GID",
+    "SERVER_PORT",
+    "RCON_PORT",
+    "ENABLE_RCON",
+    "RCON_PASSWORD",
+    "RCON_PASSWORD_FILE",
+}
 MAX_ENV_VALUE = 32 * 1024
 
 
@@ -166,3 +176,7 @@ class ExtractRequest(BaseModel):
     strip: Literal["auto", "none"] = "auto"
     overwrite: bool = False
     delete_archive: bool = False
+
+
+class RestorePathRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)

@@ -237,6 +237,72 @@ class Restic:
         proc = self.run(["stats", "--mode", "raw-data", "--json"], timeout=600)
         return json.loads(proc.stdout or "{}")
 
+    # -- browsing ----------------------------------------------------------------------
+    def _root_path(self, snap: dict[str, Any]) -> str:
+        paths = snap.get("paths") or []
+        if len(paths) != 1:
+            raise AgentError("Snapshot has an unexpected layout", "snapshot_layout", 500)
+        return paths[0].rstrip("/")
+
+    def ls(self, snapshot_id: str, rel_parts: list[str]) -> list[dict[str, Any]]:
+        """Direct children of a directory inside a snapshot (paths relative to the server folder)."""
+        snap = self.snapshot(snapshot_id)
+        base = self._root_path(snap)
+        target = "/".join([base, *rel_parts])
+        proc = self.run(["ls", "--json", snap["id"], target], timeout=600)
+        out = []
+        for line in proc.stdout.splitlines():
+            try:
+                node = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if node.get("struct_type") != "node" and "path" not in node:
+                continue
+            path = node.get("path", "")
+            if path == target or not path.startswith(base + "/"):
+                continue
+            rel = path[len(base) + 1 :]
+            if rel.count("/") != len(rel_parts):  # only direct children
+                continue
+            out.append(
+                {
+                    "name": node.get("name"),
+                    "path": rel,
+                    "type": {"dir": "directory"}.get(node.get("type"), node.get("type")),
+                    "size": node.get("size", 0),
+                    "modified": node.get("mtime"),
+                }
+            )
+        out.sort(key=lambda e: (e["type"] != "directory", (e["name"] or "").lower()))
+        return out
+
+    def dump(self, snapshot_id: str, rel_parts: list[str]) -> subprocess.Popen[bytes]:
+        """Stream a single file from a snapshot (caller reads stdout)."""
+        snap = self.snapshot(snapshot_id)
+        target = "/".join([self._root_path(snap), *rel_parts])
+        return subprocess.Popen(
+            [self.binary, "dump", snap["id"], target],
+            env=self._env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def restore_path(self, snapshot_id: str, rel_parts: list[str], staging: Path) -> Path:
+        """Restore one file/directory into ``staging``; returns the restored item path."""
+        if not rel_parts:
+            raise AgentError("Choose a file or folder to restore", "invalid_path", 400)
+        snap = self.snapshot(snapshot_id)
+        parent = "/".join([self._root_path(snap), *rel_parts[:-1]])
+        staging.mkdir(parents=True, exist_ok=False)
+        self.run(
+            ["restore", f"{snap['id']}:{parent}", "--target", str(staging), "--include", f"/{rel_parts[-1]}"],
+            timeout=6 * 3600,
+        )
+        restored = staging / rel_parts[-1]
+        if not restored.exists() and not restored.is_symlink():
+            raise AgentError("That path does not exist in the backup", "not_found", 404)
+        return restored
+
     def unlock(self) -> None:
         if self.initialized():
             self.run(["unlock"], timeout=60)

@@ -252,3 +252,57 @@ class BackupVerifyView(APIView):
             params={"read_data_subset": subset},
         )
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class BackupBrowseView(APIView):
+    """List files inside a backup snapshot."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str, bid: str) -> Response:
+        from apps.nodes.client import AgentClient
+
+        instance, backup = BackupDetailView()._get(request, pk, bid, "instance.backup")
+        if not backup.snapshot_id:
+            raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
+        require(request.user, "instance.files.read", instance)
+        return Response(
+            AgentClient(instance.node).backup_files(instance.id, backup.snapshot_id, request.query_params.get("path", ""))
+        )
+
+
+class BackupFileDownloadView(APIView):
+    def get(self, request: Request, pk: str, bid: str):  # type: ignore[no-untyped-def]
+        from django.http import StreamingHttpResponse
+
+        from apps.nodes.client import AgentClient
+
+        instance, backup = BackupDetailView()._get(request, pk, bid, "instance.backup")
+        require(request.user, "instance.files.read", instance)
+        path = request.query_params.get("path", "")
+        chunks, _resp = AgentClient(instance.node).backup_download(instance.id, backup.snapshot_id, path)
+        filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
+        response = StreamingHttpResponse(chunks, content_type="application/octet-stream")
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response["X-Content-Type-Options"] = "nosniff"
+        audit.record("backup.file_download", request=request, instance=instance, target=backup, details={"path": path})
+        return response
+
+
+class BackupRestorePathView(APIView):
+    @extend_schema(request=dict, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str, bid: str) -> Response:
+        instance, backup = BackupDetailView()._get(request, pk, bid, "instance.restore")
+        path = str(request.data.get("path") or "").strip("/")
+        if not path:
+            raise ApiError("Choose a file or folder to restore", code="invalid_path")
+        if request.data.get("confirm") is not True:
+            raise ApiError(f"Restoring replaces the current '{path}'. Confirm to continue.", code="confirmation_required")
+        job = enqueue(
+            "restore_path",
+            title=f"Restore {path} from '{backup.name}'",
+            instance=instance,
+            user=request.user,
+            params={"backup_id": str(backup.id), "path": path},
+        )
+        audit.record("backup.restore_path", request=request, instance=instance, target=backup, details={"path": path})
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)

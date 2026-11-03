@@ -228,13 +228,26 @@ class AgentClient:
             timeout=900,
         )
 
-    def extract(self, instance_id: UUID, path: str, destination: str = "", *, strip: str = "auto",
-                overwrite: bool = False, delete_archive: bool = False) -> dict[str, Any]:
+    def extract(
+        self,
+        instance_id: UUID,
+        path: str,
+        destination: str = "",
+        *,
+        strip: str = "auto",
+        overwrite: bool = False,
+        delete_archive: bool = False,
+    ) -> dict[str, Any]:
         return self._json(
             "POST",
             f"/v1/instances/{instance_id}/files/extract",
-            json={"path": path, "destination": destination, "strip": strip, "overwrite": overwrite,
-                  "delete_archive": delete_archive},
+            json={
+                "path": path,
+                "destination": destination,
+                "strip": strip,
+                "overwrite": overwrite,
+                "delete_archive": delete_archive,
+            },
         )["operation"]
 
     # -- backups -------------------------------------------------------------------------
@@ -264,6 +277,42 @@ class AgentClient:
     def check_backups(self, instance_id: UUID, read_data_subset: str | None = None) -> dict[str, Any]:
         params = {"read_data_subset": read_data_subset} if read_data_subset else {}
         return self._json("POST", f"/v1/instances/{instance_id}/backups/check", params=params)["operation"]
+
+    def backup_files(self, instance_id: UUID, snapshot_id: str, path: str = "") -> dict[str, Any]:
+        return self._json("GET", f"/v1/instances/{instance_id}/backups/{snapshot_id}/files", params={"path": path}, timeout=600)
+
+    def backup_download(self, instance_id: UUID, snapshot_id: str, path: str) -> tuple[Iterator[bytes], httpx.Response]:
+        client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=600))
+        req = client.build_request(
+            "GET", f"{self.base}/v1/instances/{instance_id}/backups/{snapshot_id}/download", params={"path": path}
+        )
+        try:
+            resp = client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            client.close()
+            raise AgentUnavailable(f"Cannot reach the node agent: {exc}") from exc
+        if resp.status_code >= 400:
+            resp.read()
+            client.close()
+            try:
+                err = resp.json().get("error", {})
+            except ValueError:
+                err = {}
+            raise AgentError(err.get("message", "Download failed"), err.get("code", "agent_error"), resp.status_code)
+
+        def _iter() -> Iterator[bytes]:
+            try:
+                yield from resp.iter_bytes(256 * 1024)
+            finally:
+                resp.close()
+                client.close()
+
+        return _iter(), resp
+
+    def backup_restore_path(self, instance_id: UUID, snapshot_id: str, path: str) -> dict[str, Any]:
+        return self._json("POST", f"/v1/instances/{instance_id}/backups/{snapshot_id}/restore-path", json={"path": path})[
+            "operation"
+        ]
 
     # -- operations ------------------------------------------------------------------------
     def operation(self, op_id: str) -> dict[str, Any]:

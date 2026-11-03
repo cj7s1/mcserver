@@ -21,6 +21,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Path as PathParam
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
@@ -45,6 +46,7 @@ from .schemas import (
     MkdirRequest,
     PrepareInstanceRequest,
     RenameRequest,
+    RestorePathRequest,
     RestoreRequest,
     StopRequest,
     WriteTextRequest,
@@ -631,7 +633,9 @@ async def files_fetch(
 
 
 @app.post("/v1/instances/{instance_id}/files/extract", dependencies=[Depends(require_token)])
-async def files_extract(instance_id: UUID, body: ExtractRequest, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+async def files_extract(
+    instance_id: UUID, body: ExtractRequest, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     """Safely extract an archive that is already inside the instance (import server/world/server pack)."""
     from .archive import extract
 
@@ -645,8 +649,14 @@ async def files_extract(instance_id: UUID, body: ExtractRequest, settings: Setti
 
     def _do(op: Operation) -> dict[str, Any]:
         op.update(0.01, f"Extracting {body.path}")
-        result = extract(root, body.path, body.destination, strip=body.strip, overwrite=body.overwrite,
-                         progress=lambda p, m: op.update(p * 0.98, m))
+        result = extract(
+            root,
+            body.path,
+            body.destination,
+            strip=body.strip,
+            overwrite=body.overwrite,
+            progress=lambda p, m: op.update(p * 0.98, m),
+        )
         if body.delete_archive:
             root.delete(body.path)
         return result
@@ -781,6 +791,113 @@ async def check_backups(
 @app.get("/v1/instances/{instance_id}/backups/stats", dependencies=[Depends(require_token)])
 async def backup_stats(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return await run_in_threadpool(Restic(settings, instance_id).stats)
+
+
+@app.get("/v1/instances/{instance_id}/backups/{snapshot_id}/files", dependencies=[Depends(require_token)])
+async def backup_files(
+    instance_id: UUID,
+    snapshot_id: str = PathParam(pattern=r"^[a-f0-9]{8,64}$"),
+    path: str = "",
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    from .safefs import split_path
+
+    parts = split_path(path)
+    entries = await run_in_threadpool(Restic(settings, instance_id).ls, snapshot_id, parts)
+    return {"path": "/".join(parts), "entries": entries}
+
+
+@app.get("/v1/instances/{instance_id}/backups/{snapshot_id}/download", dependencies=[Depends(require_token)])
+async def backup_download(
+    instance_id: UUID,
+    snapshot_id: str = PathParam(pattern=r"^[a-f0-9]{8,64}$"),
+    path: str = "",
+    settings: Settings = Depends(get_settings),
+) -> StreamingResponse:
+    from .safefs import split_path
+
+    parts = split_path(path)
+    if not parts:
+        raise AgentError("Choose a file", "invalid_path", 400)
+    proc = await run_in_threadpool(Restic(settings, instance_id).dump, snapshot_id, parts)
+
+    def _iter() -> Any:
+        assert proc.stdout is not None
+        try:
+            while chunk := proc.stdout.read(256 * 1024):
+                yield chunk
+        finally:
+            proc.stdout.close()
+            proc.wait(timeout=30)
+
+    return StreamingResponse(_iter(), media_type="application/octet-stream")
+
+
+@app.post(
+    "/v1/instances/{instance_id}/backups/{snapshot_id}/restore-path", dependencies=[Depends(require_token)]
+)
+async def backup_restore_path(
+    instance_id: UUID,
+    body: RestorePathRequest,
+    snapshot_id: str = PathParam(pattern=r"^[a-f0-9]{8,64}$"),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Restore a single file or folder from a snapshot over the current one (server must be stopped)."""
+    from .safefs import split_path
+
+    parts = split_path(body.path)
+    if not parts:
+        raise AgentError("Choose a file or folder (use a full restore for everything)", "invalid_path", 400)
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    if status.get("running"):
+        raise AgentError("Stop the server before restoring files into it", "must_stop", 409)
+    restic = Restic(settings, instance_id)
+    inst_dir = docker_ops.instance_dir(settings, instance_id)
+
+    def _do(op: Operation) -> dict[str, Any]:
+        staging = settings.staging_dir / f"restore-path-{instance_id}-{int(time.time())}"
+        try:
+            op.update(0.1, f"Restoring {body.path} from backup")
+            restored = restic.restore_path(snapshot_id, parts, staging)
+            # Ensure the parent exists inside the instance, using the confined API.
+            root = _root(settings, instance_id)
+            if len(parts) > 1:
+                root.mkdir("/".join(parts[:-1]), parents=True)
+            # The parent directory was created/validated through SafeRoot (no symlinks); move into it.
+            parent_fd = os.open(inst_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for comp in parts[:-1]:
+                    nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+                    os.close(parent_fd)
+                    parent_fd = nfd
+                name = parts[-1]
+                trash_name = None
+                try:
+                    os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    trash_name = f".mcpanel-old-{int(time.time())}-{name}"[:255]
+                    os.rename(name, trash_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
+                staging_fd = os.open(restored.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.rename(restored.name, name, src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
+                except OSError:
+                    if trash_name:
+                        os.rename(trash_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+                    raise
+                finally:
+                    os.close(staging_fd)
+                if trash_name:
+                    old = SafeRoot(inst_dir)
+                    old.delete("/".join([*parts[:-1], trash_name]), recursive=True)
+            finally:
+                os.close(parent_fd)
+            return {"restored": "/".join(parts)}
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
+    op = registry.start("restore", [instance_id], _do)
+    return {"operation": op.as_dict()}
 
 
 # --- operations ----------------------------------------------------------------------

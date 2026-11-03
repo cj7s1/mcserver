@@ -206,3 +206,19 @@ def verify_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     if not ok:
         raise ApiError("Integrity check FAILED: " + " | ".join(result.get("output", [])[-5:]), code="verify_failed")
     return {"ok": ok, "output": result.get("output", [])}
+
+
+@register("restore_path")
+def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Restore a single file or folder from a backup (server stopped first, restarted after)."""
+    instance = Instance.objects.select_related("node").get(pk=job.instance_id)
+    backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
+    client = AgentClient(instance.node)
+    was_running = ensure_stopped(instance, ctx)
+    ctx.progress(0.2, f"Restoring {job.params['path']} from '{backup.name}'", force=True)
+    op = client.backup_restore_path(instance.id, backup.snapshot_id, job.params["path"])
+    client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
+    if was_running:
+        ctx.progress(0.92, "Starting server")
+        client.start(instance.id)
+    return {"restored": job.params["path"], "backup": str(backup.id), "restarted": was_running}
