@@ -174,7 +174,8 @@ export function CreateRoleDialog({
               {template
                 ? `Copies ${grantable.length} permission${grantable.length === 1 ? "" : "s"} from ${template.name}.`
                 : "The role starts empty."}
-              {dropped > 0 && ` ${dropped} permission${dropped === 1 ? "" : "s"} you don't hold will be left out.`}
+              {dropped > 0 &&
+                ` ${dropped} permission${dropped === 1 ? "" : "s"} you can't grant (ones you don't hold, and user or settings administration, which only the owner grants) will be left out.`}
             </AdminHint>
           </div>
 

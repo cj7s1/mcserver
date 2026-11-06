@@ -89,10 +89,33 @@ export function useBackups(instanceId: string, busy: boolean) {
   });
 }
 
-export function usePorts(enabled = true) {
+/** Whether the backup lives in another node's repository (the server was moved since it was made). */
+export function onOtherNode(b: Pick<Backup, "on_current_node">): boolean {
+  return b.on_current_node === false;
+}
+
+/** Whether the backup can still be read: false when the node holding it was deleted. */
+export function backupReadable(b: Pick<Backup, "on_current_node" | "node_id">): boolean {
+  return !(onOtherNode(b) && b.node_id == null);
+}
+
+/** Why a backup on another node cannot be restored over this server. */
+export function otherNodeHint(b: Pick<Backup, "node_name" | "node_id">): string {
+  if (b.node_id == null)
+    return `This backup was stored on ${b.node_name ? `node “${b.node_name}”, which` : "a node that"} no longer exists; it can no longer be read.`;
+  const where = b.node_name ? `node “${b.node_name}”` : "another node";
+  return `Stored in the backup repository on ${where}: this server was moved since. It can be browsed, downloaded and restored as a new server (created on that node), but not restored over this server.`;
+}
+
+/**
+ * Ports in use on `node` (GET /system/ports?node=<id>): pages about an existing server pass that
+ * server's node, so a server on another node is checked against that node's ports, not the default
+ * node's. The key starts with ["system", "ports"], so invalidating that prefix refreshes every node.
+ */
+export function usePorts(node: number, enabled = true) {
   return useQuery({
-    queryKey: ["system", "ports"],
-    queryFn: () => api.get<PortsResponse>("/system/ports"),
+    queryKey: ["system", "ports", { node }],
+    queryFn: () => api.get<PortsResponse>("/system/ports", { node }),
     enabled,
     staleTime: 10_000,
   });

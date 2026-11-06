@@ -226,7 +226,11 @@ export function DangerTab({ instance, can }: TabProps) {
           {canConfigure && (
             <ActionRow
               title="Recreate container"
-              description="Removes the Docker container and creates it again from the current settings. Files and worlds are kept; a running server is restarted. Use this if the container is broken or out of sync."
+              description={
+                archived
+                  ? "Not available while the server is archived: it has no container. Unarchive it first; its container is recreated on the next start."
+                  : "Removes the Docker container and creates it again from the current settings. Files and worlds are kept; a running server is restarted. Use this if the container is broken or out of sync."
+              }
               action={
                 <ConfirmDialog
                   trigger={

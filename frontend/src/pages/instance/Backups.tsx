@@ -20,7 +20,7 @@ import { DeleteBackupDialog, RestoreAsNewDialog, RestoreDialog } from "./backups
 import { RetentionPolicyForm } from "./backups/RetentionPolicyForm";
 import { SnapshotsSection } from "./backups/SnapshotsSection";
 import { TrackedJobBanner } from "./backups/TrackedJobBanner";
-import { useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
+import { onOtherNode, useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
 import { isSnapshotJob } from "./backups/snapshot-utils";
 import { WorldSection } from "./backups/WorldSection";
 import { isWorldJob } from "./backups/world-utils";
@@ -295,7 +295,8 @@ export default function Backups() {
           key={dialog.key}
           instance={instance}
           backup={dialog.backup}
-          canRestore={perms.restore}
+          // restoring single files is in place: not for a backup stored on another node
+          canRestore={perms.restore && !onOtherNode(dialog.backup)}
           open
           onOpenChange={(o) => !o && close()}
           onStarted={onStarted}

@@ -154,6 +154,15 @@ export function nodeToForm(node: PanelNodeRecord): NodeFormState {
 }
 
 /**
+ * Whether an edit points an existing node at another agent URL. The backend then requires the
+ * token again (the stored one is never sent to a new address: apps/nodes/views.py).
+ */
+export function urlChanged(f: Pick<NodeFormState, "agent_url">, existing?: Pick<PanelNodeRecord, "agent_url" | "use_settings_token">): boolean {
+  if (!existing || existing.use_settings_token) return false;
+  return f.agent_url.trim().replace(/\/+$/, "") !== existing.agent_url.replace(/\/+$/, "");
+}
+
+/**
  * Validate the add/edit form. `existing` is the node being edited (undefined when adding).
  * Settings-managed nodes (use_settings_token) only edit their addresses.
  */
@@ -170,6 +179,8 @@ export function validateNodeForm(f: NodeFormState, existing?: PanelNodeRecord): 
 
     const token = f.agent_token;
     if (!existing && !token) errors.agent_token = "Enter the token configured as AGENT_TOKEN on that node";
+    else if (!token && !urlErr && urlChanged(f, existing))
+      errors.agent_token = "Re-enter the node's AGENT_TOKEN when changing its URL (the stored token is not reused)";
     else if (token && token.length < MIN_TOKEN_LENGTH)
       errors.agent_token = `Agent tokens must be at least ${MIN_TOKEN_LENGTH} characters`;
     else if (token.length > 500) errors.agent_token = "At most 500 characters";

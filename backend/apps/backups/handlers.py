@@ -340,24 +340,64 @@ def snapshot_create(job: Job, ctx: JobContext) -> dict[str, Any]:
     result = done.get("result") or {}
     keep = job.params.get("keep")
     if keep and job.params.get("kind") == "scheduled":
-        removed = prune_scheduled_snapshots(client, instance, ctx, label=job.params.get("label", ""), keep=int(keep))
+        removed = prune_scheduled_snapshots(
+            client,
+            instance,
+            ctx,
+            label=job.params.get("label", ""),
+            keep=int(keep),
+            schedule_id=job.params.get("schedule_id"),
+            legacy_label=job.params.get("legacy_label", ""),
+        )
         if removed:
             result = {**result, "retention_removed": removed}
     return result
 
 
-def prune_scheduled_snapshots(client: AgentClient, instance: Instance, ctx: JobContext, *, label: str, keep: int) -> list[str]:
+def schedule_snapshot_label(schedule_id: int, name: str) -> str:
+    """Label of the snapshots a schedule takes: unique per schedule, even when names repeat."""
+    return f"scheduled #{schedule_id} {name}"[:120]
+
+
+def _of_schedule(snap_label: str, *, label: str, schedule_id: Any, legacy_label: str) -> bool:
+    if schedule_id is not None:
+        prefix = f"scheduled #{int(schedule_id)}"
+        # by id, so renaming the schedule keeps its older snapshots under its retention
+        if snap_label == prefix or snap_label.startswith(prefix + " "):
+            return True
+    return snap_label == label or bool(legacy_label and snap_label == legacy_label)
+
+
+def prune_scheduled_snapshots(
+    client: AgentClient,
+    instance: Instance,
+    ctx: JobContext,
+    *,
+    label: str,
+    keep: int,
+    schedule_id: Any = None,
+    legacy_label: str = "",
+) -> list[str]:
     """Keep the newest ``keep`` snapshots of ONE snapshot schedule and delete its older ones.
 
-    A schedule's snapshots are those of kind "scheduled" carrying its label (the scheduler
-    labels them "scheduled <schedule name>"), so each schedule's ``keep`` applies to its own
-    snapshots only. Manual and safety (pre-restore/pre-update) snapshots, snapshots of other
-    schedules and unlabelled ones are never touched. Deletion is best effort.
+    A schedule's snapshots are those of kind "scheduled" whose label carries its id (the
+    scheduler labels them "scheduled #<id> <schedule name>", ``schedule_snapshot_label``), or
+    exactly ``label`` / ``legacy_label`` (the "scheduled <name>" labels of older versions, passed
+    only while that name is unique among the server's snapshot schedules). Each schedule's
+    ``keep`` therefore applies to its own snapshots only, even when two schedules share a name.
+    Manual and safety (pre-restore/pre-update) snapshots, snapshots of other schedules and
+    unlabelled ones are never touched. Deletion is best effort.
     """
     if keep < 1 or not label:
         return []
     listed = client.snapshots(instance.id)["snapshots"]
-    mine = [s for s in listed if s.get("kind") == "scheduled" and s.get("label") == label and s.get("name")]
+    mine = [
+        s
+        for s in listed
+        if s.get("kind") == "scheduled"
+        and s.get("name")
+        and _of_schedule(str(s.get("label") or ""), label=label, schedule_id=schedule_id, legacy_label=legacy_label)
+    ]
     mine.sort(key=lambda s: s["name"], reverse=True)  # names start with a UTC timestamp: newest first
     removed = []
     for old in mine[keep:]:

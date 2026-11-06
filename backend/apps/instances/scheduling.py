@@ -87,11 +87,24 @@ def execute(sched: Schedule) -> str:
         )
         return f"Queued job {job.id}"
     if sched.action == "snapshot":
+        from apps.backups.handlers import schedule_snapshot_label
+
+        # Retention ("keep") applies to this schedule's own snapshots, found by the schedule id in
+        # their label. Snapshots from before ids were part of the label ("scheduled <name>") are
+        # still matched by name, but only while no other snapshot schedule of this server has the
+        # same name: otherwise they cannot be told apart and are left alone.
+        same_name = Schedule.objects.filter(instance=inst, action="snapshot", name=sched.name).exclude(pk=sched.pk).exists()
         job = enqueue(
             "snapshot_create",
             title=f"Scheduled snapshot: {sched.name}",
             instance=inst,
-            params={"label": f"scheduled {sched.name}"[:120], "kind": "scheduled", "keep": sched.payload.get("keep", 24)},
+            params={
+                "label": schedule_snapshot_label(sched.pk, sched.name),
+                "kind": "scheduled",
+                "keep": sched.payload.get("keep", 24),
+                "schedule_id": sched.pk,
+                "legacy_label": "" if same_name else f"scheduled {sched.name}"[:120],
+            },
         )
         return f"Queued job {job.id}"
     if sched.action == "command":

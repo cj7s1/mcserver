@@ -132,16 +132,22 @@ class SystemSettingsView(APIView):
 
 
 class PortsView(APIView):
+    """Ports in use on a node (``?node=<id>``; default node without it) and a free suggestion.
+
+    Any signed-in user may ask for any node (the node list is visible to everyone too); names
+    are only revealed for servers the user can see and for host programs to ``system.nodes``.
+    Pages about an existing server pass that server's node.
+    """
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         from apps.instances.services import allocate_port, port_range, ports_in_use
         from apps.nodes.models import Node
 
-        node = (
-            Node.objects.filter(pk=request.query_params.get("node")).first()
-            if request.query_params.get("node")
-            else Node.default()
-        )
+        raw = str(request.query_params.get("node") or "").strip()
+        if raw and not raw.isdigit():
+            raise ApiError("Unknown node", code="not_found", status_code=404)
+        node = Node.objects.filter(pk=int(raw)).first() if raw else Node.default()
         if node is None:
             raise ApiError("Unknown node", code="not_found", status_code=404)
         used = ports_in_use(node)

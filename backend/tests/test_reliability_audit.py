@@ -491,6 +491,78 @@ def test_restore_as_new_server_happens_on_the_node_holding_the_backup(
     assert str(target.id) in agents[a.pk].containers
 
 
+def test_backup_views_use_the_node_holding_the_backup(
+    make_instance, two_nodes, users, client_for, monkeypatch, django_capture_on_commit_callbacks
+):
+    capture = django_capture_on_commit_callbacks
+    a, b, agents, _ = two_nodes
+    inst = make_instance(name="Browsed")
+    agents[a.pk].put_file(inst.id, "world/level.dat", b"from-a")
+    backup_id = run("backup", inst, capture, kind="manual").result["backup_id"]
+    assert _migrate(inst, b, capture).status == JobStatus.SUCCEEDED
+    inst.refresh_from_db()
+    owner = client_for(users["owner"])
+    seen: list[tuple[str, int]] = []
+
+    def files(client, instance_id, snapshot_id, path=""):
+        seen.append(("files", client.node.pk))
+        return {"path": path, "entries": []}
+
+    def download(client, instance_id, snapshot_id, path):
+        seen.append(("download", client.node.pk))
+        return iter([b"payload"]), None
+
+    monkeypatch.setattr(AgentClient, "backup_files", files)
+    monkeypatch.setattr(AgentClient, "backup_download", download)
+    base = f"/api/instances/{inst.id}/backups/{backup_id}"
+
+    # browsing and downloading read node A's repository, where the snapshot is
+    assert owner.get(f"{base}/files?path=").status_code == 200
+    dl = owner.get(f"{base}/download?path=world/level.dat")
+    assert dl.status_code == 200 and b"".join(dl.streaming_content) == b"payload"
+    assert seen == [("files", a.pk), ("download", a.pk)]
+
+    rows = {r["id"]: r for r in owner.get(f"/api/instances/{inst.id}/backups").json()["backups"]}
+    assert (rows[backup_id]["node_name"], rows[backup_id]["on_current_node"]) == (a.name, False)
+
+    # in-place restores are refused right away, without queuing a job that would fail
+    jobs = Job.objects.filter(instance=inst).count()
+    for path, body in (("restore", {"confirm": True}), ("restore-path", {"path": "world", "confirm": True})):
+        resp = owner.post(f"{base}/{path}", body, format="json")
+        assert resp.status_code == 409 and resp.json()["error"]["code"] == "backup_on_other_node", path
+    assert Job.objects.filter(instance=inst).count() == jobs
+
+    # restore as new: the port is checked on A and the new server is created there
+    blocker = make_instance(name="Blocker", node=a)
+    taken = owner.post(f"{base}/restore-as-new", {"name": "Copy", "game_port": blocker.game_port}, format="json")
+    assert taken.status_code == 409 and taken.json()["error"]["code"] == "port_conflict"
+    with capture(execute=True):
+        resp = owner.post(f"{base}/restore-as-new", {"name": "Copy"}, format="json")
+    assert resp.status_code == 202, resp.content
+    target = Instance.objects.get(pk=resp.json()["instance"]["id"])
+    assert target.node_id == a.pk and target.game_port != blocker.game_port
+    assert agents[a.pk].get_file(target.id, "world/level.dat") == b"from-a"
+    assert Job.objects.get(pk=resp.json()["job"]["id"]).status == JobStatus.SUCCEEDED
+
+
+def test_backups_on_a_deleted_node_cannot_be_read(make_instance, fake_agent, users, client_for):
+    inst = make_instance(name="Orphaned")
+    gone = Backup.objects.create(
+        instance=inst,
+        name="old",
+        status=BackupStatus.SUCCEEDED,
+        snapshot_id="e" * 64,
+        meta={"node_id": 987654, "node_name": "retired"},
+    )
+    owner = client_for(users["owner"])
+    base = f"/api/instances/{inst.id}/backups/{gone.id}"
+    for resp in (owner.get(f"{base}/files?path="), owner.post(f"{base}/restore-as-new", {}, format="json")):
+        assert resp.status_code == 409 and resp.json()["error"]["code"] == "backup_node_missing"
+    assert not Instance.objects.filter(name__contains="restored").exists()
+    row = owner.get(f"/api/instances/{inst.id}/backups").json()["backups"][0]
+    assert (row["on_current_node"], row["node_id"], row["node_name"]) == (False, None, "retired")
+
+
 def test_delete_source_only_drops_backups_of_the_old_node(make_instance, two_nodes, django_capture_on_commit_callbacks):
     capture = django_capture_on_commit_callbacks
     a, b, agents, _ = two_nodes
@@ -509,7 +581,9 @@ def test_delete_source_only_drops_backups_of_the_old_node(make_instance, two_nod
     assert on_c.status == BackupStatus.SUCCEEDED
 
 
-def test_modpack_rollback_refuses_a_backup_on_another_node(inst, node, fake_agent, django_capture_on_commit_callbacks):
+def test_modpack_rollback_refuses_a_backup_on_another_node(
+    inst, node, fake_agent, users, client_for, django_capture_on_commit_callbacks
+):
     other = Node.objects.create(name="node-x", agent_url="http://agent-x.invalid:8700", agent_token="t" * 30)
     backup = Backup.objects.create(
         instance=inst,
@@ -522,6 +596,13 @@ def test_modpack_rollback_refuses_a_backup_on_another_node(inst, node, fake_agen
     job = run("modpack_rollback", inst, django_capture_on_commit_callbacks, backup_id=str(backup.id))
     assert (job.status, job.error_code) == (JobStatus.FAILED, "backup_on_other_node")
     assert not fake_agent.called("restore_backup")
+
+    # the API refuses right away and does not offer it as a rollback point
+    owner = client_for(users["owner"])
+    jobs = Job.objects.filter(instance=inst).count()
+    resp = owner.post(f"/api/instances/{inst.id}/modpack/rollback", {"backup_id": str(backup.id), "confirm": True}, format="json")
+    assert resp.status_code == 409 and resp.json()["error"]["code"] == "backup_on_other_node"
+    assert Job.objects.filter(instance=inst).count() == jobs
 
 
 # =====================================================================================
@@ -551,6 +632,48 @@ def test_snapshot_retention_only_prunes_the_schedules_own_snapshots(inst, fake_a
         "before rollback",
         "scheduled daily",
         "scheduled daily",
+    ]
+
+
+def test_snapshot_schedules_with_the_same_name_keep_their_own_snapshots(inst, fake_agent, django_capture_on_commit_callbacks):
+    from apps.instances.models import Schedule
+    from apps.instances.scheduling import execute
+
+    def labels():
+        return [s["label"] for s in fake_agent.snaps[str(inst.id)]]
+
+    fake_agent.create_snapshot(inst.id, "scheduled hourly", "none", "scheduled")  # older version's label
+    first = Schedule.objects.create(instance=inst, name="hourly", action="snapshot", cron="0 * * * *", payload={"keep": 1})
+    second = Schedule.objects.create(instance=inst, name="hourly", action="snapshot", cron="30 * * * *", payload={"keep": 1})
+    for sched in (first, second, first):
+        with django_capture_on_commit_callbacks(execute=True):
+            assert execute(sched).startswith("Queued job")
+    # each schedule kept its newest snapshot; the ambiguous legacy one is left alone
+    assert sorted(labels()) == sorted(["scheduled hourly", f"scheduled #{second.pk} hourly", f"scheduled #{first.pk} hourly"])
+
+    # renaming keeps a schedule's older snapshots under its retention (matched by id)
+    Schedule.objects.filter(pk=first.pk).update(name="renamed")
+    first.refresh_from_db()
+    with django_capture_on_commit_callbacks(execute=True):
+        execute(first)
+    assert sorted(labels()) == sorted(["scheduled hourly", f"scheduled #{second.pk} hourly", f"scheduled #{first.pk} renamed"])
+
+
+def test_snapshot_schedule_still_prunes_its_legacy_labelled_snapshots(inst, fake_agent, django_capture_on_commit_callbacks):
+    from apps.instances.models import Schedule
+    from apps.instances.scheduling import execute
+
+    for _ in range(2):
+        fake_agent.create_snapshot(inst.id, "scheduled daily", "none", "scheduled")
+    fake_agent.create_snapshot(inst.id, "scheduled daily", "none", "manual")  # not a schedule's
+    sched = Schedule.objects.create(instance=inst, name="daily", action="snapshot", cron="0 4 * * *", payload={"keep": 2})
+    with django_capture_on_commit_callbacks(execute=True):
+        execute(sched)
+    snaps = fake_agent.snaps[str(inst.id)]
+    assert [(s["label"], s["kind"]) for s in snaps] == [
+        ("scheduled daily", "scheduled"),
+        ("scheduled daily", "manual"),
+        (f"scheduled #{sched.pk} daily", "scheduled"),
     ]
 
 

@@ -5,8 +5,10 @@
 #   $EDITOR .env                           # data dir, bind address, hosts, UID/GID
 #   docker compose up -d --build
 #
-# Services: postgres, redis, panel (web UI + API + WebSockets), worker (Celery jobs),
-# beat (Celery scheduler, exactly one), agent (the ONLY service with the Docker socket).
+# Services: postgres, redis, panel (web UI + API + WebSockets), worker (Celery jobs and
+# periodic tasks), worker-periodic (Celery, only the short periodic tasks: reconcile,
+# schedules, watchdog, metrics), beat (Celery scheduler, exactly one), agent (the ONLY
+# service with the Docker socket).
 #
 # Networks:
 #   internal           panel, worker, beat, agent, postgres, redis. Not marked
@@ -42,6 +44,8 @@ x-panel-env: &panel-env
   TZ: ${TZ:-UTC}
   MCPANEL_SECRET_KEY: ${MCPANEL_SECRET_KEY:?MCPANEL_SECRET_KEY is not set - run deploy/scripts/generate-secrets.sh}
   MCPANEL_SECRET_KEY_FALLBACKS: ${MCPANEL_SECRET_KEY_FALLBACKS:-}
+  # First-run setup token (empty = the setup page is open to whoever reaches the panel first).
+  MCPANEL_SETUP_TOKEN: ${MCPANEL_SETUP_TOKEN:-}
   MCPANEL_AGENT_URL: http://agent:8700
   MCPANEL_AGENT_TOKEN: ${MCPANEL_AGENT_TOKEN:?MCPANEL_AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh}
   MCPANEL_AGENT_TIMEOUT: ${MCPANEL_AGENT_TIMEOUT:-}
@@ -70,6 +74,11 @@ x-panel-env: &panel-env
   MCPANEL_LOG_LEVEL: ${MCPANEL_LOG_LEVEL:-INFO}
   MCPANEL_LOG_JSON: ${MCPANEL_LOG_JSON:-true}
   MCPANEL_WORKER_CONCURRENCY: ${MCPANEL_WORKER_CONCURRENCY:-}
+  # Job reliability tuning; empty = the defaults in backend/mcpanel/settings.py.
+  MCPANEL_CELERY_VISIBILITY_TIMEOUT: ${MCPANEL_CELERY_VISIBILITY_TIMEOUT:-}
+  MCPANEL_JOB_HEARTBEAT_SECONDS: ${MCPANEL_JOB_HEARTBEAT_SECONDS:-}
+  MCPANEL_JOB_STALE_SECONDS: ${MCPANEL_JOB_STALE_SECONDS:-}
+  MCPANEL_JOB_MAX_RUNTIME_HOURS: ${MCPANEL_JOB_MAX_RUNTIME_HOURS:-}
 
 # The panel processes run as UID 10001 and need no Linux capabilities.
 x-panel-hardening: &panel-hardening
@@ -200,6 +209,36 @@ services:
     # Celery finishes running tasks on SIGTERM (warm shutdown). Jobs cut off by a
     # hard kill are marked failed by the job runner instead of being re-run blindly.
     stop_grace_period: 2m
+    logging: *logging
+
+  # Second worker that consumes ONLY the "periodic" queue (beat ticks: reconcile, schedules,
+  # job watchdog, metrics, modpack update checks). The main worker above consumes both queues;
+  # while long jobs (modpack installs, big backups) occupy all of its slots, server status,
+  # schedules and the watchdog keep running here. It never runs jobs.
+  worker-periodic:
+    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
+    command: ["worker", "-Q", "periodic", "-c", "2", "-n", "periodic@%h"]
+    restart: unless-stopped
+    <<: *panel-hardening
+    environment:
+      <<: *panel-env
+      # fixed concurrency (-c 2 above): the main worker's MCPANEL_WORKER_CONCURRENCY must not apply
+      MCPANEL_WORKER_CONCURRENCY: ""
+    networks: [internal]
+    depends_on:
+      panel:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A mcpanel inspect ping --destination \"periodic@$${HOSTNAME}\" --timeout 10 > /dev/null"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    stop_grace_period: 1m
     logging: *logging
 
   beat:

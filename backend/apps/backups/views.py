@@ -17,12 +17,50 @@ from apps.instances.serializers import InstanceSerializer
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
 
-from .handlers import policy_for
+from .handlers import backup_agent, policy_for, repository_node_id, require_local_backup
 from .models import Backup, BackupStatus, RetentionPolicy
 
 
 class BackupSerializer(serializers.ModelSerializer):
+    """A backup row. ``node_name``/``on_current_node`` say which node's restic repository holds it.
+
+    Every node keeps its own repository and a migration does not copy it, so after a move the
+    older backups stay on the previous node: they can be browsed, downloaded, deleted and restored
+    as a new server (created on that node) but not restored in place. Pass ``instance`` and
+    ``node_names`` ({id: name}) in the context to avoid a query per row.
+    """
+
     created_by_name = serializers.CharField(source="created_by.username", read_only=True, default=None)
+    node_id = serializers.SerializerMethodField()
+    node_name = serializers.SerializerMethodField()
+    on_current_node = serializers.SerializerMethodField()
+
+    def _instance(self, obj: Backup) -> Instance:
+        return self.context.get("instance") or obj.instance
+
+    def _node_names(self) -> dict[int, str]:
+        names = self.context.get("node_names")
+        if names is None:
+            from apps.nodes.models import Node
+
+            names = self.context["node_names"] = dict(Node.objects.values_list("pk", "name"))
+        return names
+
+    def get_node_id(self, obj: Backup) -> int | None:
+        """The node holding the backup; None when that node no longer exists (backup unreadable)."""
+        node_id = repository_node_id(obj, self._instance(obj))
+        return node_id if node_id in self._node_names() else None
+
+    def get_node_name(self, obj: Backup) -> str:
+        node_id = repository_node_id(obj, self._instance(obj))
+        names = self._node_names()
+        if node_id is not None and node_id in names:
+            return names[node_id]
+        meta = obj.meta or {}  # a deleted node: the name recorded with the backup
+        return str(meta.get("node_name") or meta.get("left_on_node") or "")
+
+    def get_on_current_node(self, obj: Backup) -> bool:
+        return repository_node_id(obj, self._instance(obj)) == self._instance(obj).node_id
 
     class Meta:
         model = Backup
@@ -47,6 +85,9 @@ class BackupSerializer(serializers.ModelSerializer):
             "finished_at",
             "verified_at",
             "verify_ok",
+            "node_id",
+            "node_name",
+            "on_current_node",
         ]
         read_only_fields = [f for f in fields if f not in ("name", "pinned", "notes")]
 
@@ -79,7 +120,15 @@ class BackupListView(APIView):
         qs = instance.backups.select_related("created_by")
         if request.query_params.get("all") != "true":
             qs = qs.exclude(status=BackupStatus.DELETED)
-        return Response({"backups": BackupSerializer(qs, many=True).data, "policy": PolicySerializer(policy_for(instance)).data})
+        from apps.nodes.models import Node
+
+        context = {"instance": instance, "node_names": dict(Node.objects.values_list("pk", "name"))}
+        return Response(
+            {
+                "backups": BackupSerializer(qs, many=True, context=context).data,
+                "policy": PolicySerializer(policy_for(instance)).data,
+            }
+        )
 
     @extend_schema(request=dict, responses={202: JobSerializer})
     def post(self, request: Request, pk: str) -> Response:
@@ -124,7 +173,7 @@ class BackupDetailView(APIView):
         instance, backup = self._get(request, pk, bid, "instance.backup")
         if "pinned" in request.data:
             require(request.user, "instance.restore", instance)
-        ser = BackupSerializer(backup, data=request.data, partial=True)
+        ser = BackupSerializer(backup, data=request.data, partial=True, context={"instance": instance})
         ser.is_valid(raise_exception=True)
         ser.save()
         return Response(ser.data)
@@ -155,6 +204,7 @@ class BackupRestoreView(APIView):
         instance, backup = BackupDetailView()._get(request, pk, bid, "instance.restore")
         if backup.status != BackupStatus.SUCCEEDED or not backup.snapshot_id:
             raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
+        require_local_backup(backup, instance)  # 409 backup_on_other_node now, not when the job runs
         if request.data.get("confirm") is not True:
             raise ApiError("Restoring replaces the current server files. Confirm to continue.", code="confirmation_required")
         from apps.core.models import SystemSetting
@@ -178,13 +228,15 @@ class BackupRestoreNewView(APIView):
         require(request.user, "instance.create")
         if backup.status != BackupStatus.SUCCEEDED or not backup.snapshot_id:
             raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
+        # restic restores on the node whose repository holds the snapshot (after a migration that
+        # can be the server's previous node), so the new server is created on that node
+        repo_node = backup_agent(backup, source).node  # 409 backup_node_missing if it is gone
         name = str(request.data.get("name") or f"{source.name} (restored)")[:80]
         port = request.data.get("game_port")
         copy_fields = [
             "description",
             "icon_url",
             "group",
-            "node",
             "edition",
             "server_type",
             "minecraft_version",
@@ -218,11 +270,12 @@ class BackupRestoreNewView(APIView):
         # rolled back with the failed enqueue instead of being left behind as an orphan.
         with transaction.atomic():
             if port:
-                services.check_port_available(source.node, port)
+                services.check_port_available(repo_node, port)
             else:
-                port = services.allocate_port(source.node)
+                port = services.allocate_port(repo_node)
             target = Instance.objects.create(
                 name=name,
+                node=repo_node,
                 game_port=port,
                 source=Source.RESTORED,
                 created_by=request.user,
@@ -236,7 +289,13 @@ class BackupRestoreNewView(APIView):
                 params={"backup_id": str(backup.id), "target_id": str(target.id)},
             )
             Instance.objects.filter(pk=target.pk).update(active_job=job)
-        audit.record("backup.restore_as_new", request=request, instance=source, target=target, details={"backup": str(backup.id)})
+        audit.record(
+            "backup.restore_as_new",
+            request=request,
+            instance=source,
+            target=target,
+            details={"backup": str(backup.id), "node": repo_node.name},
+        )
         target.refresh_from_db()
         return Response(
             {"instance": InstanceSerializer(target, context={"request": request}).data, "job": JobSerializer(job).data},
@@ -268,15 +327,13 @@ class BackupBrowseView(APIView):
 
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str, bid: str) -> Response:
-        from apps.nodes.client import AgentClient
-
         instance, backup = BackupDetailView()._get(request, pk, bid, "instance.backup")
         if not backup.snapshot_id:
             raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
         require(request.user, "instance.files.read", instance)
-        return Response(
-            AgentClient(instance.node).backup_files(instance.id, backup.snapshot_id, request.query_params.get("path", ""))
-        )
+        # the repository may be on the server's previous node (migration): ask that node's agent
+        client = backup_agent(backup, instance)
+        return Response(client.backup_files(instance.id, backup.snapshot_id, request.query_params.get("path", "")))
 
 
 class BackupFileDownloadView(APIView):
@@ -284,12 +341,12 @@ class BackupFileDownloadView(APIView):
     def get(self, request: Request, pk: str, bid: str):  # type: ignore[no-untyped-def]
         from django.http import StreamingHttpResponse
 
-        from apps.nodes.client import AgentClient
-
         instance, backup = BackupDetailView()._get(request, pk, bid, "instance.backup")
+        if not backup.snapshot_id:
+            raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
         require(request.user, "instance.files.read", instance)
         path = request.query_params.get("path", "")
-        chunks, _resp = AgentClient(instance.node).backup_download(instance.id, backup.snapshot_id, path)
+        chunks, _resp = backup_agent(backup, instance).backup_download(instance.id, backup.snapshot_id, path)
         filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
         response = StreamingHttpResponse(chunks, content_type="application/octet-stream")
         from apps.core.utils import content_disposition
@@ -304,6 +361,9 @@ class BackupRestorePathView(APIView):
     @extend_schema(request=dict, responses={202: JobSerializer})
     def post(self, request: Request, pk: str, bid: str) -> Response:
         instance, backup = BackupDetailView()._get(request, pk, bid, "instance.restore")
+        if backup.status != BackupStatus.SUCCEEDED or not backup.snapshot_id:
+            raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
+        require_local_backup(backup, instance)  # 409 backup_on_other_node now, not when the job runs
         path = str(request.data.get("path") or "").strip("/")
         if not path:
             raise ApiError("Choose a file or folder to restore", code="invalid_path")

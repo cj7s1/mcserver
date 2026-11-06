@@ -25,7 +25,20 @@ def _instance(job: Job) -> Instance:
 def apply_container(
     instance: Instance, ctx: JobContext, *, start: bool, span: tuple[float, float] = (0.1, 0.8)
 ) -> dict[str, Any]:
-    """(Re)create the container from the current configuration. World data is untouched."""
+    """(Re)create the container from the current configuration. World data is untouched.
+
+    Central guard for every job that (re)creates or starts a server (start, restart, recreate,
+    software and modpack updates, rollbacks, migrations): an archived server is never started,
+    even by a job that was queued before it was archived (409 ``archived``), and it gets no new
+    container either (archiving removed it; the next start after unarchiving creates it from the
+    current configuration). The flag is read from the database because the caller's copy may
+    predate the archive.
+    """
+    if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
+        if start:
+            raise ConflictError("This server is archived; unarchive it before starting it", code="archived")
+        ctx.log("The server is archived: its container is created when it is next started")
+        return {"skipped": "archived"}
     client = AgentClient(instance.node)
     spec = build_spec(instance)
     ctx.progress(span[0], "Preparing container (pulling the runtime image if needed)", force=True)

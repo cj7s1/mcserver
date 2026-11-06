@@ -147,7 +147,7 @@ export default function Network() {
   const qc = useQueryClient();
   const invalidate = useInvalidateInstance();
   const canEdit = can("instance.configure") && !instance.archived_at;
-  const ports = usePorts();
+  const ports = usePorts(instance.node); // the ports of the node this server runs on
   const system = useSystemInfo();
   const [draft, setDraft] = useState<Draft | null>(null);
   const [serverErr, setServerErr] = useState<{ port?: number; message: string } | null>(null);

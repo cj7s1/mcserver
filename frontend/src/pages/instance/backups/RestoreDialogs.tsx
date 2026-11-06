@@ -171,7 +171,11 @@ export function RestoreAsNewDialog({
 }) {
   const navigate = useNavigate();
   const invalidate = useInvalidateInstance();
-  const ports = usePorts(open);
+  // the new server is created on the node whose repository holds the backup (it can be the
+  // server's previous node after a move), so its port is checked there
+  const targetNode = backup.node_id ?? instance.node;
+  const elsewhere = backup.on_current_node === false && backup.node_id != null;
+  const ports = usePorts(targetNode, open);
   const [name, setName] = useState(`${instance.name} (restored)`.slice(0, 80));
   const [port, setPort] = useState("");
   const restore = useMutation({
@@ -219,6 +223,8 @@ export function RestoreAsNewDialog({
             <DialogDescription>
               Creates a separate server with the same software and settings, filled with this backup's files. “{instance.name}”
               is not changed. Good for checking an old world or recovering items.
+              {elsewhere &&
+                ` The backup is stored on node “${backup.node_name}” (this server was moved since), so the new server is created on that node.`}
             </DialogDescription>
           </DialogHeader>
           <BackupSummary backup={backup} />

@@ -7,11 +7,13 @@ import { Button } from "@/components/ui/button";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { useAuth } from "@/hooks/use-auth";
 import { api, ApiError } from "@/lib/api";
 import { formatDateTime, relativeTime } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import type { AuditEvent, Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { canAbandonJob } from "../activity/job-utils";
 import { InstanceJobItem } from "./activity/InstanceJobItem";
 import { useInstanceContext } from "./InstanceLayout";
 import { isJobActive, useInstanceJobs } from "./overview/instance-jobs";
@@ -26,7 +28,8 @@ const JOB_FILTERS: { value: JobFilter; label: string; test: (j: Job) => boolean 
   { value: "succeeded", label: "Succeeded", test: (j) => j.status === "succeeded" },
 ];
 
-function JobsSection({ instance, now, canControl }: { instance: Instance; now: number; canControl: boolean }) {
+function JobsSection({ instance, now }: { instance: Instance; now: number }) {
+  const { user } = useAuth();
   const jobs = useInstanceJobs(instance.id, instance.active_job);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [text, setText] = useState("");
@@ -87,7 +90,7 @@ function JobsSection({ instance, now, canControl }: { instance: Instance; now: n
               job={j}
               now={now}
               defaultOpen={j.id === instance.active_job?.id}
-              canAbandon={canControl}
+              canAbandon={canAbandonJob(j, { instance: instance.permissions, global: user?.permissions })}
             />
           ))}
         </ul>
@@ -244,11 +247,11 @@ function AuditSection({ instance, now }: { instance: Instance; now: number }) {
 }
 
 export default function InstanceActivity() {
-  const { instance, can } = useInstanceContext();
+  const { instance } = useInstanceContext();
   const now = useNow(15_000);
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4">
-      <JobsSection key={`jobs-${instance.id}`} instance={instance} now={now} canControl={can("instance.control")} />
+      <JobsSection key={`jobs-${instance.id}`} instance={instance} now={now} />
       <AuditSection key={`audit-${instance.id}`} instance={instance} now={now} />
     </div>
   );

@@ -130,10 +130,13 @@ class InstanceModpackView(APIView):
         current = next((r for r in releases if r["id"] == instance.modpack_version_id), None)
         # releases are sorted newest first by the provider adapters
         newer = releases[: releases.index(current)] if current is not None else []
+        from apps.backups.handlers import stored_on_current_node
+
+        # a rollback restores in place, so only pre-update backups in this node's repository count
         rollback_points = [
             {"backup_id": str(b.id), "name": b.name, "created_at": b.created_at, "before": (b.meta or {}).get("modpack_before")}
             for b in Backup.objects.filter(instance=instance, kind=BackupKind.PRE_UPDATE, status=BackupStatus.SUCCEEDED)
-            if (b.meta or {}).get("modpack_before")
+            if (b.meta or {}).get("modpack_before") and stored_on_current_node(b, instance)
         ]
         return Response(
             {
@@ -203,6 +206,11 @@ class InstanceModpackUpdateView(APIView):
         version_id = str(request.data.get("version_id") or "")
         if not version_id:
             raise ApiError("version_id is required", code="missing_params")
+        start = bool(request.data.get("start", False))
+        if start and instance.archived_at:
+            raise ApiError(
+                "This server is archived; unarchive it before updating and starting it", code="archived", status_code=409
+            )
         job = enqueue(
             "modpack_update",
             title=f"Update {instance.modpack_name or instance.name}",
@@ -212,7 +220,7 @@ class InstanceModpackUpdateView(APIView):
                 "version_id": version_id,
                 "backup": bool(request.data.get("backup", SystemSetting.get("pre_update_backup"))),
                 "allow_minecraft_change": bool(request.data.get("allow_minecraft_change", False)),
-                "start": bool(request.data.get("start", False)),
+                "start": start,
             },
         )
         audit.record(
@@ -223,6 +231,16 @@ class InstanceModpackUpdateView(APIView):
             details={"from": instance.modpack_version_id, "to": version_id},
         )
         return Response(JobSerializer(job).data, status=202)
+
+
+def _is_uuid(value: str) -> bool:
+    import uuid
+
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 class InstanceModpackRollbackView(APIView):
@@ -241,6 +259,12 @@ class InstanceModpackRollbackView(APIView):
                 code="confirmation_required",
             )
         backup_id = str(request.data.get("backup_id") or "")
+        from apps.backups.handlers import require_local_backup
+        from apps.backups.models import Backup
+
+        backup = Backup.objects.filter(instance=instance, pk=backup_id).first() if _is_uuid(backup_id) else None
+        if backup is not None:
+            require_local_backup(backup, instance)  # 409 backup_on_other_node now, not when the job runs
         job = enqueue(
             "modpack_rollback",
             title=f"Roll back {instance.modpack_name or instance.name}",

@@ -65,7 +65,12 @@ export const JAVA_VERSIONS = [8, 11, 16, 17, 21, 25] as const;
 export const DEFAULT_MEMORY_STANDARD = 4096;
 export const DEFAULT_MEMORY_MODPACK = 6144;
 
-/** Environment keys the backend refuses (backend/apps/instances/spec.py MANAGED_ENV). */
+/**
+ * Panel-managed environment keys (backend/apps/instances/spec.py _PANEL_ENV), checked here only as
+ * a quick hint. The backend refuses more (download, command and player-rights variables, by name,
+ * prefix or suffix: spec.env_override_error) and its precise message is shown on the env field
+ * (SERVER_FIELD_MAP.env -> errors.env in StepGameplay).
+ */
 export const MANAGED_ENV = new Set([
   "EULA",
   "TYPE",

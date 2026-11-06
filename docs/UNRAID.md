@@ -6,7 +6,7 @@
 > yet on real Unraid hardware**. The paths and settings below follow Unraid conventions. Please
 > report anything that differs.
 
-MCPanel is a multi-container stack (panel, worker, beat, agent, Postgres, Redis), so it runs through
+MCPanel is a multi-container stack (panel, worker, worker-periodic, beat, agent, Postgres, Redis), so it runs through
 **Docker Compose**, not as a single Community Applications template.
 
 ## 1. Install Docker Compose support

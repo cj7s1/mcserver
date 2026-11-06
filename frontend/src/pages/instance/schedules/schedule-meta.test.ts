@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Schedule } from "@/lib/types";
-import { DEFAULT_WARN_MINUTES, draftFrom, scheduleWarnMinutes, warnPayload } from "./schedule-meta";
+import type { PermissionCode } from "@/lib/types";
+import {
+  actionBlockedReason,
+  DEFAULT_WARN_MINUTES,
+  draftFrom,
+  editBlockedReason,
+  SCHEDULE_ACTIONS,
+  scheduleWarnMinutes,
+  warnPayload,
+} from "./schedule-meta";
 
 function schedule(payload: Record<string, unknown>, action: Schedule["action"] = "restart"): Schedule {
   return {
@@ -45,5 +54,30 @@ describe("schedule warning fields", () => {
       warn_minutes: 0,
     });
     expect(warnPayload({}, { warnMinutes: 9, warnMessage: "" })).toEqual({ warn_minutes: 0 });
+  });
+});
+
+describe("schedule action permissions (backend SCHEDULE_ACTION_PERMISSIONS)", () => {
+  const canOnly =
+    (...codes: PermissionCode[]) =>
+    (code: PermissionCode) =>
+      codes.includes(code);
+
+  it("offers only the actions the user may run", () => {
+    const allowed = (can: (c: PermissionCode) => boolean) => SCHEDULE_ACTIONS.filter((a) => !actionBlockedReason(a, can));
+    expect(allowed(canOnly("instance.schedules"))).toEqual([]);
+    expect(allowed(canOnly("instance.control"))).toEqual(["restart", "start", "stop"]);
+    expect(allowed(canOnly("instance.backup"))).toEqual(["backup"]);
+    expect(allowed(canOnly("instance.backup", "instance.restore"))).toEqual(["backup", "snapshot"]);
+    expect(allowed(canOnly("instance.command"))).toEqual(["command"]);
+    expect(actionBlockedReason("command", canOnly("instance.control"))).toMatch(/Send commands/);
+  });
+
+  it("needs restore permission to edit any snapshot schedule (all of them prune)", () => {
+    const backup = canOnly("instance.backup");
+    expect(editBlockedReason(schedule({ keep: 5 }, "snapshot" as Schedule["action"]), backup)).toMatch(/Restore/);
+    expect(editBlockedReason(schedule({}, "snapshot" as Schedule["action"]), backup)).toMatch(/Restore/);
+    expect(editBlockedReason(schedule({ keep: 5 }, "snapshot" as Schedule["action"]), canOnly("instance.backup", "instance.restore"))).toBeNull();
+    expect(editBlockedReason(schedule({ command: "say hi" }, "command"), backup)).toMatch(/^Editing command schedules needs/);
   });
 });

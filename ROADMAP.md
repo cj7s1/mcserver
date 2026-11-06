@@ -90,7 +90,8 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Player activity history + metrics history (1-min sampling) incl. charts
 
 ## Phase 10 — Hardening
-- [~] Systematic security review of agent + API (full audit ON HOLD until the user asks; earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard)
+- [x] Systematic security review of agent + API + frontend + deployment (run 2026-11-06: 9 lenses, adversarially verified, ~60 findings fixed with regression tests; see DEVELOPMENT_STATUS.md "Security audit"). Earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard
+- [ ] External penetration test / review by a second party
 - [x] Dependency scanning in CI (pip-audit, npm audit, non-blocking)
 - [ ] Upgrade/reinstall test (data survives image upgrades)
 - [ ] Load test of console fan-out

@@ -13,16 +13,20 @@ import { Switch } from "@/components/ui/switch";
 import { api, ApiError, errorMessage } from "@/lib/api";
 import { describeWarning, WARN_MESSAGE_MAX, WARN_MINUTES, warnMessageError, warnOptionLabel } from "@/lib/power-warning";
 import { qk } from "@/lib/queries";
-import type { Schedule } from "@/lib/types";
+import type { PermissionCode, Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CRON_PRESETS, cronError, describeCron, normalizeCron } from "./cron";
 import { snapshotState, useSnapshots } from "../backups/snapshot-utils";
 import {
   ACTION_INFO,
+  actionBlockedReason,
   DEFAULT_SNAPSHOT_KEEP,
   draftFrom,
+  editBlockedReason,
   MAX_SNAPSHOT_KEEP,
   RUNNING_ONLY_ACTIONS,
+  SCHEDULE_ACTIONS,
+  SNAPSHOT_KEEP_PERMISSION,
   WARN_ACTIONS,
   warnPayload,
   type ScheduleAction,
@@ -31,7 +35,7 @@ import {
 
 type FieldKey = "name" | "cron" | "command" | "backupName" | "keep" | "warnMessage";
 
-function validate(d: ScheduleDraft): Partial<Record<FieldKey, string>> {
+function validate(d: ScheduleDraft, canKeep: boolean): Partial<Record<FieldKey, string>> {
   const e: Partial<Record<FieldKey, string>> = {};
   if (!d.name.trim()) e.name = "Give the schedule a name";
   else if (d.name.length > 80) e.name = "At most 80 characters";
@@ -43,7 +47,7 @@ function validate(d: ScheduleDraft): Partial<Record<FieldKey, string>> {
     else if (cmd.length > 1400) e.command = "At most 1400 characters";
   }
   if (d.action === "backup" && d.backupName.length > 120) e.backupName = "At most 120 characters";
-  if (d.action === "snapshot") {
+  if (d.action === "snapshot" && canKeep) {
     const n = Number(d.keep.trim());
     if (!/^\d+$/.test(d.keep.trim()) || !Number.isInteger(n) || n < 1 || n > MAX_SNAPSHOT_KEEP)
       e.keep = `Enter a whole number from 1 to ${MAX_SNAPSHOT_KEEP}`;
@@ -59,7 +63,7 @@ export function ScheduleDialog({
   instanceId,
   schedule,
   template,
-  canBackup,
+  can,
   panelTz,
   open,
   onOpenChange,
@@ -67,13 +71,22 @@ export function ScheduleDialog({
   instanceId: string;
   schedule?: Schedule | null;
   template?: Partial<ScheduleDraft>;
-  canBackup: boolean;
+  /** the user's permissions on this server: only actions they may run themselves are offered */
+  can: (code: PermissionCode) => boolean;
   panelTz: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
   const qc = useQueryClient();
-  const [draft, setDraft] = useState<ScheduleDraft>(() => draftFrom(schedule, template));
+  const canBackup = can("instance.backup");
+  const canKeep = can(SNAPSHOT_KEEP_PERMISSION);
+  const [draft, setDraft] = useState<ScheduleDraft>(() => {
+    const d = draftFrom(schedule, template);
+    if (schedule || !actionBlockedReason(d.action, can)) return d;
+    // a new schedule starts with the first action this user may schedule
+    const first = SCHEDULE_ACTIONS.find((a) => !actionBlockedReason(a, can));
+    return first ? { ...d, action: first } : d;
+  });
   const [touched, setTouched] = useState(false);
   const editing = !!schedule;
 
@@ -86,7 +99,10 @@ export function ScheduleDialog({
         payload = { ...keep };
         if (draft.backupName.trim()) payload.name = draft.backupName.trim();
         else delete payload.name;
-      } else if (draft.action === "snapshot") payload = { ...keep, keep: Number(draft.keep.trim()) };
+      } else if (draft.action === "snapshot") {
+        // without instance.restore the keep count is left as it is (new schedules: the default)
+        payload = canKeep ? { ...keep, keep: Number(draft.keep.trim()) } : keep;
+      }
       else if (WARN_ACTIONS.includes(draft.action)) payload = warnPayload(keep, draft);
       else payload = keep;
       const body = {
@@ -111,7 +127,10 @@ export function ScheduleDialog({
     },
   });
 
-  const errors = validate(draft);
+  const errors = validate(draft, canKeep);
+  const blocked = editing
+    ? editBlockedReason({ action: draft.action, payload: schedule!.action === draft.action ? schedule!.payload : {} }, can)
+    : actionBlockedReason(draft.action, can);
   const server = save.error instanceof ApiError ? save.error.fieldErrors : {};
   const err = (k: keyof typeof errors, serverKey: string = k) => (touched ? errors[k] : undefined) ?? server[serverKey];
   const description = describeCron(draft.cron);
@@ -122,10 +141,9 @@ export function ScheduleDialog({
   const submit = (e: FormEvent) => {
     e.preventDefault();
     setTouched(true);
-    if (Object.keys(errors).length) return;
+    if (Object.keys(errors).length || blocked) return;
     save.mutate();
   };
-  const actions: ScheduleAction[] = ["restart", "start", "stop", "backup", "snapshot", "command"];
   const generalError = server.non_field_errors ?? server.detail;
 
   return (
@@ -168,12 +186,15 @@ export function ScheduleDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {actions.map((a) => (
-                  <SelectItem key={a} value={a} disabled={a === "backup" && !canBackup}>
-                    {ACTION_INFO[a].label}
-                    {a === "backup" && !canBackup ? " (needs backup permission)" : ""}
-                  </SelectItem>
-                ))}
+                {SCHEDULE_ACTIONS.map((a) => {
+                  const reason = actionBlockedReason(a, can);
+                  return (
+                    <SelectItem key={a} value={a} disabled={!!reason}>
+                      {ACTION_INFO[a].label}
+                      {reason ? ` (${reason})` : ""}
+                    </SelectItem>
+                  );
+                })}
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">{ACTION_INFO[draft.action]?.description}</p>
@@ -271,6 +292,7 @@ export function ScheduleDialog({
             <SnapshotFields
               instanceId={instanceId}
               canBackup={canBackup}
+              canKeep={canKeep}
               keep={draft.keep}
               error={err("keep", "payload")}
               onKeep={(v) => set("keep", v)}
@@ -348,12 +370,18 @@ export function ScheduleDialog({
           </div>
 
           {generalError && <p className="text-sm text-destructive">{generalError}</p>}
+          {blocked && (
+            <p className="text-sm text-muted-foreground" role="status">
+              {blocked.charAt(0).toUpperCase() + blocked.slice(1)}
+              {blocked.endsWith(".") ? "" : "."}
+            </p>
+          )}
 
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={save.isPending}>
               Cancel
             </Button>
-            <Button type="submit" disabled={save.isPending}>
+            <Button type="submit" disabled={save.isPending || !!blocked}>
               {save.isPending && <Loader2 className="animate-spin" />}
               {editing ? "Save changes" : "Create schedule"}
             </Button>
@@ -368,6 +396,7 @@ export function ScheduleDialog({
 function SnapshotFields({
   instanceId,
   canBackup,
+  canKeep,
   keep,
   error,
   onKeep,
@@ -375,6 +404,7 @@ function SnapshotFields({
 }: {
   instanceId: string;
   canBackup: boolean;
+  canKeep: boolean;
   keep: string;
   error?: string;
   onKeep: (v: string) => void;
@@ -399,11 +429,14 @@ function SnapshotFields({
           value={keep}
           placeholder={String(DEFAULT_SNAPSHOT_KEEP)}
           onChange={(e) => onKeep(e.target.value)}
+          disabled={!canKeep}
           aria-invalid={!!error || undefined}
           aria-describedby="sched-keep-help"
         />
         <p id="sched-keep-help" className={cn("text-xs", error ? "text-destructive" : "text-muted-foreground")}>
-          {error ??
+          {!canKeep
+            ? `Older scheduled snapshots are deleted after each run, so choosing how many are kept needs the “Restore backups” permission. New schedules keep the default ${DEFAULT_SNAPSHOT_KEEP}.`
+            : error ??
             `After each run only the newest ${/^\d+$/.test(keep.trim()) && Number(keep) > 0 ? Number(keep) : "N"} scheduled snapshots are kept; older scheduled ones are deleted. Manual and “before rollback” snapshots are never removed automatically. Default ${DEFAULT_SNAPSHOT_KEEP} (e.g. one day of hourly snapshots).`}
         </p>
       </div>

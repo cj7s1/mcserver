@@ -297,6 +297,24 @@ def test_api_rejects_dangerous_env_variables(clients, make_instance, fake_agent,
     assert ok.status_code == 200
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("key", "reason"),
+    [
+        ("MODS", "is not allowed: it would install unverified code"),
+        ("RCON_CMDS_STARTUP", "is not allowed"),
+        ("TYPE", "is managed by MCPanel; use the dedicated setting instead"),
+        ("memory", "is managed by MCPanel"),
+    ],
+)
+def test_env_errors_say_why_a_variable_is_refused(clients, make_instance, fake_agent, key, reason):
+    inst = make_instance()
+    resp = clients["owner"].patch(f"/api/instances/{inst.id}", {"env": {key: "x"}}, format="json")
+    assert resp.status_code == 400
+    field = resp.json()["error"]["details"]["fields"]["env"]
+    assert len(field) == 1 and field[0].startswith(f"{key} ") and reason in field[0], field
+
+
 # --------------------------------------------------------------------------------------
 # 4. server.properties managed-key guard
 # --------------------------------------------------------------------------------------

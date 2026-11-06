@@ -159,6 +159,8 @@ export interface Instance {
   jvm_flags_preset: "none" | "aikar" | "meowice";
   jvm_args: string;
   env: Record<string, string>;
+  /** true when the API masked the env values ("********") because the caller lacks instance.configure */
+  env_values_hidden?: boolean;
   restart_policy: "unless-stopped" | "on-failure" | "no";
   stop_timeout: number;
   host_ip: string;
@@ -358,6 +360,8 @@ export interface PropertiesResponse {
   raw: string;
   schema: PropertySchema[];
   managed_keys: string[];
+  /** Secret keys whose value the API replaced with "********" (never sent to the browser). */
+  redacted_keys: string[];
 }
 
 export interface Backup {
@@ -381,6 +385,15 @@ export interface Backup {
   finished_at: string | null;
   verified_at: string | null;
   verify_ok: boolean | null;
+  /** Node whose restic repository holds the backup; null when that node was deleted (unreadable). */
+  node_id?: number | null;
+  /** That node's name (for a deleted node: the name recorded with the backup, if any). */
+  node_name?: string;
+  /**
+   * false after the server moved to another node: the backup stays in the old node's repository
+   * and can be browsed, downloaded, deleted and restored as a new server there, not restored in place.
+   */
+  on_current_node?: boolean;
 }
 
 export interface RetentionPolicy {
@@ -526,6 +539,8 @@ export interface SystemSettings {
     timezone: string;
   };
   secrets_configured: Record<string, boolean>;
+  /** stored secrets that cannot be decrypted with the current MCPANEL_SECRET_KEY (re-enter them) */
+  secrets_unreadable?: Record<string, boolean>;
   env: { port_range_default: [number, number] };
 }
 

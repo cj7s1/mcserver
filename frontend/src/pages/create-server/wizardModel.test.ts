@@ -41,3 +41,15 @@ describe("container memory limit", () => {
     expect(containerLimitMb(1024, false)).toBe(1024 + 768);
   });
 });
+
+describe("environment variable errors", () => {
+  it("leaves download/command variables to the backend and shows its message on the env field", async () => {
+    const { MANAGED_ENV, SERVER_FIELD_MAP, stepForField } = await import("./wizardModel");
+    // the client hint only knows panel-managed keys; the backend's precise reason for e.g. MODS
+    // ("is not allowed: it would install unverified code ...") arrives as a field error on "env"
+    expect(MANAGED_ENV.has("TYPE")).toBe(true);
+    expect(MANAGED_ENV.has("MODS")).toBe(false);
+    expect(SERVER_FIELD_MAP.env).toBe("env");
+    expect(stepForField(SERVER_FIELD_MAP.env)).toBe("gameplay");
+  });
+});

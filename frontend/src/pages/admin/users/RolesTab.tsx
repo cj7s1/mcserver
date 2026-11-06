@@ -15,7 +15,7 @@ import type { Me, PermissionDef, Role } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { AdminCallout } from "../admin-shared";
 import { CreateRoleDialog, EditRoleDialog } from "./RoleDialogs";
-import { canGrantPermission, groupPermissions, sameSet, sortRoles } from "./users-model";
+import { grantBlockedReason, groupPermissions, roleEditBlockedReason, sameSet, sortRoles } from "./users-model";
 
 export function RolesTab({ roles, defs, me }: { roles: Role[]; defs: PermissionDef[]; me: Me }) {
   const qc = useQueryClient();
@@ -239,14 +239,15 @@ export function RolesTab({ roles, defs, me }: { roles: Role[]; defs: PermissionD
                         );
                       }
                       const changed = checked !== r.permissions.includes(p.code);
-                      const allowed = canGrantPermission(me, p.code);
+                      // a role the user may not change at all, or a permission they may not grant
+                      const blocked = roleEditBlockedReason(me, r) ?? grantBlockedReason(me, p.code);
                       return (
                         <TableCell key={r.id} className={cn("text-center", changed && "bg-primary/10")}>
                           <Checkbox
                             className="mx-auto"
                             checked={checked}
-                            disabled={!allowed || save.isPending}
-                            title={allowed ? undefined : "You can't grant a permission you don't hold"}
+                            disabled={!!blocked || save.isPending}
+                            title={blocked ?? undefined}
                             aria-label={`${p.label} for ${r.name}`}
                             onCheckedChange={(c) => toggle(r, p.code, c === true)}
                           />

@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, ExternalLink, KeyRound, Loader2, Save, Trash2, Undo2 } from "lucide-react";
+import { ChevronRight, ExternalLink, KeyRound, Loader2, Save, Trash2, TriangleAlert, Undo2 } from "lucide-react";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -15,8 +15,8 @@ import { formatMemoryMb } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import type { SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { AdminFieldError, AdminHint } from "../admin-shared";
-import type { AgentPolicy } from "./system-types";
+import { AdminCallout, AdminFieldError, AdminHint } from "../admin-shared";
+import { unreadableSecrets, type AgentPolicy } from "./system-types";
 
 type Values = SystemSettings["values"];
 type Channel = "stable" | "latest" | "pinned";
@@ -220,6 +220,8 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
   const timezones = useMemo(() => getTimezones(), []);
   const envRange = settings.env.port_range_default;
   const cfConfigured = !!settings.secrets_configured.curseforge_api_key;
+  const cfUnreadable = !!settings.secrets_unreadable?.curseforge_api_key;
+  const unreadable = unreadableSecrets(settings);
 
   const built = buildValues(form, envRange, policy);
   const changes = diffValues(built.values, settings.values);
@@ -247,7 +249,7 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
     mutationFn: () => api.patch<SystemSettings>("/system/settings", { values: {}, secrets: { curseforge_api_key: "" } }),
     onSuccess: (data) => {
       qc.setQueryData<SystemSettings>(qk.settings, (old) =>
-        old ? { ...old, secrets_configured: data.secrets_configured } : data,
+        old ? { ...old, secrets_configured: data.secrets_configured, secrets_unreadable: data.secrets_unreadable } : data,
       );
       if (data.secrets_configured.curseforge_api_key)
         toast.info("Removed the stored key. A key is still provided by the CURSEFORGE_API_KEY environment variable.");
@@ -282,6 +284,17 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
   return (
     <Section title="Panel settings" description="Panel-wide defaults. Changes apply to new servers or the next container recreation.">
       <form onSubmit={submit} className="grid gap-5" noValidate>
+        {unreadable.length > 0 && (
+          <AdminCallout tone="warning" icon={<TriangleAlert />} title="Some stored secrets can't be read">
+            <p>
+              {unreadable.join(", ")}: stored, but encrypted with a different <span className="font-mono">MCPANEL_SECRET_KEY</span>,
+              so the panel treats {unreadable.length === 1 ? "it" : "them"} as missing. Re-enter{" "}
+              {unreadable.length === 1 ? "it" : "them"} below and save to replace the unreadable value. If the secret key was
+              changed by mistake, put the previous key into <span className="font-mono">MCPANEL_SECRET_KEY_FALLBACKS</span> and
+              restart the panel instead; the stored value then works again.
+            </p>
+          </AdminCallout>
+        )}
         <FieldGroup title="New servers">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid content-start gap-1.5">
@@ -455,6 +468,10 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
                 <Badge className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
                   <KeyRound /> Configured
                 </Badge>
+              ) : cfUnreadable ? (
+                <Badge className="bg-amber-500/15 text-amber-800 dark:text-amber-200">
+                  <TriangleAlert /> Unreadable: re-enter it
+                </Badge>
               ) : (
                 <Badge variant="outline">Not configured</Badge>
               )}
@@ -467,13 +484,19 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
                 autoComplete="new-password"
                 spellCheck={false}
                 value={cfKey}
-                placeholder={cfConfigured ? "Enter a new key to replace the current one" : "Paste your API key"}
+                placeholder={
+                  cfConfigured
+                    ? "Enter a new key to replace the current one"
+                    : cfUnreadable
+                      ? "Paste the key again to replace the unreadable one"
+                      : "Paste your API key"
+                }
                 onChange={(e) => setCfKey(e.target.value)}
                 maxLength={500}
                 className="font-mono"
                 aria-describedby="set-cf-hint"
               />
-              {cfConfigured && (
+              {(cfConfigured || cfUnreadable) && (
                 <Button
                   type="button"
                   variant="outline"

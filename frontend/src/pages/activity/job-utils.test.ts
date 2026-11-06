@@ -8,15 +8,31 @@ describe("canAbandonJob", () => {
     for (const status of ["succeeded", "failed", "cancelled"] as const) {
       expect(canAbandonJob({ status, instance: "a" }, { instance: control, global: ["system.settings"] })).toBe(false);
     }
-    expect(canAbandonJob({ status: "queued", instance: "a" }, { instance: control })).toBe(true);
-    expect(canAbandonJob({ status: "running", instance: "a" }, { instance: control })).toBe(true);
+    expect(canAbandonJob({ status: "queued", instance: "a", kind: "start" }, { instance: control })).toBe(true);
+    expect(canAbandonJob({ status: "running", instance: "a", kind: "stop" }, { instance: control })).toBe(true);
   });
 
-  it("needs instance.control on the job's server", () => {
-    expect(canAbandonJob({ status: "running", instance: "a" }, { instance: ["instance.view"] })).toBe(false);
-    expect(canAbandonJob({ status: "running", instance: "a" }, { instance: null, global: ["system.settings"] })).toBe(false);
-    // global system.settings does not replace the server permission
-    expect(canAbandonJob({ status: "running", instance: "a" }, { global: ["system.settings", "instance.control"] })).toBe(false);
+  it("needs instance.control on the job's server for power jobs", () => {
+    expect(canAbandonJob({ status: "running", instance: "a", kind: "restart" }, { instance: ["instance.view"] })).toBe(false);
+    expect(canAbandonJob({ status: "running", instance: "a", kind: "restart" }, { instance: control })).toBe(true);
+    // a global instance.control alone does not count for this server
+    expect(canAbandonJob({ status: "running", instance: "a", kind: "restart" }, { global: ["instance.control"] })).toBe(false);
+  });
+
+  it("needs the permission of the job's kind (backend ABANDON_PERMISSIONS)", () => {
+    const job = (kind: string) => ({ status: "running" as const, instance: "a", kind });
+    expect(canAbandonJob(job("restore"), { instance: control })).toBe(false);
+    expect(canAbandonJob(job("restore"), { instance: [...control, "instance.restore"] })).toBe(true);
+    expect(canAbandonJob(job("delete"), { instance: control })).toBe(false);
+    expect(canAbandonJob(job("world_replace"), { instance: ["instance.restore"] })).toBe(false);
+    expect(canAbandonJob(job("world_replace"), { instance: ["instance.restore", "instance.files.write"] })).toBe(true);
+    // panel-wide codes come from the global role
+    expect(canAbandonJob(job("migrate"), { instance: ["instance.configure", "system.nodes"] })).toBe(false);
+    expect(canAbandonJob(job("migrate"), { instance: ["instance.configure"], global: ["system.nodes"] })).toBe(true);
+    expect(canAbandonJob(job("restore_new"), { instance: ["instance.restore"], global: ["instance.create"] })).toBe(true);
+    // unknown kinds need system.settings, which may always abandon
+    expect(canAbandonJob(job("something_new"), { instance: control })).toBe(false);
+    expect(canAbandonJob(job("restore"), { instance: [], global: ["system.settings"] })).toBe(true);
   });
 
   it("needs system.settings for jobs without a server", () => {

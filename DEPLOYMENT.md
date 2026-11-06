@@ -28,6 +28,7 @@ Edit `.env` (every variable is documented in `deploy/.env.example`):
 | `MCPANEL_ALLOWED_HOSTS`, `MCPANEL_CSRF_TRUSTED_ORIGINS` | Must contain the host/origin you type into the browser. |
 | `MCPANEL_LAN_ADDRESS`, `MCPANEL_PUBLIC_HOSTNAME` | Shown to users as connection addresses (informational only). |
 | `AGENT_RESTIC_PASSWORD` | **Store a copy somewhere safe.** Without it, backups can't be restored. |
+| `MCPANEL_SETUP_TOKEN` | Recommended before the first start (`openssl rand -hex 24`): the setup page asks for it before it creates the owner account, so nobody else who reaches the panel first can claim it. |
 
 Start the stack:
 
@@ -36,15 +37,17 @@ docker compose up -d --build
 docker compose ps          # all services healthy (beat has no health check)
 ```
 
-Open `http://<MCPANEL_BIND>:<MCPANEL_PORT>/`, create the owner account, and create a server.
+Open `http://<MCPANEL_BIND>:<MCPANEL_PORT>/`, create the owner account (enter `MCPANEL_SETUP_TOKEN` if you
+set it), and create a server.
 
 ## What runs
 
 | Service | Image | Privileges |
 |---|---|---|
 | `panel` | `mcpanel/panel` (`web`) | UID 10001, no capabilities. Runs migrations on start and serves API, WebSockets and UI. |
-| `worker` | same (`worker`) | Celery jobs: installs, backups, restores, updates. |
-| `beat` | same (`beat`) | Scheduler: reconcile loop, schedules, metrics. Run exactly one. |
+| `worker` | same (`worker`) | Celery jobs: installs, backups, restores, updates (and periodic tasks when it has a free slot). |
+| `worker-periodic` | same (`worker -Q periodic`) | Celery, periodic tasks only (reconcile loop, schedules, job watchdog, metrics, modpack update checks), so they keep running while long jobs fill every `worker` slot. Never runs jobs. |
+| `beat` | same (`beat`) | Scheduler: queues the periodic tasks above. Run exactly one. |
 | `agent` | `mcpanel/agent` | Root, Docker socket, data directory. Never published. It refuses requests coming from the Minecraft network. |
 | `postgres`, `redis` | upstream | Internal network only. |
 

@@ -274,6 +274,12 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
   return (
     <div className="grid grid-cols-1 gap-4">
       {!canEdit && <ReadOnlyNotice what="change versions" />}
+      {canEdit && instance.archived_at && (
+        <Notice title="This server is archived">
+          Software updates recreate the container, which an archived server does not have. Unarchive it first (Settings → Danger
+          zone).
+        </Notice>
+      )}
       {instance.is_modpack && <ModpackInfo instance={instance} />}
       {st === "CUSTOM" && (
         <Notice title="Custom server">This server runs a custom server jar, so its Minecraft version is not managed by the panel.</Notice>

@@ -551,10 +551,12 @@ class PropertiesView(APIView):
         restart = any(properties.SCHEMA_KEYS.get(k, {}).get("restart", True) for k in changed_keys)
         running = instance.status in ("running", "starting", "unhealthy")
         shown = redact_properties(new_text)
+        shown_values = properties.parse(shown)
         return Response(
             {
-                "values": properties.parse(shown),
+                "values": shown_values,
                 "raw": shown,
+                "redacted_keys": [k for k in SECRET_PROPERTIES if shown_values.get(k) == REDACTED_VALUE],
                 "changed": changed_keys,
                 "restart_required": restart and running,
             }
@@ -679,8 +681,9 @@ SCHEDULE_ACTION_PERMISSIONS = {
 
 def require_schedule_action(user: Any, instance: Instance, action: str, payload: dict[str, Any] | None) -> None:
     require(user, SCHEDULE_ACTION_PERMISSIONS.get(action, "instance.configure"), instance)
-    if action == "snapshot" and isinstance(payload, dict) and payload.get("keep") is not None:
-        # "keep N" deletes older scheduled snapshots, which is a restore-level operation
+    if action == "snapshot":
+        # Every snapshot schedule prunes older scheduled snapshots (its own keep count, or the
+        # default of 24 when none is set), and deleting snapshots is a restore-level operation.
         require(user, "instance.restore", instance)
 
 

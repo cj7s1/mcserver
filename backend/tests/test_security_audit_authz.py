@@ -361,8 +361,15 @@ def test_snapshot_retention_in_a_schedule_needs_restore(make_user, client_for, m
     client = client_for(make_user("snap", role=role))
     url = f"/api/instances/{make_instance().id}/schedules"
     body = {"name": "s", "action": "snapshot", "cron": "0 * * * *"}
-    assert client.post(url, body, format="json").status_code == 201
+    # every snapshot schedule prunes older snapshots (default keep 24), so all need instance.restore
+    assert client.post(url, body, format="json").status_code == 403
     assert client.post(url, {**body, "payload": {"keep": 1}}, format="json").status_code == 403
+    restorer = client_for(
+        make_user(
+            "snap2", role=custom_role("snapper2", "instance.view", "instance.schedules", "instance.backup", "instance.restore")
+        )
+    )
+    assert restorer.post(url, body, format="json").status_code == 201
 
 
 # --- 5. node tokens cannot be redirected ---------------------------------------------------------------
@@ -570,12 +577,19 @@ def test_must_change_password_blocks_the_api(make_user, client_for, make_instanc
         "/api/permissions",
         "/api/system/settings",
         "/api/audit",
+        # views without their own permission helper: covered by DEFAULT_PERMISSION_CLASSES
+        "/api/system/info",
+        "/api/catalog/server-types",
+        "/api/modpacks/providers",
+        "/api/notifications/events",
     ):
         resp = c.get(url)
         assert resp.status_code == 403 and err(resp) == "must_change_password", url
     assert c.post(f"/api/instances/{inst.id}/power", {"action": "start"}, format="json").status_code == 403
     assert c.get("/api/auth/me").status_code == 200
     assert c.get("/api/auth/state").json()["user"]["must_change_password"] is True
+    assert c.get("/api/schema").status_code == 403  # SERVE_PERMISSIONS
+    assert c.get("/api/health").status_code in (200, 503)
     assert c.post("/api/auth/password", {"old_password": PASSWORD, "new_password": "Brand-new-passphrase-42"}).status_code == 204
     assert c.get("/api/instances/").status_code == 200
 
@@ -633,6 +647,59 @@ def test_archived_servers_cannot_be_updated_or_recreated(clients, make_instance,
     rec = m.post(f"/api/instances/{inst.id}/recreate")
     assert rec.status_code == 409 and err(rec) == "archived"
     assert not Job.objects.filter(instance=inst).exists()
+
+
+def test_archived_modpack_servers_cannot_be_updated_and_started(clients, make_instance):
+    from django.utils import timezone
+
+    inst = make_instance(server_type="MODRINTH", modpack_provider="modrinth", modpack_project_id="P1", archived_at=timezone.now())
+    resp = clients["manager"].post(f"/api/instances/{inst.id}/modpack/update", {"version_id": "v2", "start": True})
+    assert resp.status_code == 409 and err(resp) == "archived"
+    assert not Job.objects.filter(instance=inst).exists()
+
+
+@pytest.mark.parametrize("kind", ["start", "restart", "recreate", "software_update"])
+def test_jobs_never_start_an_archived_server(make_instance, fake_agent, django_capture_on_commit_callbacks, kind):
+    """apply_container is the central guard, also for jobs queued before the server was archived."""
+    from django.utils import timezone
+
+    from apps.jobs.runner import enqueue
+
+    inst = make_instance()
+    params = {"start": True}
+    if kind == "software_update":
+        params.update(minecraft_version="1.20.4", java_version=17, backup=False)
+    job = enqueue(kind, title=kind, instance=inst, params=params)  # queued while the server was active
+    Instance.objects.filter(pk=inst.pk).update(archived_at=timezone.now())
+    from apps.jobs.runner import run_job
+
+    run_job(str(job.id))
+    job.refresh_from_db()
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "archived"), job.error
+    assert not fake_agent.called("apply")
+
+
+def test_apply_container_rereads_the_archive_flag(make_instance, fake_agent):
+    from django.utils import timezone
+
+    from apps.core.errors import ApiError
+    from apps.instances.handlers import apply_container
+
+    inst = make_instance()
+    stale = Instance.objects.get(pk=inst.pk)  # a copy loaded before the server was archived
+    Instance.objects.filter(pk=inst.pk).update(archived_at=timezone.now())
+    with pytest.raises(ApiError) as exc:
+        apply_container(stale, None, start=True)  # type: ignore[arg-type]
+    assert exc.value.error_code == "archived" and exc.value.status_code == 409
+    # without start it creates no container either (archiving removed it)
+    logged: list[str] = []
+
+    class Ctx:
+        def log(self, line: str) -> None:
+            logged.append(line)
+
+    assert apply_container(stale, Ctx(), start=False) == {"skipped": "archived"}  # type: ignore[arg-type]
+    assert logged and not fake_agent.called("apply")
 
 
 # --- 13. PATCH: no version change bypass; only edited columns are written ---------------------------------

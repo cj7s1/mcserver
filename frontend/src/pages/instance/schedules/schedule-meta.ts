@@ -1,5 +1,5 @@
 import { isWarnMinutes } from "@/lib/power-warning";
-import type { Schedule } from "@/lib/types";
+import type { PermissionCode, Schedule } from "@/lib/types";
 
 /** The backend also knows "snapshot" (btrfs/ZFS filesystem snapshots); lib/types predates it. */
 export type ScheduleAction = Schedule["action"] | "snapshot";
@@ -31,6 +31,65 @@ export const ACTION_INFO: Record<string, { label: string; description: string }>
       "Takes an instant filesystem snapshot (btrfs or ZFS) of the server folder (world saving is paused for a moment if the server is running), then deletes the oldest scheduled snapshots beyond the keep count.",
   },
 };
+
+/** Every schedule action, in the order the dialog offers them. */
+export const SCHEDULE_ACTIONS: ScheduleAction[] = ["restart", "start", "stop", "backup", "snapshot", "command"];
+
+/**
+ * Permission a schedule action needs: a schedule runs it with the panel's authority, so creating or
+ * editing one needs the action's own permission (backend apps/instances/views.py
+ * SCHEDULE_ACTION_PERMISSIONS; instance.schedules alone only allows viewing, pausing and deleting).
+ */
+export const ACTION_PERMISSIONS: Record<ScheduleAction, PermissionCode> = {
+  restart: "instance.control",
+  start: "instance.control",
+  stop: "instance.control",
+  backup: "instance.backup",
+  snapshot: "instance.backup",
+  command: "instance.command",
+};
+
+/** Setting a snapshot schedule's keep count deletes older snapshots, so it also needs this. */
+export const SNAPSHOT_KEEP_PERMISSION: PermissionCode = "instance.restore";
+
+const PERMISSION_LABELS: Partial<Record<PermissionCode, string>> = {
+  "instance.control": "Start/stop/restart",
+  "instance.backup": "Create backups",
+  "instance.command": "Send commands",
+  "instance.restore": "Restore backups",
+};
+
+type Can = (code: PermissionCode) => boolean;
+
+/** Why `action` cannot be chosen, or null when the user may schedule it. */
+export function actionBlockedReason(action: ScheduleAction, can: Can): string | null {
+  const code = ACTION_PERMISSIONS[action] ?? "instance.configure";
+  if (!can(code)) return `needs the “${PERMISSION_LABELS[code] ?? code}” permission`;
+  // every snapshot schedule prunes older scheduled snapshots (backend: needs instance.restore too)
+  if (action === "snapshot" && !can(SNAPSHOT_KEEP_PERMISSION))
+    return `needs the “${PERMISSION_LABELS[SNAPSHOT_KEEP_PERMISSION]}” permission (it deletes older snapshots)`;
+  return null;
+}
+
+/** Whether the schedule's payload sets its own keep count (backend: needs instance.restore). */
+export function hasExplicitKeep(s?: Pick<Schedule, "payload"> | null): boolean {
+  return s?.payload?.keep !== undefined && s?.payload?.keep !== null;
+}
+
+/**
+ * Why an existing schedule cannot be edited by this user (null = editable). Mirrors the backend:
+ * every edit except switching it off needs the action's permission, and a snapshot schedule with
+ * its own keep count also needs instance.restore.
+ */
+export function editBlockedReason(s: { action: ScheduleAction | string; payload: Schedule["payload"] }, can: Can): string | null {
+  const action = s.action as ScheduleAction;
+  const label = ACTION_INFO[action]?.label.toLowerCase() ?? action;
+  const blocked = actionBlockedReason(action, can);
+  if (blocked) return `Editing ${label} schedules ${blocked}.`;
+  if (action === "snapshot" && hasExplicitKeep(s) && !can(SNAPSHOT_KEEP_PERMISSION))
+    return `This schedule sets its own keep count; editing it needs the “${PERMISSION_LABELS[SNAPSHOT_KEEP_PERMISSION]}” permission.`;
+  return null;
+}
 
 /** Actions where "only when running" changes behaviour (mirrors backend scheduling.execute). */
 export const RUNNING_ONLY_ACTIONS = ["restart", "command", "stop"];

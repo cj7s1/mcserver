@@ -216,7 +216,13 @@ if env_bool("MCPANEL_BEHIND_TLS_PROXY", False):
 # --- REST framework ------------------------------------------------------------
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["apps.core.auth.CsrfEnforcedSessionAuthentication"],
-    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
+    # PasswordChangeEnforced: accounts flagged must_change_password get 403 must_change_password
+    # everywhere except the views that pin their own permission_classes (auth state/setup/login/
+    # logout/me/password/reset and the health probe).
+    "DEFAULT_PERMISSION_CLASSES": [
+        "rest_framework.permissions.IsAuthenticated",
+        "apps.core.permissions.PasswordChangeEnforced",
+    ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": None,
     "EXCEPTION_HANDLER": "apps.core.errors.exception_handler",
@@ -235,7 +241,7 @@ SPECTACULAR_SETTINGS = {
     "VERSION": "0.1.0",
     "SERVE_INCLUDE_SCHEMA": False,
     "COMPONENT_SPLIT_REQUEST": True,
-    "SERVE_PERMISSIONS": ["rest_framework.permissions.IsAuthenticated"],
+    "SERVE_PERMISSIONS": ["rest_framework.permissions.IsAuthenticated", "apps.core.permissions.PasswordChangeEnforced"],
 }
 
 # --- Celery ----------------------------------------------------------------------
@@ -297,6 +303,11 @@ MCPANEL_JOB_STALE_SECONDS = float(env("MCPANEL_JOB_STALE_SECONDS", "300") or 300
 MCPANEL_JOB_MAX_RUNTIME_HOURS = float(env("MCPANEL_JOB_MAX_RUNTIME_HOURS", "48") or 0)
 if MCPANEL_JOB_HEARTBEAT_SECONDS <= 0 or MCPANEL_JOB_STALE_SECONDS < 3 * MCPANEL_JOB_HEARTBEAT_SECONDS:
     raise ImproperlyConfigured("MCPANEL_JOB_STALE_SECONDS must be at least 3x MCPANEL_JOB_HEARTBEAT_SECONDS (> 0)")
+
+# --- First-run setup ------------------------------------------------------------
+# MCPANEL_SETUP_TOKEN (or MCPANEL_SETUP_TOKEN_FILE) is read per request by
+# apps.accounts.views.setup_token(), not here: a token file that cannot be read keeps the setup
+# page locked instead of preventing the panel from starting.
 
 # --- Agent / node defaults ---------------------------------------------------
 MCPANEL_AGENT_URL = env("MCPANEL_AGENT_URL", "http://localhost:8700") or ""

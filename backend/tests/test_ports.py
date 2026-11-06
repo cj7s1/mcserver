@@ -113,3 +113,21 @@ def test_ports_endpoint_hides_names_of_invisible_servers(make_instance, fake_age
     stranger = client_for(users["norole"]).get("/api/system/ports").json()
     assert all("Secret Server" not in p["used_by"] for p in stranger["in_use"])
     assert any(p["port"] == 25570 and p["used_by"] == "another server" for p in stranger["in_use"])
+
+
+@pytest.mark.django_db
+def test_ports_endpoint_reports_the_requested_node(make_instance, fake_agent, client_for, users):
+    other = Node.objects.create(name="node-2", agent_url="http://agent-2.invalid:8700", agent_token="t" * 30)
+    make_instance(name="Here", game_port=25571)
+    make_instance(name="There", game_port=25572, node=other)
+    c = client_for(users["owner"])
+    default = {p["port"] for p in c.get("/api/system/ports").json()["in_use"]}
+    remote = c.get(f"/api/system/ports?node={other.pk}").json()
+    assert 25571 in default and 25572 not in default
+    assert {p["port"] for p in remote["in_use"]} >= {25572} and 25571 not in {p["port"] for p in remote["in_use"]}
+    # visibility rules are the same on every node
+    stranger = client_for(users["norole"]).get(f"/api/system/ports?node={other.pk}").json()
+    assert any(p["port"] == 25572 and p["used_by"] == "another server" for p in stranger["in_use"])
+    for bad in ("999999", "abc", "1;2"):
+        resp = c.get(f"/api/system/ports?node={bad}")
+        assert resp.status_code == 404 and resp.json()["error"]["code"] == "not_found", bad

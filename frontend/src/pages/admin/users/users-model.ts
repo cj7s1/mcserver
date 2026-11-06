@@ -16,10 +16,18 @@ export function sortRoles(roles: readonly Role[]): Role[] {
   });
 }
 
-/** Only the owner may hand out Administrator; others can only assign roles within their own permissions. */
+/**
+ * Permissions only the owner may hand out, in a role or by assigning a role that has them
+ * (backend apps/accounts/permissions.py OWNER_GRANTED_CODES): otherwise a user manager could mint
+ * more user managers or Administrator-equivalent accounts.
+ */
+export const OWNER_GRANTED_CODES: ReadonlySet<string> = new Set(["system.users", "system.settings"]);
+
+/** Only the owner may hand out Administrator (or any role with owner-granted permissions); others can only assign roles within their own permissions. */
 export function canAssignRole(me: Me, role: Role): boolean {
   if (me.is_owner) return true;
   if (role.key === "administrator") return false;
+  if (role.permissions.some((p) => OWNER_GRANTED_CODES.has(p))) return false;
   return role.permissions.every((p) => me.permissions.includes(p));
 }
 
@@ -31,8 +39,29 @@ export function canManageUser(me: Me, target: PanelUser, roles: readonly Role[])
   return rolePerms.every((p) => me.permissions.includes(p));
 }
 
+/** Why `me` cannot put `code` into a role (null = allowed). Mirrors backend `_guard_permission_grant`. */
+export function grantBlockedReason(me: Me, code: string): string | null {
+  if (me.is_owner) return null;
+  if (OWNER_GRANTED_CODES.has(code)) return "Only the owner can grant this permission";
+  if (!me.permissions.includes(code as Me["permissions"][number])) return "You can't grant a permission you don't hold";
+  return null;
+}
+
 export function canGrantPermission(me: Me, code: string): boolean {
-  return me.is_owner || me.permissions.includes(code as Me["permissions"][number]);
+  return grantBlockedReason(me, code) === null;
+}
+
+/**
+ * Why `me` cannot change a custom role's permissions (null = allowed): saving re-checks every
+ * permission the role keeps, so a role holding an owner-granted permission or one `me` lacks
+ * is read-only for them (backend `_guard_role_change` + `_guard_permission_grant`).
+ */
+export function roleEditBlockedReason(me: Me, role: Role): string | null {
+  if (me.is_owner) return null;
+  if (role.permissions.some((p) => OWNER_GRANTED_CODES.has(p)))
+    return "Only the owner can change roles that include user or settings administration";
+  if (!role.permissions.every((p) => me.permissions.includes(p))) return "This role has permissions you don't hold";
+  return null;
 }
 
 export interface PermissionGroup {

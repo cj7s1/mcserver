@@ -14,12 +14,12 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **847 passed** (2026-11-06, after merging the security-audit fixes, the ZFS snapshot provider and world import/export; working tree incl. 2 not-yet-committed HTTP-hardening tests; incl. OpenAPI fail-on-warn) |
+| `backend: uv run pytest -q -m "not integration"` | **862 passed** (2026-11-06, after the security-audit integration follow-ups; incl. OpenAPI fail-on-warn) |
 | `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06, before the audit/ZFS/world merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
 | `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **533 passed** (2026-11-06; real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite, world swap/rollback on a real filesystem) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 143 tests in 23 files (2026-11-06, incl. 4 not-yet-committed events tests) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 154 tests in 26 files (2026-11-06, after the audit follow-ups) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
-| Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
+| Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack (before `worker-periodic` was added; since then only `docker compose config -q` was run) |
 
 ### Integration coverage added 2026-11-06 (and a bug it found)
 
@@ -189,6 +189,32 @@ server's current node (tagged with its `node_id`, like every backup). The world 
 (`.mcpanel-world-*`) are handled through SafeRoot inside the server folder, so they work unchanged on btrfs
 subvolumes and ZFS datasets.
 
+### Security-audit integration follow-ups (2026-11-06, unit-tested; not yet browser-checked)
+
+* `REST_FRAMEWORK.DEFAULT_PERMISSION_CLASSES` = IsAuthenticated + `PasswordChangeEnforced` (also the schema/docs
+  `SERVE_PERMISSIONS`); auth views and `/api/health` pin their own classes. `apps/core/errors.py` imports DRF's
+  handler lazily (DRF resolves the default classes on import, which imports `apps.core.permissions`).
+* Archived servers are never started: `apps/instances/handlers.apply_container` re-reads the flag (409
+  `archived` with `start=True`, also for jobs queued before the archive; without `start` it skips creating a
+  container, which the next start after unarchiving does); `POST /modpack/update` with `start` refuses archived
+  servers up front. UI: notices on the Software tab and the Recreate row.
+* Backups after a migration: browse/download use the repository node's agent (`backup_agent`), restore and
+  restore-path refuse at once (409 `backup_on_other_node`), restore-as-new checks/allocates the port on and
+  creates the server on the repository node, modpack rollback refuses at once and only offers local rollback
+  points. The backup list carries `node_id` (null = node deleted), `node_name`, `on_current_node`; the
+  Backups table shows an "on <node>" badge and disables in-place restores (tooltip).
+* Snapshot schedules label their snapshots `scheduled #<id> <name>`; retention matches by id (survives
+  renames) and still prunes old `scheduled <name>` snapshots while that name is unique on the server.
+* Env validation reports `spec.env_override_error` (managed vs refused download/command/player variables).
+* `GET /system/ports?node=<id>` (non-numeric/unknown node = 404); the Network page and restore-as-new pass
+  the server's (backup's) node.
+* Compose: `worker-periodic` (`worker -Q periodic -c 2 -n periodic@%h`, own ping health check); `.env.example`
+  documents `MCPANEL_SETUP_TOKEN` and the job-reliability variables, passed through `x-panel-env`.
+* Frontend: Properties tab shows `redacted_keys` as "•••••••• (hidden)" (no reveal toggle); Environment tab
+  notice for `env_values_hidden`; schedule dialog offers only actions the user may run (snapshot keep count
+  needs Restore); roles UI mirrors `OWNER_GRANTED_CODES`; "Mark as failed" mirrors `ABANDON_PERMISSIONS`;
+  node dialog requires the token when the URL changes; System settings warns about `secrets_unreadable`.
+
 ### SpigotMC realities (verified live, see `docs/reference/spiget-api.md`)
 
 * Only **Spiget's mirror of the latest file** can be installed: per-version downloads go to
@@ -269,18 +295,36 @@ Status: **implemented + unit-tested; NOT verified on real ZFS.**
   subvolume (fresh and prepared target), ZFS restore writes through a descriptor and cleans up on failure,
   restore into a new server creates its dataset.
 
+## Security audit (Phase 10, run 2026-11-06 at the user's request)
+
+Nine read-only lenses (agent, backend authz, input/SSRF, secrets/sessions/HTTP, data integrity, frontend,
+deployment, backend bugs, frontend bugs), each finding adversarially verified, then fixed by area with
+regression tests that fail on the pre-fix code:
+`agent/tests/test_security_audit.py`, `backend/tests/test_security_audit_authz.py`,
+`backend/tests/test_security_audit_http.py`, `backend/tests/test_reliability_audit.py`.
+Highlights: bounded RCON replies and console buffers, FIFO-safe file reads, save-on on every path, bounded
+archive parsing; RCON password / env values hidden from viewers; WebSockets re-check access (4401/4403) and
+check the full Origin; schedules need the scheduled action's permission (every snapshot schedule needs
+Restore, since all of them prune); node tokens cannot be redirected; only the owner grants
+system.users/settings; optional `MCPANEL_SETUP_TOKEN`; reset tokens in the URL fragment and bound to the
+password; `must_change_password` enforced; job heartbeat + 24 h visibility timeout; periodic queue +
+`worker-periodic`; backups track their repository node; env deny-list covers code-download/command/op
+variables; Java-exact `server.properties` parsing; webhook SSRF guard; CSP + frame-ancestors on the SPA;
+trusted-proxy default narrowed to loopback; node agent bind address required. Frontend: reset page reads
+`#token=`, setup token field, sockets stop retrying on 4401/4403, CSRF cookie primed before unsafe requests
+(fixed a real reset-link bug in fresh browsers), live events no longer refetch every query.
+Verified live: password reset end to end in a fresh browser; final browser smoke over 10 pages with no
+console or 5xx errors. Not re-run after the audit: the `-m integration` suite and the full compose stack
+(now 7 services with `worker-periodic`).
+
 ## Next recommended tasks (in order)
 
-1. Browser pass over the new screens (Playwright, 1440 and 390 px, dark/light) and fix what it finds,
-   including the restart-warning dialog/banner and the modpack update badge; run one real restart with a
-   warning on a vanilla server (≤1.21.4 and ≥1.21.5) and watch the chat.
-2. Admin UI still missing: Nodes screen (API + `manage.py add_node` exist), notifications channels
-   screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
-   wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).
-3. Validate on Unraid; then (only when the user asks) the Phase 10 security audit.
-4. Roadmap: verify ZFS snapshots on a real pool, CurseForge per-mod search (needs a key). SpigotMC: install
-   one plugin through the UI on a running Paper server and check it loads (only the adapter + agent path was
-   run live).
+1. Re-run the integration suite and the production compose stack (incl. `worker-periodic`) on the
+   current branch; browser pass over the audit-touched screens (properties redaction, schedules
+   permissions, backups on other nodes, nodes dialog, roles matrix) and the restart-warning dialog.
+2. Validate on real Unraid hardware (docs/QUICKSTART-UNRAID.md), including `MCPANEL_SETUP_TOKEN`.
+3. ZFS on a real pool (only fake-`zfs` unit tests so far; check `:rshared` visibility on Unraid).
+4. CurseForge per-mod search (needs a key); run one real restart with a warning and watch the chat.
 
 ## Environment notes (cloud sandbox)
 

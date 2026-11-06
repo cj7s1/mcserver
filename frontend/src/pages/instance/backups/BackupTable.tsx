@@ -5,6 +5,7 @@ import {
   CopyPlus,
   FolderOpen,
   Loader2,
+  Server,
   MoreHorizontal,
   Pencil,
   Pin,
@@ -33,6 +34,7 @@ import { formatBytes, formatDateTime, formatDuration, relativeTime } from "@/lib
 import type { Backup } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { KindBadge } from "./KindBadge";
+import { backupReadable, onOtherNode, otherNodeHint } from "./backup-utils";
 
 export type BackupAction = "restore" | "restore-new" | "browse" | "edit" | "delete";
 
@@ -49,6 +51,20 @@ function Tip({ label, children }: { label: ReactNode; children: ReactNode }) {
       <TooltipTrigger asChild>{children}</TooltipTrigger>
       <TooltipContent className="max-w-xs">{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function NodeBadge({ b }: { b: Backup }) {
+  return (
+    <Tip label={otherNodeHint(b)}>
+      <span
+        className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-800 outline-none focus-visible:ring-3 focus-visible:ring-ring/50 dark:text-amber-200"
+        tabIndex={0}
+      >
+        <Server className="size-3" aria-hidden />
+        {backupReadable(b) ? `on ${b.node_name || "another node"}` : `on a removed node${b.node_name ? ` (${b.node_name})` : ""}`}
+      </span>
+    </Tip>
   );
 }
 
@@ -188,6 +204,9 @@ export function BackupTable({
       <TableBody>
         {backups.map((b) => {
           const ok = b.status === "succeeded";
+          const elsewhere = onOtherNode(b);
+          // a backup on a node that no longer exists cannot be read at all
+          const readable = backupReadable(b);
           return (
             <TableRow key={b.id} className={cn(b.pinned && "bg-primary/[0.03]")}>
               <TableCell className="px-2">
@@ -227,6 +246,7 @@ export function BackupTable({
                 </div>
                 <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-muted-foreground">
                   <KindBadge kind={b.kind} />
+                  {elsewhere && <NodeBadge b={b} />}
                   {b.created_by_name && <span>by {b.created_by_name}</span>}
                   {b.snapshot_id && (
                     <code className="font-mono text-[10px]" title={`restic snapshot ${b.snapshot_id}`}>
@@ -282,7 +302,7 @@ export function BackupTable({
               </TableCell>
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
-                  {perms.restore && ok && (
+                  {perms.restore && ok && !elsewhere && (
                     <Button
                       variant="outline"
                       size="xs"
@@ -293,7 +313,17 @@ export function BackupTable({
                       <RotateCcw /> <span className="hidden 2xl:inline">Restore</span>
                     </Button>
                   )}
-                  {perms.files && ok && (
+                  {perms.restore && ok && elsewhere && (
+                    <Tip label={otherNodeHint(b)}>
+                      {/* a disabled button gets no pointer events: the wrapper carries the tooltip */}
+                      <span tabIndex={0} className="inline-flex rounded-md outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
+                        <Button variant="outline" size="xs" disabled aria-label={`Restore ${b.name} (stored on another node)`}>
+                          <RotateCcw /> <span className="hidden 2xl:inline">Restore</span>
+                        </Button>
+                      </span>
+                    </Tip>
+                  )}
+                  {perms.files && ok && readable && (
                     <Button
                       variant="ghost"
                       size="icon-xs"
@@ -314,16 +344,20 @@ export function BackupTable({
                     <DropdownMenuContent align="end" className="w-60">
                       <DropdownMenuLabel className="truncate text-xs text-muted-foreground">{b.name}</DropdownMenuLabel>
                       {perms.restore && ok && (
-                        <DropdownMenuItem disabled={busy} onSelect={() => onAction("restore", b)}>
-                          <RotateCcw /> Restore over this server…
+                        <DropdownMenuItem
+                          disabled={busy || elsewhere}
+                          title={elsewhere ? otherNodeHint(b) : undefined}
+                          onSelect={() => onAction("restore", b)}
+                        >
+                          <RotateCcw /> {elsewhere ? `Restore over this server (stored on ${b.node_name || "another node"})` : "Restore over this server…"}
                         </DropdownMenuItem>
                       )}
-                      {perms.restore && perms.createInstance && ok && (
+                      {perms.restore && perms.createInstance && ok && readable && (
                         <DropdownMenuItem disabled={busy} onSelect={() => onAction("restore-new", b)}>
-                          <CopyPlus /> Restore as a new server…
+                          <CopyPlus /> {elsewhere ? `Restore as a new server on ${b.node_name || "that node"}…` : "Restore as a new server…"}
                         </DropdownMenuItem>
                       )}
-                      {perms.files && ok && (
+                      {perms.files && ok && readable && (
                         <DropdownMenuItem onSelect={() => onAction("browse", b)}>
                           <FolderOpen /> Browse files…
                         </DropdownMenuItem>

@@ -22,6 +22,7 @@ scripts/cloud-dev/  sandbox-only helpers (egress forwarder, env files, start-ser
 # backend
 cd backend && uv sync && MCPANEL_DEBUG=1 uv run python manage.py migrate
 cd backend && uv run pytest -q -m "not integration"          # conftest sets MCPANEL_TESTING=1
+cd backend && MCPANEL_TEST_DB_NAME=test_mcpanel_<name> uv run pytest -q ...  # own test DB for parallel runs
 cd backend && uv run ruff check . && uv run ruff format .
 # agent
 cd agent && uv sync && uv run pytest -q && uv run ruff check .
@@ -56,10 +57,11 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 | Lifecycle, spec, status, crash loops | `apps/instances/{handlers,spec,state,reconcile}.py` | `docker_ops.py` |
 | Diagnostics / manual downloads | `apps/instances/diagnostics.py` | (reads logs/files) |
 | Modpacks (Modrinth/CurseForge/FTB), preflight, pinning, update/rollback | `apps/modpacks/{providers,mrpack,pinning,handlers}.py` | — |
-| Mods/plugins (Modrinth + Hangar) | `apps/content/{service,hangar_source}.py`, `apps/modpacks/hangar.py` | `fetch.py`, `/files/hashes` |
+| Mods/plugins (Modrinth + Hangar + SpigotMC via Spiget) | `apps/content/{service,hangar_source,spigot_source}.py`, `apps/modpacks/{hangar,spiget}.py` | `fetch.py`, `hashcache.py`, `/files/hashes` |
 | Backups (restic), backup browser, retention | `apps/backups/{handlers,retention,views}.py` | `backups.py` |
-| Snapshots (btrfs) | `apps/backups/handlers.py` (snapshot_*) | `snapshots.py` |
+| Snapshots (btrfs, ZFS) | `apps/backups/handlers.py` (snapshot_*), schedules in `apps/instances/scheduling.py` | `snapshots.py`, `zfs.py` |
 | Import / export (archives) | `apps/instances/views.py` (Import/Extract/Archive) | `archive.py` |
+| Power warnings / update checks | `apps/instances/power_warnings.py` (in-game countdown before restart/stop), `apps/modpacks/{updates,tasks}.py` (periodic modpack update checks) | (RCON via `rcon.py`) |
 | World import / export (level-name, Bukkit dims, replace + rollback) | `apps/instances/{world,views,handlers}.py` (`world_replace` job) | `world.py` |
 | Metrics + player history | `apps/metrics` | `/stats` |
 | Notifications | `apps/notifications` | — |

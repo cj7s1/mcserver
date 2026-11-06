@@ -9,6 +9,7 @@ import {
   nodeToForm,
   normalizeFingerprint,
   sameFingerprint,
+  urlChanged,
   validateNodeForm,
   type PanelNodeRecord,
 } from "./nodes-model";
@@ -176,5 +177,26 @@ describe("certificate helpers", () => {
       }),
     ).toBe("mcagent 0.1.0 · Docker 29.9.2 · restic 0.19.1 · TLS auto");
     expect(checkSummary({ version: "0.1.0", restic: null })).toBe("mcagent 0.1.0 · restic missing");
+  });
+});
+
+describe("changing an existing node's URL", () => {
+  const token = "x".repeat(32);
+
+  it("requires the token again (the stored one is never sent to a new address)", () => {
+    const existing = node();
+    const moved = { ...nodeToForm(existing), agent_url: "https://10.0.0.9:8700" };
+    expect(urlChanged(moved, existing)).toBe(true);
+    expect(validateNodeForm(moved, existing).agent_token).toMatch(/Re-enter the node's AGENT_TOKEN/);
+    expect(validateNodeForm({ ...moved, agent_token: token }, existing).agent_token).toBeUndefined();
+    expect(nodePayload({ ...moved, agent_token: token }, existing)).toEqual({ agent_url: "https://10.0.0.9:8700", agent_token: token });
+  });
+
+  it("keeps the stored token for other edits and for a trailing slash", () => {
+    const existing = node();
+    expect(urlChanged({ agent_url: "https://10.0.0.5:8700/" }, existing)).toBe(false);
+    expect(validateNodeForm({ ...nodeToForm(existing), name: "renamed" }, existing).agent_token).toBeUndefined();
+    // settings-managed nodes never edit URL or token here
+    expect(urlChanged({ agent_url: "https://elsewhere:8700" }, node({ use_settings_token: true }))).toBe(false);
   });
 });

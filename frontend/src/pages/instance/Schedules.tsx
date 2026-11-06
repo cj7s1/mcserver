@@ -27,15 +27,18 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { api, errorMessage } from "@/lib/api";
 import { formatDateTime, relativeTime } from "@/lib/format";
 import { qk } from "@/lib/queries";
-import type { Schedule } from "@/lib/types";
+import type { PermissionCode, Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useInstanceContext } from "./InstanceLayout";
 import { snapshotState, useSnapshots } from "./backups/snapshot-utils";
 import { browserOffset, describeCron, offsetFromIso } from "./schedules/cron";
 import {
   ACTION_INFO,
+  actionBlockedReason,
   DEFAULT_SNAPSHOT_KEEP,
+  editBlockedReason,
   RUNNING_ONLY_ACTIONS,
+  SCHEDULE_ACTIONS,
   scheduleWarnMinutes,
   snapshotKeep,
   WARN_ACTIONS,
@@ -52,8 +55,8 @@ const ACTION_ICONS: Record<string, LucideIcon> = {
   snapshot: Camera,
 };
 
-const TEMPLATES: { label: string; draft: Partial<ScheduleDraft>; needsBackup?: boolean; needsSnapshots?: boolean }[] = [
-  { label: "Nightly backup", draft: { name: "Nightly backup", action: "backup", cron: "0 4 * * *" }, needsBackup: true },
+const TEMPLATES: { label: string; draft: Partial<ScheduleDraft> & Pick<ScheduleDraft, "action">; needsSnapshots?: boolean }[] = [
+  { label: "Nightly backup", draft: { name: "Nightly backup", action: "backup", cron: "0 4 * * *" } },
   {
     label: "Hourly snapshot",
     draft: { name: "Hourly snapshot", action: "snapshot", cron: "0 * * * *", keep: String(DEFAULT_SNAPSHOT_KEEP) },
@@ -92,13 +95,13 @@ function payloadSummary(s: Schedule): string | null {
 function ScheduleRow({
   schedule: s,
   canManage,
-  canBackup,
+  can,
   onEdit,
   instanceId,
 }: {
   schedule: Schedule;
   canManage: boolean;
-  canBackup: boolean;
+  can: (code: PermissionCode) => boolean;
   onEdit: () => void;
   instanceId: string;
 }) {
@@ -125,8 +128,9 @@ function ScheduleRow({
   const description = describeCron(s.cron);
   const summary = payloadSummary(s);
   const enabled = toggle.isPending ? !!toggle.variables : s.enabled;
-  // backup schedules can only be edited by users who may create backups
-  const editable = canManage && (s.action !== "backup" || canBackup);
+  // editing needs the permission of the schedule's action (and restore for a snapshot keep count)
+  const lockedReason = editBlockedReason(s, can);
+  const editable = canManage && !lockedReason;
 
   return (
     <li className="grid grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-2 px-4 py-3 md:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,1fr)_auto] md:items-center">
@@ -219,7 +223,7 @@ function ScheduleRow({
                 <Lock className="size-3.5" aria-label="Locked" />
               </span>
             </TooltipTrigger>
-            <TooltipContent>Editing backup schedules requires the backup permission.</TooltipContent>
+            <TooltipContent>{lockedReason} You can still pause or resume it.</TooltipContent>
           </Tooltip>
         ) : null}
       </div>
@@ -231,6 +235,8 @@ export default function Schedules() {
   const { instance, can } = useInstanceContext();
   const canManage = can("instance.schedules");
   const canBackup = can("instance.backup");
+  // a schedule runs its action with the panel's authority: only actions the user may run are offered
+  const canCreate = canManage && SCHEDULE_ACTIONS.some((a) => !actionBlockedReason(a, can));
   const [dialog, setDialog] = useState<{ key: number; schedule?: Schedule; template?: Partial<ScheduleDraft> } | null>(null);
 
   const query = useQuery({
@@ -262,7 +268,7 @@ export default function Schedules() {
           </>
         }
         actions={
-          canManage && (
+          canCreate && (
             <Button size="sm" onClick={() => openNew()}>
               <Plus /> New schedule
             </Button>
@@ -282,14 +288,14 @@ export default function Schedules() {
               icon={<CalendarClock className="size-5" />}
               title="No schedules yet"
               description={
-                canManage
+                canCreate
                   ? "Start from a template or create your own. A nightly backup is a good first schedule."
                   : "No automation is configured for this server."
               }
               action={
-                canManage && (
+                canCreate && (
                   <div className="flex flex-wrap justify-center gap-2">
-                    {TEMPLATES.filter((t) => (!t.needsBackup || canBackup) && (!t.needsSnapshots || snapshotsReady)).map((t) => (
+                    {TEMPLATES.filter((t) => !actionBlockedReason(t.draft.action, can) && (!t.needsSnapshots || snapshotsReady)).map((t) => (
                       <Button key={t.label} size="sm" variant="outline" onClick={() => openNew(t.draft)}>
                         <Plus /> {t.label}
                       </Button>
@@ -306,7 +312,7 @@ export default function Schedules() {
                 key={s.id}
                 schedule={s}
                 canManage={canManage}
-                canBackup={canBackup}
+                can={can}
                 instanceId={instance.id}
                 onEdit={() => setDialog({ key: Date.now(), schedule: s })}
               />
@@ -340,11 +346,18 @@ export default function Schedules() {
             pruned.
           </li>
         </ul>
-        {!canManage && (
+        {!canManage ? (
           <p className="flex items-center gap-1.5">
             <Lock className="size-3.5" aria-hidden /> You can view schedules but need the “Manage schedules” permission to change
             them.
           </p>
+        ) : (
+          !canCreate && (
+            <p className="flex items-center gap-1.5">
+              <Lock className="size-3.5" aria-hidden /> You can pause and delete schedules. Creating or editing one also needs the
+              permission of its action (start/stop/restart, backups or commands).
+            </p>
+          )
         )}
       </div>
 
@@ -354,7 +367,7 @@ export default function Schedules() {
           instanceId={instance.id}
           schedule={dialog.schedule}
           template={dialog.template}
-          canBackup={canBackup}
+          can={can}
           panelTz={panelTz}
           open
           onOpenChange={(o) => !o && setDialog(null)}

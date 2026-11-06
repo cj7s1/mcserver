@@ -1,6 +1,6 @@
 /** server.properties: typed form editor + raw file editor (GET/PATCH /instances/{id}/properties). */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Eye, EyeOff, Loader2, Plus, RotateCw, Save, Search, Trash2, Undo2, X } from "lucide-react";
+import { Loader2, Lock, Plus, RotateCw, Save, Search, Trash2, Undo2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { Section } from "@/components/PageHeader";
@@ -22,11 +22,23 @@ import { FieldError, Notice, ReadOnlyNotice, SaveBar, useReportDirty, type TabPr
 interface PatchResult {
   values: Record<string, string>;
   raw: string;
+  redacted_keys?: string[];
   changed: string[];
   restart_required: boolean;
 }
 
-const SECRET_KEYS = new Set(["rcon.password"]);
+/** Shown for keys in `redacted_keys`: the API masks them for everyone, so there is nothing to reveal. */
+const HIDDEN_VALUE = "•••••••• (hidden)";
+const HIDDEN_HINT =
+  "The panel never sends this secret to the browser. To change it, replace the masked value in the Raw file tab; saving the mask unchanged keeps the current value.";
+
+function HiddenValue({ id }: { id?: string }) {
+  return (
+    <span id={id} className="inline-flex items-center gap-1 font-mono text-xs text-muted-foreground" title={HIDDEN_HINT}>
+      <Lock className="size-3" aria-hidden /> {HIDDEN_VALUE}
+    </span>
+  );
+}
 const MANAGED_HELP: Record<string, string> = {
   "server-port": "Always 25565 inside the container. Change the public port on the Network tab.",
   "enable-rcon": "RCON is enabled so the panel console can send commands.",
@@ -210,12 +222,12 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
   const [filter, setFilter] = useState("");
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
-  const [showSecrets, setShowSecrets] = useState(false);
 
   const data = q.data;
   const values = useMemo(() => data?.values ?? {}, [data]);
   const schemaKeys = useMemo(() => new Set((data?.schema ?? []).map((s) => s.key)), [data]);
   const managed = useMemo(() => new Set(data?.managed_keys ?? []), [data]);
+  const redacted = useMemo(() => new Set(data?.redacted_keys ?? []), [data]);
 
   const changes = useMemo(() => {
     const out: Record<string, string | null> = {};
@@ -241,7 +253,11 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
   useReportDirty(changeCount > 0 || rawDirty, onDirtyChange);
 
   const onSaved = (res: PatchResult, what: string) => {
-    qc.setQueryData<PropertiesResponse>(key, (old) => (old ? { ...old, exists: true, values: res.values, raw: res.raw } : old));
+    qc.setQueryData<PropertiesResponse>(key, (old) =>
+      old
+        ? { ...old, exists: true, values: res.values, raw: res.raw, redacted_keys: res.redacted_keys ?? old.redacted_keys }
+        : old,
+    );
     qc.invalidateQueries({ queryKey: key });
     // server.properties is also shown in the file manager
     qc.invalidateQueries({ queryKey: [...qk.files(instance.id, "server.properties")] });
@@ -369,16 +385,24 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
             {groups.map(([group, items]) => (
               <Section key={group} title={group}>
                 <div className="grid gap-x-6 gap-y-5 sm:grid-cols-2">
-                  {items.map((s) => (
-                    <PropertyControl
-                      key={s.key}
-                      schema={s}
-                      value={valueOf(s.key)}
-                      set={(v) => setDraft(s.key, v)}
-                      disabled={!canEdit || saveValues.isPending}
-                      error={errors[s.key] ?? null}
-                    />
-                  ))}
+                  {items.map((s) =>
+                    redacted.has(s.key) && !(s.key in drafts) ? (
+                      <div key={s.key} className="grid grid-cols-1 gap-0.5">
+                        <span className="text-sm font-medium">{s.label}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground">{s.key}</span>
+                        <HiddenValue />
+                      </div>
+                    ) : (
+                      <PropertyControl
+                        key={s.key}
+                        schema={s}
+                        value={valueOf(s.key)}
+                        set={(v) => setDraft(s.key, v)}
+                        disabled={!canEdit || saveValues.isPending}
+                        error={errors[s.key] ?? null}
+                      />
+                    ),
+                  )}
                 </div>
               </Section>
             ))}
@@ -412,6 +436,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                     {otherKeys.map((k) => {
                       const removed = drafts[k] === null;
                       const added = !(k in values);
+                      const hidden = redacted.has(k) && !added;
                       return (
                         <tr key={k} className="border-b last:border-b-0">
                           <td className="px-3 py-1.5 align-middle sm:px-4">
@@ -424,14 +449,18 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
                             {added && <span className="ml-2 rounded bg-primary/10 px-1 text-[10px] text-primary">new</span>}
                           </td>
                           <td className="px-2 py-1.5 align-middle">
-                            <Input
-                              id={`other-${k}`}
-                              value={removed ? (values[k] ?? "") : (valueOf(k) ?? "")}
-                              onChange={(e) => setDraft(k, e.target.value)}
-                              disabled={!canEdit || removed}
-                              className="h-7 min-w-28 font-mono text-xs sm:min-w-40"
-                              spellCheck={false}
-                            />
+                            {hidden ? (
+                              <HiddenValue id={`other-${k}`} />
+                            ) : (
+                              <Input
+                                id={`other-${k}`}
+                                value={removed ? (values[k] ?? "") : (valueOf(k) ?? "")}
+                                onChange={(e) => setDraft(k, e.target.value)}
+                                disabled={!canEdit || removed}
+                                className="h-7 min-w-28 font-mono text-xs sm:min-w-40"
+                                spellCheck={false}
+                              />
+                            )}
                           </td>
                           {canEdit && (
                             <td className="px-2 py-1.5 text-right align-middle">
@@ -516,20 +545,13 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
           <Section
             title="Managed by MCPanel"
             description="Set through the container runtime on every start; edits to these keys are rejected or reverted."
-            actions={
-              data.managed_keys.some((k) => SECRET_KEYS.has(k) && values[k]) ? (
-                <Button variant="ghost" size="xs" onClick={() => setShowSecrets((v) => !v)} aria-pressed={showSecrets}>
-                  {showSecrets ? <EyeOff /> : <Eye />} {showSecrets ? "Hide secrets" : "Reveal secrets"}
-                </Button>
-              ) : undefined
-            }
           >
             <dl className="grid gap-3 sm:grid-cols-2">
               {data.managed_keys.map((k) => (
                 <div key={k} className="grid grid-cols-1 gap-0.5">
                   <dt className="font-mono text-xs">{k}</dt>
                   <dd className="font-mono text-xs text-muted-foreground">
-                    {values[k] === undefined ? "(not in file)" : SECRET_KEYS.has(k) && !showSecrets ? "••••••••" : values[k] || "(empty)"}
+                    {values[k] === undefined ? "(not in file)" : redacted.has(k) ? <HiddenValue /> : values[k] || "(empty)"}
                   </dd>
                   {MANAGED_HELP[k] && <dd className="text-[11px] text-muted-foreground">{MANAGED_HELP[k]}</dd>}
                 </div>

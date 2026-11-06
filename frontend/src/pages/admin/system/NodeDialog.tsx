@@ -27,6 +27,7 @@ import {
   nodeToForm,
   normalizeFingerprint,
   sameFingerprint,
+  urlChanged,
   validateNodeForm,
   type NodeCheckResult,
   type NodeFormState,
@@ -160,6 +161,8 @@ function NodeDialogBody({ node, onClose }: { node?: PanelNodeRecord; onClose: ()
   }
 
   const urlValid = agentUrlError(form.agent_url) === null;
+  // a changed URL needs the token again: the stored one is never sent to a new address
+  const tokenRequired = !editing || urlChanged(form, node);
   const https = isHttpsUrl(form.agent_url);
   const plainHttp = urlValid && !https;
   const busy = save.isPending;
@@ -239,7 +242,10 @@ function NodeDialogBody({ node, onClose }: { node?: PanelNodeRecord; onClose: ()
               <>
                 <span className="font-mono">AGENT_TOKEN</span> from the node's <span className="font-mono">node.env</span>, at
                 least {MIN_TOKEN_LENGTH} characters. Stored encrypted and never shown again.
-                {editing && " Leave blank to keep the current token."}
+                {editing &&
+                  (tokenRequired
+                    ? " Required because the URL changed: the stored token is never sent to a new address."
+                    : " Leave blank to keep the current token.")}
               </>
             }
           >
@@ -249,7 +255,8 @@ function NodeDialogBody({ node, onClose }: { node?: PanelNodeRecord; onClose: ()
                 type={showToken ? "text" : "password"}
                 value={form.agent_token}
                 onChange={(e) => set("agent_token", e.target.value)}
-                placeholder={editing ? "Unchanged" : "Paste the node's AGENT_TOKEN"}
+                placeholder={tokenRequired ? "Paste the node's AGENT_TOKEN" : "Unchanged"}
+                required={tokenRequired}
                 autoComplete="new-password"
                 spellCheck={false}
                 maxLength={500}

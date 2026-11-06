@@ -22,7 +22,7 @@ import { ApiError, api, errorMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
 import type { Me, PanelUser, Role } from "@/lib/types";
 import { AdminCallout, AdminCopyButton, AdminFieldError, AdminHint } from "../admin-shared";
-import { canAssignRole, generatePassword, sortRoles, USERNAME_RE } from "./users-model";
+import { canAssignRole, generatePassword, OWNER_GRANTED_CODES, sortRoles, USERNAME_RE } from "./users-model";
 
 const NO_ROLE = "none";
 
@@ -72,7 +72,13 @@ function UserRoleSelect({
               <SelectItem key={r.id} value={String(r.id)} disabled={!allowed && String(r.id) !== value}>
                 {r.name}
                 {!r.is_system && <span className="text-xs text-muted-foreground">custom</span>}
-                {!allowed && <span className="text-xs text-muted-foreground">exceeds your permissions</span>}
+                {!allowed && (
+                  <span className="text-xs text-muted-foreground">
+                    {!me.is_owner && (r.key === "administrator" || r.permissions.some((p) => OWNER_GRANTED_CODES.has(p)))
+                      ? "only the owner can assign it"
+                      : "exceeds your permissions"}
+                  </span>
+                )}
               </SelectItem>
             );
           })}

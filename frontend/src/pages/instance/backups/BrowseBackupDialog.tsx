@@ -63,6 +63,8 @@ export function BrowseBackupDialog({
           <DialogDescription>
             Read-only view of the backup taken {formatDateTime(backup.created_at)}. Download single files, or restore one file or
             folder without touching the rest of the server.
+            {backup.on_current_node === false &&
+              ` This backup is stored on ${backup.node_name ? `node “${backup.node_name}”` : "another node"} (the server was moved since), so files can be downloaded but not restored into this server.`}
           </DialogDescription>
         </DialogHeader>
 

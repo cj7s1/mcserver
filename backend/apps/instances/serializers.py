@@ -10,7 +10,7 @@ from apps.core.models import SystemSetting
 
 from . import properties
 from .models import Instance, Schedule, ServerType
-from .spec import MANAGED_ENV, restart_required
+from .spec import env_override_error, restart_required
 
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 # Shown instead of custom env values to users without instance.configure: values often carry
@@ -29,8 +29,10 @@ def validate_env(value: dict[str, Any]) -> dict[str, str]:
     for k, v in value.items():
         if not ENV_KEY.match(str(k)):
             raise serializers.ValidationError(f"Invalid variable name {k!r}")
-        if str(k).upper() in MANAGED_ENV:
-            raise serializers.ValidationError(f"{k} is managed by MCPanel; use the dedicated setting instead")
+        # precise reason: panel-managed (use the dedicated setting) vs refused download/command/
+        # player-rights variables (see docs/SECURITY.md, "Advanced environment variables")
+        if (reason := env_override_error(str(k))) is not None:
+            raise serializers.ValidationError(reason)
         if not isinstance(v, (str, int, float, bool)) or len(str(v)) > 8192 or "\x00" in str(v):
             raise serializers.ValidationError(f"Invalid value for {k}")
         out[str(k)] = str(v).lower() if isinstance(v, bool) else str(v)

@@ -1,5 +1,15 @@
 /** Local shapes for GET /system/info (agent part), GET /system/ports (backend/apps/core/views.py). */
-import type { SystemInfo } from "@/lib/types";
+import type { SystemInfo, SystemSettings } from "@/lib/types";
+
+/** Names of the stored secrets (backend apps/core/views.py SECRETS). */
+const SECRET_LABELS: Record<string, string> = { curseforge_api_key: "CurseForge API key" };
+
+/** Labels of stored secrets the panel cannot decrypt (GET /system/settings secrets_unreadable). */
+export function unreadableSecrets(settings: Pick<SystemSettings, "secrets_unreadable">): string[] {
+  return Object.entries(settings.secrets_unreadable ?? {})
+    .filter(([, unreadable]) => unreadable)
+    .map(([key]) => SECRET_LABELS[key] ?? key);
+}
 
 export interface StorageVolume {
   path: string;

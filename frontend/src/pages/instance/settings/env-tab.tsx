@@ -69,9 +69,17 @@ export function EnvTab({ instance, can, onDirtyChange }: TabProps) {
     if (patch.error) patch.reset();
   };
 
+  const valuesHidden = !!instance.env_values_hidden;
+
   return (
     <div className="grid grid-cols-1 gap-4">
       {!canEdit && <ReadOnlyNotice what="edit environment variables" />}
+      {valuesHidden && (
+        <Notice title="Values are hidden: you need the Configure server permission">
+          Variable values often contain secrets (webhook URLs, plugin or API tokens), so only people who can configure this
+          server see them. The names are shown so you can tell which settings are overridden.
+        </Notice>
+      )}
       <Section
         title="Environment variables"
         description="Advanced: extra variables passed to the itzg/minecraft-server container. Applied when the container is recreated (restart)."
@@ -89,7 +97,9 @@ export function EnvTab({ instance, can, onDirtyChange }: TabProps) {
         <div className="grid grid-cols-1 gap-3">
           <Notice>
             Settings MCPanel manages itself (server type, version, memory, JVM flags, EULA, ports and RCON) are rejected here; use
-            the dedicated settings instead. Values are visible to everyone who can configure this server.
+            the dedicated settings instead. So are variables that would download mods, plugins or worlds, run commands or grant
+            operator/whitelist entries (use the mods/plugins manager, the console or the Players page). Values are visible to
+            everyone who can configure this server.
           </Notice>
           {serverError && (
             <Notice tone="danger" title="The server rejected these variables">
@@ -136,7 +146,7 @@ export function EnvTab({ instance, can, onDirtyChange }: TabProps) {
                       <td className="px-2 py-1.5">
                         <Input
                           aria-label={`Variable ${r.key || i + 1} value`}
-                          value={r.value}
+                          value={valuesHidden && !canEdit ? "•••••••• (hidden)" : r.value}
                           onChange={(e) => edit((list) => list.map((x) => (x.id === r.id ? { ...x, value: e.target.value } : x)))}
                           placeholder="value"
                           className="h-7 min-w-44 font-mono text-xs"
