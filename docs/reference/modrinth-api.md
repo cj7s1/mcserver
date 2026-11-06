@@ -22,13 +22,13 @@ The mrpack support article (`support.modrinth.com/en/articles/8802351`) returns 
 |---|---|---|
 | `GET /search` | `query`, `facets`, `index`, `offset`, `limit` | `{hits[], offset, limit, total_hits}` |
 | `GET /project/{id\|slug}` | - | Project |
-| `GET /projects?ids=[...]` | ids **and/or slugs** (verified mixed) | Project[] |
+| `GET /projects?ids=[...]` | ids **and/or slugs** (verified mixed). 245 ids in one request verified (2026-11-06: 0.68 s, vs 1.59 s for three requests of <= 100); no documented maximum, keep the URL a few KB | Project[] |
 | `GET /project/{id\|slug}/version` | `loaders`, `game_versions`, `featured`, `include_changelog` (default true) | Version[] (observed newest first) |
 | `GET /project/{id\|slug}/version/{id\|number}` | number match returns the **oldest** matching version (spec) | Version |
 | `GET /version/{id}` | - | Version |
 | `GET /versions?ids=[...]` | `include_changelog=false` also honoured (observed) | Version[] - **order NOT preserved** (observed) |
 | `GET /version_file/{hash}?algorithm=sha1\|sha512` | `multiple` (bool, default false) | Version |
-| `POST /version_files` | `{"hashes":[...],"algorithm":"sha1"\|"sha512"}` | `{hash: Version}` (unknown hashes omitted) |
+| `POST /version_files` | `{"hashes":[...],"algorithm":"sha1"\|"sha512"}`. 311 hashes in one request verified (0.28 s, 432 KB response) | `{hash: Version}` (unknown hashes omitted) |
 | `POST /version_file/{hash}/update?algorithm=` | `{"loaders":[...],"game_versions":[...],"version_types":[...]?}` | Version |
 | `POST /version_files/update` | `{"hashes","algorithm","loaders","game_versions","version_types"?}` (`loaders`,`game_versions` required) | `{hash: latest matching Version}` |
 | `GET /project/{id\|slug}/members`, `GET /team/{id}/members` | - | TeamMember[] (`[]` for org-owned projects, see 6) |

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import status
 from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.request import Request
@@ -77,13 +77,27 @@ def _audited(
 
 class ContentListView(APIView):
     @extend_schema(
-        operation_id="content_inventory", responses={200: dict}, summary="Installed mods/plugins, identified on Modrinth"
+        operation_id="content_inventory",
+        responses={200: dict},
+        summary="Installed mods/plugins, identified on Modrinth",
+        parameters=[
+            OpenApiParameter(
+                "progressive",
+                bool,
+                description=(
+                    "Answer within a few seconds even when the node still has to read (hash) files: those are "
+                    "listed with source 'pending' and identification.pending > 0; poll again until it is 0."
+                ),
+            )
+        ],
     )
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, READ)
         from . import hangar_source
 
-        return Response(hangar_source.annotate_inventory(instance, service.inventory(instance)))
+        progressive = request.query_params.get("progressive", "").lower() in ("1", "true")
+        wait = service.INVENTORY_WAIT if progressive else None
+        return Response(hangar_source.annotate_inventory(instance, service.inventory(instance, wait=wait)))
 
 
 class ContentUpdatesView(APIView):

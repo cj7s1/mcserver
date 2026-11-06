@@ -213,10 +213,12 @@ class FakeModrinth:
 # Fake node agent (content-related file operations only)
 # ======================================================================================
 class ContentAgent:
-    METHODS = ("hash_files", "fetch_file", "stat_file", "rename", "delete_files", "mkdir", "upload")
+    METHODS = ("hash_files", "hash_files_partial", "fetch_file", "stat_file", "rename", "delete_files", "mkdir", "upload")
 
     def __init__(self) -> None:
         self.files: dict[tuple[str, str], dict[str, Any]] = {}
+        # (instance id, path) of files the agent has "not hashed yet" (progressive calls only)
+        self.unhashed: set[tuple[str, str]] = set()
         self.dirs: set[tuple[str, str]] = set()
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_fetch_urls: set[str] = set()
@@ -253,6 +255,15 @@ class ContentAgent:
                 {"name": name, "path": p, "type": meta["type"], "size": meta["size"], "modified": 1.7e9, "hash": meta["sha1"]}
             )
         return out
+
+    def hash_files_partial(self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
+        assert 0 < wait <= 60
+        files = [
+            {**f, "hash": None} if (str(instance_id), f["path"]) in self.unhashed else f
+            for f in self.hash_files(instance_id, path, algorithm)
+        ]
+        pending = sum(1 for f in files if f["hash"] is None)
+        return {"files": files, "complete": pending == 0, "pending": pending}
 
     def fetch_file(
         self,
@@ -557,7 +568,7 @@ def test_inventory_identifies_and_classifies_files(
     data = resp.json()
     assert data["kind"] == "plugins" and data["directory"] == "plugins"
     assert data["loaders"] == ["paper", "spigot", "bukkit"]
-    assert data["identification"] == {"available": True, "error": None}
+    assert data["identification"] == {"available": True, "error": None, "complete": True, "pending": 0}
     files = {f["filename"]: f for f in data["files"]}
     assert set(files) == {"LuckPerms-5.4.0.jar", "Homemade.jar", "Old.jar.disabled"}
     lp = files["LuckPerms-5.4.0.jar"]
@@ -567,12 +578,137 @@ def test_inventory_identifies_and_classifies_files(
     assert lp["compatibility"] == {"loader": True, "minecraft": True}
     assert files["Homemade.jar"]["source"] == "manual" and files["Homemade.jar"]["project"] is None
     assert files["Old.jar.disabled"]["enabled"] is False
-    assert data["summary"] == {"total": 3, "enabled": 2, "disabled": 1, "identified": 1, "manual": 2}
+    assert data["summary"] == {"total": 3, "enabled": 2, "disabled": 1, "identified": 1, "manual": 2, "pending": 0}
     assert agent.called("hash_files")[0]["args"][1] == "plugins"
     # the inventory is also served without the trailing slash (not by the instance-action route)
     no_slash = api.get(f"/api/instances/{inst.id}/content")
     assert no_slash.status_code == 200, no_slash.content
     assert no_slash.json()["summary"] == data["summary"]
+
+
+@pytest.mark.django_db
+def test_inventory_progressive_lists_pending_files(
+    api: APIClient, make_server: Any, agent: ContentAgent, mr: FakeModrinth
+) -> None:
+    """?progressive=1 answers before the agent has hashed everything; the browser polls until pending is 0."""
+    seed_luckperms(mr)
+    inst = make_server("PAPER")
+    agent.put(inst, "plugins/LuckPerms-5.4.0.jar", mr.sha1("LPold001"))
+    agent.put(inst, "plugins/Big.jar", hashlib.sha1(b"big").hexdigest(), size=99)
+    agent.put(inst, "plugins/Late.jar.disabled", hashlib.sha1(b"late").hexdigest())
+    agent.unhashed = {(str(inst.id), "plugins/Big.jar"), (str(inst.id), "plugins/Late.jar.disabled")}
+
+    data = api.get(url(inst), {"progressive": "1"}).json()
+    assert agent.called("hash_files_partial")[0]["wait"] == service.INVENTORY_WAIT
+    assert not agent.called("hash_files")
+    assert data["identification"] == {"available": True, "error": None, "complete": False, "pending": 2}
+    assert [f["filename"] for f in data["files"]] == ["Big.jar", "Late.jar.disabled", "LuckPerms-5.4.0.jar"]
+    files = {f["filename"]: f for f in data["files"]}
+    assert files["Big.jar"] == {
+        "filename": "Big.jar",
+        "enabled": True,
+        "size": 99,
+        "modified": 1.7e9,
+        "sha1": None,
+        "source": "pending",
+        "project": None,
+        "version": None,
+        "compatibility": None,
+    }
+    assert files["Late.jar.disabled"]["enabled"] is False and files["Late.jar.disabled"]["source"] == "pending"
+    assert files["LuckPerms-5.4.0.jar"]["source"] == "modrinth"
+    assert data["summary"] == {"total": 3, "enabled": 2, "disabled": 1, "identified": 1, "manual": 0, "pending": 2}
+    # an incomplete scan is not remembered as the installed set
+    from django.core.cache import cache
+
+    assert cache.get(service._installed_key(inst)) is None
+
+    agent.unhashed = set()
+    done = api.get(url(inst), {"progressive": "true"}).json()
+    assert done["identification"]["complete"] is True and done["identification"]["pending"] == 0
+    assert {f["filename"]: f["source"] for f in done["files"]} == {
+        "Big.jar": "manual",
+        "Late.jar.disabled": "manual",
+        "LuckPerms-5.4.0.jar": "modrinth",
+    }
+    assert cache.get(service._installed_key(inst)) == ["LPerm001"]
+
+
+@pytest.mark.django_db
+def test_inventory_pending_files_are_not_labelled_from_hangar(
+    api: APIClient, make_server: Any, agent: ContentAgent, mr: FakeModrinth
+) -> None:
+    inst = make_server("PAPER")
+    inst.modpack_meta = {"hangar": {"Chunky.jar": {"slug": "Chunky", "version": "1.4.40"}}}
+    inst.save(update_fields=["modpack_meta"])
+    agent.put(inst, "plugins/Chunky.jar", hashlib.sha1(b"chunky").hexdigest())
+    agent.unhashed = {(str(inst.id), "plugins/Chunky.jar")}
+    pending = api.get(url(inst), {"progressive": "1"}).json()
+    assert pending["files"][0]["source"] == "pending" and pending["summary"]["hangar"] == 0
+    agent.unhashed = set()
+    done = api.get(url(inst), {"progressive": "1"}).json()
+    assert done["files"][0]["source"] == "hangar" and done["summary"]["hangar"] == 1
+
+
+@pytest.mark.django_db
+def test_client_hash_files_partial(ct_node: Any) -> None:
+    import uuid
+
+    iid = uuid.uuid4()
+    digest = "ab" * 20
+    with respx.mock(assert_all_mocked=True) as router:
+        route = router.get(f"http://agent.invalid:8700/v1/instances/{iid}/files/hashes").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "algorithm": "sha1",
+                    "files": [{"name": "a.jar", "hash": None}, {"name": "b.jar", "hash": digest}],
+                    "complete": False,
+                    "pending": 1,
+                },
+            )
+        )
+        out = AgentClient(ct_node).hash_files_partial(iid, "mods", wait=3.0)
+        params = route.calls[0].request.url.params
+        assert (params["path"], params["algorithm"], params["wait"]) == ("mods", "sha1", "3.0")
+        assert out["complete"] is False and out["pending"] == 1 and len(out["files"]) == 2
+        # an agent without progressive hashing ignores ``wait`` and returns everything hashed
+        route.mock(return_value=httpx.Response(200, json={"algorithm": "sha1", "files": [{"name": "a.jar", "hash": digest}]}))
+        assert AgentClient(ct_node).hash_files_partial(iid, "mods", wait=3.0)["complete"] is True
+
+
+@pytest.mark.django_db
+def test_identify_batches_hashes_and_projects(make_server: Any, agent: ContentAgent, mr: FakeModrinth) -> None:
+    """Hashes and project ids are looked up in batches, and both lookups are cached."""
+    assert service.HASH_BATCH == 500 and service.PROJECT_BATCH == 250
+    seed_luckperms(mr)
+    hashes = [mr.sha1("LPold001"), *(hashlib.sha1(str(i).encode()).hexdigest() for i in range(60))]
+    calls = {"files": 0, "projects": 0}
+    real_identify, real_projects = service._mr().identify_files, service._mr().projects
+
+    def count_identify(chunk: list[str]) -> dict[str, Any]:
+        calls["files"] += 1
+        assert len(chunk) <= service.HASH_BATCH
+        return real_identify(chunk)
+
+    def count_projects(ids: list[str]) -> list[dict[str, Any]]:
+        calls["projects"] += 1
+        assert len(ids) <= service.PROJECT_BATCH
+        return real_projects(ids)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(service, "HASH_BATCH", 50)  # the test cache (LocMem) only holds 300 keys
+        mp.setattr(service._mr(), "identify_files", count_identify)
+        mp.setattr(service._mr(), "projects", count_projects)
+        found = service.identify(hashes)
+        assert set(found) == {mr.sha1("LPold001")}
+        assert calls["files"] == 2
+        service.project_summaries([found[mr.sha1("LPold001")]["project_id"]])
+        assert calls["projects"] == 1
+        # cached: neither call is repeated (hits and misses alike)
+        assert service.identify(hashes) == found
+        service.project_summaries([found[mr.sha1("LPold001")]["project_id"]])
+        assert calls == {"files": 2, "projects": 1}
 
 
 @pytest.mark.django_db

@@ -75,12 +75,17 @@ MAX_DEPENDENCY_DEPTH = 3
 MAX_INSTALLS_PER_REQUEST = 25
 MAX_FILES_PER_UPDATE = 100
 HASH_BATCH = 500
-PROJECT_BATCH = 100
+# One /projects request for 245 ids took 0.68 s, three of up to 100 took 1.59 s (measured);
+# 250 ids keep the URL around 4 KB.
+PROJECT_BATCH = 250
 
-IDENTIFY_TTL = 3600  # a hash -> version mapping never changes once published
+IDENTIFY_TTL = 6 * 3600  # a hash -> version mapping never changes once published (metadata rarely does)
 IDENTIFY_MISS_TTL = 600  # unknown hashes may be published later
-PROJECT_TTL = 3600
+PROJECT_TTL = 6 * 3600
 INSTALLED_TTL = 60
+# How long a progressive inventory lets the agent hash before answering with what it has
+# (the agent keeps hashing in the background; the browser polls until nothing is pending).
+INVENTORY_WAIT = 3.0
 
 UNTRUSTED_UPLOAD_NOTICE = (
     "Uploaded jars are untrusted third-party code: they run inside the server with full access to its files "
@@ -483,23 +488,47 @@ class LocalFile:
     sha1: str
 
 
-def scan(ctx: ContentContext, client: AgentClient) -> list[LocalFile]:
-    entries = client.hash_files(ctx.instance.id, ctx.directory, "sha1")
-    out: list[LocalFile] = []
+@dataclass(frozen=True)
+class PendingFile:
+    """A jar the agent has not hashed yet (progressive inventory only)."""
+
+    filename: str
+    enabled: bool
+    size: int
+    modified: float | None
+
+
+def _parse_entries(entries: list[dict[str, Any]]) -> tuple[list[LocalFile], list[PendingFile]]:
+    files: list[LocalFile] = []
+    pending: list[PendingFile] = []
     for e in entries:
         name = e.get("name")
-        digest = str(e.get("hash") or "").lower()
-        if e.get("type") != "file" or not isinstance(name, str) or not _SHA1.match(digest):
+        if e.get("type") != "file" or not isinstance(name, str):
             continue
         if not (name.endswith(ENABLED_SUFFIX) or name.endswith(DISABLED_SUFFIX)):
             continue
-        out.append(
-            LocalFile(
-                filename=name, enabled=is_enabled(name), size=int(e.get("size") or 0), modified=e.get("modified"), sha1=digest
-            )
-        )
-    out.sort(key=lambda f: f.filename.lower())
-    return out
+        size, modified = int(e.get("size") or 0), e.get("modified")
+        if e.get("hash") is None:
+            pending.append(PendingFile(filename=name, enabled=is_enabled(name), size=size, modified=modified))
+            continue
+        digest = str(e.get("hash")).lower()
+        if _SHA1.match(digest):
+            files.append(LocalFile(filename=name, enabled=is_enabled(name), size=size, modified=modified, sha1=digest))
+    files.sort(key=lambda f: f.filename.lower())
+    pending.sort(key=lambda f: f.filename.lower())
+    return files, pending
+
+
+def scan(ctx: ContentContext, client: AgentClient) -> list[LocalFile]:
+    """Every jar in the content folder with its SHA-1 (waits until the agent hashed all of them)."""
+    files, _pending = _parse_entries(client.hash_files(ctx.instance.id, ctx.directory, "sha1"))
+    return files
+
+
+def scan_progressive(ctx: ContentContext, client: AgentClient, wait: float) -> tuple[list[LocalFile], list[PendingFile]]:
+    """Like :func:`scan`, but returns after about ``wait`` seconds with the jars not hashed yet."""
+    result = client.hash_files_partial(ctx.instance.id, ctx.directory, "sha1", wait=wait)
+    return _parse_entries(result.get("files") or [])
 
 
 def _installed_key(instance: Instance) -> str:
@@ -533,9 +562,18 @@ def base_warnings(ctx: ContentContext) -> list[str]:
     return warnings
 
 
-def inventory(instance: Instance) -> dict[str, Any]:
+def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any]:
+    """Installed jars identified on Modrinth.
+
+    With ``wait`` (progressive) the agent answers after about that many seconds; jars it has
+    not hashed yet are listed with ``source: "pending"`` and ``identification.pending`` > 0.
+    """
     ctx = context_for(instance, require_version=False)
-    files = scan(ctx, AgentClient(instance.node))
+    client = AgentClient(instance.node)
+    if wait is None:
+        files, pending = scan(ctx, client), []
+    else:
+        files, pending = scan_progressive(ctx, client, wait)
     warnings = base_warnings(ctx)
     identification_error: str | None = None
     versions: dict[str, dict[str, Any]] = {}
@@ -546,7 +584,7 @@ def inventory(instance: Instance) -> dict[str, Any]:
     except ApiError as exc:
         identification_error = str(exc.detail)
         warnings.append(f"Could not identify files on Modrinth: {identification_error}")
-    if identification_error is None:
+    if identification_error is None and not pending:
         _remember_installed(instance, versions)
 
     items = []
@@ -577,6 +615,22 @@ def inventory(instance: Instance) -> dict[str, Any]:
                 enabled_by_project.setdefault(pid, []).append(f.filename)
         items.append(item)
 
+    for p in pending:
+        items.append(
+            {
+                "filename": p.filename,
+                "enabled": p.enabled,
+                "size": p.size,
+                "modified": p.modified,
+                "sha1": None,
+                "source": "pending",
+                "project": None,
+                "version": None,
+                "compatibility": None,
+            }
+        )
+    items.sort(key=lambda i: i["filename"].lower())
+
     for pid, names in enabled_by_project.items():
         if len(names) > 1:
             title = (projects.get(pid) or {}).get("title") or pid
@@ -591,7 +645,12 @@ def inventory(instance: Instance) -> dict[str, Any]:
         "minecraft_version": ctx.minecraft_version,
         "is_modpack": instance.is_modpack,
         "restart_required_for_changes": ctx.restart_required,
-        "identification": {"available": identification_error is None, "error": identification_error},
+        "identification": {
+            "available": identification_error is None,
+            "error": identification_error,
+            "complete": not pending,
+            "pending": len(pending),
+        },
         "warnings": warnings,
         "summary": {
             "total": len(items),
@@ -599,6 +658,7 @@ def inventory(instance: Instance) -> dict[str, Any]:
             "disabled": sum(1 for i in items if not i["enabled"]),
             "identified": identified,
             "manual": sum(1 for i in items if i["source"] == "manual"),
+            "pending": len(pending),
         },
         "files": items,
     }
