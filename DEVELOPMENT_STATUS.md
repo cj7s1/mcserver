@@ -14,7 +14,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
 | `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 54 tests (41 of them for the command palette) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 57 tests (44 of them for the command palette) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -62,6 +62,23 @@ shortcuts on/off). Playwright against a worktree Vite + the live dev API at 1440
 light, reduced motion, and Ctrl+K from inside the xterm console: 33 + 4 checks passed, no page errors.
 For the confirmation flow one server was shown as running by rewriting the API response in the browser,
 and every `/power` request was aborted in the browser; no real server was started or stopped.
+
+Independent review (second pass) fixed: (1) closing the palette, the shortcuts help or the Stop/Restart
+confirmation dropped keyboard focus on `<body>` (Radix returns focus to a `DialogTrigger`, and none of
+these dialogs has one); focus now goes back to the element that had it when the palette or help was
+opened, or to the search button if that element is gone (`ConfirmDialog` gained an optional
+`onCloseAutoFocus` prop for this). (2) On macOS, Ctrl+K inside text fields (the system "delete to end of
+line" key) is no longer taken; Cmd+K works everywhere. (3) The screen-reader result count could
+re-announce the previous search's count when a new search started. Re-verified with jsdom tests (focus
+return after Escape, after the help and after cancelling Stop; Restart confirm posts `{action:
+"restart"}`; macOS hotkey rule) and Playwright on a worktree Vite against the live API: focus return,
+Ctrl+K ignored while a menu is open, keyboard-only navigation, the result count, Stop/Restart
+confirmation with Cancel focused (server shown as running by a browser-only response rewrite), macOS
+emulation (`navigator.platform` overridden), and a **view-only user simulated by rewriting
+`/auth/state` and `/instances` responses in the browser** (no admin group, no Create server, no power
+actions, no console/files/backups/access pages, `c` inert, help without "Create a server"): 32 checks
+passed, no console errors. Every non-GET API request except the login was aborted in the browser (none
+was attempted). Still not verified: a real restricted account on the backend, and a real Mac.
 
 ### Not yet verified
 

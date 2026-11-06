@@ -7,6 +7,7 @@ import {
   isPaletteHotkey,
   isTypingTarget,
   SHORTCUTS,
+  togglesPalette,
 } from "./shortcuts";
 import { fuzzyScore, orderGroups, scoreToken } from "./fuzzy";
 import { MAX_RECENT, pushRecent, readRecent, readSingleKeyShortcuts, RECENT_KEY, writeSingleKeyShortcuts } from "./storage";
@@ -83,6 +84,26 @@ describe("isPaletteHotkey", () => {
     expect(isPaletteHotkey({ ...base, ctrlKey: true, shiftKey: true })).toBe(false);
     expect(isPaletteHotkey({ ...base, ctrlKey: true, altKey: true })).toBe(false);
     expect(isPaletteHotkey({ ...base, key: "j", ctrlKey: true })).toBe(false);
+  });
+});
+
+describe("togglesPalette", () => {
+  const base = { key: "k", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false };
+  it("leaves Ctrl+K to text fields on macOS (delete to end of line) but takes Cmd+K there", () => {
+    document.body.innerHTML = '<input id="i"><button id="b">x</button>';
+    const input = document.getElementById("i");
+    const button = document.getElementById("b");
+    expect(togglesPalette({ ...base, ctrlKey: true, target: input }, true)).toBe(false);
+    expect(togglesPalette({ ...base, metaKey: true, target: input }, true)).toBe(true);
+    expect(togglesPalette({ ...base, ctrlKey: true, target: button }, true)).toBe(true);
+    expect(togglesPalette({ ...base, ctrlKey: true, target: document.body }, true)).toBe(true);
+  });
+  it("takes Ctrl+K everywhere elsewhere, text fields included", () => {
+    document.body.innerHTML = '<input id="i">';
+    const input = document.getElementById("i");
+    expect(togglesPalette({ ...base, ctrlKey: true, target: input }, false)).toBe(true);
+    expect(togglesPalette({ ...base, metaKey: true, target: input }, false)).toBe(true);
+    expect(togglesPalette({ ...base, target: input }, false)).toBe(false);
   });
 });
 

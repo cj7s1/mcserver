@@ -122,6 +122,38 @@ describe("CommandPalette", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("hands focus back to what had it when the palette opened (Radix has no trigger to return to)", async () => {
+    const { user } = setup();
+    const field = screen.getByRole("textbox", { name: "Some field" });
+    await user.click(field);
+    await user.keyboard("{Control>}k{/Control}");
+    await screen.findByRole("dialog", { name: "Command palette" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(field).toHaveFocus());
+
+    // opened from the search button, focus returns to it (also after a follow-up dialog)
+    const trigger = screen.getByRole("button", { name: "Search pages, servers and actions" });
+    await user.click(trigger);
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.type(within(dialog).getByRole("combobox"), "keyboard shortcuts");
+    await user.keyboard("{Enter}");
+    const help = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    await waitFor(() => expect(help).toContainElement(document.activeElement as HTMLElement));
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(trigger).toHaveFocus());
+
+    // "?" from a focused button returns focus to that button
+    const plain = screen.getByRole("button", { name: "Plain button" });
+    await user.click(plain);
+    await user.keyboard("?");
+    await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(plain).toHaveFocus());
+  });
+
   it("lists permitted navigation and every visible server, and navigates on select", async () => {
     const { user } = setup();
     await user.keyboard("{Control>}k{/Control}");
@@ -181,6 +213,8 @@ describe("CommandPalette", () => {
     await user.click(within(confirm).getByRole("button", { name: "Cancel" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     expect(post).not.toHaveBeenCalled();
+    // focus is not dropped on <body>: the palette was opened from the page, so it goes to the search button
+    await waitFor(() => expect(screen.getByRole("button", { name: "Search pages, servers and actions" })).toHaveFocus());
 
     // confirming sends the same power request as the library buttons
     await user.keyboard("{Control>}k{/Control}");
@@ -213,8 +247,10 @@ describe("CommandPalette", () => {
     expect(within(group).getByRole("option", { name: /Restart server/ })).toBeInTheDocument();
     expect(within(group).getByRole("option", { name: /Console/ })).toBeInTheDocument();
     await user.click(within(group).getByRole("option", { name: /Restart server/ }));
-    expect(await screen.findByRole("alertdialog", { name: "Restart Vanilla Test?" })).toBeInTheDocument();
+    const confirm = await screen.findByRole("alertdialog", { name: "Restart Vanilla Test?" });
     expect(post).not.toHaveBeenCalled();
+    await user.click(within(confirm).getByRole("button", { name: "Restart server" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/instances/${RUNNING.id}/power`, { action: "restart" }));
   });
 });
 

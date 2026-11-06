@@ -18,7 +18,7 @@ function defaultStorage(): StorageLike | undefined {
   }
 }
 
-/** Recent entry ids, most recent first (only ids of navigation entries are ever stored). */
+/** Recent entry ids (`nav:<path>` or `server:<id>:<section>`), most recent first; no names or other data. */
 export function readRecent(storage: StorageLike | undefined = defaultStorage()): string[] {
   try {
     const raw = storage?.getItem(RECENT_KEY);

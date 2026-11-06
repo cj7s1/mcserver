@@ -70,6 +70,12 @@ const ACCOUNT_ENTRY: PaletteEntry = {
 /** Taller rows on touch screens, the regular density from sm up. */
 const ITEM_CLASS = "py-2.5 sm:py-1.5";
 
+/** The focused element, or null when nothing in particular has focus. */
+function focusedElement(): HTMLElement | null {
+  const el = document.activeElement;
+  return el instanceof HTMLElement && el !== document.body ? el : null;
+}
+
 const paletteFilter = (_value: string, search: string, keywords?: string[]) => fuzzyScore(search, keywords);
 
 export function CommandPalette({ navigation }: { navigation: readonly PaletteNavGroup[] }) {
@@ -77,9 +83,14 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
   const [helpOpen, setHelpOpen] = useState(false);
   const [confirm, setConfirm] = useState<PowerRequest | null>(null);
   const [singleKey, setSingleKey] = useState(() => readSingleKeyShortcuts());
-  // Work to do once the palette has closed and handed focus back (opening another dialog earlier
-  // would let the palette's focus restore fight the new dialog's focus trap).
+  // Work to do once the palette has closed (opening another dialog earlier would let the palette's
+  // focus restore fight the new dialog's focus trap).
   const afterClose = useRef<(() => void) | null>(null);
+  // None of these dialogs has a Radix trigger, so Radix would drop focus on <body> when they close.
+  // Focus goes back to whatever had it when the palette (or the help via "?") was opened, or to the
+  // search button when that element is gone (e.g. after navigating).
+  const returnFocus = useRef<HTMLElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const navigate = useNavigate();
   const { user } = useAuth();
   const mac = useMemo(() => isMacPlatform(), []);
@@ -91,9 +102,21 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
     [permsKey],
   );
 
+  const restoreFocus = (event: Event) => {
+    event.preventDefault();
+    const el = returnFocus.current;
+    returnFocus.current = null;
+    (el?.isConnected ? el : triggerRef.current)?.focus({ preventScroll: true });
+  };
+  const openPalette = () => {
+    returnFocus.current = focusedElement();
+    setOpen(true);
+  };
+
   const runShortcut = useCallback(
     (id: ShortcutId) => {
       if (id === "help") {
+        returnFocus.current = focusedElement();
         setHelpOpen(true);
         return;
       }
@@ -105,10 +128,11 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
 
   useGlobalShortcuts({
     paletteOpen: open,
-    onTogglePalette: () => setOpen((o) => !o),
+    onTogglePalette: () => (open ? setOpen(false) : openPalette()),
     singleKeyEnabled: singleKey,
     bindings: shortcuts,
     onShortcut: runShortcut,
+    mac,
   });
 
   const closeThen = (fn: () => void) => {
@@ -119,9 +143,10 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
   return (
     <>
       <Button
+        ref={triggerRef}
         variant="outline"
         size="sm"
-        onClick={() => setOpen(true)}
+        onClick={openPalette}
         aria-label="Search pages, servers and actions"
         aria-haspopup="dialog"
         aria-keyshortcuts={PALETTE_ARIA_KEYSHORTCUTS}
@@ -137,10 +162,14 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
         <DialogContent
           showCloseButton={false}
           className="top-[8svh] translate-y-0 gap-0 overflow-hidden p-0 sm:top-[14vh] sm:max-w-xl motion-reduce:animate-none!"
-          onCloseAutoFocus={() => {
+          onCloseAutoFocus={(event) => {
             const fn = afterClose.current;
             afterClose.current = null;
-            fn?.();
+            // A follow-up dialog takes focus itself and hands it back when it closes.
+            if (fn) {
+              event.preventDefault();
+              fn();
+            } else restoreFocus(event);
           }}
         >
           <DialogTitle className="sr-only">Command palette</DialogTitle>
@@ -173,15 +202,31 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
           setSingleKey(enabled);
           writeSingleKeyShortcuts(enabled);
         }}
+        onCloseAutoFocus={restoreFocus}
       />
 
-      {confirm && <PowerConfirm key={`${confirm.instance.id}:${confirm.action}`} request={confirm} onClose={() => setConfirm(null)} />}
+      {confirm && (
+        <PowerConfirm
+          key={`${confirm.instance.id}:${confirm.action}`}
+          request={confirm}
+          onClose={() => setConfirm(null)}
+          onCloseAutoFocus={restoreFocus}
+        />
+      )}
     </>
   );
 }
 
 /** Stop/Restart confirmation; the request goes through the same hook as the library power buttons. */
-function PowerConfirm({ request, onClose }: { request: PowerRequest; onClose: () => void }) {
+function PowerConfirm({
+  request,
+  onClose,
+  onCloseAutoFocus,
+}: {
+  request: PowerRequest;
+  onClose: () => void;
+  onCloseAutoFocus: (event: Event) => void;
+}) {
   const power = useServerPower(request.instance);
   const copy = powerConfirmCopy(request.instance, request.action);
   return (
@@ -195,6 +240,7 @@ function PowerConfirm({ request, onClose }: { request: PowerRequest; onClose: ()
       confirmLabel={copy.confirmLabel}
       destructive={copy.destructive}
       onConfirm={() => power.mutateAsync(request.action)}
+      onCloseAutoFocus={onCloseAutoFocus}
     />
   );
 }
@@ -416,7 +462,8 @@ function PaletteBody({
           </div>
         )}
       </CommandList>
-      <ResultCount active={searching} />
+      {/* Remounted per search so a count from an earlier search is never announced again. */}
+      <ResultCount key={searching ? "searching" : "idle"} active={searching} />
       <div className="hidden items-center gap-4 border-t px-3 py-2 text-[11px] text-muted-foreground sm:flex" aria-hidden>
         <span className="inline-flex items-center gap-1">
           <Kbd>↑</Kbd>

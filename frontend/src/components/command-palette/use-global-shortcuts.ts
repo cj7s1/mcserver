@@ -5,6 +5,7 @@ import {
   hasOpenOverlay,
   isModifierKey,
   isPaletteHotkey,
+  togglesPalette,
   type ShortcutDef,
   type ShortcutId,
 } from "./shortcuts";
@@ -16,6 +17,8 @@ interface Options {
   /** Bindings the user may use (already filtered by permission). */
   bindings: readonly ShortcutDef[];
   onShortcut: (id: ShortcutId) => void;
+  /** macOS: Ctrl+K inside text fields stays an editing key (only Cmd+K is taken there). */
+  mac: boolean;
 }
 
 /**
@@ -23,16 +26,16 @@ interface Options {
  * inputs and the xterm console (which stops propagation of keys it handles); the single-key
  * shortcuts listen in the bubble phase, so any component that handles a key itself wins.
  */
-export function useGlobalShortcuts({ paletteOpen, onTogglePalette, singleKeyEnabled, bindings, onShortcut }: Options) {
-  const latest = useRef({ paletteOpen, onTogglePalette, singleKeyEnabled, onShortcut });
+export function useGlobalShortcuts({ paletteOpen, onTogglePalette, singleKeyEnabled, bindings, onShortcut, mac }: Options) {
+  const latest = useRef({ paletteOpen, onTogglePalette, singleKeyEnabled, onShortcut, mac });
   useEffect(() => {
-    latest.current = { paletteOpen, onTogglePalette, singleKeyEnabled, onShortcut };
+    latest.current = { paletteOpen, onTogglePalette, singleKeyEnabled, onShortcut, mac };
   });
 
   useEffect(() => {
     const matcher = createKeySequenceMatcher(bindings);
     const onCapture = (e: KeyboardEvent) => {
-      if (e.isComposing || !isPaletteHotkey(e)) return;
+      if (e.isComposing || !togglesPalette(e, latest.current.mac)) return;
       // Another dialog (a confirmation, the shortcuts help) keeps the keyboard until it is closed.
       if (!latest.current.paletteOpen && hasOpenOverlay()) return;
       e.preventDefault();

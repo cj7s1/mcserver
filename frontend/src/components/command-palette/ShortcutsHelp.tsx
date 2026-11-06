@@ -36,6 +36,7 @@ export function ShortcutsHelp({
   shortcuts,
   singleKeyEnabled,
   onSingleKeyChange,
+  onCloseAutoFocus,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -44,6 +45,8 @@ export function ShortcutsHelp({
   shortcuts: readonly ShortcutDef[];
   singleKeyEnabled: boolean;
   onSingleKeyChange: (enabled: boolean) => void;
+  /** It has no trigger button, so the caller decides where focus returns. */
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   const switchId = useId();
   const hintId = useId();
@@ -52,7 +55,10 @@ export function ShortcutsHelp({
   const off = !singleKeyEnabled;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-md motion-reduce:animate-none!">
+      <DialogContent
+        className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-md motion-reduce:animate-none!"
+        onCloseAutoFocus={onCloseAutoFocus}
+      >
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>

@@ -1,7 +1,8 @@
 /**
  * Keyboard shortcut logic for the command palette (pure, unit-tested in shortcuts.test.ts).
  *
- * Ctrl+K / Cmd+K toggles the palette everywhere (also inside inputs and the console). The single-key
+ * Ctrl+K / Cmd+K toggles the palette everywhere (also inside inputs and the console; on macOS only
+ * Cmd+K inside text fields, where Ctrl+K deletes to the end of the line). The single-key
  * shortcuts ("?", "g d", "g s", "c", …) only fire when focus is not in something the user types into
  * (inputs, textareas, selects, contenteditable, the xterm console) or inside an open dialog or menu,
  * and they can be switched off in the shortcuts dialog (WCAG 2.1.4 Character Key Shortcuts).
@@ -93,6 +94,15 @@ type KeyLike = Pick<KeyboardEvent, "key" | "ctrlKey" | "metaKey" | "altKey" | "s
 /** Ctrl+K or Cmd+K (no Alt/Shift), whatever the keyboard layout reports in upper or lower case. */
 export function isPaletteHotkey(e: KeyLike): boolean {
   return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k";
+}
+
+/**
+ * Whether a keydown should toggle the palette. On macOS Ctrl+K inside a text field is the system
+ * "delete to the end of the line" editing key, so there only Cmd+K is taken while typing.
+ */
+export function togglesPalette(e: KeyLike & Pick<KeyboardEvent, "target">, mac: boolean): boolean {
+  if (!isPaletteHotkey(e)) return false;
+  return !(mac && e.ctrlKey && !e.metaKey && isTypingTarget(e.target));
 }
 
 const NON_TEXT_INPUT_TYPES = new Set(["button", "checkbox", "color", "file", "image", "radio", "range", "reset", "submit"]);
