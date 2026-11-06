@@ -116,6 +116,43 @@ as `interrupted` (players were warned but get no "cancelled" message). The count
 worker slot while it sleeps (like other long jobs). Notification channels still have no admin UI, so
 `modpack.update_available` is selectable through the API only.
 
+### Command palette + keyboard shortcuts (frontend)
+
+`frontend/src/components/command-palette/` (hooked into the top bar in `AppLayout.tsx`). Ctrl+K / Cmd+K or
+the search button opens it: navigation (permission-filtered, admin pages included), every visible server
+(archived too) with its pages, per-server Start/Stop/Restart (same rules and `useServerPower` hook as the
+library buttons; Stop and Restart **always** go through `ConfirmDialog` from the palette, Start runs
+directly like the Start buttons), toggle/system theme, recent items (localStorage, try/catch), fuzzy
+order-independent search with groups ordered by best match. Shortcuts: `?` help, `g d`/`g s`/`g m`/`g a`,
+`c` create server (only with `instance.create`); ignored while typing (inputs, textareas, selects,
+contenteditable, xterm) or while a dialog/menu is open; a switch in the help dialog turns single-key
+shortcuts off (WCAG 2.1.4). Reduced motion removes the palette's zoom animation.
+
+Verified: unit tests (key-sequence matcher, typing-target detection, fuzzy scoring, group ordering,
+storage fallbacks, permission rules) and jsdom component tests (open/close, navigation, recents, stop
+confirm cancel → no request, confirm → `POST /power`, start without confirm, current-server group,
+shortcuts on/off). Playwright against a worktree Vite + the live dev API at 1440 px and 390 px, dark and
+light, reduced motion, and Ctrl+K from inside the xterm console: 33 + 4 checks passed, no page errors.
+For the confirmation flow one server was shown as running by rewriting the API response in the browser,
+and every `/power` request was aborted in the browser; no real server was started or stopped.
+
+Independent review (second pass) fixed: (1) closing the palette, the shortcuts help or the Stop/Restart
+confirmation dropped keyboard focus on `<body>` (Radix returns focus to a `DialogTrigger`, and none of
+these dialogs has one); focus now goes back to the element that had it when the palette or help was
+opened, or to the search button if that element is gone (`ConfirmDialog` gained an optional
+`onCloseAutoFocus` prop for this). (2) On macOS, Ctrl+K inside text fields (the system "delete to end of
+line" key) is no longer taken; Cmd+K works everywhere. (3) The screen-reader result count could
+re-announce the previous search's count when a new search started. Re-verified with jsdom tests (focus
+return after Escape, after the help and after cancelling Stop; Restart confirm posts `{action:
+"restart"}`; macOS hotkey rule) and Playwright on a worktree Vite against the live API: focus return,
+Ctrl+K ignored while a menu is open, keyboard-only navigation, the result count, Stop/Restart
+confirmation with Cancel focused (server shown as running by a browser-only response rewrite), macOS
+emulation (`navigator.platform` overridden), and a **view-only user simulated by rewriting
+`/auth/state` and `/instances` responses in the browser** (no admin group, no Create server, no power
+actions, no console/files/backups/access pages, `c` inert, help without "Create a server"): 32 checks
+passed, no console errors. Every non-GET API request except the login was aborted in the browser (none
+was attempted). Still not verified: a real restricted account on the backend, and a real Mac.
+
 ### Not yet verified
 
 * **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).

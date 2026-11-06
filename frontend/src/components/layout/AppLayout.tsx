@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
+import { CommandPalette, type PaletteNavGroup } from "@/components/command-palette/CommandPalette";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -57,6 +58,11 @@ const ADMIN_NAV: NavItem[] = [
   { to: "/admin/users", label: "Users & roles", icon: <Users />, perm: "system.users" },
   { to: "/admin/audit", label: "Audit log", icon: <ScrollText />, perm: "system.audit" },
   { to: "/admin/system", label: "System", icon: <Settings />, perm: "system.settings" },
+];
+
+const PALETTE_NAV: PaletteNavGroup[] = [
+  { heading: "Navigation", items: MAIN_NAV },
+  { heading: "Administration", items: ADMIN_NAV },
 ];
 
 function Logo() {
@@ -211,6 +217,7 @@ export function AppLayout() {
           <Button variant="ghost" size="icon-sm" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation">
             <Menu />
           </Button>
+          <CommandPalette navigation={PALETTE_NAV} />
           <div className="flex-1" />
           <Tooltip>
             <TooltipTrigger asChild>

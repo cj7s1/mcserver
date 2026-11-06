@@ -27,6 +27,7 @@ export function ConfirmDialog({
   onConfirm,
   open,
   onOpenChange,
+  onCloseAutoFocus,
   children,
 }: {
   trigger?: ReactNode;
@@ -38,6 +39,8 @@ export function ConfirmDialog({
   onConfirm: () => unknown | Promise<unknown>;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Where focus goes on close when there is no trigger (call `event.preventDefault()` to move it yourself). */
+  onCloseAutoFocus?: (event: Event) => void;
   children?: ReactNode;
 }) {
   const [typed, setTyped] = useState("");
@@ -55,7 +58,7 @@ export function ConfirmDialog({
   return (
     <AlertDialog open={isOpen} onOpenChange={(o) => (busy && !o ? undefined : setOpen(o))}>
       {trigger && <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>}
-      <AlertDialogContent>
+      <AlertDialogContent onCloseAutoFocus={onCloseAutoFocus}>
         {/* Left-aligned at every width: descriptions here are lists and paragraphs, which read badly centred. */}
         <AlertDialogHeader className="place-items-start text-left">
           <AlertDialogTitle>{title}</AlertDialogTitle>
