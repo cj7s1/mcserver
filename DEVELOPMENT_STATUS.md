@@ -43,6 +43,18 @@ and the worker+beat. All tests pass on `main` of this branch:
 | `deploy/docker-compose.node.yml` agent container (healthy, TLS-aware healthcheck) added with a pin; a real vanilla 1.21.1 server ran there (RCON ok); instance-network containers get 403 | |
 | Docker daemon restart with a running server | status "unknown: Docker is not reachable" during the outage, then the container came back and the panel went to running on its own |
 
+### Unraid simulation (production compose stack, 2026-11-06)
+
+Followed docs/QUICKSTART-UNRAID.md against images built from a clean export of the repository, with
+Unraid values (MC_UID=99, MC_GID=100, data under a `/mnt/cache/appdata`-style path, backups under a
+`/mnt/user/backups`-style path, `MCPANEL_POSTGRES_DIR` bind mount; only a sandbox proxy override added):
+all six services healthy; owner setup; **Better MC Forge BMC4 deployed by CurseForge page URL**
+(keyless) → running in 3 min 16 s, auto-pinned to file 9104992; all 7,719 server files owned 99:100;
+RCON ok; restic backup to the array-style path ok; `docker compose up -d --force-recreate` (update)
+left the running server untouched and the session valid; `docker compose down` + `up -d` (reboot)
+→ server started again in 95 s. Production SPA served with no console errors. Still not run on real
+Unraid hardware.
+
 ### Not yet verified
 
 * **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).
