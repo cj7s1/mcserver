@@ -39,6 +39,7 @@ ABANDON_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "snapshot_convert": ("instance.restore",),
     "modpack_update": ("instance.content",),
     "modpack_rollback": ("instance.content", "instance.restore"),
+    "world_replace": ("instance.restore", "instance.files.write"),
 }
 
 

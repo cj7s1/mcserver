@@ -23,7 +23,7 @@ from .docker_ops import AgentError
 log = logging.getLogger(__name__)
 
 # Operation kinds that must not overlap with power actions on the same instance.
-BLOCKS_LIFECYCLE = {"restore", "delete_data", "clone_target", "import", "apply"}
+BLOCKS_LIFECYCLE = {"restore", "delete_data", "clone_target", "import", "apply", "world_replace"}
 
 
 @dataclass

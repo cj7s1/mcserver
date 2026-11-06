@@ -22,6 +22,7 @@ JOB_STATUS = {
     "restore_path": Status.RESTORING,
     "snapshot_restore": Status.RESTORING,
     "modpack_rollback": Status.RESTORING,
+    "world_replace": Status.RESTORING,
     "modpack_update": Status.UPDATING,
     "software_update": Status.UPDATING,
     "recreate": Status.UPDATING,

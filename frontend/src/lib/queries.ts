@@ -12,6 +12,7 @@ export const qk = {
   properties: (id: string) => ["instances", id, "properties"] as const,
   files: (id: string, path: string) => ["instances", id, "files", path] as const,
   backups: (id: string) => ["instances", id, "backups"] as const,
+  world: (id: string) => ["instances", id, "world"] as const,
   schedules: (id: string) => ["instances", id, "schedules"] as const,
   players: (id: string) => ["instances", id, "players"] as const,
   content: (id: string) => ["instances", id, "content"] as const,

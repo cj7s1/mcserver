@@ -893,6 +893,147 @@ class ImportArchiveView(APIView):
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
 
+def _flag(value: Any, default: bool = False) -> bool:
+    """Booleans from JSON or multipart form fields ("true"/"false")."""
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+RUNNING_STATUSES = ("running", "starting", "installing", "unhealthy", "restarting")
+
+
+class WorldView(APIView):
+    """The world folder (level-name), the folders that exist and their size, plus a zip export link."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from django.conf import settings
+
+        from . import world
+
+        instance = get_instance_for(request.user, pk, "instance.files.read")
+        flush = world.may_flush(request.user, instance)
+        data = world.describe(instance, AgentClient(instance.node), flush=flush)
+        perms = request.user.instance_permissions(instance.pk)
+        data.update(
+            can_replace={"instance.files.write", "instance.restore"} <= perms,
+            running=instance.status in RUNNING_STATUSES,
+            # whether the download link asks a running server to save first (needs instance.command/backup)
+            download_flushes=flush,
+            max_upload_bytes=settings.MCPANEL_MAX_UPLOAD_BYTES or None,
+            pre_restore_backup_default=bool(SystemSetting.get("pre_restore_backup")),
+            archive_suffixes=list(ARCHIVE_SUFFIXES),
+        )
+        return Response(data)
+
+
+class WorldReplaceView(APIView):
+    """Replace the world with one from an archive (multipart ``file``, or ``archive``: a path in the server folder).
+
+    Requires ``instance.restore`` *and* ``instance.files.write``: it is a destructive restore of the
+    world (same stop / safety backup / start-again semantics as restoring a backup), and it writes
+    uploaded content into the server folder. Body fields: ``confirm`` (must be true),
+    ``stop_if_running``, ``pre_restore_backup`` (default: the panel setting) and, for an archive in
+    the server folder, ``delete_archive`` (removed after a successful replace).
+    """
+
+    parser_classes = [MultiPartParser, JSONParser]
+
+    @extend_schema(request=None, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        import secrets as _secrets
+
+        from apps.jobs.models import ACTIVE_STATUSES, Job
+
+        from . import world
+
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        require(request.user, "instance.files.write", instance)
+        data = request.data
+        if not _flag(data.get("confirm")):
+            raise ApiError(
+                "Replacing the world deletes the current one (a safety backup is taken first unless you turn it off). "
+                "Confirm to continue.",
+                code="confirmation_required",
+            )
+        if instance.archived_at:
+            raise ConflictError("Unarchive the server first", code="archived")
+        current = (
+            Job.objects.filter(pk=instance.active_job_id, status__in=ACTIVE_STATUSES).first() if instance.active_job_id else None
+        )
+        if current is not None:
+            raise ConflictError(f"Another operation is in progress: {current.title}", code="instance_busy")
+        stop = _flag(data.get("stop_if_running"))
+        if instance.status in RUNNING_STATUSES and not stop:
+            raise ConflictError(
+                "The server is running. Confirm that it may be stopped while the world is replaced.", code="must_stop"
+            )
+        client = AgentClient(instance.node)
+        level, _source = world.level_name(instance, client)
+        level = world.validate_level_name(level)
+        pre = _flag(data.get("pre_restore_backup"), default=bool(SystemSetting.get("pre_restore_backup")))
+        upload = request.FILES.get("file")
+        if upload is not None:
+            lower = upload.name.lower()
+            if not lower.endswith(ARCHIVE_SUFFIXES):
+                raise ValidationError({"file": ["Upload the world as a .zip, .tar, .tar.gz or .tar.xz archive"]})
+            suffix = next(s for s in ARCHIVE_SUFFIXES if lower.endswith(s))
+            archive = f".mcpanel-world-upload-{_secrets.token_hex(6)}{suffix}"
+            client.upload(instance.id, archive, upload.chunks(1024 * 1024), overwrite=False)
+            uploaded, label, size, delete_after = True, upload.name, upload.size, False
+        else:
+            archive = str(data.get("archive") or "").strip().strip("/")
+            if not archive:
+                raise ValidationError({"file": ["Upload a world archive, or choose an archive in the server folder"]})
+            if not archive.lower().endswith(ARCHIVE_SUFFIXES):
+                raise ValidationError({"archive": ["Choose a .zip, .tar, .tar.gz or .tar.xz archive"]})
+            world.check_archive_location(archive, level, world.layout(instance, client))
+            entry = client.stat_file(instance.id, archive)
+            if entry.get("type") != "file":
+                raise ValidationError({"archive": ["That is not a regular file"]})
+            uploaded, label, size, delete_after = False, archive, entry.get("size"), _flag(data.get("delete_archive"))
+        try:
+            job = enqueue(
+                "world_replace",
+                title=f"Replace world of {instance.name}",
+                instance=instance,
+                user=request.user,
+                params={
+                    "archive": archive,
+                    "uploaded": uploaded,
+                    "delete_archive": delete_after,
+                    "pre_restore_backup": pre,
+                    "stop_if_running": stop,
+                    "original_name": label[:200],
+                },
+            )
+        except ApiError:
+            if uploaded:
+                try:
+                    client.delete_files(instance.id, [archive])
+                except ApiError:
+                    pass
+            raise
+        audit.record(
+            "instance.world_replace",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={
+                "archive": label[:200],
+                "size": size,
+                "level_name": level,
+                "uploaded": uploaded,
+                "pre_restore_backup": pre,
+                "stop_if_running": stop,
+            },
+        )
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
 class DiagnosticsView(APIView):
     """Known failure signatures found in the recent server log, with suggested fixes."""
 
@@ -1024,18 +1165,42 @@ def pinned_loader(server_type: str, minecraft_version: str) -> str:
 
 
 class FilesArchiveView(APIView):
-    """Download a folder (e.g. a world) as a zip built on the fly by the agent."""
+    """Download one or more folders (e.g. a world and its dimension folders) as a zip built on the fly.
+
+    ``path`` may be repeated (up to 8). ``name`` sets the download file name; ``flush=true`` asks a
+    running server to write all chunks to disk first (``save-all flush``, best effort; only for users
+    with ``instance.command`` or ``instance.backup``, since it is a console command).
+    """
 
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
+        from . import world
+
         instance = get_instance_for(request.user, pk, "instance.files.read")
-        path = request.query_params.get("path", "")
-        chunks, _length, _resp = AgentClient(instance.node).download(instance.id, path, endpoint="archive")
-        name = path.strip("/").rsplit("/", 1)[-1] or instance.name
+        paths = request.query_params.getlist("path") or [""]
+        if len(paths) > 8:
+            raise ValidationError({"path": ["At most 8 folders can be downloaded at once"]})
+        client = AgentClient(instance.node)
+        flushed = False
+        if (
+            request.query_params.get("flush") == "true"
+            and instance.status in ("running", "unhealthy")
+            and world.may_flush(request.user, instance)  # a console command: not for read-only file access
+        ):
+            try:
+                client.command(instance.id, "save-all flush", timeout=120)
+                flushed = True
+            except ApiError:
+                pass  # not running after all / RCON not ready: download what is on disk
+        chunks, _length, _resp = client.download(instance.id, paths[0] if len(paths) == 1 else paths, endpoint="archive")
+        name = (request.query_params.get("name") or "").strip()[:100] or paths[0].strip("/").rsplit("/", 1)[-1] or instance.name
         response = StreamingHttpResponse(chunks, content_type="application/zip")
         response["Content-Disposition"] = content_disposition(f"{name}.zip")
         response["X-Content-Type-Options"] = "nosniff"
-        audit.record("files.download_archive", request=request, instance=instance, target=instance, details={"path": path})
+        details: dict[str, Any] = {"path": paths[0]} if len(paths) == 1 else {"paths": paths}
+        if flushed:
+            details["flushed"] = True
+        audit.record("files.download_archive", request=request, instance=instance, target=instance, details=details)
         return response
 
 

@@ -435,3 +435,124 @@ def _tag_backups_on_node(instance: Instance, node: Any) -> None:
         meta.setdefault("node_name", legacy or node.name)
         b.meta = meta
         b.save(update_fields=["meta"])
+
+
+def _discard(client: AgentClient, instance: Instance, path: str) -> None:
+    try:
+        client.delete_files(instance.id, [path])
+    except ApiError:
+        pass  # already gone (the agent operation removes temporary uploads itself)
+
+
+# Failures after which the world folders may be in an unknown state: never start the server then
+# (Minecraft would generate a brand-new world where the old one is missing).
+WORLD_STATE_UNKNOWN = {"world_rollback_failed", "operation_lost", "operation_timeout"}
+
+
+@register("world_replace")
+def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Replace the world with the one in an uploaded archive: stop, safety backup, swap, start again.
+
+    The agent extracts into a staging folder, moves the old world folders aside, renames the new
+    ones into place and deletes the old ones only after that worked; on failure it puts the old
+    world back. If the server was running it is started again, also after a clean failure.
+    """
+    from apps.backups.handlers import run_backup
+    from apps.backups.models import BackupKind
+    from apps.nodes.client import AgentError
+
+    from . import world
+
+    instance = _instance(job)
+    client = AgentClient(instance.node)
+    p = job.params
+    archive = p["archive"]
+    was_running = False
+    submitted = False
+    safety_id = None
+    try:
+        level, source = world.level_name(instance, client)
+        level = world.validate_level_name(level)
+        world_layout = world.layout(instance, client)
+        ctx.log(f"World folder: {level} (from {source}); layout: {world_layout}")
+        for warning in world.warnings_for(instance):
+            ctx.log(f"warning: {warning}")
+        if client.status(instance.id).get("running") and not p.get("stop_if_running"):
+            raise ConflictError("The server is running. Confirm that it may be stopped to replace the world.", code="must_stop")
+        was_running = ensure_stopped(instance, ctx)
+        if p.get("pre_restore_backup", True):
+            ctx.progress(0.05, "Creating a safety backup of the current state", force=True)
+            safety = run_backup(
+                instance,
+                ctx,
+                name=f"Before replacing the world '{level}'",
+                kind=BackupKind.PRE_RESTORE,
+                user=job.user,
+                span=(0.05, 0.45),
+                job=job,
+                # the uploaded archive sits in the server folder meanwhile; it does not belong in the backup
+                excludes=[archive] if p.get("uploaded") else None,
+            )
+            safety_id = str(safety.id)
+        else:
+            ctx.log("No safety backup was requested")
+        ctx.progress(0.5, f"Replacing the world '{level}'", force=True)
+        # Set before the request: if it times out or the connection drops, the agent may have started
+        # the swap anyway, so only an error the agent itself reported proves the world is untouched.
+        submitted = True
+        # a temporary upload is removed by the agent whatever the outcome
+        op = client.world_replace(
+            instance.id, archive=archive, level_name=level, layout=world_layout, delete_archive=bool(p.get("uploaded"))
+        )
+        done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
+    except ApiError as exc:
+        # AgentError = the agent answered (a refused request or a failed operation, which rolls back);
+        # anything else after submitting (agent unreachable, auth) leaves the outcome unknown.
+        intact = not submitted or (isinstance(exc, AgentError) and exc.error_code not in WORLD_STATE_UNKNOWN)
+        if not intact:
+            _set_desired(instance, DesiredState.STOPPED)
+            ctx.log(
+                "The world folders may be incomplete, so the server was left stopped. Check the Files page "
+                "(a '.mcpanel-world-old-…' folder holds the previous world)"
+                + (" or restore the safety backup." if safety_id else ".")
+            )
+        elif was_running:
+            try:
+                client.start(instance.id)
+                ctx.log("The previous world is unchanged; the server was started again")
+            except ApiError as start_exc:
+                ctx.log(f"Could not start the server again: {start_exc.detail}")
+        raise
+    finally:
+        if p.get("uploaded"):
+            _discard(client, instance, archive)  # the job may have failed before the agent operation
+    if p.get("delete_archive") and not p.get("uploaded"):
+        _discard(client, instance, archive)  # an archive the user chose from the server folder: only after success
+    result = done.get("result") or {}
+    for warning in result.get("warnings") or []:
+        ctx.log(f"warning: {warning}")
+    if result.get("converted"):
+        ctx.log(f"Moved the {' and '.join(result['converted'])} from Bukkit-style folders into '{level}'")
+    if was_running:
+        ctx.progress(0.93, "Starting server")
+        try:
+            client.start(instance.id)
+        except ApiError as exc:
+            # the job fails, but say clearly that the world itself was replaced
+            raise ApiError(
+                f"The world was replaced, but the server could not be started again: {exc.detail}",
+                code=exc.error_code,
+                status_code=exc.status_code,
+            ) from exc
+    return {
+        "level_name": level,
+        "layout": world_layout,
+        "installed": result.get("installed", []),
+        "replaced": result.get("replaced", []),
+        "converted": result.get("converted", []),
+        "files": result.get("files"),
+        "bytes": result.get("bytes"),
+        "warnings": result.get("warnings", []),
+        "safety_backup": safety_id,
+        "restarted": was_running,
+    }

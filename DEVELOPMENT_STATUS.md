@@ -2,7 +2,7 @@
 
 _Last updated: 2026-11-06 (session 2: SpigotMC source, mods-listing speed-up, integration coverage, btrfs
 delete fix, Unraid simulation, modpack update checks, restart warnings, security-audit fixes, ZFS snapshot
-provider). Previous: 2026-11-03, end of
+provider, world import/export). Previous: 2026-11-03, end of
 session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
@@ -14,10 +14,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **812 passed** (2026-11-06, after merging the security-audit fixes and the ZFS snapshot provider; incl. OpenAPI fail-on-warn) |
-| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06, before the audit/ZFS merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **468 passed** (2026-11-06; real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 140 tests in 22 files (2026-11-06) |
+| `backend: uv run pytest -q -m "not integration"` | **847 passed** (2026-11-06, after merging the security-audit fixes, the ZFS snapshot provider and world import/export; working tree incl. 2 not-yet-committed HTTP-hardening tests; incl. OpenAPI fail-on-warn) |
+| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06, before the audit/ZFS/world merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **533 passed** (2026-11-06; real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite, world swap/rollback on a real filesystem) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 143 tests in 23 files (2026-11-06, incl. 4 not-yet-committed events tests) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -58,6 +58,8 @@ code run on :8711 with the same data root).
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
 | SpigotMC source (2026-11-06): `spigot_source.install/update/details` against **live** Spiget + Modrinth and a real (throwaway) agent process: LuckPerms 5.5.71 (mirror current) and Chunky 1.5.3 (mirror outdated, installed only after confirmation) landed with the right SHA-256; premium, external and `.zip` resources refused; re-install refused; update reports up to date; a wrong SHA-256 is refused by the agent and leaves no file | then through the **HTTP API** on the dev panel: search, install of PlaceholderAPI 2.12.3 (resource 6245) on 'Paper Plugins', SHA-256 on disk matches, and the **running Paper 1.21.1 server loaded it** (RCON `plugins`: Chunky, PlaceholderAPI). UI not opened in a browser yet |
 | World export as zip (`/files/archive?path=world`) | zip validated |
+| **World import/export** (`GET /world`, `POST /world/replace`, job `world_replace`) through the real API + worker + agent + restic, on an isolated stack (own DB, agent :8702, API :8010, worker on Redis db 7), Playwright at 1440/390 px, light/dark | singleplayer save zip → vanilla `world`; whole Paper server zip → `survival` + `survival_nether` (level-name, plugins/server.properties ignored); zip without level.dat → job failed `no_level_dat`, world unchanged; `.tar.gz` already in the server folder → replaced and deleted; level.dat hashes match the sources; export zip valid; safety backups (“Before restore”) exclude the temporary upload. **No Minecraft server loaded the replaced worlds** (no container was started) |
+| World import/export **review fixes**, again on an isolated stack (own DB, agent :8705, API :8015, worker on Redis db 9, Vite :5175, Playwright 1440 px light / 390 px dark) | archive inside `world/` refused before anything happens (`archive_in_world`, toast, world and archive untouched); macOS Finder zip with a nested world + `__MACOSX/` from the server folder → replaced (with a real restic safety backup), no `__MACOSX` warning; singleplayer upload without safety backup (server name typed) → replaced, no leftovers, upload removed; a user with only read files + backups sees no “Replace world…”; no horizontal overflow at 390 px. Running-server race, lost connection and start-after-replace failure: unit tests only |
 | Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
 | TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
 | `deploy/docker-compose.node.yml` agent container (healthy, TLS-aware healthcheck) added with a pin; a real vanilla 1.21.1 server ran there (RCON ok); instance-network containers get 403 | |
@@ -167,6 +169,25 @@ was attempted). Still not verified: a real restricted account on the backend, an
 * SpigotMC tab, SpigotMC dialog and the Hangar browse tab (the Hangar install dialog existed but no tab
   rendered it until now): tsc/lint/build/vitest only, not opened in a browser. The SpigotMC endpoints are
   covered by 45 mocked backend tests plus the live adapter/agent run above, not by an API-level live run.
+* World replace with a **running** server (stop → replace → start) and a Minecraft server actually loading the
+  replaced world (Paper migrating a singleplayer world's `DIM-1` into `world_nether`): unit-tested with the fake
+  agent only. Worlds above the panel upload limit (`MCPANEL_MAX_UPLOAD_BYTES`, 2 GiB) must be copied into the
+  server folder first and chosen with “From the server folder”.
+* World replace on Paper with a custom `world-container` (bukkit.yml / `--world-container`): the panel looks for
+  the world in the server folder root only, so it would install a world there that Paper ignores (nothing is
+  deleted). A dropped connection to the agent while a long replace runs fails the job (the agent keeps
+  going and refuses power actions until it is done); the server is then left stopped on purpose.
+
+### World import/export (merged into the audit branch 2026-11-06)
+
+Reconciled with the security-audit fixes: the multi-folder zip export (`world` + Bukkit dimension folders)
+streams through the audit's bounded, cancellable zip producer; archive extraction keeps the audit's
+streaming entry/size limits and runs the world job's free-space check after the first pass, before anything
+is written; a running `world_replace` job can only be marked failed with `instance.restore` +
+`instance.files.write` (the permissions that start it); the safety backup goes to the repository on the
+server's current node (tagged with its `node_id`, like every backup). The world staging folders
+(`.mcpanel-world-*`) are handled through SafeRoot inside the server folder, so they work unchanged on btrfs
+subvolumes and ZFS datasets.
 
 ### SpigotMC realities (verified live, see `docs/reference/spiget-api.md`)
 

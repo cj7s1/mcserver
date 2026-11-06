@@ -71,7 +71,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Cron schedules: restart/start/stop/backup/command
 - [x] In-game countdown warnings before restart/stop (manual + scheduled, cancellable, lock only for the last 10 s) — unit-tested only
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
-- [ ] World import / export
+- [x] World import / export (replace from an archive with safety backup + rollback; zip export incl. Bukkit dimension folders)
 - [x] Software (non-modpack) version update workflow with automatic pre-update backup
 
 ## Phase 8 — Unraid

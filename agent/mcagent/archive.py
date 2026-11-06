@@ -250,7 +250,13 @@ def extract(
     strip: str = "auto",
     overwrite: bool = False,
     progress: Callable[[float, str], None] | None = None,
+    check: Callable[[int, int], None] | None = None,
 ) -> dict:
+    """Extract ``archive`` into ``destination`` (both relative to ``root``).
+
+    ``check(file_count, total_bytes)`` runs after the member list is read and before
+    anything is written (e.g. to refuse an archive that does not fit on the disk).
+    """
     dest_parts = split_path(destination)
     with root.open_read(archive) as (fh, _size):
         try:
@@ -259,7 +265,15 @@ def extract(
             raise AgentError(f"The archive is corrupt or truncated: {exc}", "archive_corrupt", 400) from exc
         try:
             return _extract_members(
-                root, kind, arc, archive, dest_parts, strip=strip, overwrite=overwrite, progress=progress
+                root,
+                kind,
+                arc,
+                archive,
+                dest_parts,
+                strip=strip,
+                overwrite=overwrite,
+                progress=progress,
+                check=check,
             )
         finally:
             arc.close()  # type: ignore[attr-defined]
@@ -275,6 +289,7 @@ def _extract_members(
     strip: str,
     overwrite: bool,
     progress: Callable[[float, str], None] | None,
+    check: Callable[[int, int], None] | None = None,
 ) -> dict:
     stats = ExtractStats()
     if strip not in ("auto", "0", "none"):
@@ -286,17 +301,20 @@ def _extract_members(
     try:
         # First pass: limits and the common prefix, enforced while the entries are read
         # (nothing is collected; a tar keeps at most MAX_FILES headers in its member cache).
-        count = total = 0
+        count = files = total = 0
         common = _CommonRoot()
         for m in members():
             count += 1
             if count > MAX_FILES:
                 raise AgentError(f"Archive has more than {MAX_FILES} entries", "archive_too_large", 413)
             if m.kind == "file":
+                files += 1
                 total += m.size
                 if total > MAX_TOTAL_BYTES:
                     raise AgentError("Archive expands to more than 64 GiB", "archive_too_large", 413)
             common.add(m.name, m.kind)
+        if check is not None:
+            check(files, total)  # before anything is written
         strip_prefix = common.result() if strip == "auto" else None
         archive_rel = "/".join(split_path(archive))
         done = 0
@@ -401,29 +419,44 @@ class _PipeWriter:
         pass
 
 
-def stream_zip(root: SafeRoot, rel: str, *, max_bytes: int = MAX_TOTAL_BYTES) -> Iterator[bytes]:
-    """A zip of a directory inside the instance, built on the fly.
+MAX_ZIP_FOLDERS = 8
 
-    The folder is walked and its size checked right away (so a too-large folder is an
+
+def stream_zip(root: SafeRoot, rel: str | list[str], *, max_bytes: int = MAX_TOTAL_BYTES) -> Iterator[bytes]:
+    """A zip of one or more directories inside the instance, built on the fly.
+
+    The folders are walked and their size checked right away (so a too-large folder is an
     error response, not a broken download); the returned iterator then streams the zip
     from a producer thread through a small bounded queue. Closing the iterator (the
     client went away) stops the producer, which also stops by itself if nothing is read
     for ``ZIP_STALL_SECONDS``.
 
     Only regular files are included (symlinks are never followed); paths in the archive
-    are relative to the chosen directory's parent so the folder name is preserved.
+    are relative to each chosen directory's parent so the folder names are preserved
+    (``world/…``, ``world_nether/…``). Several folders must have distinct names.
     """
-    parts = split_path(rel)
-    prefix = parts[-1] if parts else "server"
-    files = list(root.walk_files("/".join(parts), max_depth=64))
-    if sum(st.st_size for _p, st in files) > max_bytes:
+    rels = [rel] if isinstance(rel, str) else list(rel)
+    if not rels or len(rels) > MAX_ZIP_FOLDERS:
+        raise AgentError(f"Choose between 1 and {MAX_ZIP_FOLDERS} folders", "invalid_path", 400)
+    folders: list[tuple[list[str], str]] = []
+    for item in rels:
+        parts = split_path(item)
+        if not parts and len(rels) > 1:
+            raise AgentError("The server root cannot be combined with other folders", "invalid_path", 400)
+        prefix = parts[-1] if parts else "server"
+        if any(prefix == other for _p, other in folders):
+            raise AgentError(f"Two folders are both named '{prefix}'", "invalid_path", 400)
+        folders.append((parts, prefix))
+    files: list[tuple[str, str, os.stat_result]] = []  # (path, name in the zip, stat)
+    for parts, prefix in folders:
+        for path, st in root.walk_files("/".join(parts), max_depth=64):
+            files.append((path, "/".join([prefix, *split_path(path)[len(parts) :]]), st))
+    if sum(st.st_size for _p, _a, st in files) > max_bytes:
         raise AgentError("Folder is too large to download as a zip", "archive_too_large", 413)
-    return _zip_stream(root, parts, prefix, files)
+    return _zip_stream(root, files)
 
 
-def _zip_stream(
-    root: SafeRoot, parts: list[str], prefix: str, files: list[tuple[str, os.stat_result]]
-) -> Iterator[bytes]:
+def _zip_stream(root: SafeRoot, files: list[tuple[str, str, os.stat_result]]) -> Iterator[bytes]:
     q: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=ZIP_QUEUE_CHUNKS)
     cancelled = threading.Event()
     sink = _PipeWriter(q, cancelled)
@@ -431,11 +464,9 @@ def _zip_stream(
     def produce() -> None:
         try:
             with zipfile.ZipFile(sink, "w", zipfile.ZIP_DEFLATED, compresslevel=6, allowZip64=True) as zf:
-                base = len(parts)
-                for path, st in files:
+                for path, arcname, st in files:
                     if cancelled.is_set():
                         raise _ConsumerGone
-                    arcname = "/".join([prefix, *split_path(path)[base:]])
                     try:
                         with root.open_read(path) as (fh, _size):
                             info = zipfile.ZipInfo(arcname, date_time=time.localtime(st.st_mtime)[:6])

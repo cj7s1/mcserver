@@ -75,6 +75,11 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 <data root>/instances/<instance-uuid>/   -> mounted at /data in the Minecraft container
 <backup root>/restic/<instance-uuid>/    -> restic repository (AGENT_BACKUP_ROOT, default <data root>/backups)
 <data root>/staging/                     -> restore/clone staging (same filesystem for atomic rename)
+<data root>/instances/<id>.mcpanel-{restore,clone,old}-* -> btrfs: new subvolume built next to the server, renamed in
+<instance dir>/.mcpanel-tmp-*            -> restore-path and ZFS in-place restore/clone staging, opened by fd
+                                           (excluded from backups; removed afterwards)
+<instance dir>/.mcpanel-world-{upload,new,old}-* -> world replace: uploaded archive, extracted world, old world
+                                           (inside the instance so every swap is a rename; removed afterwards)
 <data root>/trash/                       -> deletes are renamed here first, then removed
 <data root>/agent/                       -> restic password (if generated) and cache
 <data root>/agent/cache/file-hashes/     -> persistent file-digest cache for /files/hashes (AGENT_CACHE_ROOT; rebuildable)
