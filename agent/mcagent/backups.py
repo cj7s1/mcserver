@@ -8,11 +8,14 @@ agent from validated values; user input never reaches a shell.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import shutil
 import subprocess
+import threading
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,6 +31,10 @@ EXIT_REPO_MISSING = 10
 EXIT_LOCKED = 11
 EXIT_WRONG_PASSWORD = 12
 
+STDERR_TAIL_LINES = 200  # kept for error messages; the rest of restic's stderr is discarded
+MAX_OUTPUT_LINE = 1024 * 1024  # longest line read from restic at once
+MAX_STORED_LINE = 2000
+
 
 def restic_available(settings: Settings) -> str | None:
     binary = shutil.which(settings.restic_binary)
@@ -41,6 +48,10 @@ def restic_available(settings: Settings) -> str | None:
 
 
 class Restic:
+    # Backstops for a hung restic (a backup may run while world saving is paused).
+    BACKUP_TIMEOUT = 12 * 3600
+    RESTORE_TIMEOUT = 12 * 3600
+
     def __init__(self, settings: Settings, instance_id: UUID) -> None:
         self.settings = settings
         self.instance_id = instance_id
@@ -90,16 +101,23 @@ class Restic:
         raise AgentError(f"restic {action} failed: {msg}", "restic_failed", 500)
 
     def run(
-        self, args: list[str], *, timeout: float | None = 3600, cwd: Path | None = None
+        self,
+        args: list[str],
+        *,
+        timeout: float | None = 3600,
+        cwd: Path | None = None,
+        pass_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
         proc = subprocess.run(
             [self.binary, *args],
             env=self._env(),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
             cwd=cwd,
             check=False,
+            pass_fds=pass_fds,
         )
         if proc.returncode not in (0, 3):  # 3 = backup completed but some files unreadable
             self._raise_for(proc, proc.stderr, args[0])
@@ -113,6 +131,79 @@ class Restic:
             return
         self.repo.parent.mkdir(parents=True, exist_ok=True)
         self.run(["init"], timeout=120)
+
+    def _stream_json(
+        self, args: list[str], on_message: Callable[[dict[str, Any]], None], *, timeout: float, action: str
+    ) -> tuple[int, str]:
+        """Run restic with ``--json`` output, handing each JSON line of stdout to ``on_message``.
+
+        stderr is drained concurrently into a bounded tail (restic blocks once a pipe it
+        writes to is full, so reading one pipe to EOF and then the other can deadlock; a
+        mod can make restic print an error per file). The process is killed after
+        ``timeout`` seconds or if ``on_message`` raises. Returns (exit code, stderr tail).
+        """
+        proc = subprocess.Popen(
+            args,
+            env=self._env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            errors="replace",
+        )
+        assert proc.stdout is not None and proc.stderr is not None
+        stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+        stderr_pipe = proc.stderr
+
+        def drain_stderr() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                while line := stderr_pipe.readline(MAX_OUTPUT_LINE):
+                    stderr_tail.append(line[:MAX_STORED_LINE])
+
+        timed_out = threading.Event()
+
+        def kill_on_timeout() -> None:
+            timed_out.set()
+            with contextlib.suppress(OSError):
+                proc.kill()
+
+        drainer = threading.Thread(target=drain_stderr, name="restic-stderr", daemon=True)
+        drainer.start()
+        timer = threading.Timer(timeout, kill_on_timeout)
+        timer.daemon = True
+        timer.start()
+        try:
+            while line := proc.stdout.readline(MAX_OUTPUT_LINE):
+                line = line.strip()
+                if not line.startswith("{"):
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(msg, dict):
+                    on_message(msg)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                proc.kill()
+            raise
+        finally:
+            timer.cancel()
+            try:
+                code = proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                code = proc.wait()
+            drainer.join(timeout=10)
+            proc.stdout.close()
+            stderr_pipe.close()
+        if timed_out.is_set():
+            raise AgentError(
+                f"restic {action} did not finish within {int(timeout)} seconds and was stopped",
+                "restic_timeout",
+                504,
+            )
+        return code, "".join(stderr_tail)
 
     # -- operations ------------------------------------------------------------------
     def backup(
@@ -129,19 +220,10 @@ class Restic:
         for ex in excludes:
             args += ["--exclude", ex]
         args += ["--exclude", ".mcpanel-tmp-*", str(source)]
-        proc = subprocess.Popen(
-            args, env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
         summary: dict[str, Any] = {}
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+
+        def on_message(msg: dict[str, Any]) -> None:
+            nonlocal summary
             if msg.get("message_type") == "status" and progress:
                 pct = float(msg.get("percent_done") or 0.0)
                 files = msg.get("files_done", 0)
@@ -149,8 +231,8 @@ class Restic:
                 progress(pct, f"Backing up files ({files}/{total})")
             elif msg.get("message_type") == "summary":
                 summary = msg
-        stderr = proc.stderr.read() if proc.stderr else ""
-        code = proc.wait()
+
+        code, stderr = self._stream_json(args, on_message, timeout=self.BACKUP_TIMEOUT, action="backup")
         if code not in (0, 3):
             self._raise_for(code, stderr, "backup")
         if not summary.get("snapshot_id"):
@@ -182,27 +264,21 @@ class Restic:
         paths = snap.get("paths") or []
         if len(paths) != 1:
             raise AgentError("Snapshot has an unexpected layout", "snapshot_layout", 500)
-        target.mkdir(parents=True, exist_ok=False)
+        # ``target`` may already exist (e.g. a freshly created btrfs subvolume) but must be empty
+        target.mkdir(parents=True, exist_ok=True)
+        if not target.is_dir() or target.is_symlink() or any(target.iterdir()):
+            raise AgentError("The restore target is not an empty directory", "target_not_empty", 409)
         args = [self.binary, "restore", f"{snap['id']}:{paths[0]}", "--target", str(target), "--json"]
-        proc = subprocess.Popen(
-            args, env=self._env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
         summary: dict[str, Any] = {}
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+
+        def on_message(msg: dict[str, Any]) -> None:
+            nonlocal summary
             if msg.get("message_type") == "status" and progress:
                 progress(float(msg.get("percent_done") or 0.0), "Restoring files")
             elif msg.get("message_type") == "summary":
                 summary = msg
-        stderr = proc.stderr.read() if proc.stderr else ""
-        code = proc.wait()
+
+        code, stderr = self._stream_json(args, on_message, timeout=self.RESTORE_TIMEOUT, action="restore")
         if code != 0:
             self._raise_for(code, stderr, "restore")
         return {"snapshot": snap["id"], **summary}
@@ -283,12 +359,20 @@ class Restic:
         return subprocess.Popen(
             [self.binary, "dump", snap["id"], target],
             env=self._env(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # nobody reads stderr while stdout streams: a pipe would block restic once full
+            stderr=subprocess.DEVNULL,
         )
 
-    def restore_path(self, snapshot_id: str, rel_parts: list[str], staging: Path) -> Path:
-        """Restore one file/directory into ``staging``; returns the restored item path."""
+    def restore_path(
+        self, snapshot_id: str, rel_parts: list[str], staging: Path, *, pass_fds: tuple[int, ...] = ()
+    ) -> Path:
+        """Restore one file/directory into ``staging``; returns the restored item path.
+
+        ``staging`` may be ``/proc/self/fd/<n>/...`` with ``n`` in ``pass_fds``: restic then
+        writes into the directory that descriptor refers to, whatever its name is meanwhile.
+        """
         if not rel_parts:
             raise AgentError("Choose a file or folder to restore", "invalid_path", 400)
         snap = self.snapshot(snapshot_id)
@@ -297,6 +381,7 @@ class Restic:
         self.run(
             ["restore", f"{snap['id']}:{parent}", "--target", str(staging), "--include", f"/{rel_parts[-1]}"],
             timeout=6 * 3600,
+            pass_fds=pass_fds,
         )
         restored = staging / rel_parts[-1]
         if not restored.exists() and not restored.is_symlink():

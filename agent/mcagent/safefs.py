@@ -135,6 +135,12 @@ class SafeRoot:
             os.close(fd)
 
     @contextmanager
+    def dir_fd(self, rel: str) -> Iterator[int]:
+        """A file descriptor of the directory ``rel`` (no link followed on the way); closed on exit."""
+        with self._dir_fd(split_path(rel)) as fd:
+            yield fd
+
+    @contextmanager
     def _parent(self, rel: str, *, allow_root: bool = False) -> Iterator[tuple[int, str | None, list[str]]]:
         parts = split_path(rel)
         if not parts:

@@ -237,6 +237,10 @@ class BtrfsSnapshots:
         return {"restored": name}
 
 
+def _subvolumes_possible(parent: Path) -> bool:
+    return (mount_for(parent) or {}).get("fstype") == "btrfs" and shutil.which("btrfs") is not None
+
+
 def ensure_instance_dir(settings: Settings, path: Path) -> bool:
     """Create an instance directory; on btrfs (with tools available) create a subvolume.
 
@@ -245,7 +249,7 @@ def ensure_instance_dir(settings: Settings, path: Path) -> bool:
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    if (mount_for(path.parent) or {}).get("fstype") == "btrfs" and shutil.which("btrfs"):
+    if _subvolumes_possible(path.parent):
         try:
             BtrfsSnapshots.create_subvolume(path)
             return True
@@ -253,3 +257,50 @@ def ensure_instance_dir(settings: Settings, path: Path) -> bool:
             pass  # fall back to a plain directory (e.g. missing privileges)
     path.mkdir(parents=True, exist_ok=True)
     return False
+
+
+def replacement_wants_subvolume(path: Path) -> bool:
+    """Whether a directory that will replace ``path`` (e.g. a restore) should be a subvolume.
+
+    True if ``path`` is a subvolume (replacing it with a plain directory would silently
+    disable snapshots), or if it does not exist and a new instance directory there would be
+    created as one (see :func:`ensure_instance_dir`).
+    """
+    if path.exists() or path.is_symlink():
+        return is_subvolume(path)
+    return _subvolumes_possible(path.parent)
+
+
+def create_empty_dir(path: Path, *, subvolume: bool) -> bool:
+    """Create the empty directory ``path`` (as a subvolume if asked and possible).
+
+    Returns True if it is a subvolume; falls back to a plain directory if btrfs refuses.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if subvolume:
+        try:
+            BtrfsSnapshots.create_subvolume(path)
+            return True
+        except AgentError:
+            pass
+    path.mkdir()
+    return False
+
+
+def remove_tree(path: Path) -> None:
+    """Best-effort removal of a directory tree that may be a btrfs subvolume."""
+    if path.is_symlink():
+        path.unlink(missing_ok=True)
+        return
+    if not path.exists():
+        return
+    if path.is_dir() and is_subvolume(path):
+        try:
+            _run([_btrfs(), "subvolume", "delete", str(path)])
+            return
+        except AgentError:
+            pass  # e.g. it contains a nested subvolume: fall back to a recursive delete
+    if path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)

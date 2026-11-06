@@ -23,6 +23,7 @@ import time
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -602,6 +603,10 @@ class _LogBuffer:
         with contextlib.suppress(RuntimeError):  # the loop is gone: the connection has ended
             self._loop.call_soon_threadsafe(self._wakeup.set)
 
+    def wake(self) -> None:
+        """Wake a waiting :meth:`get_batch` (event-loop thread only)."""
+        self._wakeup.set()
+
     async def get_batch(self, timeout: float) -> list[dict[str, Any]] | None:
         """Messages in order (None if nothing arrived within ``timeout``)."""
         try:
@@ -716,6 +721,8 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                 await websocket.receive_text()  # we ignore client messages; detect disconnect
         except WebSocketDisconnect:
             pass
+        finally:
+            buffer.wake()  # let the sender loop notice the disconnect now, not at the next ping
 
     recv_task = asyncio.create_task(receiver())
     try:
@@ -1018,26 +1025,47 @@ async def restore_backup(
         raise AgentError("Target instance directory is not empty", "target_not_empty", 409)
 
     def _restore(op: Operation) -> dict[str, Any]:
-        staging = settings.staging_dir / f"restore-{target_id}-{int(time.time())}"
+        from .snapshots import create_empty_dir, remove_tree, replacement_wants_subvolume
+
+        stamp = int(time.time())
+        warnings: list[str] = []
+        # A btrfs subvolume stays a subvolume (or snapshots would silently stop working): the
+        # backup is restored into a new subvolume next to it (same parent, so the swap is a
+        # rename) and the old one is deleted after the swap.
+        subvolume = replacement_wants_subvolume(target_dir)
+        if subvolume:
+            staging = target_dir.with_name(f"{target_id}.mcpanel-restore-{stamp}")
+            old = target_dir.with_name(f"{target_id}.mcpanel-old-{stamp}")
+        else:
+            staging = settings.staging_dir / f"restore-{target_id}-{stamp}"
+            old = settings.trash_dir / f"pre-restore-{target_id}-{stamp}"
         op.update(0.02, "Restoring snapshot into staging area")
         try:
+            if subvolume and not create_empty_dir(staging, subvolume=True):
+                warnings.append(
+                    "Could not create a btrfs subvolume; the server folder was restored as a plain "
+                    "directory (convert it to enable snapshots again)"
+                )
             result = restic.restore(body.snapshot_id, staging, lambda p, m: op.update(0.02 + p * 0.9, m))
         except BaseException:
-            shutil.rmtree(staging, ignore_errors=True)
+            remove_tree(staging)
             raise
         op.update(0.94, "Swapping restored files into place")
-        old = None
-        if target_dir.exists():
-            old = settings.trash_dir / f"pre-restore-{target_id}-{int(time.time())}"
-            target_dir.rename(old)
+        moved = False
         try:
+            if target_dir.exists():
+                target_dir.rename(old)
+                moved = True
             staging.rename(target_dir)
         except BaseException:
-            if old is not None:
+            if moved:
                 old.rename(target_dir)
+            remove_tree(staging)
             raise
-        if old is not None:
-            shutil.rmtree(old, ignore_errors=True)
+        if moved:
+            remove_tree(old)
+        if warnings:
+            result["warnings"] = warnings
         return result
 
     kinds = [instance_id] if target_id == instance_id else [instance_id, target_id]
@@ -1129,52 +1157,87 @@ async def backup_restore_path(
     if status.get("running"):
         raise AgentError("Stop the server before restoring files into it", "must_stop", 409)
     restic = Restic(settings, instance_id)
-    inst_dir = docker_ops.instance_dir(settings, instance_id)
 
     def _do(op: Operation) -> dict[str, Any]:
-        staging = settings.staging_dir / f"restore-path-{instance_id}-{int(time.time())}"
-        try:
-            op.update(0.1, f"Restoring {body.path} from backup")
-            restored = restic.restore_path(snapshot_id, parts, staging)
-            # Ensure the parent exists inside the instance, using the confined API.
-            root = _root(settings, instance_id)
-            if len(parts) > 1:
-                root.mkdir("/".join(parts[:-1]), parents=True)
-            # The parent directory was created/validated through SafeRoot (no symlinks); move into it.
-            parent_fd = os.open(inst_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        root = _root(settings, instance_id)
+        parent_rel = "/".join(parts[:-1])
+        if parent_rel:
+            root.mkdir(parent_rel, parents=True)  # created/validated through SafeRoot (no symlinks)
+        name = parts[-1]
+        stage_name = f".mcpanel-tmp-restore-{secrets.token_hex(6)}"  # excluded from backups
+        with root.dir_fd(parent_rel) as parent_fd:
+            # Stage in the destination's own directory: same filesystem and btrfs subvolume, so
+            # the final rename cannot fail with EXDEV (a staging folder under <data root>/staging
+            # is outside an instance subvolume).
+            os.mkdir(stage_name, 0o700, dir_fd=parent_fd)
+            stage_fd = os.open(stage_name, _DIR_FLAGS, dir_fd=parent_fd)
             try:
-                for comp in parts[:-1]:
-                    nfd = os.open(comp, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-                    os.close(parent_fd)
-                    parent_fd = nfd
-                name = parts[-1]
-                trash_name = None
+                op.update(0.1, f"Restoring {body.path} from backup")
+                # restic gets the staging directory as an inherited descriptor: it writes into
+                # that directory even if names inside the instance are changed meanwhile.
+                restic.restore_path(
+                    snapshot_id, parts, Path(f"/proc/self/fd/{stage_fd}/r"), pass_fds=(stage_fd,)
+                )
+                restored_fd = os.open("r", _DIR_FLAGS, dir_fd=stage_fd)
                 try:
-                    os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                    trash_name = f".mcpanel-old-{int(time.time())}-{name}"[:255]
-                    os.rename(name, trash_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                except FileNotFoundError:
-                    pass
-                staging_fd = os.open(restored.parent, os.O_RDONLY | os.O_DIRECTORY)
-                try:
-                    os.rename(restored.name, name, src_dir_fd=staging_fd, dst_dir_fd=parent_fd)
-                except OSError:
-                    if trash_name:
-                        os.rename(trash_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-                    raise
+                    _swap_in_restored(restored_fd, parent_fd, name)
                 finally:
-                    os.close(staging_fd)
-                if trash_name:
-                    old = SafeRoot(inst_dir)
-                    old.delete("/".join([*parts[:-1], trash_name]), recursive=True)
+                    os.close(restored_fd)
             finally:
-                os.close(parent_fd)
-            return {"restored": "/".join(parts)}
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+                _remove_own_dir(parent_fd, stage_name, stage_fd)
+                os.close(stage_fd)
+        return {"restored": "/".join(parts)}
 
     op = registry.start("restore", [instance_id], _do)
     return {"operation": op.as_dict()}
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _delete_entry(dir_fd: int, name: str) -> None:
+    st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    if stat.S_ISDIR(st.st_mode):
+        shutil.rmtree(name, dir_fd=dir_fd)  # fd-based, never follows links
+    else:
+        os.unlink(name, dir_fd=dir_fd)
+
+
+def _swap_in_restored(src_dir_fd: int, parent_fd: int, name: str) -> None:
+    """Move ``name`` from ``src_dir_fd`` over ``name`` in ``parent_fd`` (same directory tree).
+
+    The current item is renamed aside first and put back if the move fails; it is deleted
+    only after the restored item is in place.
+    """
+    aside = None
+    try:
+        os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        aside = f".mcpanel-tmp-old-{secrets.token_hex(6)}"
+        os.rename(name, aside, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+    except FileNotFoundError:
+        pass
+    try:
+        os.rename(name, name, src_dir_fd=src_dir_fd, dst_dir_fd=parent_fd)
+    except OSError:
+        if aside:
+            os.rename(aside, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        raise
+    if aside:
+        try:
+            _delete_entry(parent_fd, aside)
+        except OSError as exc:
+            log.warning("Could not delete the replaced copy %s: %s", aside, exc)
+
+
+def _remove_own_dir(parent_fd: int, name: str, own_fd: int) -> None:
+    """Delete ``name`` in ``parent_fd`` if it is still the directory ``own_fd`` refers to."""
+    try:
+        st = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        own = os.fstat(own_fd)
+        if (st.st_dev, st.st_ino) == (own.st_dev, own.st_ino):
+            shutil.rmtree(name, dir_fd=parent_fd)
+    except OSError as exc:
+        log.warning("Could not remove restore staging folder %s: %s", name, exc)
 
 
 SAVE_SETTLE_SECONDS = 1.0  # after save-all flush, before reading the world

@@ -14,6 +14,7 @@ member goes through the same confined :class:`SafeRoot` writer as uploads, so:
 
 from __future__ import annotations
 
+import os
 import queue
 import stat
 import struct
@@ -421,7 +422,7 @@ def stream_zip(root: SafeRoot, rel: str, *, max_bytes: int = MAX_TOTAL_BYTES) ->
 
 
 def _zip_stream(
-    root: SafeRoot, parts: list[str], prefix: str, files: list[tuple[str, object]]
+    root: SafeRoot, parts: list[str], prefix: str, files: list[tuple[str, os.stat_result]]
 ) -> Iterator[bytes]:
     q: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=ZIP_QUEUE_CHUNKS)
     cancelled = threading.Event()
@@ -437,10 +438,10 @@ def _zip_stream(
                     arcname = "/".join([prefix, *split_path(path)[base:]])
                     try:
                         with root.open_read(path) as (fh, _size):
-                            info = zipfile.ZipInfo(arcname, date_time=time.localtime(st.st_mtime)[:6])  # type: ignore[attr-defined]
+                            info = zipfile.ZipInfo(arcname, date_time=time.localtime(st.st_mtime)[:6])
                             info.compress_type = zipfile.ZIP_DEFLATED
                             info.external_attr = (stat.S_IFREG | 0o644) << 16
-                            with zf.open(info, "w", force_zip64=st.st_size > 2**31) as out:  # type: ignore[attr-defined]
+                            with zf.open(info, "w", force_zip64=st.st_size > 2**31) as out:
                                 while chunk := fh.read(CHUNK):
                                     out.write(chunk)
                     except PathError:
