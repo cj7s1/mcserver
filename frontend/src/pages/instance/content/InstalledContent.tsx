@@ -20,6 +20,7 @@ import {
   contentPath,
   displayTitle,
   modrinthUrl,
+  pendingCount,
   safeHttpUrl,
   useContentUpdates,
   useInvalidateContent,
@@ -99,6 +100,12 @@ function BulkUpdateConfirm({
 
 function SourceBadges({ file, env }: { file: ContentFile; env: ContentEnv }) {
   const badges: { label: string; tip: string; className: string }[] = [];
+  if (file.source === "pending")
+    badges.push({
+      label: "Reading…",
+      tip: "The server node is still reading this file to identify it on Modrinth.",
+      className: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
+    });
   if (file.source === "manual")
     badges.push({
       label: "Manual",
@@ -301,6 +308,8 @@ function InstalledRow({
                       ? `It can be reinstalled from Modrinth later.`
                       : file.source === "spigot" || file.source === "hangar"
                         ? `It can be installed again from the ${file.source === "spigot" ? "SpigotMC" : "Hangar"} tab, possibly in a newer version.`
+                      : file.source === "pending"
+                        ? `This file has not been identified yet, so it may only be recoverable from a backup.`
                         : `This file is not on Modrinth, so it can only be recovered from a backup.`}{" "}
                     To keep the file but stop loading it, disable it instead. Worlds may lose blocks or items this{" "}
                     {env.noun.one} added.
@@ -339,7 +348,8 @@ export function InstalledContent({
   const [checkRequested, setCheckRequested] = useState(false);
   const [rowUpdating, setRowUpdating] = useState<string | null>(null);
   const updates = useContentUpdates(env.instance.id, checkRequested);
-  const canCheck = !!env.minecraftVersion;
+  const pending = pendingCount(inventory);
+  const canCheck = !!env.minecraftVersion && pending === 0;
 
   const updateMap = useMemo(() => new Map((updates.data?.updates ?? []).map((u) => [u.filename, u])), [updates.data]);
   const files = inventory.files;
@@ -355,7 +365,7 @@ export function InstalledContent({
     const out = files.filter((f) => {
       if (status === "enabled" && !f.enabled) return false;
       if (status === "disabled" && f.enabled) return false;
-      if (status === "manual" && f.source === "modrinth") return false;
+      if (status === "manual" && (f.source === "modrinth" || f.source === "pending")) return false;
       if (status === "updates" && !updateMap.has(f.filename)) return false;
       if (!needle) return true;
       return f.filename.toLowerCase().includes(needle) || (f.project?.title ?? "").toLowerCase().includes(needle);
@@ -429,9 +439,11 @@ export function InstalledContent({
         <div className="min-w-0 flex-1">
           {!checkRequested ? (
             <span className="text-muted-foreground">
-              {canCheck
-                ? `Check Modrinth for newer ${env.platform} ${env.minecraftVersion} versions of the ${inventory.summary.identified} identified ${env.noun.many}.`
-                : `Update checks need a specific Minecraft version (this server follows the newest one).`}
+              {!env.minecraftVersion
+                ? `Update checks need a specific Minecraft version (this server follows the newest one).`
+                : pending > 0
+                  ? `Update checks are available once every file is identified (${pending} still being read).`
+                  : `Check Modrinth for newer ${env.platform} ${env.minecraftVersion} versions of the ${inventory.summary.identified} identified ${env.noun.many}.`}
             </span>
           ) : updates.isFetching ? (
             <span className="inline-flex items-center gap-2 text-muted-foreground">
@@ -493,7 +505,7 @@ export function InstalledContent({
                 <SelectItem value="all">All ({inventory.summary.total})</SelectItem>
                 <SelectItem value="enabled">Enabled ({inventory.summary.enabled})</SelectItem>
                 <SelectItem value="disabled">Disabled ({inventory.summary.disabled})</SelectItem>
-                <SelectItem value="manual">Not on Modrinth ({inventory.summary.total - inventory.summary.identified})</SelectItem>
+                <SelectItem value="manual">Not on Modrinth ({inventory.summary.total - inventory.summary.identified - pending})</SelectItem>
                 {updates.data && <SelectItem value="updates">Updates ({updatable.length})</SelectItem>}
               </SelectContent>
             </Select>
@@ -582,7 +594,8 @@ export function InstalledContent({
       )}
       <p className="text-xs text-muted-foreground">
         {inventory.summary.enabled} enabled · {inventory.summary.disabled} disabled · {inventory.summary.identified} identified on Modrinth ·{" "}
-        {inventory.summary.manual} manual. Disabled files are renamed to <span className="font-mono">.jar.disabled</span> and not loaded.
+        {inventory.summary.manual} manual{pending > 0 ? ` · ${pending} still being read` : ""}. Disabled files are renamed to{" "}
+        <span className="font-mono">.jar.disabled</span> and not loaded.
       </p>
     </div>
   );

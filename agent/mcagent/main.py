@@ -18,7 +18,6 @@ import os
 import shutil
 import threading
 import time
-from collections import OrderedDict
 from typing import Any
 from uuid import UUID
 
@@ -30,7 +29,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
-from . import __version__, docker_ops, storage, tls
+from . import __version__, docker_ops, hashcache, storage, tls
 from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
@@ -169,6 +168,17 @@ async def _startup() -> None:
         await run_in_threadpool(_load_blocked_networks, settings)
     except Exception as exc:  # docker not reachable yet; health endpoint will report it
         log.warning("Could not ensure instance network: %s", exc)
+
+
+# At most one background pass per folder (two at a time) for progressive /files/hashes calls.
+_hash_jobs = hashcache.HashJobs(workers=2)
+
+
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    global _hash_jobs
+    _hash_jobs.shutdown()  # stop background hashing so the process can exit promptly
+    _hash_jobs = hashcache.HashJobs(workers=2)
 
 
 def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
@@ -383,6 +393,7 @@ async def delete_data(
             trash = settings.trash_dir / f"{instance_id}-{int(time.time())}"
             path.rename(trash)
             shutil.rmtree(trash, ignore_errors=True)
+        hashcache.HashCache(settings.hash_cache_dir).forget(instance_id)
         repo = settings.backups_dir / "restic" / str(instance_id)
         if repo.exists():
             op.update(0.8, "Deleting backup repository")
@@ -701,59 +712,34 @@ async def files_search(
     return {"results": results}
 
 
-# (instance, path, size, mtime, algorithm) -> digest. A file that changes gets a new mtime
-# (or size), so stale entries are never returned for modified files; LRU-bounded.
-_hash_cache: OrderedDict[tuple[str, str, int, float, str], str] = OrderedDict()
-HASH_CACHE_MAX = 50_000
-
-
 @app.get("/v1/instances/{instance_id}/files/hashes", dependencies=[Depends(require_token)])
 async def files_hashes(
     instance_id: UUID,
     path: str,
     algorithm: str = Query("sha1", pattern="^(sha1|sha512)$"),
+    wait: float | None = Query(None, ge=0, le=60),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    """Hash every regular file directly inside ``path`` (used to identify mods/plugins)."""
+    """Hash every regular file directly inside ``path`` (used to identify mods/plugins).
+
+    Digests are cached on disk per file (name, size, mtime, ctime, inode), so only new or changed
+    files are read. Without ``wait`` the call returns once every file is hashed. With
+    ``wait`` it returns after at most about that many seconds; files not read yet then
+    have ``hash: null``, ``complete`` is false, and hashing continues in the background.
+    """
     root = _root(settings, instance_id)
-
-    def _do() -> list[dict[str, Any]]:
-        out = []
-        for entry in root.list(path):
-            if entry.type != "file":
-                continue
-            key = (str(instance_id), entry.path, entry.size, entry.modified, algorithm)
-            cached = _hash_cache.get(key)
-            if cached is not None:
-                _hash_cache.move_to_end(key)
-                out.append({**entry.as_dict(), "hash": cached})
-                continue
-            h = hashlib.new(algorithm)
-            try:
-                with root.open_read(entry.path) as (fh, _size):
-                    while chunk := fh.read(1024 * 1024):
-                        h.update(chunk)
-            except PathError as exc:
-                # removed or replaced (e.g. by a symlink) after listing: skip just this entry,
-                # otherwise the outer not_found handler would report the whole folder as empty
-                if exc.code in ("not_found", "symlink", "not_a_file"):
-                    continue
-                raise
-            digest = h.hexdigest()
-            _hash_cache[key] = digest
-            while len(_hash_cache) > HASH_CACHE_MAX:
-                _hash_cache.popitem(last=False)
-            out.append({**entry.as_dict(), "hash": digest})
-        return out
-
+    cache = hashcache.HashCache(settings.hash_cache_dir)
     try:
-        files = await run_in_threadpool(_do)
+        result = await run_in_threadpool(
+            hashcache.hash_directory, root, cache, _hash_jobs, instance_id, path, algorithm, wait=wait
+        )
     except PathError as exc:
-        if exc.code == "not_found":
-            files = []
-        else:
+        if exc.code != "not_found":
             raise
-    return {"algorithm": algorithm, "files": files}
+        result = {"files": [], "complete": True, "pending": 0}
+    except hashcache.HashingCancelled as exc:
+        raise AgentError("The agent is shutting down", "shutting_down", 503) from exc
+    return {"algorithm": algorithm, **result}
 
 
 @app.post("/v1/instances/{instance_id}/files/fetch", dependencies=[Depends(require_token)])

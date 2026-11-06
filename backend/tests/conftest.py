@@ -78,6 +78,7 @@ class FakeAgent:
         "delete_files",
         "search_files",
         "hash_files",
+        "hash_files_partial",
         "fetch_file",
         "list_backups",
         "create_backup",
@@ -696,6 +697,10 @@ class FakeAgent:
                 digest = hashlib.new(algorithm, root["files"][entry["path"]]).hexdigest()
                 out.append({**entry, "hash": digest})
         return out
+
+    def hash_files_partial(self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
+        files = self.hash_files(instance_id, path, algorithm)
+        return {"files": files, "complete": True, "pending": 0}
 
     def fetch_file(
         self,

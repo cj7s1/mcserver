@@ -45,12 +45,13 @@ export interface ContentFile {
   enabled: boolean;
   size: number;
   modified: number | null;
-  sha1: string;
+  /** null while the node is still reading the file (source "pending") */
+  sha1: string | null;
   /**
    * modrinth = identified by hash; hangar / spigot = installed from Hangar / SpigotMC by the panel;
-   * manual = not on Modrinth; unknown = identification failed
+   * manual = not on Modrinth; unknown = identification failed; pending = the node has not read (hashed) the file yet
    */
-  source: "modrinth" | "hangar" | "spigot" | "manual" | "unknown";
+  source: "modrinth" | "hangar" | "spigot" | "manual" | "unknown" | "pending";
   /** Set when source is "hangar" (recorded at install time; Hangar has no hash lookup). */
   hangar?: { slug: string; version: string };
   /** Set when source is "spigot": recorded at install time, and the file still has the recorded hash. */
@@ -68,7 +69,8 @@ export interface ContentInventory {
   minecraft_version: string | null;
   is_modpack: boolean;
   restart_required_for_changes: boolean;
-  identification: { available: boolean; error: string | null };
+  /** complete/pending: files the node still has to read (progressive inventory); poll until pending is 0 */
+  identification: { available: boolean; error: string | null; complete?: boolean; pending?: number };
   warnings: string[];
   summary: {
     total: number;
@@ -78,6 +80,7 @@ export interface ContentInventory {
     manual: number;
     hangar?: number;
     spigot?: number;
+    pending?: number;
   };
   files: ContentFile[];
 }
@@ -425,12 +428,26 @@ export const contentPath = (id: string, sub = "") => `/instances/${id}/content/$
 export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
 export const SEARCH_PAGE_SIZE = 20;
 
+/** How often the inventory is re-read while the node is still hashing files. */
+export const INVENTORY_POLL_MS = 1_000;
+
+/** Files the node has not read (hashed) yet, so they are not identified. */
+export function pendingCount(inventory: ContentInventory | undefined): number {
+  return inventory?.identification.pending ?? 0;
+}
+
 // --- hooks ------------------------------------------------------------------------------
+/**
+ * Progressive: the panel answers within a few seconds even when the node still has to read the
+ * jars (the first time after an install that can take a minute for a large modpack); the query
+ * then polls until every file is identified. Afterwards the node's digest cache makes it fast.
+ */
 export function useContentInventory(instanceId: string) {
   return useQuery({
     queryKey: contentKeys.inventory(instanceId),
-    queryFn: () => api.get<ContentInventory>(contentPath(instanceId)),
+    queryFn: ({ signal }) => api.get<ContentInventory>(contentPath(instanceId), { progressive: 1 }, signal),
     staleTime: 30_000,
+    refetchInterval: (query) => (pendingCount(query.state.data) > 0 ? INVENTORY_POLL_MS : false),
     retry: false,
   });
 }

@@ -506,7 +506,7 @@ def annotate_inventory(instance: Instance, inventory: dict[str, Any]) -> dict[st
         base = item["filename"].removesuffix(".disabled")
         entry = rec.get(base)
         # a file Modrinth identifies keeps that source: Modrinth then also handles its updates
-        if entry and item.get("source") != "modrinth" and item.get("sha1") == entry.get("sha1"):
+        if entry and item.get("source") != "modrinth" and item.get("sha1") and item.get("sha1") == entry.get("sha1"):
             item["source"] = "spigot"
             item["spigot"] = {
                 "resource_id": entry.get("resource_id"),

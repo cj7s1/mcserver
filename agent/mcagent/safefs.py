@@ -41,6 +41,10 @@ class Entry:
     size: int
     modified: float
     mode: str
+    # identity of the listed file (used as a cache key, not part of the API output)
+    mtime_ns: int = 0
+    ctime_ns: int = 0
+    ino: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -164,6 +168,9 @@ class SafeRoot:
                 size=st.st_size,
                 modified=st.st_mtime,
                 mode=statmod.filemode(st.st_mode),
+                mtime_ns=st.st_mtime_ns,
+                ctime_ns=st.st_ctime_ns,
+                ino=st.st_ino,
             )
 
     def list(self, rel: str) -> list[Entry]:
@@ -184,6 +191,9 @@ class SafeRoot:
                             size=st.st_size,
                             modified=st.st_mtime,
                             mode=statmod.filemode(st.st_mode),
+                            mtime_ns=st.st_mtime_ns,
+                            ctime_ns=st.st_ctime_ns,
+                            ino=st.st_ino,
                         )
                     )
         entries.sort(key=lambda e: (e.type != "directory", e.name.lower()))

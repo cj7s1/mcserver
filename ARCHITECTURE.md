@@ -67,6 +67,7 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 <data root>/staging/                     -> restore/clone staging (same filesystem for atomic rename)
 <data root>/trash/                       -> deletes are renamed here first, then removed
 <data root>/agent/                       -> restic password (if generated) and cache
+<data root>/agent/cache/file-hashes/     -> persistent file-digest cache for /files/hashes (AGENT_CACHE_ROOT; rebuildable)
 ```
 
 ## Backend apps

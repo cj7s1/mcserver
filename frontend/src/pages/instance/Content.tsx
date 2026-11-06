@@ -6,13 +6,14 @@ import { toast } from "sonner";
 import { Section } from "@/components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { useInstanceContext } from "./InstanceLayout";
 import { BrowseContent } from "./content/BrowseContent";
-import { isRunningLike, nouns, useContentInventory, useRestartHint, useRestartServer } from "./content/content-api";
+import { isRunningLike, nouns, pendingCount, useContentInventory, useRestartHint, useRestartServer } from "./content/content-api";
 import type { ContentReport } from "./content/content-report";
 import { Notice, ReportCard, type ContentEnv } from "./content/content-ui";
 import { HangarBrowse } from "./content/HangarBrowse";
@@ -127,6 +128,7 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
     );
   }
   const inv = inventory.data;
+  const pending = pendingCount(inv);
 
   const env: ContentEnv = {
     instance,
@@ -178,6 +180,19 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
         </Notice>
       )}
       {canEdit && env.locked && <Notice tone="info">{env.locked}</Notice>}
+      {pending > 0 && (
+        <Notice tone="info" title={`Identifying ${noun.many}: ${inv.summary.total - pending} of ${inv.summary.total} read`}>
+          <p>
+            The server node reads each jar once to identify it on Modrinth and remembers the result, so this is only slow the first
+            time (or after files change). The list updates as files are read.
+          </p>
+          <Progress
+            value={inv.summary.total ? (100 * (inv.summary.total - pending)) / inv.summary.total : 0}
+            className="mt-2 h-1.5"
+            aria-label={`${inv.summary.total - pending} of ${inv.summary.total} files read`}
+          />
+        </Notice>
+      )}
       {inv.warnings.map((w) => (
         <Notice key={w} tone="warning">
           {w}

@@ -48,6 +48,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 
 ## Phase 5 — Mods, plugins, players
 - [x] Mods/plugins inventory, Modrinth identification by hash, update check, compatible search/install/remove/toggle/upload
+- [x] Fast inventory for large modpacks: persistent digest cache on the agent, progressive first load with progress
 - [x] Whitelist / operators / bans / kick (RCON when running, JSON files when stopped)
 - [x] Online players (RCON `list`)
 - [ ] CurseForge mod search for individual mods

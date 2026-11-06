@@ -246,6 +246,23 @@ class AgentClient:
             "GET", f"/v1/instances/{instance_id}/files/hashes", params={"path": path, "algorithm": algorithm}, timeout=300
         )["files"]
 
+    def hash_files_partial(self, instance_id: UUID, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
+        """Like :meth:`hash_files`, but the agent answers after about ``wait`` seconds.
+
+        Files it has not hashed yet have ``hash: None``; it keeps hashing in the background.
+        Returns ``{"files", "complete", "pending"}`` (agents without progressive hashing
+        ignore ``wait`` and always return a complete result).
+        """
+        data = self._json(
+            "GET",
+            f"/v1/instances/{instance_id}/files/hashes",
+            params={"path": path, "algorithm": algorithm, "wait": wait},
+            timeout=300,
+        )
+        files = data.get("files") or []
+        pending = sum(1 for f in files if f.get("hash") is None)
+        return {"files": files, "complete": pending == 0, "pending": pending}
+
     def fetch_file(
         self,
         instance_id: UUID,

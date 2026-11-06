@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     host_data_root: Path | None = None
     # Optional separate root for backup repositories (e.g. array vs cache on Unraid).
     backup_root: Path | None = None
+    # Optional location of rebuildable caches (file digests). Defaults to <state dir>/cache.
+    cache_root: Path | None = None
 
     # Container runtime policy ---------------------------------------------------
     allowed_images: Annotated[list[str], NoDecode] = Field(
@@ -119,6 +121,14 @@ class Settings(BaseSettings):
     @property
     def state_dir(self) -> Path:
         return self.data_root / "agent"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.cache_root or (self.state_dir / "cache")
+
+    @property
+    def hash_cache_dir(self) -> Path:
+        return self.cache_dir / "file-hashes"
 
     def effective_networks(self) -> set[str]:
         nets = set(self.allowed_networks) | {self.instance_network}

@@ -110,7 +110,7 @@ def annotate_inventory(instance: Instance, inventory: dict[str, Any]) -> dict[st
         return inventory
     for item in inventory.get("files", []):
         base = item["filename"].removesuffix(".disabled")
-        if item.get("source") != "modrinth" and base in rec:
+        if item.get("source") in ("manual", "unknown") and base in rec:  # not while still being hashed
             item["source"] = "hangar"
             item["hangar"] = rec[base]
     summary = inventory.get("summary") or {}

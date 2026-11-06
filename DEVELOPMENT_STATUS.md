@@ -56,6 +56,32 @@ left the running server untouched and the session valid; `docker compose down` +
 → server started again in 95 s. Production SPA served with no console errors. Still not run on real
 Unraid hardware.
 
+### Performance: Mods tab of a large modpack (2026-11-06)
+
+Better MC 4 (CurseForge) `44d1f199…`: 311 jars, 943 MB in `mods/`. Real dev data. "Before" is the dev
+agent :8700 and API :8000 on `main`. "After" is the worktree agent on :8790 (its own `AGENT_CACHE_ROOT` in
+a temp dir) and the worktree backend code (`service.inventory`, LocMem cache so Modrinth starts cold).
+
+| Step | Before | After |
+|---|---|---|
+| Agent `/files/hashes`, first read with a cold page cache | **44.6 s** (disk-bound, ~21 MB/s) | same disk cost, but progressive: StoneBlock (220 jars, 240 MB, cold) answered after 3.0 s with partial results and was complete after 10.0 s (3 polls, ~24 MB/s) |
+| Agent, first read with a warm page cache | 0.7 s (repeated after every restart) | 0.72 s (only once) |
+| Agent, repeat call | 3 ms (in-memory LRU, lost on restart) | 4–12 ms |
+| Agent, **after an agent restart** | 44.6 s cold / 0.7 s warm (re-reads every jar) | **5–8 ms**, no jar read (page-cache residency stayed 0 %) |
+| Modrinth lookups (cold cache): `version_files` + `/projects` | 0.28 s + 1.59 s (3 requests of 100) | 0.28 s + 0.68 s (1 request, batch 250) |
+| Backend inventory, cold Modrinth cache, warm agent | 1.86–2.10 s | 1.14–1.30 s |
+| Backend inventory, warm | 0.02–0.05 s | 0.02 s |
+
+Where the time went: reading the jars from disk. SHA-1 of the same 943 MB from RAM takes 0.62 s (SHA-512
+1.27 s), and 4 reader threads on the cold disk gave no gain (20 MB/s), so there is no thread pool. Changes:
+a persistent per-folder digest cache on the agent (`agent/mcagent/hashcache.py`, keyed by name, size,
+`mtime_ns`, `ctime_ns` and inode, under `<state dir>/cache/file-hashes`, atomic, bounded, ignored if corrupted), an
+optional `wait` on `/files/hashes` (partial results while one background pass per folder keeps hashing),
+`GET /content/?progressive=1` (pending files are listed as `source: "pending"` and the page polls every
+second with a progress notice), one `/projects` request per 250 ids, and Modrinth cache TTLs of 6 h
+instead of 1 h. Suites: agent 350 passed, backend 435 passed, frontend tsc, lint, vitest and build clean.
+Not yet checked in a browser.
+
 ### Not yet verified
 
 * **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).
@@ -120,3 +146,8 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   `$HTTPS_PROXY` for the egress forwarder (a stale port silently breaks downloads in containers).
 * A published agent port must arrive through a network that is not an instance network, or the
   agent's own instance-network guard refuses it (`docker-compose.node.yml` uses a dedicated `api` net).
+* Identifying a modpack's mods is disk-bound, not CPU-bound: the sandbox volume reads ~21 MB/s cold,
+  SHA-1 from RAM is ~1.5 GB/s, and parallel reads did not help. So the agent caches digests on disk.
+  `posix_fadvise(DONTNEED)` only empties the guest page cache (the host still caches the file), so it
+  cannot reproduce a cold read. Use folders that have not been read recently and check them with
+  `mincore`.
