@@ -6,7 +6,7 @@ import { ServerIcon } from "@/components/ServerIcon";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { formatMemoryMb } from "@/lib/format";
+import { formatBytes, formatMemoryMb } from "@/lib/format";
 import { loaderLabel, providerLabel } from "../modpacks/modpackMeta";
 import { SummaryList } from "./WizardBits";
 import {
@@ -26,6 +26,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   plugins: "Plugin server",
   mods: "Modded",
   modpack: "Modpack",
+  import: "Import",
 };
 
 const PRESET_LABELS: Record<string, string> = {
@@ -39,8 +40,7 @@ export function softwareRows(
   state: WizardState,
   d: Derived,
 ): [ReactNode, ReactNode][] {
-  if (!state.category || state.category === "import")
-    return [["Type", "Not chosen"]];
+  if (!state.category) return [["Type", "Not chosen"]];
   if (d.isModpack && state.modpackSource === "url") {
     return [
       ["Type", "Modpack · CurseForge (by page URL)"],
@@ -99,6 +99,20 @@ export function softwareRows(
       ? `Java ${d.javaVersion}${state.javaOverride ? " (override)" : ""}`
       : "Auto",
   ]);
+  if (state.category === "import")
+    rows.push([
+      "Archive",
+      state.importFile ? (
+        <span key="archive" className="break-all">
+          {state.importFile.name}{" "}
+          <span className="text-muted-foreground">
+            · {formatBytes(state.importFile.size)}
+          </span>
+        </span>
+      ) : (
+        "Not chosen"
+      ),
+    ]);
   return rows;
 }
 
@@ -156,7 +170,16 @@ export function StepReview({
   const warnings: string[] = [...(d.resolved?.warnings ?? [])];
   if (!state.onlineMode)
     warnings.push("Online mode is off: anyone can join with any username.");
-  if (!state.start)
+  const importing = state.category === "import";
+  if (importing) {
+    warnings.push(
+      "Keep this page open until the archive is uploaded. The server is created stopped, so you can check the files before its first start.",
+    );
+    if (state.importOverwrite && Object.keys(props).length)
+      warnings.push(
+        "The archive's server.properties (if it has one) replaces the gameplay settings chosen here.",
+      );
+  } else if (!state.start)
     warnings.push("The server will be installed but not started.");
   const icon = state.iconUrl.trim() || d.resolved?.icon_url || null;
 
@@ -197,11 +220,18 @@ export function StepReview({
                       ? `${formatMemoryMb(d.memoryMb)} heap${limit ? ` · ${formatMemoryMb(limit)} container limit` : ""}`
                       : "—",
                   ],
+                  ...(d.nodeName
+                    ? ([["Node", d.nodeName]] as [ReactNode, ReactNode][])
+                    : []),
                   ["Port", d.gamePort ? `${d.gamePort}/tcp` : "—"],
                   ["Bind address", state.hostIp || "Panel default"],
                   [
                     "After install",
-                    state.start ? "Start the server" : "Leave stopped",
+                    importing
+                      ? `Upload and extract the archive${state.importOverwrite ? " (its files win)" : " (keep new defaults)"}, leave stopped`
+                      : state.start
+                        ? "Start the server"
+                        : "Leave stopped",
                   ],
                 ]}
               />

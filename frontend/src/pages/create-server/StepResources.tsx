@@ -9,7 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { formatBytes, formatMemoryMb } from "@/lib/format";
 import { useSystemInfo } from "@/lib/queries";
-import { usePorts } from "../modpacks/modpackQueries";
+import { useNodePorts } from "./import/nodes";
 import { Advanced, describedBy, Field } from "./WizardBits";
 import {
   containerLimitMb,
@@ -48,10 +48,13 @@ function MemorySlider({ value, onChange, max, labelledBy }: { value: number; onC
 
 export function StepResources({ state, patch, d, errors }: { state: WizardState; patch: Patch; d: Derived; errors: FieldErrors }) {
   const uid = useId();
-  const ports = usePorts();
+  const ports = useNodePorts(state.node);
   const system = useSystemInfo();
-  const hostBytes = Number(system.data?.agent.docker?.memory_bytes ?? 0) || null;
-  const policyMax = Number((system.data?.agent.policy as { max_memory_mb?: number } | undefined)?.max_memory_mb ?? 0) || null;
+  // /system/info describes the default node only; host checks are skipped for other nodes
+  const defaultNode = state.node === null;
+  const hostBytes = (defaultNode && Number(system.data?.agent.docker?.memory_bytes ?? 0)) || null;
+  const policyMax =
+    (defaultNode && Number((system.data?.agent.policy as { max_memory_mb?: number } | undefined)?.max_memory_mb ?? 0)) || null;
   const hostMb = hostBytes ? Math.floor(hostBytes / 1024 / 1024) : null;
   const sliderMax = Math.max(
     4096,
@@ -260,6 +263,7 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
         </div>
       </Section>
 
+      {state.category !== "import" && (
       <Section>
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -278,6 +282,7 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
           />
         </div>
       </Section>
+      )}
     </div>
   );
 }

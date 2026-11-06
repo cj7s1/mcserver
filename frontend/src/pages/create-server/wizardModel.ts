@@ -19,6 +19,7 @@ import type {
   PortsInfo,
   ResolvedModpackData,
 } from "../modpacks/modpackQueries";
+import { validateImportArchive } from "./import/importModel";
 
 export type Category = "vanilla" | "plugins" | "mods" | "modpack" | "import";
 export type StandardCategory = "vanilla" | "plugins" | "mods";
@@ -30,6 +31,13 @@ export const CATEGORY_TYPES: Record<StandardCategory, ServerType[]> = {
   plugins: ["PAPER", "PURPUR", "FOLIA"],
   mods: ["FABRIC", "QUILT", "FORGE", "NEOFORGE"],
 };
+
+/** Import mode: the archive can come from any standard server software. */
+export const IMPORT_TYPES: ServerType[] = [
+  ...CATEGORY_TYPES.vanilla,
+  ...CATEGORY_TYPES.plugins,
+  ...CATEGORY_TYPES.mods,
+];
 
 export const TYPE_LABELS: Record<string, string> = {
   VANILLA: "Vanilla",
@@ -134,6 +142,12 @@ export interface WizardState {
   gamePort: string | null;
   hostIp: string;
   start: boolean;
+  /** Node id; null = the panel's default node. */
+  node: number | null;
+  // import
+  importFile: File | null;
+  /** Archive files replace the new server's defaults (the server.properties written at creation). */
+  importOverwrite: boolean;
   // gameplay
   motd: string;
   difficulty: string;
@@ -180,6 +194,9 @@ export function initialState(): WizardState {
     gamePort: null,
     hostIp: "",
     start: true,
+    node: null,
+    importFile: null,
+    importOverwrite: true,
     motd: "",
     difficulty: GAMEPLAY_DEFAULTS.difficulty,
     gamemode: GAMEPLAY_DEFAULTS.gamemode,
@@ -216,6 +233,8 @@ export interface Derived {
   resolveOk: boolean;
   resolvePending: boolean;
   softwareSummary: string;
+  /** Name of the chosen node when the panel has more than one; otherwise null. */
+  nodeName: string | null;
 }
 
 /** Container memory limit for a heap size; mirrors Instance.container_memory_mb in the backend
@@ -226,7 +245,13 @@ export function containerLimitMb(memoryMb: number, modded: boolean): number {
 
 /** Whether the wizard selection runs mods (modded loaders and modpacks). */
 export function isModded(state: WizardState, d: Derived): boolean {
-  return d.isModpack || state.category === "mods";
+  return (
+    d.isModpack ||
+    state.category === "mods" ||
+    (state.category === "import" &&
+      !!d.serverType &&
+      CATEGORY_TYPES.mods.includes(d.serverType))
+  );
 }
 
 // --- validation ---------------------------------------------------------------------
@@ -275,10 +300,6 @@ export function validateStep(
   if (step === "type") {
     if (!state.category)
       return { category: "Choose what kind of server to create" };
-    if (state.category === "import")
-      return {
-        category: "Importing happens after creation — see the steps below",
-      };
     return {};
   }
   if (step === "software") {
@@ -340,7 +361,12 @@ export function validateStep(
         serverType: d.serverType ?? "",
         minecraftVersion: d.minecraftVersion,
       });
-    return r.success ? {} : issuesToErrors(r.error);
+    const errors = r.success ? {} : issuesToErrors(r.error);
+    if (state.category === "import") {
+      const archive = validateImportArchive(state.importFile);
+      if (archive) errors.importFile = archive;
+    }
+    return errors;
   }
   if (step === "resources") {
     const inUse = new Map(
@@ -475,10 +501,11 @@ export function stepForField(key: string): StepId {
       "cfRef",
       "cfMinecraftVersion",
       "cfFileId",
+      "importFile",
     ].includes(k)
   )
     return "software";
-  if (["name", "memoryMb", "gamePort", "hostIp", "start"].includes(k))
+  if (["name", "memoryMb", "gamePort", "hostIp", "start", "node"].includes(k))
     return "resources";
   if (k === "acceptEula" || k === "form") return "review";
   return "gameplay";
@@ -507,6 +534,7 @@ export const SERVER_FIELD_MAP: Record<string, string> = {
   host_ip: "hostIp",
   server_properties: "serverProperties",
   start: "start",
+  node: "node",
   non_field_errors: "form",
 };
 
@@ -534,6 +562,8 @@ export interface CreatePayload {
   host_ip?: string;
   server_properties?: Record<string, string | number | boolean>;
   start: boolean;
+  /** Omitted = the default node. */
+  node?: number;
 }
 
 export interface CreateResponse {
@@ -577,8 +607,10 @@ export function buildPayload(state: WizardState, d: Derived): CreatePayload {
     memory_mb: d.memoryMb,
     jvm_flags_preset: state.jvmPreset,
     game_port: Number(d.gamePort),
-    start: state.start,
+    // an imported server stays stopped: the archive is uploaded into it after creation
+    start: state.category === "import" ? false : state.start,
   };
+  if (state.node !== null) payload.node = state.node;
   if (d.isModpack && state.modpackSource === "url") {
     payload.modpack_provider = "curseforge";
     payload.modpack_project_id = state.cfRef.trim();

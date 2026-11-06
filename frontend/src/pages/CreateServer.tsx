@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, Loader2, Lock, Rocket } from "lucide-react";
+import { ArrowLeft, ArrowRight, Loader2, Lock, Rocket, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -21,6 +21,13 @@ import {
   StepSoftware,
 } from "./create-server/StepSoftware";
 import { StepType } from "./create-server/StepType";
+import { ArchivePicker } from "./create-server/import/ArchivePicker";
+import { nameFromArchive } from "./create-server/import/importModel";
+import { ImportProgress } from "./create-server/import/ImportProgress";
+import { ImportSoftware } from "./create-server/import/ImportSoftware";
+import { NodeSelect } from "./create-server/import/NodeSelect";
+import { selectedNode, useNodePorts, useWizardNodes } from "./create-server/import/nodes";
+import { useImportDeploy } from "./create-server/import/useImportDeploy";
 import { Stepper, SummaryList } from "./create-server/WizardBits";
 import {
   buildPayload,
@@ -32,6 +39,7 @@ import {
   DEFAULT_MEMORY_STANDARD,
   type Derived,
   type FieldErrors,
+  IMPORT_TYPES,
   initialState,
   SERVER_FIELD_MAP,
   type StandardCategory,
@@ -48,7 +56,6 @@ import {
   useGameVersions,
   useJavaInfo,
   useLoaderVersions,
-  usePorts,
   useResolveRelease,
   useServerTypes,
 } from "./modpacks/modpackQueries";
@@ -68,6 +75,7 @@ const GAMEPLAY_KEYS = [
  * Deep links:
  *   /servers/new?provider=modrinth&project=<id>&version=<id>  -> modpack mode with that project/release
  *   /servers/new?type=PAPER                                   -> standard mode with that software
+ *   /servers/new?mode=import                                  -> import an existing server folder
  */
 function stateFromParams(sp: URLSearchParams): {
   state: WizardState;
@@ -99,13 +107,20 @@ function stateFromParams(sp: URLSearchParams): {
     s.category = "modpack";
     return { state: s, step: "software" };
   }
+  if (sp.get("mode") === "import") {
+    s.category = "import";
+    s.serverType = "VANILLA";
+    return { state: s, step: "software" };
+  }
   return { state: s, step: "type" };
 }
 
 function useDerived(state: WizardState): Derived {
   const isModpack = state.category === "modpack";
-  const types =
-    state.category && state.category in CATEGORY_TYPES
+  const isImport = state.category === "import";
+  const types = isImport
+    ? IMPORT_TYPES
+    : state.category && state.category in CATEGORY_TYPES
       ? CATEGORY_TYPES[state.category as StandardCategory]
       : [];
   const serverType: ServerType | null = isModpack
@@ -144,7 +159,8 @@ function useDerived(state: WizardState): Derived {
     isModpack ? state.projectId : null,
     isModpack ? state.versionId : null,
   );
-  const ports = usePorts();
+  const ports = useNodePorts(state.node);
+  const nodes = useWizardNodes();
 
   return useMemo(() => {
     const resolved = isModpack ? resolve.data : undefined;
@@ -164,7 +180,9 @@ function useDerived(state: WizardState): Derived {
             .join(" ")
         : isModpack
           ? (resolved?.name ?? state.projectHit?.title ?? "")
-          : serverType && minecraftVersion
+          : isImport && state.importFile && nameFromArchive(state.importFile.name)
+            ? nameFromArchive(state.importFile.name)
+            : serverType && minecraftVersion
             ? `${TYPE_LABELS[serverType]} ${minecraftVersion}`
             : ""
     ).slice(0, 80);
@@ -178,8 +196,13 @@ function useDerived(state: WizardState): Derived {
           ? `${resolved.name} ${resolved.version_name} · Minecraft ${resolved.minecraft_version} · ${loaderLabel(resolved.loader)}`
           : "Modpack"
         : serverType
-          ? `${TYPE_LABELS[serverType]} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
+          ? `${isImport ? "Import · " : ""}${TYPE_LABELS[serverType]} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
           : "";
+    const nodeList = nodes.data ?? [];
+    const nodeName =
+      nodeList.length > 1
+        ? (selectedNode(nodeList, state.node)?.name ?? `Node ${state.node}`)
+        : null;
     return {
       isModpack,
       serverType,
@@ -204,9 +227,14 @@ function useDerived(state: WizardState): Derived {
       resolveOk: isModpack && resolve.isSuccess,
       resolvePending: isModpack && resolve.isLoading,
       softwareSummary,
+      nodeName,
     };
   }, [
     isModpack,
+    isImport,
+    state.importFile,
+    state.node,
+    nodes.data,
     resolve.data,
     resolve.isSuccess,
     resolve.isLoading,
@@ -263,6 +291,8 @@ export default function CreateServer() {
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
   const d = useDerived(state);
+  const nodes = useWizardNodes();
+  const importer = useImportDeploy();
 
   const patch = useCallback((p: Partial<WizardState>) => {
     setState((s) => ({ ...s, ...p }));
@@ -318,9 +348,22 @@ export default function CreateServer() {
   };
 
   const create = useMutation({
-    mutationFn: (payload: CreatePayload) =>
+    mutationFn: ({ payload }: { payload: CreatePayload; importFile?: File; overwrite?: boolean }) =>
       api.post<CreateResponse>("/instances/", payload),
-    onSuccess: (res) => {
+    onSuccess: (res, vars) => {
+      if (vars.importFile) {
+        toast.success(`Created ${res.instance.name}`, {
+          description: "Preparing it for the import; the archive upload starts next.",
+        });
+        for (const w of res.warnings ?? []) toast.warning(w);
+        qc.setQueryData(qk.instance(res.instance.id), res.instance);
+        qc.invalidateQueries({ queryKey: qk.instances });
+        qc.invalidateQueries({ queryKey: qk.jobs });
+        qc.invalidateQueries({ queryKey: mpk.ports });
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        void importer.begin(res, vars.importFile, vars.overwrite ?? true);
+        return;
+      }
       toast.success(`Deploying ${res.instance.name}`, {
         description: state.start
           ? "Installing now; the server starts when the install finishes."
@@ -359,7 +402,11 @@ export default function CreateServer() {
         return;
       }
     }
-    create.mutate(buildPayload(state, d));
+    create.mutate({
+      payload: buildPayload(state, d),
+      importFile: state.category === "import" ? (state.importFile ?? undefined) : undefined,
+      overwrite: state.importOverwrite,
+    });
   };
 
   const onCategory = (c: Category) => {
@@ -367,7 +414,11 @@ export default function CreateServer() {
     patch({
       category: c,
       serverType:
-        c in CATEGORY_TYPES ? CATEGORY_TYPES[c as StandardCategory][0] : null,
+        c in CATEGORY_TYPES
+          ? CATEGORY_TYPES[c as StandardCategory][0]
+          : c === "import"
+            ? "VANILLA"
+            : null,
       minecraftVersion: null,
       loaderVersion: null,
       javaOverride: "",
@@ -398,9 +449,25 @@ export default function CreateServer() {
   const isLast = idx === STEPS.length - 1;
   const importMode = state.category === "import";
   const wide = step === "software" && d.isModpack;
-  const showSummary =
-    !wide && step !== "review" && !!state.category && !importMode;
-  const stepLabels = { software: d.isModpack ? "Modpack" : "Software" };
+  const showSummary = !wide && step !== "review" && !!state.category;
+  const stepLabels = {
+    software: d.isModpack ? "Modpack" : importMode ? "Software & files" : "Software",
+  };
+  const nodeList = nodes.data ?? [];
+  const multiNode = nodeList.length > 1;
+
+  if (importer.run) {
+    return (
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-4 pb-2">
+        <PageHeader
+          title="Create server"
+          description="The server exists now; its files are being imported."
+          className="pb-0"
+        />
+        <ImportProgress run={importer.run} onRetry={(file) => void importer.retry(file)} />
+      </div>
+    );
+  }
   const stepTitle =
     d.isModpack && step === "software" ? "Modpack & release" : STEPS[idx].label;
 
@@ -408,7 +475,11 @@ export default function CreateServer() {
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 pb-2">
       <PageHeader
         title="Create server"
-        description="Pick the software, size it, and deploy. The install runs in the background and you can watch it on the server page."
+        description={
+          importMode
+            ? "Bring an existing server: pick its software, choose an archive of its folder, size it and deploy."
+            : "Pick the software, size it, and deploy. The install runs in the background and you can watch it on the server page."
+        }
         actions={
           <Button asChild variant="ghost" size="sm">
             <Link to="/servers">Cancel</Link>
@@ -418,7 +489,7 @@ export default function CreateServer() {
       />
       <Stepper
         current={step}
-        maxReached={importMode ? 0 : maxReached}
+        maxReached={maxReached}
         onGo={goTo}
         labels={stepLabels}
       />
@@ -440,11 +511,23 @@ export default function CreateServer() {
               error={errors.category}
             />
           )}
-          {step === "software" && (
+          {step === "software" && importMode && (
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
+              <ImportSoftware patch={patch} d={d} errors={errors} />
+              <StepSoftware state={state} patch={patch} d={d} errors={errors} />
+              <ArchivePicker state={state} patch={patch} errors={errors} />
+            </div>
+          )}
+          {step === "software" && !importMode && (
             <StepSoftware state={state} patch={patch} d={d} errors={errors} />
           )}
           {step === "resources" && (
-            <StepResources state={state} patch={patch} d={d} errors={errors} />
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
+              {multiNode && (
+                <NodeSelect nodes={nodeList} state={state} patch={patch} errors={errors} />
+              )}
+              <StepResources state={state} patch={patch} d={d} errors={errors} />
+            </div>
           )}
           {step === "gameplay" && (
             <StepGameplay state={state} patch={patch} d={d} errors={errors} />
@@ -468,6 +551,7 @@ export default function CreateServer() {
                   ...softwareRows(state, d),
                   ...(idx >= 2
                     ? ([
+                        ...(d.nodeName ? [["Node", d.nodeName]] : []),
                         ["Name", d.name || "—"],
                         [
                           "Memory",
@@ -495,8 +579,8 @@ export default function CreateServer() {
           <ArrowLeft /> Back
         </Button>
         <div className="min-w-0 flex-1 truncate text-center text-xs text-muted-foreground">
-          {importMode
-            ? "Import and restore happen from an existing server — see the steps above."
+          {importMode && step === "review"
+            ? "The server is created first, then the archive is uploaded."
             : step === "software" && d.isModpack && d.resolvePending
               ? "Checking the selected release…"
               : step === "gameplay"
@@ -512,13 +596,21 @@ export default function CreateServer() {
           >
             {create.isPending ? (
               <Loader2 className="animate-spin" />
+            ) : importMode ? (
+              <Upload />
             ) : (
               <Rocket />
             )}
-            {create.isPending ? "Deploying…" : "Deploy server"}
+            {create.isPending
+              ? importMode
+                ? "Creating…"
+                : "Deploying…"
+              : importMode
+                ? "Create & import"
+                : "Deploy server"}
           </Button>
         ) : (
-          <Button type="button" onClick={next} disabled={importMode}>
+          <Button type="button" onClick={next}>
             {step === "gameplay" ? "Review" : "Next"} <ArrowRight />
           </Button>
         )}
