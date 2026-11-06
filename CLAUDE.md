@@ -82,8 +82,8 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
   shared UI in `src/components/`, instance pages get `{instance, can}` from `useInstanceContext()`.
 * Keep `DEVELOPMENT_STATUS.md` and `ROADMAP.md` updated when a feature lands; commit often.
 
-* Never run the Phase 10 security-audit workflow unless the user explicitly asks (user instruction,
-  session 1).
+* Security audit: on hold in session 1 at the user's request; the user asked to start it on 2026-11-06
+  (session 2). Results and open findings are tracked in DEVELOPMENT_STATUS.md.
 
 ## Security rules (non-negotiable)
 
