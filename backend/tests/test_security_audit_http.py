@@ -558,9 +558,11 @@ def captured(monkeypatch):
             raise state["response"]
         return state["response"]
 
-    monkeypatch.setattr(
-        notify_service, "_client", lambda: httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
-    )
+    def client(*, direct: bool) -> httpx.Client:
+        state["direct"] = direct
+        return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+    monkeypatch.setattr(notify_service, "_client", client)
     state["requests"] = requests
     return state
 
@@ -580,8 +582,25 @@ def test_webhook_is_sent_to_the_checked_address(resolver, captured):
     assert request.url.host == "203.0.113.10" and request.url.port == 8443 and request.url.path == "/x"
     assert request.headers["Host"] == "hooks.example:8443"
     assert request.extensions["sni_hostname"] == "hooks.example"
+    assert captured["direct"] is True
     ch.refresh_from_db()
     assert ch.last_error == "" and ch.last_sent_at is not None
+
+
+@pytest.mark.django_db
+def test_webhook_through_an_egress_proxy_keeps_the_host_name(resolver, captured, monkeypatch):
+    resolver["hooks.example"] = ["203.0.113.10"]
+    monkeypatch.setattr(notify_service, "_env_proxy", lambda scheme, host: "http://proxy.lan:3128")
+    ch = _channel("https://hooks.example/x")
+    notify_service.deliver(ch.pk, "job.failed", "t", "m", {})
+    (request,) = captured["requests"]
+    assert request.url.host == "hooks.example" and captured["direct"] is False
+
+
+def test_direct_webhook_client_ignores_environment_proxies(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    with notify_service._client(direct=True) as client:
+        assert client._transport_for_url(httpx.URL("https://203.0.113.10/")) is client._transport
 
 
 @pytest.mark.django_db

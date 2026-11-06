@@ -72,9 +72,11 @@ otherwise pretend to be any address (bypassing the login rate limit, faking audi
 you set it, every request appears to come from the proxy and all users share one login rate limit;
 the panel logs a warning at start. To find the right value, open the panel through the proxy once and
 run `docker compose logs --tail 20 panel`: the access log lines start with the address requests came
-from. That is the proxy's LAN IP for a proxy on another machine or on the host network, or a Docker
-address such as `172.18.0.1` for a proxy container on a bridge network. Use that exact address (a
-comma-separated list is allowed), never a whole private range and never `*`.
+from. That is the proxy's LAN IP for a proxy on another machine, or the proxy container's Docker
+address (for example `172.17.0.5`) for a proxy container on a bridge network. Use that exact address
+(a comma-separated list is allowed), never a whole private range and never `*`. Make sure the address
+belongs to the proxy alone: a Docker network gateway (`172.x.0.1`, what the panel sees when the proxy
+connects to `127.0.0.1` on the host) also stands for every other local process that connects that way.
 
 The proxy must forward WebSockets for `/ws/` (Upgrade/Connection headers). Raise its body-size limit
 and its read/send timeouts. Uploads (worlds, archives) can be several GB, and installing a mod with

@@ -256,7 +256,11 @@ def _env_proxy(scheme: str, host: str) -> str | None:
     return proxy
 
 
-def _client() -> httpx.Client:
+def _client(*, direct: bool) -> httpx.Client:
+    if direct:
+        # Straight to the checked address: no environment proxy (its NO_PROXY rules would see the
+        # IP, not the host name), but the CA settings (SSL_CERT_FILE/SSL_CERT_DIR) still apply.
+        return httpx.Client(timeout=10, follow_redirects=False, trust_env=False, verify=httpx.create_ssl_context(trust_env=True))
     return httpx.Client(timeout=10, follow_redirects=False)
 
 
@@ -264,13 +268,14 @@ def post_webhook(url: str, payload: dict[str, Any]) -> httpx.Response:
     """POST ``payload`` to a vetted webhook URL, connecting to the address that was checked."""
     dest = check_destination(url)
     headers = {"User-Agent": settings.MCPANEL_USER_AGENT}
-    with _client() as client:
-        if _env_proxy(dest.scheme, dest.host):
-            # An egress proxy connects (and resolves) for us; the check above is what we can do.
+    if _env_proxy(dest.scheme, dest.host):
+        # An egress proxy connects (and resolves) for us; the check above is what we can do.
+        with _client(direct=False) as client:
             return client.post(url, json=payload, headers=headers)
-        parsed = httpx.URL(url)
-        headers["Host"] = parsed.netloc.decode("ascii")
-        extensions = {"sni_hostname": dest.host} if dest.scheme == "https" else {}
+    parsed = httpx.URL(url)
+    headers["Host"] = parsed.netloc.decode("ascii")
+    extensions = {"sni_hostname": dest.host} if dest.scheme == "https" else {}
+    with _client(direct=True) as client:
         return client.post(parsed.copy_with(host=str(dest.address)), json=payload, headers=headers, extensions=extensions)
 
 
