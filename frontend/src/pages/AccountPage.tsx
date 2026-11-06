@@ -6,6 +6,7 @@ import {
   EyeOff,
   KeyRound,
   Loader2,
+  LogOut,
   Monitor,
   Moon,
   ShieldCheck,
@@ -23,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { useAuth } from "@/hooks/use-auth";
 import { useTheme } from "@/hooks/use-theme";
 import { ApiError, api, errorMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
@@ -97,6 +99,45 @@ export default function AccountPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Focused screen the auth gate (router.tsx) shows in place of every page while the account has
+ * `must_change_password` set (the backend refuses everything else until then). After a successful
+ * change every query is refreshed and the page the user originally asked for renders.
+ */
+export function ForcedPasswordChange() {
+  const { user, logout } = useAuth();
+  if (!user) return null;
+  return (
+    <main className="grid min-h-svh place-items-center bg-[radial-gradient(ellipse_at_top,var(--color-primary)/8%,transparent_60%)] px-4 py-10">
+      <div className="grid w-full max-w-md gap-4">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <div className="grid size-11 place-items-center rounded-xl bg-primary/15 text-primary">
+            <KeyRound className="size-5" aria-hidden />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Set a new password</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              An administrator set a temporary password for <span className="font-mono">@{user.username}</span>. Choose your own
+              password to continue.
+            </p>
+          </div>
+        </div>
+        <PasswordForm me={user} required />
+        <div className="flex justify-center">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => logout().catch((err: unknown) => toast.error(errorMessage(err)))}
+          >
+            <LogOut /> Sign out
+          </Button>
+        </div>
+      </div>
+    </main>
   );
 }
 
@@ -202,7 +243,8 @@ function ProfileForm({ me }: { me: Me }) {
 
 const EMPTY_PASSWORDS = { old_password: "", new_password: "", confirm: "" };
 
-function PasswordForm({ me }: { me: Me }) {
+/** `required`: shown by the forced password-change screen; success refreshes every query. */
+function PasswordForm({ me, required = false }: { me: Me; required?: boolean }) {
   const qc = useQueryClient();
   const [form, setForm] = useState(EMPTY_PASSWORDS);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -217,7 +259,10 @@ function PasswordForm({ me }: { me: Me }) {
     { ok: pw.length >= 10, label: "At least 10 characters" },
     { ok: pw.length > 0 && !/^\d+$/.test(pw), label: "Not only numbers" },
     { ok: pw.length > 0 && !personal.some((s) => lowered.includes(s)), label: "Does not contain your username or name" },
-    { ok: pw.length > 0 && pw !== form.old_password, label: "Different from the current password" },
+    {
+      ok: pw.length > 0 && pw !== form.old_password,
+      label: required ? "Different from the temporary password" : "Different from the current password",
+    },
   ];
 
   const change = useMutation({
@@ -226,7 +271,8 @@ function PasswordForm({ me }: { me: Me }) {
       toast.success("Password changed");
       setForm(EMPTY_PASSWORDS);
       setErrors({});
-      qc.invalidateQueries({ queryKey: qk.auth });
+      // Refresh /auth/state and /auth/me; after a forced change also everything that was refused.
+      qc.invalidateQueries(required ? undefined : { queryKey: qk.auth });
     },
     onError: (err) => {
       if (err instanceof ApiError) setErrors(err.fieldErrors);
@@ -270,10 +316,14 @@ function PasswordForm({ me }: { me: Me }) {
     <Section
       title={
         <span className="flex items-center gap-2">
-          <KeyRound className="size-4 text-muted-foreground" aria-hidden /> Change password
+          <KeyRound className="size-4 text-muted-foreground" aria-hidden /> {required ? "New password" : "Change password"}
         </span>
       }
-      description="You stay signed in on this device after changing it."
+      description={
+        required
+          ? "Enter the temporary password once more, then your new one. You stay signed in on this device."
+          : "You stay signed in on this device after changing it."
+      }
       actions={
         <Button
           type="button"
@@ -290,7 +340,7 @@ function PasswordForm({ me }: { me: Me }) {
       <form className="grid gap-4" onSubmit={submit} noValidate>
         {/* hidden username helps password managers associate the change */}
         <input type="text" name="username" autoComplete="username" value={me.username} readOnly hidden />
-        {input("old_password", "Current password", "current-password")}
+        {input("old_password", required ? "Temporary password" : "Current password", "current-password")}
         {input(
           "new_password",
           "New password",
@@ -320,7 +370,7 @@ function PasswordForm({ me }: { me: Me }) {
             size="sm"
             disabled={change.isPending || !form.old_password || !form.new_password || !form.confirm}
           >
-            {change.isPending && <Loader2 className="animate-spin" />} Change password
+            {change.isPending && <Loader2 className="animate-spin" />} {required ? "Set password and continue" : "Change password"}
           </Button>
         </div>
       </form>

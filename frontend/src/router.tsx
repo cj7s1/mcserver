@@ -2,7 +2,8 @@ import { lazy, Suspense, type ComponentType, type ReactNode } from "react";
 import { createBrowserRouter, Navigate, Outlet } from "react-router";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { ErrorState, LoadingState } from "@/components/States";
-import { useAuth } from "@/hooks/use-auth";
+import { useAuth, useAuthLifecycle } from "@/hooks/use-auth";
+import { authGateView } from "@/lib/auth-gate";
 import { LoginPage, ResetPasswordPage, SetupPage } from "@/pages/AuthPages";
 import { InstanceLayout } from "@/pages/instance/InstanceLayout";
 
@@ -15,13 +16,30 @@ function page(loader: () => Promise<{ default: ComponentType }>): ReactNode {
   );
 }
 
+/** Focused "Set a new password" screen (lazy, it lives with the Account page's password form). */
+const forcedPasswordChange = page(() => import("@/pages/AccountPage").then((m) => ({ default: m.ForcedPasswordChange })));
+
 function AuthGate() {
   const { state, isLoading, error, refetch } = useAuth();
-  if (isLoading) return <LoadingState label="Connecting to MCPanel…" className="min-h-svh" />;
-  if (error || !state) return <div className="p-6"><ErrorState error={error} onRetry={() => refetch()} title="Cannot reach the panel API" /></div>;
-  if (state.setup_required) return <SetupPage />;
-  if (!state.authenticated) return <LoginPage />;
-  return <Outlet />;
+  useAuthLifecycle(state);
+  switch (authGateView({ state, isLoading, error })) {
+    case "loading":
+      return <LoadingState label="Connecting to MCPanel…" className="min-h-svh" />;
+    case "error":
+      return <div className="p-6"><ErrorState error={error} onRetry={() => refetch()} title="Cannot reach the panel API" /></div>;
+    case "setup":
+      return <SetupPage />;
+    case "login":
+      return <LoginPage />;
+    case "change-password":
+      // Rendered in place of every page (the URL is kept): once the password is changed the
+      // auth state refreshes and the page the user asked for appears.
+      return forcedPasswordChange;
+    case "app":
+      // Keyed by user: a different account (e.g. signed in from another tab) never inherits the
+      // previous one's in-memory page state (console history, terminal, forms).
+      return <Outlet key={state?.user?.id} />;
+  }
 }
 
 export const router = createBrowserRouter([

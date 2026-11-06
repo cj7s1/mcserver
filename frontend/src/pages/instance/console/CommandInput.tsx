@@ -1,34 +1,39 @@
 import { CornerDownLeft, Loader2 } from "lucide-react";
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
+import { useAuth } from "@/hooks/use-auth";
+import { userScopedKey } from "@/lib/user-storage";
 
 const MAX_HISTORY = 100;
 const MAX_COMMAND = 1400; // backend limit (apps/console/consumers.py)
 
-function storageKey(instanceId: string): string {
-  return `mcpanel.console.history.${instanceId}`;
+/** History is per user and server; logout / user switch also wipes it (lib/user-storage.ts). */
+function storageKey(userId: number, instanceId: string): string {
+  return userScopedKey("mcpanel.console.history", userId, instanceId);
 }
 
-function loadHistory(instanceId: string): string[] {
+function loadHistory(userId: number | undefined, instanceId: string): string[] {
+  if (userId === undefined) return [];
   try {
-    const v: unknown = JSON.parse(sessionStorage.getItem(storageKey(instanceId)) ?? "[]");
+    const v: unknown = JSON.parse(sessionStorage.getItem(storageKey(userId, instanceId)) ?? "[]");
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(-MAX_HISTORY) : [];
   } catch {
     return [];
   }
 }
 
-function saveHistory(instanceId: string, history: string[]) {
+function saveHistory(userId: number | undefined, instanceId: string, history: string[]) {
+  if (userId === undefined) return;
   try {
-    sessionStorage.setItem(storageKey(instanceId), JSON.stringify(history.slice(-MAX_HISTORY)));
+    sessionStorage.setItem(storageKey(userId, instanceId), JSON.stringify(history.slice(-MAX_HISTORY)));
   } catch {
     /* storage unavailable (private mode / quota) — history just won't persist */
   }
 }
 
 /**
- * Console command line with shell-style history (↑/↓), persisted per instance in
- * sessionStorage so it survives tab switches and reloads but not the browser session.
+ * Console command line with shell-style history (↑/↓), persisted per user and instance in
+ * sessionStorage so it survives tab switches and reloads but not the browser session or a logout.
  */
 export function CommandInput({
   instanceId,
@@ -41,8 +46,9 @@ export function CommandInput({
   pending: number;
   onSubmit: (command: string) => boolean;
 }) {
+  const userId = useAuth().user?.id;
   const [value, setValue] = useState("");
-  const [history, setHistory] = useState<string[]>(() => loadHistory(instanceId));
+  const [history, setHistory] = useState<string[]>(() => loadHistory(userId, instanceId));
   const [index, setIndex] = useState(-1); // -1 = editing a new line
   const draft = useRef("");
   const id = useId();
@@ -54,7 +60,7 @@ export function CommandInput({
     if (!onSubmit(cmd)) return;
     const next = history[history.length - 1] === cmd ? history : [...history, cmd].slice(-MAX_HISTORY);
     setHistory(next);
-    saveHistory(instanceId, next);
+    saveHistory(userId, instanceId, next);
     setValue("");
     setIndex(-1);
     draft.current = "";

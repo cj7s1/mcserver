@@ -57,6 +57,31 @@ function buildUrl(path: string, query?: Query): string {
   return qs ? `${url}?${qs}` : url;
 }
 
+type ApiErrorListener = (err: ApiError) => void;
+const errorListeners = new Set<ApiErrorListener>();
+
+/**
+ * Observe every HTTP error response the client turns into an ApiError (e.g. to react to
+ * `must_change_password` globally). Returns an unsubscribe function.
+ */
+export function onApiError(listener: ApiErrorListener): () => void {
+  errorListeners.add(listener);
+  return () => {
+    errorListeners.delete(listener);
+  };
+}
+
+function notifyApiError(err: ApiError): ApiError {
+  for (const listener of errorListeners) {
+    try {
+      listener(err);
+    } catch {
+      /* a listener must never mask the original error */
+    }
+  }
+  return err;
+}
+
 async function parseError(resp: Response): Promise<ApiError> {
   let code = `http_${resp.status}`;
   let message = resp.statusText || "Request failed";
@@ -111,7 +136,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     if ((err as Error).name === "AbortError") throw err;
     throw new ApiError(0, "network_error", "Cannot reach the panel API. Check your connection.");
   }
-  if (!resp.ok) throw await parseError(resp);
+  if (!resp.ok) throw notifyApiError(await parseError(resp));
   if (resp.status === 204) return undefined as T;
   const text = await resp.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -152,11 +177,13 @@ export function uploadWithProgress<T>(
       if (xhr.status >= 200 && xhr.status < 300) resolve(body as T);
       else
         reject(
-          new ApiError(
-            xhr.status,
-            body?.error?.code ?? `http_${xhr.status}`,
-            body?.error?.message ?? "Upload failed",
-            body?.error?.details ?? {},
+          notifyApiError(
+            new ApiError(
+              xhr.status,
+              body?.error?.code ?? `http_${xhr.status}`,
+              body?.error?.message ?? "Upload failed",
+              body?.error?.details ?? {},
+            ),
           ),
         );
     };
