@@ -41,7 +41,11 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 3. **Jobs with per-instance locks.** Every state-changing long operation is a `Job`. Exclusive jobs
    atomically claim `Instance.active_job` (`select_for_update`), so conflicting operations get HTTP 409
    `instance_busy`. A job found `running` when a worker picks it up was interrupted and is failed
-   rather than blindly re-run (important for restores).
+   rather than blindly re-run (important for restores). A restart/stop that first warns players in
+   game (1–15 min) is enqueued **non-exclusive** and takes the lock only for its last 10 seconds and
+   the action (`runner.claim_lock`, waiting up to 20 min for another exclusive job), so a long warning
+   never blocks backups or other operations; its waits are cancellation-aware (`JobContext.sleep_until`
+   raises `JobCancelled` once the job is cancelled or abandoned). See `apps/instances/power_warnings.py`.
 4. **server.properties is a file, not env.** itzg rewrites properties from env on every start, so the
    panel only sets env for what it owns (port, RCON, type/version, memory, JVM) and edits
    `server.properties` directly for everything else. Initial values are written before first start.
@@ -49,6 +53,9 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
    container config. RCON is never published to the host.
 6. **Modpacks are pinned.** We store provider, project id and version/file id and pass them to itzg
    (`MODRINTH_VERSION`, `CF_FILE_ID`, `FTB_MODPACK_VERSION_ID`), so restarts never silently upgrade.
+   A periodic check (`apps/modpacks/updates.py`, at most every 6 h per server, staggered) only *records*
+   the newest release for the pinned Minecraft version and loader and notifies once per release;
+   updating stays an explicit job.
 7. **Backups use restic** (one repository per instance, encrypted, deduplicated). Running servers are
    coordinated with `save-off` → `save-all flush` → backup → `save-on` (always re-enabled in `finally`).
    Restores go into a staging directory first and are swapped in only after restic succeeds; a

@@ -31,6 +31,7 @@ instance_patterns = [
     path("", instances.InstanceListView.as_view()),
     path("<uuid:pk>", instances.InstanceDetailView.as_view()),
     path("<uuid:pk>/power", instances.InstancePowerView.as_view()),
+    path("<uuid:pk>/power/cancel", instances.InstancePowerCancelView.as_view()),
     path("<uuid:pk>/clone", instances.InstanceCloneView.as_view()),
     path("<uuid:pk>/stats", instances.InstanceStatsView.as_view()),
     path("<uuid:pk>/logs", instances.InstanceLogsView.as_view()),
@@ -74,6 +75,7 @@ instance_patterns = [
     path("<uuid:pk>/modpack/plan/<str:version_id>", modpacks.InstanceModpackPlanView.as_view()),
     path("<uuid:pk>/modpack/update", modpacks.InstanceModpackUpdateView.as_view()),
     path("<uuid:pk>/modpack/rollback", modpacks.InstanceModpackRollbackView.as_view()),
+    path("<uuid:pk>/modpack/check", modpacks.InstanceModpackCheckView.as_view()),
     path("<uuid:pk>/<str:action>", instances.InstanceActionView.as_view()),
 ]
 

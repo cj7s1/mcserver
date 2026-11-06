@@ -77,8 +77,23 @@ def start(job: Job, ctx: JobContext) -> dict[str, Any]:
     return {}
 
 
+def _warn_players_first(job: Job, ctx: JobContext, action: str) -> dict[str, Any] | None:
+    """Run the in-game countdown of a restart/stop enqueued with warn_minutes (see power_warnings).
+
+    Returns a result when the action is skipped; otherwise the job holds the instance lock.
+    Jobs without a warning are enqueued exclusive and skip this entirely.
+    """
+    if job.exclusive:
+        return None
+    from .power_warnings import PowerCountdown
+
+    return PowerCountdown(job, ctx, _instance(job), action).run()
+
+
 @register("stop")
 def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
+    if (skipped := _warn_players_first(job, ctx, "stop")) is not None:
+        return skipped
     instance = _instance(job)
     _set_desired(instance, DesiredState.STOPPED)
     ctx.progress(0.2, f"Stopping server gracefully (up to {instance.stop_timeout}s)", force=True)
@@ -90,7 +105,9 @@ def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
 
 @register("restart")
 def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
-    instance = _instance(job)
+    if (skipped := _warn_players_first(job, ctx, "restart")) is not None:
+        return skipped
+    instance = _instance(job)  # (re)loaded after the countdown: settings may have changed
     client = AgentClient(instance.node)
     _set_desired(instance, DesiredState.RUNNING)
     status = client.status(instance.id)

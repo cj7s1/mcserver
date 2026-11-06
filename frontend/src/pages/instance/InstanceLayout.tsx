@@ -1,9 +1,12 @@
 import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, ChevronLeft, Play, RotateCw, Skull, Square } from "lucide-react";
+import { useState } from "react";
 import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
+import { PowerActionDialog } from "@/components/PowerActionDialog";
+import { PowerCountdownBanner } from "@/components/PowerCountdownBanner";
 import { ServerIcon } from "@/components/ServerIcon";
 import { ErrorState, LoadingState } from "@/components/States";
 import { StatusBadge } from "@/components/StatusBadge";
@@ -12,6 +15,7 @@ import { api, errorMessage } from "@/lib/api";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ModpackUpdateBadge } from "./modpack/UpdateBadge";
 
 export interface InstanceContext {
   instance: Instance;
@@ -33,8 +37,9 @@ export function softwareLabel(i: Instance): string {
 
 function PowerControls({ instance, can }: InstanceContext) {
   const invalidate = useInvalidateInstance();
+  const [confirm, setConfirm] = useState<"restart" | "stop" | null>(null);
   const power = useMutation({
-    mutationFn: (action: "start" | "stop" | "restart" | "kill") => api.post(`/instances/${instance.id}/power`, { action }),
+    mutationFn: (action: "start" | "kill") => api.post(`/instances/${instance.id}/power`, { action }),
     onSuccess: (_d, action) => {
       toast.success(action === "kill" ? "Server process killed" : `${action[0].toUpperCase()}${action.slice(1)} requested`);
       invalidate(instance.id);
@@ -52,13 +57,16 @@ function PowerControls({ instance, can }: InstanceContext) {
         </Button>
       ) : (
         <>
-          <Button size="sm" variant="outline" onClick={() => power.mutate("restart")} disabled={busy}>
+          <Button size="sm" variant="outline" onClick={() => setConfirm("restart")} disabled={busy}>
             <RotateCw /> Restart
           </Button>
-          <Button size="sm" variant="outline" onClick={() => power.mutate("stop")} disabled={busy}>
+          <Button size="sm" variant="outline" onClick={() => setConfirm("stop")} disabled={busy}>
             <Square /> Stop
           </Button>
         </>
+      )}
+      {confirm && (
+        <PowerActionDialog instance={instance} action={confirm} open onOpenChange={(o) => !o && setConfirm(null)} />
       )}
       {(running || instance.status === "stopping") && (
         <ConfirmDialog
@@ -117,6 +125,7 @@ export function InstanceLayout() {
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="truncate text-xl font-semibold tracking-tight">{instance.name}</h1>
                 <StatusBadge status={instance.status} title={instance.status_detail} />
+                <ModpackUpdateBadge instance={instance} />
               </div>
               <p className="mt-0.5 truncate text-sm text-muted-foreground">
                 {softwareLabel(instance)} · Java {instance.java_version} · port {instance.game_port}
@@ -139,6 +148,9 @@ export function InstanceLayout() {
           </div>
         )}
         {instance.active_job && <JobProgress job={instance.active_job} className="mt-3" />}
+        {!instance.archived_at && (
+          <PowerCountdownBanner instance={instance} canControl={can("instance.control")} className="mt-3" />
+        )}
       </div>
       <nav className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
         <div className="flex min-w-max gap-1">

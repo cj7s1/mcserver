@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiError, errorMessage } from "@/lib/api";
+import { describeWarning, WARN_MESSAGE_MAX, WARN_MINUTES, warnMessageError, warnOptionLabel } from "@/lib/power-warning";
 import { qk } from "@/lib/queries";
 import type { Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -22,11 +23,13 @@ import {
   draftFrom,
   MAX_SNAPSHOT_KEEP,
   RUNNING_ONLY_ACTIONS,
+  WARN_ACTIONS,
+  warnPayload,
   type ScheduleAction,
   type ScheduleDraft,
 } from "./schedule-meta";
 
-type FieldKey = "name" | "cron" | "command" | "backupName" | "keep";
+type FieldKey = "name" | "cron" | "command" | "backupName" | "keep" | "warnMessage";
 
 function validate(d: ScheduleDraft): Partial<Record<FieldKey, string>> {
   const e: Partial<Record<FieldKey, string>> = {};
@@ -44,6 +47,10 @@ function validate(d: ScheduleDraft): Partial<Record<FieldKey, string>> {
     const n = Number(d.keep.trim());
     if (!/^\d+$/.test(d.keep.trim()) || !Number.isInteger(n) || n < 1 || n > MAX_SNAPSHOT_KEEP)
       e.keep = `Enter a whole number from 1 to ${MAX_SNAPSHOT_KEEP}`;
+  }
+  if (WARN_ACTIONS.includes(d.action) && d.warnMinutes > 0) {
+    const w = warnMessageError(d.warnMessage);
+    if (w) e.warnMessage = w;
   }
   return e;
 }
@@ -80,6 +87,7 @@ export function ScheduleDialog({
         if (draft.backupName.trim()) payload.name = draft.backupName.trim();
         else delete payload.name;
       } else if (draft.action === "snapshot") payload = { ...keep, keep: Number(draft.keep.trim()) };
+      else if (WARN_ACTIONS.includes(draft.action)) payload = warnPayload(keep, draft);
       else payload = keep;
       const body = {
         name: draft.name.trim(),
@@ -170,6 +178,52 @@ export function ScheduleDialog({
             </Select>
             <p className="text-xs text-muted-foreground">{ACTION_INFO[draft.action]?.description}</p>
           </div>
+
+          {WARN_ACTIONS.includes(draft.action) && (
+            <div className="grid gap-3 rounded-lg border p-3">
+              <div className="grid gap-1.5">
+                <Label htmlFor="sched-warn">Warn players in game</Label>
+                <Select value={String(draft.warnMinutes)} onValueChange={(v) => set("warnMinutes", Number(v))}>
+                  <SelectTrigger id="sched-warn" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {WARN_MINUTES.map((m) => (
+                      <SelectItem key={m} value={String(m)}>
+                        {warnOptionLabel(m)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {draft.warnMinutes > 0
+                    ? `The countdown starts at the scheduled time. ${describeWarning(draft.warnMinutes)} Without players online it runs at once.`
+                    : `The ${draft.action} happens at the scheduled time without a warning.`}
+                </p>
+              </div>
+              {draft.warnMinutes > 0 && (
+                <div className="grid gap-1.5">
+                  <Label htmlFor="sched-warn-msg">Message (optional)</Label>
+                  <Input
+                    id="sched-warn-msg"
+                    value={draft.warnMessage}
+                    maxLength={WARN_MESSAGE_MAX}
+                    placeholder="e.g. Daily restart"
+                    onChange={(e) => set("warnMessage", e.target.value.replace(/[\r\n]/g, " "))}
+                    aria-invalid={!!err("warnMessage", "payload") || undefined}
+                    aria-describedby="sched-warn-msg-help"
+                    autoComplete="off"
+                  />
+                  <p
+                    id="sched-warn-msg-help"
+                    className={cn("text-xs", err("warnMessage", "payload") ? "text-destructive" : "text-muted-foreground")}
+                  >
+                    {err("warnMessage", "payload") ?? "Shown after each warning. Plain text, one line."}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
 
           {draft.action === "command" && (
             <div className="grid gap-1.5">

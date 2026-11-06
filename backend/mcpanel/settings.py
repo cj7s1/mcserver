@@ -244,6 +244,8 @@ CELERY_BEAT_SCHEDULE = {
     "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0},
     "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0},
     "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0},
+    # hourly tick; each modpack server is checked at most every 6 h (apps/modpacks/updates.py)
+    "modpack-update-check": {"task": "apps.modpacks.tasks.check_updates_due", "schedule": 3600.0},
 }
 
 # --- Agent / node defaults ---------------------------------------------------

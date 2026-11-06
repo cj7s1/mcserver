@@ -4,6 +4,7 @@ import mimetypes
 from typing import Any
 
 from django.db import IntegrityError, transaction
+from django.db.models import Prefetch
 from django.http import StreamingHttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
@@ -22,12 +23,13 @@ from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.core.permissions import get_instance_for, require, visible_instances
 from apps.core.utils import content_disposition
+from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
 from apps.nodes.client import AgentClient
 from apps.nodes.models import Node
 
-from . import properties, services
+from . import power_warnings, properties, services
 from .models import Instance, Schedule, Source
 from .serializers import CreateInstanceSerializer, InstanceSerializer, ScheduleSerializer
 from .spec import image_for
@@ -42,7 +44,13 @@ def _ser(instance: Instance, request: Request) -> dict[str, Any]:
 class InstanceListView(APIView):
     @extend_schema(responses={200: InstanceSerializer(many=True)})
     def get(self, request: Request) -> Response:
-        qs = visible_instances(request.user, Instance.objects.select_related("node", "active_job"))
+        power_jobs = Job.objects.filter(kind__in=("restart", "stop"), status__in=ACTIVE_STATUSES)
+        qs = visible_instances(
+            request.user,
+            Instance.objects.select_related("node", "active_job", "modpack_update_check").prefetch_related(
+                Prefetch("jobs", queryset=power_jobs, to_attr="active_power_jobs")
+            ),
+        )
         archived = request.query_params.get("archived")
         if archived == "true":
             qs = qs.filter(archived_at__isnull=False)
@@ -224,6 +232,25 @@ class InstanceDetailView(APIView):
 
 class PowerSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=["start", "stop", "restart", "kill"])
+    warn_minutes = serializers.ChoiceField(
+        choices=list(power_warnings.WARN_MINUTES_CHOICES),
+        default=0,
+        help_text="stop/restart: warn online players in game this many minutes before (0 = no warning)",
+    )
+    warn_message = serializers.CharField(
+        max_length=power_warnings.MESSAGE_MAX, required=False, allow_blank=True, default="", trim_whitespace=True
+    )
+
+    def validate_warn_message(self, value: str) -> str:
+        try:
+            return power_warnings.validate_message(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if attrs.get("warn_minutes") and attrs["action"] not in power_warnings.WARNABLE_ACTIONS:
+            raise serializers.ValidationError({"warn_minutes": ["Player warnings apply to stop and restart only"]})
+        return attrs
 
 
 class InstancePowerView(APIView):
@@ -232,10 +259,38 @@ class InstancePowerView(APIView):
         instance = get_instance_for(request.user, pk, "instance.control")
         ser = PowerSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        result = services.power(instance, ser.validated_data["action"], request.user, request)
+        data = ser.validated_data
+        result = services.power(
+            instance,
+            data["action"],
+            request.user,
+            request,
+            warn_minutes=int(data.get("warn_minutes") or 0),
+            warn_message=data.get("warn_message") or "",
+        )
         if isinstance(result, dict):
             return Response({"status": result})
         return Response(JobSerializer(result).data, status=status.HTTP_202_ACCEPTED)
+
+
+class InstancePowerCancelView(APIView):
+    """Cancel a pending restart/stop countdown (players are told in game)."""
+
+    @extend_schema(request=None, responses={200: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.control")
+        pending = power_warnings.pending_countdown(instance)
+        if pending is None:
+            raise ConflictError("No restart or stop is counting down on this server", code="no_countdown")
+        job = power_warnings.cancel_countdown(pending.id, message=f"Cancelled by {request.user.username}")
+        audit.record(
+            "instance.power_cancelled",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"job": str(job.id), "action": job.kind},
+        )
+        return Response(JobSerializer(job).data)
 
 
 class InstanceActionView(APIView):

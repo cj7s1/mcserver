@@ -8,7 +8,9 @@ from rest_framework.views import APIView
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
 
+from .models import ModpackUpdateCheck
 from .providers import PROVIDERS, curseforge_key, get_provider
+from .updates import summary
 
 
 def _int(value: str | None, default: int, lo: int, hi: int) -> int:
@@ -143,8 +145,39 @@ class InstanceModpackView(APIView):
                 "updates_available": len(newer),
                 "history": (instance.modpack_meta or {}).get("history", []),
                 "rollback_points": rollback_points,
+                "update_check": summary(instance),
             }
         )
+
+
+class InstanceModpackCheckView(APIView):
+    """Run the "update available" check for one server now (otherwise it runs every 6 h)."""
+
+    @extend_schema(request=None, responses={200: dict})
+    def post(self, request: Request, pk: str) -> Response:
+        from django.utils import timezone
+
+        from apps.audit import service as audit
+        from apps.core.permissions import get_instance_for
+
+        from .updates import MANUAL_COOLDOWN, check_instance
+
+        instance = get_instance_for(request.user, pk, "instance.view")
+        if not instance.is_modpack:
+            raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
+        current = ModpackUpdateCheck.objects.filter(instance=instance).first()
+        if current is not None and current.checked_at and timezone.now() - current.checked_at < MANUAL_COOLDOWN:
+            # protect the provider APIs from repeated clicks: report the check that just ran
+            return Response({**summary(instance), "throttled": True})
+        check = check_instance(instance)
+        audit.record(
+            "modpack.update_checked",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"status": check.status, "latest": check.latest_version_id},
+        )
+        return Response({**summary(instance), "throttled": False})
 
 
 class InstanceModpackPlanView(APIView):

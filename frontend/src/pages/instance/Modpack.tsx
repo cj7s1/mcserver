@@ -1,8 +1,8 @@
 /** Modpack servers: pinned release, release list with explicit update, update history and rollback points. */
-import { useMutation } from "@tanstack/react-query";
-import { ExternalLink, History, Info, KeyRound, Loader2, Package, Pin, Settings2, Undo2, X } from "lucide-react";
-import { useState } from "react";
-import { Link } from "react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowUpCircle, ExternalLink, History, Info, KeyRound, Loader2, Package, Pin, RefreshCw, Settings2, Undo2, X } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
 import { JobProgress } from "@/components/JobProgress";
 import { Section } from "@/components/PageHeader";
@@ -14,13 +14,18 @@ import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
 import { api, ApiError, errorMessage } from "@/lib/api";
 import { formatDateTime, relativeTime } from "@/lib/format";
-import type { Instance } from "@/lib/types";
+import { useInvalidateInstance } from "@/lib/queries";
+import type { Instance, ModpackUpdateInfo } from "@/lib/types";
+import { cn } from "@/lib/utils";
 import { loaderLabel, providerLabel } from "@/pages/modpacks/modpackMeta";
 import { useInstanceContext } from "./InstanceLayout";
 import { RollbackPoints, UpdateHistory } from "./modpack/HistoryPanels";
 import {
   lockReason,
+  modpackPrefix,
   projectUrl,
+  REVIEW_PARAM,
+  updateCheckSummary,
   useInstanceJobList,
   useInstanceModpack,
   useModpackJob,
@@ -45,7 +50,81 @@ function UpdatesBadge({ count }: { count: number }) {
   );
 }
 
-function PinnedRelease({ instance, data, loading }: { instance: Instance; data: InstanceModpack | undefined; loading: boolean }) {
+/** Result of the periodic "update available" check, with "Review update" and "Check now". */
+function UpdateCheckLine({
+  instance,
+  info,
+  canUpdate,
+  disabled,
+  onReview,
+}: {
+  instance: Instance;
+  info: ModpackUpdateInfo | null | undefined;
+  canUpdate: boolean;
+  disabled: boolean;
+  onReview: (latest: NonNullable<ModpackUpdateInfo["latest"]>) => void;
+}) {
+  const qc = useQueryClient();
+  const invalidate = useInvalidateInstance();
+  const check = useMutation({
+    mutationFn: () => api.post<ModpackUpdateInfo>(`/instances/${instance.id}/modpack/check`),
+    onSuccess: (r) => {
+      invalidate(instance.id);
+      qc.invalidateQueries({ queryKey: modpackPrefix(instance.id) });
+      if (r.throttled) toast.message("Checked moments ago; showing that result");
+      else if (r.available && r.latest) toast.success(`Update available: ${r.latest.name}`);
+      else if (r.status === "ok") toast.success("No newer compatible release");
+      else toast.message(r.detail || "The update check could not run");
+    },
+    onError: (err) => toast.error(`Could not check for updates: ${errorMessage(err)}`),
+  });
+  const summary = updateCheckSummary(info);
+  const latest = info?.available ? info.latest : null;
+  const tone = {
+    ok: "text-muted-foreground",
+    update: "font-medium text-emerald-700 dark:text-emerald-300",
+    muted: "text-muted-foreground",
+    error: "text-destructive",
+  }[summary.tone];
+  return (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs" aria-live="polite">
+      <p className={cn("flex min-w-0 items-center gap-1.5 [overflow-wrap:anywhere]", tone)}>
+        {latest && <ArrowUpCircle className="size-3.5 shrink-0" aria-hidden />}
+        <span>
+          {summary.text}
+          {latest?.minecraft_version && <span className="font-normal text-muted-foreground"> · Minecraft {latest.minecraft_version}</span>}
+        </span>
+      </p>
+      {info?.checked_at && (
+        <span className="text-muted-foreground" title={formatDateTime(info.checked_at)}>
+          Checked {relativeTime(info.checked_at)}
+        </span>
+      )}
+      <div className="ml-auto flex items-center gap-2">
+        {latest && canUpdate && (
+          <Button size="xs" onClick={() => onReview(latest)} disabled={disabled}>
+            Review update
+          </Button>
+        )}
+        <Button size="xs" variant="outline" onClick={() => check.mutate()} disabled={check.isPending}>
+          {check.isPending ? <Loader2 className="animate-spin" /> : <RefreshCw />} Check now
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function PinnedRelease({
+  instance,
+  data,
+  loading,
+  children,
+}: {
+  instance: Instance;
+  data: InstanceModpack | undefined;
+  loading: boolean;
+  children?: ReactNode;
+}) {
   const url = projectUrl(instance);
   const provider = instance.modpack_provider || data?.provider || "";
   const current = data?.current;
@@ -110,6 +189,7 @@ function PinnedRelease({ instance, data, loading }: { instance: Instance; data: 
             </span>
           </p>
         )}
+        {children}
       </div>
     </Section>
   );
@@ -168,6 +248,45 @@ export default function Modpack() {
   });
   const planningId = plan.isPending ? (plan.variables?.release.id ?? null) : null;
 
+  /** Open the update plan for the release found by the update check (or a ?review= link). */
+  const review = (versionId: string, name?: string) => {
+    const listed = data?.releases.find((r) => r.id === versionId);
+    const info = instance.modpack_update?.latest;
+    const release: ModpackRelease = listed ?? {
+      provider: (instance.modpack_provider || "modrinth") as ModpackRelease["provider"],
+      id: versionId,
+      project_id: instance.modpack_project_id,
+      name: name ?? (info?.id === versionId ? info.name : versionId),
+      version_number: name ?? (info?.id === versionId ? info.name : versionId),
+      version_type: "release",
+      game_versions: info?.id === versionId && info.minecraft_version ? [info.minecraft_version] : [],
+      loaders: [],
+    };
+    plan.mutate({ release, relation: "newer" });
+  };
+
+  // "Update available" badge in the server header links here with ?review=<version id>
+  const [params, setParams] = useSearchParams();
+  const reviewId = params.get(REVIEW_PARAM);
+  const releasesSettled = !hasProject || !query.isLoading;
+  useEffect(() => {
+    if (!reviewId || !releasesSettled) return;
+    const next = new URLSearchParams(params);
+    next.delete(REVIEW_PARAM);
+    setParams(next, { replace: true });
+    if (!canUpdate) {
+      toast.message("You need the “Manage mods/plugins” permission on this server to update its modpack.");
+      return;
+    }
+    if (locked) {
+      toast.message(lock ?? "Another operation is running; review the update when it finishes.");
+      return;
+    }
+    review(reviewId);
+    // run once per ?review= value, after the release list settled
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviewId, releasesSettled]);
+
   if (!instance.is_modpack) {
     return (
       <EmptyState
@@ -203,7 +322,15 @@ export default function Modpack() {
       )}
       {lock && !tracked.running && canUpdate && <Notice tone="info">{lock}</Notice>}
 
-      <PinnedRelease instance={instance} data={data} loading={query.isLoading} />
+      <PinnedRelease instance={instance} data={data} loading={query.isLoading}>
+        <UpdateCheckLine
+          instance={instance}
+          info={instance.modpack_update ?? data?.update_check}
+          canUpdate={canUpdate}
+          disabled={locked || plan.isPending}
+          onReview={(latest) => review(latest.id, latest.name)}
+        />
+      </PinnedRelease>
 
       <Section
         title="Releases"

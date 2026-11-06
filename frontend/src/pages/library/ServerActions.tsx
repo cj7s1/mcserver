@@ -1,5 +1,7 @@
 import { ArchiveRestore, Info, Loader2, MoreHorizontal, Play, RotateCw, Settings, Square, Terminal } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router";
+import { PowerActionDialog } from "@/components/PowerActionDialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -17,6 +19,7 @@ import { isRunningLike, useServerPower, useUnarchive } from "./server-utils";
 /**
  * Per-server quick actions: an inline Start/Stop button (when the user may control the server)
  * plus a menu with restart, console, settings and unarchive. Permission-aware via instance.permissions.
+ * Stop and Restart open the same confirmation (with the optional in-game warning) as the server page.
  */
 export function ServerQuickActions({
   instance,
@@ -31,6 +34,7 @@ export function ServerQuickActions({
 }) {
   const power = useServerPower(instance);
   const unarchive = useUnarchive(instance);
+  const [confirm, setConfirm] = useState<"restart" | "stop" | null>(null);
   const can = (code: PermissionCode) => hasPerm(instance.permissions, code);
   const archived = !!instance.archived_at;
   const canControl = can("instance.control") && !archived;
@@ -49,10 +53,10 @@ export function ServerQuickActions({
             size="sm"
             variant="outline"
             disabled={busy}
-            onClick={() => power.mutate("stop")}
+            onClick={() => setConfirm("stop")}
             aria-label={`Stop ${instance.name}`}
           >
-            {power.isPending ? <Loader2 className="animate-spin" /> : <Square />}
+            <Square />
             {inlineLabel && <span className="hidden sm:inline">Stop</span>}
           </Button>
         ) : (
@@ -67,7 +71,7 @@ export function ServerQuickActions({
           {inlineLabel && <span className="hidden sm:inline">Unarchive</span>}
         </Button>
       )}
-      <DropdownMenu>
+      <DropdownMenu modal={false}>
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="icon-sm" aria-label={`More actions for ${instance.name}`}>
             <MoreHorizontal />
@@ -84,11 +88,11 @@ export function ServerQuickActions({
               )}
               {running && (
                 <>
-                  <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("restart")}>
-                    <RotateCw /> Restart
+                  <DropdownMenuItem disabled={busy} onSelect={() => setConfirm("restart")}>
+                    <RotateCw /> Restart…
                   </DropdownMenuItem>
-                  <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("stop")}>
-                    <Square /> Stop
+                  <DropdownMenuItem disabled={busy} onSelect={() => setConfirm("stop")}>
+                    <Square /> Stop…
                   </DropdownMenuItem>
                 </>
               )}
@@ -122,6 +126,9 @@ export function ServerQuickActions({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      {confirm && (
+        <PowerActionDialog instance={instance} action={confirm} open onOpenChange={(o) => !o && setConfirm(null)} />
+      )}
     </div>
   );
 }

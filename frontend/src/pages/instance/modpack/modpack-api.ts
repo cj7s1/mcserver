@@ -6,6 +6,8 @@
  *   GET  /instances/{id}/modpack/plan/{version_id}          -> UpdatePlan        (instance.content)
  *   POST /instances/{id}/modpack/update   {version_id, backup, allow_minecraft_change, start} -> Job (202)
  *   POST /instances/{id}/modpack/rollback {backup_id, confirm: true}                         -> Job (202)
+ *   POST /instances/{id}/modpack/check                      -> ModpackUpdateInfo (instance.view; runs the
+ *        "update available" check now, otherwise the worker runs it every 6 h; 30 s cooldown)
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -13,7 +15,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { toDate } from "@/lib/format";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
-import type { Instance, Job, Release } from "@/lib/types";
+import type { Instance, Job, ModpackUpdateInfo, Release } from "@/lib/types";
 
 /** The pin fields the backend records before/after an update (apps/modpacks/handlers.py PIN_FIELDS). */
 export interface ModpackPin {
@@ -54,6 +56,7 @@ export interface InstanceModpack {
   updates_available: number;
   history: ModpackHistoryEntry[];
   rollback_points: RollbackPoint[];
+  update_check: ModpackUpdateInfo | null;
 }
 
 export interface UpdatePlan {
@@ -203,4 +206,29 @@ export function useModpackJob(instance: Instance) {
     },
     dismiss: () => setJobId(null),
   };
+}
+
+/** Search parameter that makes the Modpack tab open the update plan for a release (header badge). */
+export const REVIEW_PARAM = "review";
+
+/** The newer compatible release found by the periodic check, if there is one. */
+export function availableUpdate(i: Pick<Instance, "is_modpack" | "modpack_update">): NonNullable<ModpackUpdateInfo["latest"]> | null {
+  const u = i.is_modpack ? i.modpack_update : null;
+  return u?.available && u.latest ? u.latest : null;
+}
+
+export function reviewUpdatePath(instanceId: string, versionId: string): string {
+  return `/servers/${instanceId}/modpack?${REVIEW_PARAM}=${encodeURIComponent(versionId)}`;
+}
+
+/** One-line status of the update check for the Modpack tab. */
+export function updateCheckSummary(u: ModpackUpdateInfo | null | undefined): { tone: "ok" | "update" | "muted" | "error"; text: string } {
+  if (!u || u.status === "pending") return { tone: "muted", text: "Not checked for updates yet." };
+  if (u.status === "unavailable") return { tone: "muted", text: u.detail || "Update check unavailable." };
+  const failed = u.status === "error";
+  if (u.available && u.latest) return { tone: "update", text: `Update available: ${u.latest.name}` };
+  if (u.stale) return { tone: "muted", text: "The release changed since the last check. Check again to compare." };
+  if (failed && !u.last_success_at) return { tone: "error", text: `Update check failed: ${u.detail || "unknown error"}` };
+  const base = u.latest ? "Up to date with the newest compatible release." : "No compatible release found.";
+  return { tone: failed ? "error" : "ok", text: failed ? `${base} The last check failed: ${u.detail || "unknown error"}` : base };
 }
