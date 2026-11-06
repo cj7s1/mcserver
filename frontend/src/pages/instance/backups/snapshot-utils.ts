@@ -3,11 +3,17 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 export interface SnapshotCapability {
+  /** "btrfs" or "zfs" (the node's agent picks it by filesystem) */
   provider: string | null;
   available: boolean;
   fstype: string | null;
   reason: string | null;
+  /** legacy name: the folder is its own btrfs subvolume or ZFS dataset */
   instance_is_subvolume: boolean;
+  /** newer agents: same meaning as instance_is_subvolume, provider-neutral */
+  instance_ready?: boolean;
+  /** ZFS: the instance dataset, e.g. "cache/appdata/mcpanel-<id>" */
+  dataset?: string | null;
 }
 
 export interface Snapshot {
@@ -17,6 +23,8 @@ export interface Snapshot {
   /** missing on snapshots whose metadata sidecar was lost */
   kind?: "manual" | "scheduled" | "pre_restore" | string;
   consistent?: boolean;
+  /** ZFS: kept on a history dataset from before a rollback */
+  retained?: boolean;
 }
 
 export interface SnapshotsResponse {
@@ -31,13 +39,27 @@ export const isSnapshotJob = (kind: string | null | undefined) => !!kind && SNAP
 
 export const snapshotsKey = (instanceId: string) => ["instances", instanceId, "snapshots"] as const;
 
-/** unavailable: node filesystem can't snapshot · convert: folder must become a subvolume first · ready */
+/** unavailable: node filesystem can't snapshot · convert: folder must become a subvolume/dataset first · ready */
 export type SnapshotState = "unavailable" | "convert" | "ready";
 
 export function snapshotState(cap: SnapshotCapability | undefined): SnapshotState | null {
   if (!cap) return null;
   if (!cap.available) return "unavailable";
-  return cap.instance_is_subvolume ? "ready" : "convert";
+  return (cap.instance_ready ?? cap.instance_is_subvolume) ? "ready" : "convert";
+}
+
+/** Display name of the snapshot provider ("btrfs", "ZFS"), or a neutral word when unknown. */
+export function providerLabel(provider: string | null | undefined): string {
+  if (provider === "zfs") return "ZFS";
+  if (provider === "btrfs") return "btrfs";
+  return "filesystem";
+}
+
+/** What a server folder becomes when snapshots are enabled for it. */
+export function volumeNoun(provider: string | null | undefined): string {
+  if (provider === "zfs") return "ZFS dataset";
+  if (provider === "btrfs") return "btrfs subvolume";
+  return "snapshot volume";
 }
 
 export function useSnapshots(instanceId: string, { enabled = true, busy = false }: { enabled?: boolean; busy?: boolean } = {}) {

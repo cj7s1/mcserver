@@ -59,7 +59,10 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 7. **Backups use restic** (one repository per instance, encrypted, deduplicated). Running servers are
    coordinated with `save-off` → `save-all flush` → backup → `save-on` (always re-enabled in `finally`).
    Restores go into a staging directory first and are swapped in only after restic succeeds; a
-   pre-restore safety backup is taken by default. Retention is computed in the panel
+   pre-restore safety backup is taken by default. Restores and clones keep the folder kind
+   (`snapshots.prepare_replacement`): a btrfs subvolume is replaced by a new subvolume built next to it,
+   a ZFS dataset (a mount point, which cannot be renamed) is filled in place through an fd-anchored
+   hidden staging folder and an entry-by-entry swap. Retention is computed in the panel
    (`apps/backups/retention.py`) so pinned and safety backups are honoured.
 8. **File access is fd-based.** `agent/mcagent/safefs.py` walks paths with `O_NOFOLLOW` directory fds,
    rejects `..`, never follows symlinks (even ones created concurrently by a mod) and writes atomically.

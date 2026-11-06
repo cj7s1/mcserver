@@ -1,7 +1,8 @@
 # Development status
 
 _Last updated: 2026-11-06 (session 2: SpigotMC source, mods-listing speed-up, integration coverage, btrfs
-delete fix, Unraid simulation, modpack update checks, restart warnings). Previous: 2026-11-03, end of
+delete fix, Unraid simulation, modpack update checks, restart warnings, security-audit fixes, ZFS snapshot
+provider). Previous: 2026-11-03, end of
 session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
@@ -13,10 +14,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **542 passed** (2026-11-06, after merging SpigotMC, hash cache, integration tests, update checks and restart warnings; incl. OpenAPI fail-on-warn) |
-| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **354 passed**, 3 btrfs tests skipped without the mount (2026-11-06) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 26 tests (2026-11-06) |
+| `backend: uv run pytest -q -m "not integration"` | **812 passed** (2026-11-06, after merging the security-audit fixes and the ZFS snapshot provider; incl. OpenAPI fail-on-warn) |
+| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06, before the audit/ZFS merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **468 passed** (2026-11-06; real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 140 tests in 22 files (2026-11-06) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -29,8 +30,8 @@ Modrinth), `test_integration_import.py`; shared helpers in `tests/integration_su
 **Fixed: deleting a server on btrfs orphaned its snapshots.** The agent's `DELETE /v1/instances/<id>/data`
 removed the container, the folder and the restic repo but never `<data root>/snapshots/<id>/`: read-only
 subvolumes stayed on disk, invisible in the panel (also hit by migrate with "delete source"). It now
-purges them (`BtrfsSnapshots.purge()`) *before* deleting the files, so a btrfs failure leaves the server
-intact for a retry. Agent tests: `test_purge_deletes_read_only_snapshots`,
+purges them (`BtrfsSnapshots.destroy_all()`, via the snapshot provider) *before* deleting the files, so a
+btrfs failure leaves the server intact for a retry. Agent tests: `test_purge_deletes_read_only_snapshots`,
 `test_delete_data_removes_snapshots` (real btrfs). The sandbox agents on :8700/:8701 run from the main
 checkout and must be restarted to pick the fix up; until then
 `test_deleting_a_server_removes_its_snapshots` fails against :8701 (it passed against the fixed agent
@@ -160,7 +161,9 @@ was attempted). Still not verified: a real restricted account on the backend, an
   browser, snapshots, files zip/extract, Hangar tab, migrate dialog, CurseForge-by-URL wizard) were
   checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
   stopped to save credits.
-* CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub. ZFS snapshots.
+* CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub.
+* **ZFS snapshots: implemented + unit-tested; NOT verified on real ZFS** (no ZFS kernel module in the
+  sandbox). See "ZFS snapshot provider" below.
 * SpigotMC tab, SpigotMC dialog and the Hangar browse tab (the Hangar install dialog existed but no tab
   rendered it until now): tsc/lint/build/vitest only, not opened in a browser. The SpigotMC endpoints are
   covered by 45 mocked backend tests plus the live adapter/agent run above, not by an API-level live run.
@@ -181,6 +184,70 @@ was attempted). Still not verified: a real restricted account on the backend, an
   inventory, so Modrinth's update check handles them; other SpigotMC installs are labelled "SpigotMC" and
   updated from the SpigotMC dialog.
 
+## ZFS snapshot provider (merged 2026-11-06)
+
+Status: **implemented + unit-tested; NOT verified on real ZFS.**
+
+* Agent: `mcagent/zfs.py` (`ZfsSnapshots`, same interface as `BtrfsSnapshots`), picked by
+  `snapshots.snapshot_provider()` from the instances directory's filesystem. Dataset per server
+  (`<parent>/mcpanel-<id>`, explicit mountpoint) at prepare time; convert = dataset at a temp mountpoint,
+  `cp -a`, swap; snapshots with `mcpanel:*` user properties; rollback = clone + rename + promote (never
+  `zfs rollback -r`, never `destroy -R`; newer snapshots stay on `<dataset>-old-<epoch>` history
+  datasets; every step undone in reverse on failure); delete refuses snapshots that history datasets
+  depend on. Capability checks: fstype, `zfs` binary, `/dev/zfs`, same host/container path, `:rshared`
+  propagation when containerised, dataset name pattern, `zfs list` reaching the kernel module.
+* Deleting a server deletes its snapshots through the provider (`destroy_all()`, before the files, so a
+  btrfs/ZFS refusal leaves the server intact for a retry); on ZFS that destroys the dataset itself, because
+  a mount point cannot be renamed into the trash.
+* Restic restores and clones keep the folder kind (`snapshots.prepare_replacement`): a ZFS dataset (a
+  mount point) is filled **in place** (staging folder inside it, entries swapped by `swap_entries`, which
+  renames between directory descriptors and moves everything back on failure); a btrfs subvolume gets a
+  **new subvolume next to it** that is renamed into place (the security-audit design, now also used for
+  clones, which used to produce plain folders); plain folders use `<data root>/staging`. A missing target on
+  ZFS is created as its own dataset first.
+* Backend: provider-agnostic convert message, rollback warnings in the job log; fake agent can report
+  `zfs`. Frontend: wording follows `capability.provider`, "Kept from before a rollback" marker,
+  `instance_ready` with fallback to `instance_is_subvolume`.
+* Image: `zfsutils-linux` 2.3.9 (Debian trixie contrib) installs in `python:3.13-slim` (+22 packages,
+  ~33 MB) — verified with the same `apt-get install` in a throwaway container; the full agent image build
+  was not run here because the sandbox proxy rejects plain-HTTP apt (405).
+* Tests: `agent/tests/test_snapshots_zfs.py` (62 tests after the review and the merge) drive a fake `zfs` executable
+  (`tests/fake_zfs.py`, emulates datasets/snapshots/clones/promote with real files) incl. real restic
+  restore into a dataset; btrfs tests (real loopback btrfs) extended. Playwright: Backups page at 1440 and
+  390 px with the real btrfs node and route-mocked ZFS responses (ready / convert / unavailable / dialogs),
+  no horizontal overflow.
+* Needs a real host: a ZFS pool, the override in docs/UNRAID.md section 6, and a check that a dataset
+  created by the agent is visible to the Minecraft container (shared propagation).
+* Independent review (same day), fixed with regression tests:
+  * Single-path restores from the backup browser failed with EXDEV on every btrfs subvolume and ZFS
+    dataset (staging was renamed across filesystems); now staged inside the volume (real btrfs test
+    reproduces the old failure). The merged code uses the security audit's fd-anchored staging in the
+    destination's deepest existing folder, which covers datasets too.
+  * Docker copies bind mounts *inside* an `:rshared` data mount back onto the host at every agent start and
+    they multiply (reproduced: 1, 3, 7 stacked mounts) — the default `${MCPANEL_DATA_DIR}/backups` mount
+    does that. The agent now refuses ZFS snapshots while such a mount exists; docs require
+    `MCPANEL_BACKUP_DIR` outside the data dir. The propagation design itself was checked with a tmpfs
+    stand-in in Docker 29 (agent mount visible on the host and in a later container; remount propagates).
+  * A bind mount at a server folder was taken for that server's dataset (server delete would have run
+    `zfs destroy -r` on the bind's source dataset); now refused unless the dataset's `mountpoint` is the
+    server folder.
+  * A successful rollback was reported as failed when promote/tidy-up hit an error (and `origin` could be
+    unbound); these are warnings now. Deleting the last snapshot of a history dataset no longer fails when
+    the empty dataset can't be removed.
+  * The "is the current state captured" check before a rollback counted snapshots of other tools
+    (sanoid, zfs-auto-snapshot); it now uses `written@<newest MCPanel snapshot>`.
+  * Scheduled-snapshot retention failed every run on ZFS once a pruned snapshot had dependents; it keeps
+    that snapshot and logs it. The capability also reports a missing CAP_SYS_ADMIN, and the node storage
+    view honours `AGENT_HOST_DATA_ROOT`; server delete logs agent warnings in the job.
+* Merge with the security-audit branch (2026-11-06): the in-place staging folder is visible to the file
+  manager, so it is handled like the audit's restore-path staging: `.mcpanel-tmp-*` (excluded from
+  backups), opened by descriptor, restic writes through `/proc/self/fd/<n>` (`Restic.restore` gained
+  `pass_fds`), the copy for a clone too; removed on failure only if it is still the folder that was
+  created. Clones keep skipping FIFOs/sockets/devices. Scheduled-snapshot retention stays per schedule
+  and best effort (a snapshot with dependents is logged as "kept"). New tests: real-btrfs clone keeps a
+  subvolume (fresh and prepared target), ZFS restore writes through a descriptor and cleans up on failure,
+  restore into a new server creates its dataset.
+
 ## Next recommended tasks (in order)
 
 1. Browser pass over the new screens (Playwright, 1440 and 390 px, dark/light) and fix what it finds,
@@ -190,8 +257,9 @@ was attempted). Still not verified: a real restricted account on the backend, an
    screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
    wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).
 3. Validate on Unraid; then (only when the user asks) the Phase 10 security audit.
-4. Roadmap: ZFS snapshots, CurseForge per-mod search (needs a key). SpigotMC: install one plugin through the
-   UI on a running Paper server and check it loads (only the adapter + agent path was run live).
+4. Roadmap: verify ZFS snapshots on a real pool, CurseForge per-mod search (needs a key). SpigotMC: install
+   one plugin through the UI on a running Paper server and check it loads (only the adapter + agent path was
+   run live).
 
 ## Environment notes (cloud sandbox)
 

@@ -100,6 +100,17 @@ Anything that can talk to the Docker socket is effectively root on the host. The
 * requires the bearer token on every request (except the unauthenticated `/v1/health`, which reveals
   only whether Docker is reachable).
 
+Native snapshots need extra privileges, granted only through an override file (docs/UNRAID.md
+section 6), never by the default stack: `CAP_SYS_ADMIN` for btrfs and ZFS, plus `/dev/zfs` and an
+`:rshared` data mount for ZFS. They do not change the trust model (the agent is root-equivalent through
+the Docker socket already), but `/dev/zfs` lets the agent administer *every* dataset on the host's
+pools. The agent only builds `zfs` argv lists from dataset names it read from `/proc/self/mountinfo`
+or `zfs list` and validated against a strict pattern; requests can name a snapshot (validated
+timestamp pattern) but never a dataset, and nothing uses `zfs destroy -R` or `zfs rollback -r`. A dataset
+is only treated as a server's own when it is mounted at the server folder with root `/` *and* its
+`mountpoint` property is that folder, so a bind mount there can never get its source dataset renamed or
+destroyed.
+
 Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
 
 ## Network exposure

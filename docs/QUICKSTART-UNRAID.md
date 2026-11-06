@@ -33,7 +33,8 @@ flowchart LR
 * The **Minecraft servers** use the well-known `itzg/minecraft-server` image. It downloads and
   installs modpacks itself.
 * Server files live in a normal folder on your cache pool, one sub-folder per server.
-* Backups are encrypted and deduplicated (restic). Btrfs pools also get instant snapshots.
+* Backups are encrypted and deduplicated (restic). Btrfs pools also get instant snapshots (ZFS pools too,
+  with an extra override; see docs/UNRAID.md section 6).
 
 ## 0. Before you start
 
@@ -325,6 +326,6 @@ logged-in user.
 | Unraid's Docker tab says "update available" for `mcpanel-…` | Ignore it. The panel manages those containers; change their runtime in the panel instead. **Don't edit or start `mcpanel-…` containers from the Docker tab.** |
 | Panel or agent logs | `docker compose logs --tail 100 panel` (or `agent`, `worker`). They never contain passwords. |
 
-More detail: [docs/UNRAID.md](UNRAID.md) (snapshots on btrfs pools, extra capabilities),
+More detail: [docs/UNRAID.md](UNRAID.md) (snapshots on btrfs and ZFS pools, extra capabilities),
 [DEPLOYMENT.md](../DEPLOYMENT.md) (HTTPS behind a reverse proxy, more Docker hosts),
 [docs/SECURITY.md](SECURITY.md) (what is and isn't isolated; only install mods you trust).

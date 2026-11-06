@@ -1,4 +1,4 @@
-/** Instance backups: restic backups, restore, file browser, retention, integrity checks and btrfs snapshots. */
+/** Instance backups: restic backups, restore, file browser, retention, integrity checks and btrfs/ZFS snapshots. */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Archive, Camera, Clock, HardDrive, KeyRound, Lock, Pin, Plus, ShieldCheck } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -227,8 +227,8 @@ export default function Backups() {
           </p>
           <p>
             <Camera className="mr-1 inline size-3" aria-hidden />
-            On btrfs, instant snapshots (above) complement backups for quick rollbacks; they stay on the same disk. ZFS snapshots
-            are not supported yet.
+            On btrfs and ZFS pools, instant snapshots (above) complement backups for quick rollbacks; they stay on the same
+            disk.
           </p>
         </div>
       </section>

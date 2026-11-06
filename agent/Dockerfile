@@ -37,18 +37,22 @@ ENV PYTHONUNBUFFERED=1 \
 # Version verified against https://hub.docker.com/v2/repositories/restic/restic/tags
 COPY --from=restic/restic:0.19.1 /usr/bin/restic /usr/local/bin/restic
 
-# btrfs-progs enables native snapshots when the data directory is on a btrfs pool
-# (used only if the filesystem is btrfs; deleting subvolumes also needs CAP_SYS_ADMIN,
-# see docs/UNRAID.md). Build behind a TLS-intercepting proxy: see backend/Dockerfile.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends btrfs-progs \
+# btrfs-progs and zfsutils-linux (Debian contrib, userland only: no kernel module, no
+# zed, no DKMS) enable native snapshots when the data directory is on a btrfs or ZFS
+# pool. They are used only on that filesystem and only with the extra privileges the
+# docs/UNRAID.md override grants (CAP_SYS_ADMIN; for ZFS also /dev/zfs and a shared
+# bind mount). The default stack grants neither, so snapshots then report unavailable.
+# Build behind a TLS-intercepting proxy: see backend/Dockerfile.
+RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends btrfs-progs zfsutils-linux \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY --from=python-deps /opt/venv /opt/venv
 COPY agent/mcagent ./mcagent
 COPY --chmod=0644 agent/container/healthcheck.py /usr/local/bin/mcagent-healthcheck.py
-RUN python -m compileall -q mcagent && restic version
+RUN python -m compileall -q mcagent && restic version && command -v btrfs zfs
 
 # The agent deliberately runs as root:
 #  * it talks to /var/run/docker.sock, which is root-equivalent on the host anyway

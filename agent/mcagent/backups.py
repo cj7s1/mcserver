@@ -133,7 +133,13 @@ class Restic:
         self.run(["init"], timeout=120)
 
     def _stream_json(
-        self, args: list[str], on_message: Callable[[dict[str, Any]], None], *, timeout: float, action: str
+        self,
+        args: list[str],
+        on_message: Callable[[dict[str, Any]], None],
+        *,
+        timeout: float,
+        action: str,
+        pass_fds: tuple[int, ...] = (),
     ) -> tuple[int, str]:
         """Run restic with ``--json`` output, handing each JSON line of stdout to ``on_message``.
 
@@ -150,6 +156,7 @@ class Restic:
             stderr=subprocess.PIPE,
             text=True,
             errors="replace",
+            pass_fds=pass_fds,
         )
         assert proc.stdout is not None and proc.stderr is not None
         stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
@@ -258,8 +265,17 @@ class Restic:
         raise AgentError("Backup snapshot not found", "snapshot_not_found", 404)
 
     def restore(
-        self, snapshot_id: str, target: Path, progress: Callable[[float, str], None] | None = None
+        self,
+        snapshot_id: str,
+        target: Path,
+        progress: Callable[[float, str], None] | None = None,
+        *,
+        pass_fds: tuple[int, ...] = (),
     ) -> dict[str, Any]:
+        """Restore a whole snapshot into ``target`` (an empty or missing directory).
+
+        Like ``restore_path``, ``target`` may be ``/proc/self/fd/<n>/...`` with ``n`` in ``pass_fds``.
+        """
         snap = self.snapshot(snapshot_id)
         paths = snap.get("paths") or []
         if len(paths) != 1:
@@ -278,7 +294,9 @@ class Restic:
             elif msg.get("message_type") == "summary":
                 summary = msg
 
-        code, stderr = self._stream_json(args, on_message, timeout=self.RESTORE_TIMEOUT, action="restore")
+        code, stderr = self._stream_json(
+            args, on_message, timeout=self.RESTORE_TIMEOUT, action="restore", pass_fds=pass_fds
+        )
         if code != 0:
             self._raise_for(code, stderr, "restore")
         return {"snapshot": snap["id"], **summary}

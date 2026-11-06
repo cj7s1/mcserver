@@ -949,3 +949,32 @@ def test_full_restore_plain_directory(plain_settings, monkeypatch):
     _assert_restored(inst)
     assert list(plain_settings.staging_dir.iterdir()) == []
     assert list(plain_settings.trash_dir.iterdir()) == []
+
+
+@needs_btrfs
+@pytest.mark.parametrize("prepared", [False, True])
+def test_clone_on_btrfs_is_a_subvolume_and_skips_special_files(btrfs_settings, monkeypatch, prepared):
+    """A clone gets a subvolume like any new server (built next to it, renamed into place)."""
+    from mcagent.snapshots import ensure_instance_dir, is_subvolume
+
+    for d in (btrfs_settings.instances_dir, btrfs_settings.staging_dir, btrfs_settings.trash_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    btrfs_settings.state_dir.mkdir(parents=True, exist_ok=True)
+    src, dst = uuid.uuid4(), uuid.uuid4()
+    inst = btrfs_settings.instances_dir / str(src)
+    ensure_instance_dir(btrfs_settings, inst)
+    (inst / "world").mkdir()
+    (inst / "world" / "level.dat").write_bytes(b"L")
+    os.mkfifo(inst / "pipe")
+    os.symlink("world", inst / "link")
+    out = btrfs_settings.instances_dir / str(dst)
+    if prepared:  # /prepare already made the target folder (an empty subvolume)
+        assert ensure_instance_dir(btrfs_settings, out) and is_subvolume(out)
+    client, auth = _client_for(btrfs_settings, monkeypatch)
+    r = client.post(f"/v1/instances/{src}/clone", json={"target_instance_id": str(dst)}, headers=auth)
+    op = _wait_op(client, auth, r.json()["operation"]["id"])
+    assert op["status"] == "succeeded", op
+    assert is_subvolume(out), "the clone is a plain directory (snapshots would be off)"
+    assert (out / "world" / "level.dat").read_bytes() == b"L"
+    assert os.path.islink(out / "link") and not os.path.lexists(out / "pipe")
+    assert _leftovers(out) == [] and "warnings" not in op["result"]

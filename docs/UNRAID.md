@@ -93,9 +93,16 @@ files you would have to download by hand (the panel detects this and lists them)
 
 ## 6. Snapshots on Unraid
 
-On a **btrfs** pool, MCPanel creates each new server folder as a btrfs subvolume and offers instant
-snapshots and rollback alongside restic backups. The agent image already contains `btrfs-progs`; the
-agent only needs permission to delete subvolumes. Add this to `deploy/docker-compose.override.yml`:
+MCPanel offers instant snapshots and rollback alongside restic backups when `MCPANEL_DATA_DIR` is a
+**pool path** (`/mnt/cache/...`, `/mnt/<pool>/...`) on a **btrfs** or **ZFS** pool. They can't be used on
+`/mnt/user/...` FUSE paths or on XFS. Snapshots live on the same disk as the server, so they are **not**
+backups. The default stack grants none of the privileges below, so snapshots show as unavailable until
+you add an override; everything else works without it.
+
+### btrfs pools
+
+Each new server folder is created as a btrfs subvolume. The agent image contains `btrfs-progs`; the agent
+only needs permission to delete subvolumes. Add this to `deploy/docker-compose.override.yml`:
 
 ```yaml
 services:
@@ -103,9 +110,92 @@ services:
     cap_add: [SYS_ADMIN]   # btrfs subvolume delete; the agent already controls Docker (root-equivalent)
 ```
 
-Snapshots only work when `MCPANEL_DATA_DIR` is a pool path (`/mnt/cache/...`). They can't be used on
-`/mnt/user/...` FUSE paths or on XFS. ZFS pools are not supported yet. Snapshots live on the same disk
-as the server, so they are **not** backups.
+### ZFS pools (Unraid 6.12+ / 7)
+
+> **Status:** implemented and unit-tested against a simulated `zfs` command only. It has **not** been run
+> on a real ZFS pool yet. Try it on a test server first and report what you see.
+
+How it works:
+
+* Each server folder becomes its **own dataset**, `<parent>/mcpanel-<server id>`, where `<parent>` is the
+  dataset that holds the instances folder (for `/mnt/cache/appdata/mcpanel` on Unraid usually
+  `cache/appdata`). The dataset gets an explicit `mountpoint` (the server folder) and the user property
+  `mcpanel:instance`. New servers get one automatically; existing servers show **Enable snapshots**
+  (server stopped: a dataset is created next to the folder, the files are copied in, then it is mounted in
+  the folder's place; this needs free space for one copy unless the pool supports block cloning).
+* Snapshots are `<dataset>@<UTC timestamp>-<label>`, with the label and type in the user properties
+  `mcpanel:label`, `mcpanel:kind` and `mcpanel:consistent`. Snapshots made by other tools are not shown
+  and not touched.
+* **Rollback never destroys snapshots.** `zfs rollback` can only go back to the newest snapshot; going
+  further needs `zfs rollback -r`, which deletes every newer snapshot, including the safety snapshot the
+  panel takes right before a rollback. MCPanel therefore clones the chosen snapshot, unmounts the current
+  dataset and renames it to `<dataset>-old-<epoch>` (a *history* dataset: never mounted, it keeps the
+  newer snapshots), gives the clone the dataset's name and mountpoint and promotes it. Snapshots on
+  history datasets appear in the list as "Kept from before a rollback" and work like any other. A history
+  dataset is destroyed when its last snapshot is deleted. A snapshot that snapshots from before a rollback
+  are based on can't be deleted until those are; the error names them. If a step fails, the previous steps
+  are undone in reverse order; if even that fails, the error says which dataset holds the previous files.
+* Deleting a server destroys its dataset, its history datasets and their snapshots (never with
+  `zfs destroy -R`: a clone you made yourself from one of its snapshots stops the delete instead).
+
+Requirements: the agent image contains the ZFS userland (Debian `zfsutils-linux` 2.3.x from `contrib`;
+no kernel module, no `zed`). The agent container additionally needs:
+
+* the device `/dev/zfs`,
+* `CAP_SYS_ADMIN` (ZFS mounts datasets itself),
+* the data directory bind-mounted with **shared propagation** (`:rshared`). A dataset the agent mounts
+  exists only in the agent container's mount namespace otherwise: Docker would hand the empty directory
+  underneath to the Minecraft container and the world would end up outside the dataset. The agent checks
+  this and reports *"not bind-mounted … with shared propagation"* instead of creating datasets. In
+  Unraid's own Docker templates this access mode is called *RW/Shared*.
+
+`deploy/docker-compose.override.yml` (Compose merges volumes by container path, so this entry replaces
+the data directory mount of `docker-compose.yml`; keep host path and container path identical).
+**`MCPANEL_BACKUP_DIR` must point outside `MCPANEL_DATA_DIR`** (the Unraid default above,
+`/mnt/user/backups/mcpanel`, does): with `:rshared`, every other bind mount Docker places *inside* the
+data directory (the default backups directory `${MCPANEL_DATA_DIR}/backups` is one) is copied back onto
+the host at each agent start, and the copies pile up (1, 3, 7, ... mounts; reproduced with Docker 29).
+That can keep the pool busy when the array stops. The agent refuses ZFS snapshots and says so while
+such a mount exists. If you already have them, `findmnt -R ${MCPANEL_DATA_DIR}` on the host lists them;
+stop the stack and run `umount` on the extra entries (or reboot) after moving the backups directory.
+
+```yaml
+services:
+  agent:
+    cap_add: [SYS_ADMIN]
+    devices: ["/dev/zfs:/dev/zfs"]
+    volumes:
+      - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}:rshared
+```
+
+Notes and limits:
+
+* Docker refuses `:rshared` when the host mount is not shared (`... is not a shared mount`). Check with
+  `findmnt -o TARGET,PROPAGATION /mnt/cache` on the host. If it says `private`, `mount --make-shared
+  /mnt/cache` after the pool is mounted and before the stack starts fixes it until the next reboot (on
+  Unraid for example with a User Scripts "At Startup of Array" script). Not yet checked on real Unraid.
+* `AGENT_HOST_DATA_ROOT` must not differ from `AGENT_DATA_ROOT` (the default stack keeps them equal):
+  the mountpoint ZFS stores is a host path.
+* Hosts that enforce AppArmor (Ubuntu, not Unraid) block `mount` in containers with the default profile;
+  there you would also need `security_opt: ["apparmor:unconfined"]` for the agent. Weigh that before
+  using it.
+* The agent's `zfs` tools (2.3.x) talk to the host's ZFS kernel module. Basic operations are compatible
+  across 2.2/2.3, but if the panel shows *"The zfs command cannot use the ZFS kernel module"*, compare
+  `zfs version` on the host with the version shown in the snapshot capability (`zfs_version`).
+* Restic restores and clones keep a dataset in place (they swap the folder's contents inside it), so a
+  server stays snapshot-capable after a backup restore.
+* Each dataset is a separate mount, so tools on the host that walk `/mnt/cache/appdata` (backup plugins,
+  the mover) see one more filesystem per server. Keep the share on the pool (no mover to the array).
+* **Other containers** that bind-mount the whole appdata share (backup containers such as Duplicati or
+  Kopia) get a private copy of the mounts that existed when *they* started: they don't see a server
+  dataset created later (only the empty folder underneath), and after a rollback they keep the old
+  dataset mounted until they are restarted, which also stops MCPanel from destroying it ("dataset is
+  busy"). Restart them after creating servers or rolling back, or give them the share with
+  `:rslave` propagation (Unraid template access mode *RW/Slave*).
+* Verified here only with a stand-in: in a Docker 29 sandbox, a mount the agent container made below its
+  `:rshared` data mount (tmpfs instead of a dataset) appeared on the host and in a Minecraft-like
+  container started afterwards, an unmount + new mount (what a rollback does) reached both, and a
+  restarted agent saw it. Real ZFS and real Unraid are still unverified.
 
 ## 7. More than one server box
 

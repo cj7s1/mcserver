@@ -335,7 +335,7 @@ export default function Schedules() {
             from the server header.
           </li>
           <li>
-            Snapshot schedules take instant btrfs snapshots (where enabled on the Backups page) and keep only the newest scheduled
+            Snapshot schedules take instant btrfs or ZFS snapshots (where enabled on the Backups page) and keep only the newest scheduled
             snapshots, as set per schedule (default {DEFAULT_SNAPSHOT_KEEP}). Manual and “before rollback” snapshots are never
             pruned.
           </li>

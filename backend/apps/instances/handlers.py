@@ -157,7 +157,9 @@ def delete(job: Job, ctx: JobContext) -> dict[str, Any]:
     _set_desired(instance, DesiredState.STOPPED)
     ctx.progress(0.1, "Deleting container, files and backups", force=True)
     op = client.delete_data(instance.id)
-    client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(0.1, 0.8))
+    done = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(0.1, 0.8))
+    for warning in (done.get("result") or {}).get("warnings") or []:
+        ctx.log(f"Warning: {warning}")  # e.g. a btrfs snapshot that could not be deleted
     name = instance.name
     instance_id = str(instance.id)
     # detach the job from the instance before deleting so the job history survives
