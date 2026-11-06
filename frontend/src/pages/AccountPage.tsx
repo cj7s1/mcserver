@@ -444,7 +444,7 @@ function PermissionGroup({ title, items }: { title: string; items: PermissionDef
             <div className="min-w-0">
               <p className="text-sm leading-tight">{p.label}</p>
               <p className="text-xs text-muted-foreground">{p.description}</p>
-              <p className="truncate font-mono text-[10px] text-muted-foreground/80">{p.code}</p>
+              <p className="truncate font-mono text-[10px] text-muted-foreground">{p.code}</p>
             </div>
           </li>
         ))}

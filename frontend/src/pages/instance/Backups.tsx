@@ -33,7 +33,7 @@ function Tile({ icon, label, value, sub, tone }: { icon: ReactNode; label: strin
         {label}
       </p>
       <p className={cn("mt-1 truncate text-sm font-semibold", tone)}>{value}</p>
-      {sub && <p className="mt-0.5 truncate text-xs text-muted-foreground">{sub}</p>}
+      {sub && <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground [overflow-wrap:anywhere]">{sub}</p>}
     </div>
   );
 }

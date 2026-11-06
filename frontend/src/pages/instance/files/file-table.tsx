@@ -26,6 +26,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -89,7 +90,7 @@ function SortHeader({
       <button
         type="button"
         onClick={() => onSort(column)}
-        className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+        className="inline-flex items-center gap-1 rounded px-1 py-0.5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none pointer-coarse:py-2"
       >
         {label}
         {active && (sort.dir === "asc" ? <ArrowUp className="size-3" aria-hidden /> : <ArrowDown className="size-3" aria-hidden />)}
@@ -106,7 +107,9 @@ function NameCell({ entry, world, actions }: { entry: FileEntry; world: boolean;
         <TooltipTrigger asChild>
           <span className="inline-flex min-w-0 items-center gap-2 rounded" tabIndex={0}>
             {icon}
-            <span className="truncate">{entry.name}</span>
+            <span className="truncate max-sm:line-clamp-2 max-sm:break-all max-sm:whitespace-normal" title={entry.name}>
+              {entry.name}
+            </span>
             <span className="sr-only">(symbolic link, not followed)</span>
           </span>
         </TooltipTrigger>
@@ -120,7 +123,9 @@ function NameCell({ entry, world, actions }: { entry: FileEntry; world: boolean;
     return (
       <span className="inline-flex min-w-0 items-center gap-2">
         {icon}
-        <span className="truncate">{entry.name}</span>
+        <span className="truncate max-sm:line-clamp-2 max-sm:break-all max-sm:whitespace-normal" title={entry.name}>
+          {entry.name}
+        </span>
       </span>
     );
   }
@@ -128,10 +133,12 @@ function NameCell({ entry, world, actions }: { entry: FileEntry; world: boolean;
     <button
       type="button"
       onClick={action}
-      className="inline-flex max-w-full min-w-0 items-center gap-2 rounded text-left hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+      className="inline-flex max-w-full min-w-0 items-center gap-2 rounded text-left hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none pointer-coarse:-my-1.5 pointer-coarse:min-h-8 pointer-coarse:py-1.5"
     >
       {icon}
-      <span className="truncate">{entry.name}</span>
+      <span className="truncate max-sm:line-clamp-2 max-sm:break-all max-sm:whitespace-normal" title={entry.name}>
+        {entry.name}
+      </span>
     </button>
   );
 }
@@ -210,7 +217,9 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
           <MoreHorizontal />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-44">
+      <DropdownMenuContent align="end" className="max-w-72 min-w-44">
+        <DropdownMenuLabel className="font-mono text-xs font-normal break-all text-muted-foreground">{entry.name}</DropdownMenuLabel>
+        <DropdownMenuSeparator />
         {items}
       </DropdownMenuContent>
     </DropdownMenu>

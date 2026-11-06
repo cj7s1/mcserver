@@ -100,7 +100,7 @@ function Evidence({ lines }: { lines: string[] }) {
     <div className="min-w-0">
       <button
         type="button"
-        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+        className="inline-flex items-center gap-1 rounded text-xs font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50 pointer-coarse:py-2"
         aria-expanded={open}
         aria-controls={id}
         onClick={() => setOpen((o) => !o)}
@@ -265,7 +265,7 @@ export function DiagnosticsCard({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-1 text-xs text-muted-foreground">
         <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
         <span className="min-w-0">
-          No known problems found in the recent log <span className="opacity-80">(<ScanFacts data={data} checkedAt={diag.dataUpdatedAt} now={now} />)</span>
+          No known problems found in the recent log (<ScanFacts data={data} checkedAt={diag.dataUpdatedAt} now={now} />)
         </span>
         {recheck}
       </div>

@@ -23,7 +23,7 @@ export function ErrorState({ error, onRetry, title = "Something went wrong", cla
       <AlertTriangle className="size-6 text-destructive" />
       <div>
         <p className="font-medium">{title}</p>
-        <p className="mt-1 max-w-lg text-sm text-muted-foreground">{errorMessage(error)}</p>
+        <p className="mt-1 max-w-lg text-sm text-muted-foreground [overflow-wrap:anywhere]">{errorMessage(error)}</p>
       </div>
       {onRetry && (
         <Button variant="outline" size="sm" onClick={onRetry}>
@@ -46,7 +46,7 @@ export function EmptyState({ icon, title, description, action, className }: {
       <div className="rounded-full bg-muted p-3 text-muted-foreground">{icon ?? <Inbox className="size-5" />}</div>
       <div>
         <p className="font-medium">{title}</p>
-        {description && <div className="mt-1 max-w-md text-sm text-muted-foreground">{description}</div>}
+        {description && <div className="mt-1 max-w-md text-sm text-muted-foreground [overflow-wrap:anywhere]">{description}</div>}
       </div>
       {action}
     </div>

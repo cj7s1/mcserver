@@ -97,9 +97,9 @@ export function useFileUploads(instanceId: string) {
 export function UploadList({ items, onDismiss }: { items: UploadItem[]; onDismiss: (id: number) => void }) {
   if (!items.length) return null;
   return (
-    <ul className="grid gap-2" aria-live="polite" aria-label="Uploads">
+    <ul className="grid min-w-0 grid-cols-1 gap-2" aria-live="polite" aria-label="Uploads">
       {items.map((u) => (
-        <li key={u.id} className="rounded-lg border bg-muted/30 px-3 py-2">
+        <li key={u.id} className="min-w-0 rounded-lg border bg-muted/30 px-3 py-2">
           <div className="flex items-center gap-2 text-sm">
             {u.status === "done" ? (
               <CheckCircle2 className="size-4 shrink-0 text-emerald-500" aria-hidden />
@@ -108,7 +108,7 @@ export function UploadList({ items, onDismiss }: { items: UploadItem[]; onDismis
             ) : (
               <Loader2 className="size-4 shrink-0 animate-spin text-primary" aria-hidden />
             )}
-            <span className="min-w-0 truncate">
+            <span className="min-w-0 truncate" title={u.names.join(", ")}>
               {u.names.length === 1 ? u.names[0] : `${u.names.length} files`}{" "}
               <span className="text-muted-foreground">→ /{u.dir}</span>
             </span>
@@ -116,7 +116,12 @@ export function UploadList({ items, onDismiss }: { items: UploadItem[]; onDismis
               {u.status === "uploading" ? `${Math.round(u.progress * 100)}% of ${formatBytes(u.bytes)}` : formatBytes(u.bytes)}
             </span>
             {u.status !== "uploading" && (
-              <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => onDismiss(u.id)}>
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`Dismiss ${u.names.length === 1 ? u.names[0] : `${u.names.length} files`}`}
+                onClick={() => onDismiss(u.id)}
+              >
                 <X />
               </Button>
             )}
@@ -145,7 +150,7 @@ export function UploadConflictDialog({
   return (
     <AlertDialog open={!!conflict} onOpenChange={(o) => !o && onResolve("cancel")}>
       <AlertDialogContent>
-        <AlertDialogHeader>
+        <AlertDialogHeader className="place-items-start text-left">
           <AlertDialogTitle>Replace existing files?</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="grid gap-2">

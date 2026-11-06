@@ -19,7 +19,7 @@ export function ServerCard({ instance }: { instance: Instance }) {
       <div className="flex items-start gap-3">
         <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-11" />
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-sm font-semibold leading-snug">
+          <h3 className="truncate text-sm font-semibold leading-snug" title={instance.name}>
             <Link
               to={`/servers/${instance.id}`}
               data-card-link

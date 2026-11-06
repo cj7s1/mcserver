@@ -56,7 +56,8 @@ export function ConfirmDialog({
     <AlertDialog open={isOpen} onOpenChange={(o) => (busy && !o ? undefined : setOpen(o))}>
       {trigger && <AlertDialogTrigger asChild>{trigger}</AlertDialogTrigger>}
       <AlertDialogContent>
-        <AlertDialogHeader>
+        {/* Left-aligned at every width: descriptions here are lists and paragraphs, which read badly centred. */}
+        <AlertDialogHeader className="place-items-start text-left">
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description && <AlertDialogDescription asChild><div>{description}</div></AlertDialogDescription>}
         </AlertDialogHeader>

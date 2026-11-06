@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { AlertTriangle, ChevronLeft, Play, RotateCw, Skull, Square } from "lucide-react";
-import { useState } from "react";
-import { NavLink, Outlet, useOutletContext, useParams } from "react-router";
+import { useEffect, useRef, useState } from "react";
+import { NavLink, Outlet, useLocation, useOutletContext, useParams } from "react-router";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { JobProgress } from "@/components/JobProgress";
@@ -107,7 +107,21 @@ const TABS: { to: string; label: string; perm?: PermissionCode; when?: (i: Insta
 
 export function InstanceLayout() {
   const { id } = useParams();
+  const { pathname } = useLocation();
   const { data: instance, isLoading, error, refetch } = useInstance(id);
+  const tabsRef = useRef<HTMLElement>(null);
+  const loaded = !!instance;
+  // On narrow screens the section tabs scroll sideways: keep the current one in view (horizontally
+  // only, so the page itself does not jump).
+  useEffect(() => {
+    const nav = tabsRef.current;
+    const active = nav?.querySelector<HTMLElement>('[aria-current="page"]');
+    if (!nav || !active) return;
+    const n = nav.getBoundingClientRect();
+    const a = active.getBoundingClientRect();
+    if (a.left < n.left) nav.scrollLeft += a.left - n.left - 12;
+    else if (a.right > n.right) nav.scrollLeft += a.right - n.right + 12;
+  }, [pathname, loaded]);
   if (isLoading) return <LoadingState label="Loading server…" />;
   if (error || !instance) return <ErrorState error={error ?? new Error("Server not found")} onRetry={() => refetch()} />;
   const can = (code: PermissionCode) => hasPerm(instance.permissions, code);
@@ -122,12 +136,12 @@ export function InstanceLayout() {
           <div className="flex min-w-0 items-center gap-3">
             <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-12" />
             <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="truncate text-xl font-semibold tracking-tight">{instance.name}</h1>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <h1 className="min-w-0 text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">{instance.name}</h1>
                 <StatusBadge status={instance.status} title={instance.status_detail} />
                 <ModpackUpdateBadge instance={instance} />
               </div>
-              <p className="mt-0.5 truncate text-sm text-muted-foreground">
+              <p className="mt-0.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
                 {softwareLabel(instance)} · Java {instance.java_version} · port {instance.game_port}
               </p>
             </div>
@@ -152,7 +166,7 @@ export function InstanceLayout() {
           <PowerCountdownBanner instance={instance} canControl={can("instance.control")} className="mt-3" />
         )}
       </div>
-      <nav className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
+      <nav ref={tabsRef} className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
         <div className="flex min-w-max gap-1">
           {TABS.filter((t) => (!t.perm || can(t.perm)) && (!t.when || t.when(instance))).map((t) => (
             <NavLink

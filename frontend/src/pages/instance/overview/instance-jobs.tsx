@@ -12,8 +12,8 @@ import { CopyButton } from "./overview-utils";
 
 export const JOB_STATUS_META: Record<JobStatus, { label: string; className: string }> = {
   queued: { label: "Queued", className: "text-muted-foreground" },
-  running: { label: "Running", className: "text-sky-600 dark:text-sky-400" },
-  succeeded: { label: "Succeeded", className: "text-emerald-600 dark:text-emerald-400" },
+  running: { label: "Running", className: "text-sky-700 dark:text-sky-400" },
+  succeeded: { label: "Succeeded", className: "text-emerald-700 dark:text-emerald-400" },
   failed: { label: "Failed", className: "text-destructive" },
   cancelled: { label: "Cancelled", className: "text-muted-foreground" },
 };
