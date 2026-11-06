@@ -1,6 +1,7 @@
 # Development status
 
-_Last updated: 2026-11-03, end of session 1 (wrap-up at the user's request)._ Keep this file honest. Implemented,
+_Last updated: 2026-11-06 (integration coverage for snapshots, backup browser, content, import; btrfs
+delete fix). Previous: 2026-11-03, end of session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
 
@@ -12,11 +13,27 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Suite | Result |
 |---|---|
 | `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
-| `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
+| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **326 passed** (btrfs, restic, real HTTPS listener) |
 | `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
+
+### Integration coverage added 2026-11-06 (and a bug it found)
+
+New `-m integration` files: `test_integration_snapshots.py` (btrfs over a TLS-pinned node),
+`test_integration_backup_browse.py`, `test_integration_content.py` (Paper 1.21.1 + Chunky from
+Modrinth), `test_integration_import.py`; shared helpers in `tests/integration_support.py`.
+
+**Fixed: deleting a server on btrfs orphaned its snapshots.** The agent's `DELETE /v1/instances/<id>/data`
+removed the container, the folder and the restic repo but never `<data root>/snapshots/<id>/`: read-only
+subvolumes stayed on disk, invisible in the panel (also hit by migrate with "delete source"). It now
+purges them (`BtrfsSnapshots.purge()`) *before* deleting the files, so a btrfs failure leaves the server
+intact for a retry. Agent tests: `test_purge_deletes_read_only_snapshots`,
+`test_delete_data_removes_snapshots` (real btrfs). The sandbox agents on :8700/:8701 run from the main
+checkout and must be restarted to pick the fix up; until then
+`test_deleting_a_server_removes_its_snapshots` fails against :8701 (it passed against the fixed agent
+code run on :8711 with the same data root).
 
 ### Verified on real Minecraft servers through the real API (sandbox)
 
@@ -87,3 +104,6 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   `$HTTPS_PROXY` for the egress forwarder (a stale port silently breaks downloads in containers).
 * A published agent port must arrive through a network that is not an instance network, or the
   agent's own instance-network guard refuses it (`docker-compose.node.yml` uses a dedicated `api` net).
+* btrfs snapshots are read-only subvolumes outside the server folder: anything that deletes a server's
+  data must delete them with `btrfs subvolume delete` (`shutil.rmtree` cannot).
+* Several agents/sessions share one Postgres here: run pytest with a unique `MCPANEL_TEST_DB_NAME`.

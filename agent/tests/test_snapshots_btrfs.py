@@ -77,6 +77,56 @@ def test_convert_plain_directory(setup):
     assert snaps.create()["name"]
 
 
+def test_purge_deletes_read_only_snapshots(setup):
+    settings, iid = setup
+    inst = settings.instances_dir / str(iid)
+    ensure_instance_dir(settings, inst)
+    (inst / "level.dat").write_text("v1")
+    snaps = BtrfsSnapshots(settings, iid)
+    names = [snaps.create("one")["name"], snaps.create("two")["name"]]
+    assert all(is_subvolume(snaps.snap_dir / n) for n in names)
+    assert snaps.purge() == 2
+    assert not snaps.snap_dir.exists()
+    assert snaps.purge() == 0  # nothing left: a no-op
+
+
+def test_delete_data_removes_snapshots(setup, monkeypatch):
+    """Deleting a server must not orphan its snapshots (read-only subvolumes outside its folder)."""
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from mcagent import docker_ops
+    from mcagent.config import get_settings
+    from mcagent.main import app
+
+    settings, iid = setup
+    settings = settings.model_copy(update={"token": "t" * 32})
+    inst = settings.instances_dir / str(iid)
+    ensure_instance_dir(settings, inst)
+    (inst / "level.dat").write_text("v1")
+    snaps = BtrfsSnapshots(settings, iid)
+    snaps.create("kept")
+    monkeypatch.setattr(docker_ops, "remove_container", lambda *_a, **_k: False)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        api = TestClient(app)
+        headers = {"Authorization": f"Bearer {'t' * 32}"}
+        op = api.request(
+            "DELETE", f"/v1/instances/{iid}/data", json={"confirm": str(iid)}, headers=headers
+        ).json()
+        for _ in range(100):
+            state = api.get(f"/v1/operations/{op['operation']['id']}", headers=headers).json()
+            if state["status"] in ("succeeded", "failed"):
+                break
+            time.sleep(0.1)
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert state["status"] == "succeeded", state
+    assert not inst.exists()
+    assert not snaps.snap_dir.exists()
+
+
 def test_invalid_names_rejected(setup):
     settings, iid = setup
     ensure_instance_dir(settings, settings.instances_dir / str(iid))
