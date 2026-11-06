@@ -24,3 +24,6 @@ deploy/secrets/
 *.log
 .DS_Store
 celerybeat-schedule*
+
+# agent worktrees created by Claude Code (temporary)
+.claude/worktrees/
