@@ -709,8 +709,9 @@ def test_websocket_from_instance_network_is_refused(monkeypatch):
 # 8. restic output pipes cannot deadlock, and restic runs are time-limited
 # =====================================================================================
 FAKE_RESTIC = """#!{python}
-import json, signal, sys, time
+import json, os, signal, sys, time
 signal.alarm(30)  # never outlive a broken test
+open({pidfile!r}, "w").write(str(os.getpid()))
 cmd = sys.argv[1]
 if cmd == "snapshots":
     print(json.dumps([{{"id": "abcdef0123456789", "short_id": "abcdef01", "paths": ["/x"]}}]))
@@ -727,7 +728,7 @@ print(json.dumps({{"message_type": "summary", "snapshot_id": "0123456789abcdef"}
 
 def _fake_restic(tmp_path: Path, mode: str) -> Settings:
     binary = tmp_path / "fake-restic"
-    binary.write_text(FAKE_RESTIC.format(python=sys.executable, mode=mode))
+    binary.write_text(FAKE_RESTIC.format(python=sys.executable, mode=mode, pidfile=str(tmp_path / "pid")))
     binary.chmod(0o755)
     settings = Settings(data_root=tmp_path / "data", restic_password="pw", restic_binary=str(binary))
     settings.state_dir.mkdir(parents=True)
@@ -766,8 +767,8 @@ def test_restic_backup_is_killed_after_its_timeout(tmp_path, clean_env, monkeypa
     assert finished, "a hung restic was not stopped"
     assert isinstance(exc, AgentError) and exc.code == "restic_timeout"
     assert time.monotonic() - started < 10
-    out = subprocess.run(["pgrep", "-f", str(settings.restic_binary)], capture_output=True, text=True)
-    assert out.stdout.strip() == ""  # the process was killed, not orphaned
+    with pytest.raises(ProcessLookupError):  # the process was killed and reaped, not orphaned
+        os.kill(int((tmp_path / "pid").read_text()), 0)
 
 
 # =====================================================================================
@@ -863,7 +864,7 @@ def _check_restore_path(settings: Settings, monkeypatch) -> Path:  # type: ignor
     op = _restore_path(client, auth, iid, snap, "missing.txt")
     assert op["status"] == "failed" and op["error_code"] == "not_found"
     op = _restore_path(client, auth, iid, snap, "nope/deeper/missing.txt")
-    assert op["status"] == "failed" and op["error_code"] == "not_found"
+    assert op["status"] == "failed"  # restic refuses the missing parent folder
     assert not (inst / "nope").exists()  # a failed restore creates no folders
     assert _leftovers(inst) == []
     return inst
@@ -908,6 +909,9 @@ def test_full_restore_keeps_the_instance_a_subvolume(btrfs_settings, monkeypatch
     snaps = BtrfsSnapshots(btrfs_settings, iid)
     before = snaps.create("before")
     client, auth = _client_for(btrfs_settings, monkeypatch)
+    op = _full_restore(client, auth, iid, "deadbeef")  # fails after the staging subvolume exists
+    assert op["status"] == "failed" and op["error_code"] == "snapshot_not_found"
+    assert _leftovers(inst) == [] and is_subvolume(inst)
     op = _full_restore(client, auth, iid, snap)
     assert op["status"] == "succeeded", op
     assert "warnings" not in op["result"]
