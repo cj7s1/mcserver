@@ -127,6 +127,9 @@ DATABASES = {
         "PORT": env("POSTGRES_PORT", "5432"),
         "CONN_MAX_AGE": int(env("POSTGRES_CONN_MAX_AGE", "60") or 60),
         "CONN_HEALTH_CHECKS": True,
+        # Separate test databases for parallel test runs (e.g. several checkouts on one host):
+        # MCPANEL_TEST_DB_NAME=test_mcpanel_<something>. Default: Django's test_<NAME>.
+        **({"TEST": {"NAME": env("MCPANEL_TEST_DB_NAME", "")}} if env("MCPANEL_TEST_DB_NAME", "") else {}),
     }
 }
 
