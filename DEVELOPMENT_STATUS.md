@@ -14,7 +14,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
 | `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 54 tests (41 of them for the command palette) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -42,6 +42,26 @@ and the worker+beat. All tests pass on `main` of this branch:
 | TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
 | `deploy/docker-compose.node.yml` agent container (healthy, TLS-aware healthcheck) added with a pin; a real vanilla 1.21.1 server ran there (RCON ok); instance-network containers get 403 | |
 | Docker daemon restart with a running server | status "unknown: Docker is not reachable" during the outage, then the container came back and the panel went to running on its own |
+
+### Command palette + keyboard shortcuts (frontend)
+
+`frontend/src/components/command-palette/` (hooked into the top bar in `AppLayout.tsx`). Ctrl+K / Cmd+K or
+the search button opens it: navigation (permission-filtered, admin pages included), every visible server
+(archived too) with its pages, per-server Start/Stop/Restart (same rules and `useServerPower` hook as the
+library buttons; Stop and Restart **always** go through `ConfirmDialog` from the palette, Start runs
+directly like the Start buttons), toggle/system theme, recent items (localStorage, try/catch), fuzzy
+order-independent search with groups ordered by best match. Shortcuts: `?` help, `g d`/`g s`/`g m`/`g a`,
+`c` create server (only with `instance.create`); ignored while typing (inputs, textareas, selects,
+contenteditable, xterm) or while a dialog/menu is open; a switch in the help dialog turns single-key
+shortcuts off (WCAG 2.1.4). Reduced motion removes the palette's zoom animation.
+
+Verified: unit tests (key-sequence matcher, typing-target detection, fuzzy scoring, group ordering,
+storage fallbacks, permission rules) and jsdom component tests (open/close, navigation, recents, stop
+confirm cancel → no request, confirm → `POST /power`, start without confirm, current-server group,
+shortcuts on/off). Playwright against a worktree Vite + the live dev API at 1440 px and 390 px, dark and
+light, reduced motion, and Ctrl+K from inside the xterm console: 33 + 4 checks passed, no page errors.
+For the confirmation flow one server was shown as running by rewriting the API response in the browser,
+and every `/power` request was aborted in the browser; no real server was started or stopped.
 
 ### Not yet verified
 

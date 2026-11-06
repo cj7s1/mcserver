@@ -79,7 +79,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] TLS + certificate pinning for remote agents, agent-only node compose, `add_node` command — [ ] Node admin UI
 
 ## Phase 9 — UX refinement
-- [ ] Command palette, keyboard shortcuts
+- [x] Command palette (Ctrl+K / Cmd+K: navigation, servers + pages, permission-aware Start/Stop/Restart with confirmation, theme, recents) and keyboard shortcuts (`?`, `g d`, `g s`, `g m`, `g a`, `c`; single-key shortcuts can be switched off)
 - [x] Notifications (webhooks/Discord) for crashes, failed backups — [ ] admin UI
 - [x] Player activity history + metrics history (1-min sampling) incl. charts
 
