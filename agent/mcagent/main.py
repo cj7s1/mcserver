@@ -1022,7 +1022,15 @@ async def backup_restore_path(
     inst_dir = docker_ops.instance_dir(settings, instance_id)
 
     def _do(op: Operation) -> dict[str, Any]:
-        staging = settings.staging_dir / f"restore-path-{instance_id}-{int(time.time())}"
+        from .snapshots import is_volume_root
+
+        stamp = int(time.time())
+        if is_volume_root(inst_dir):
+            # A btrfs subvolume or ZFS dataset is a filesystem of its own: renaming from the shared
+            # staging directory into it fails with EXDEV, so stage inside it.
+            staging = inst_dir / f".mcpanel-restore-path-{stamp}"
+        else:
+            staging = settings.staging_dir / f"restore-path-{instance_id}-{stamp}"
         try:
             op.update(0.1, f"Restoring {body.path} from backup")
             restored = restic.restore_path(snapshot_id, parts, staging)

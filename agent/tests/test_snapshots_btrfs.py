@@ -104,3 +104,62 @@ def test_destroy_all_and_in_place_swap(setup):
     result = snaps.destroy_all()
     assert result["snapshots"] == 1 and result["warnings"] == []
     assert not snaps.snap_dir.exists()
+
+
+def _wait(op_id: str, seconds: float = 60):
+    import time
+
+    from mcagent.main import registry
+
+    op = registry.get(op_id)
+    deadline = time.monotonic() + seconds
+    while op.status in ("pending", "running"):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    return op
+
+
+@pytest.mark.skipif(shutil.which("restic") is None, reason="restic binary not installed")
+def test_backup_restore_path_into_a_subvolume(setup, monkeypatch):
+    """Single-path restores must not rename across the subvolume boundary (EXDEV)."""
+    from fastapi.testclient import TestClient
+
+    from mcagent import docker_ops
+    from mcagent.backups import Restic
+    from mcagent.config import get_settings
+    from mcagent.main import app
+    from tests.conftest import TOKEN
+
+    base, iid = setup
+    settings = Settings(
+        token=TOKEN,
+        data_root=base.data_root,
+        restic_password="test-restic-password",
+        runtime_uid=os.getuid(),
+        runtime_gid=os.getgid(),
+    )
+    for d in (settings.backups_dir, settings.staging_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    inst = settings.instances_dir / str(iid)
+    assert ensure_instance_dir(settings, inst) and is_subvolume(inst)
+    (inst / "world").mkdir()
+    (inst / "world" / "level.dat").write_text("ORIGINAL")
+    (inst / "server.properties").write_text("motd=x\n")
+    snap = Restic(settings, iid).backup(inst, [f"instance:{iid}"], [])["snapshot_id"]
+    (inst / "world" / "level.dat").write_text("BROKEN")
+    monkeypatch.setattr(docker_ops, "status", lambda i: {"running": False})
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        r = TestClient(app).post(
+            f"/v1/instances/{iid}/backups/{snap}/restore-path",
+            json={"path": "world"},
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert r.status_code == 200, r.text
+        op = _wait(r.json()["operation"]["id"])
+    finally:
+        app.dependency_overrides.pop(get_settings, None)
+    assert op.status == "succeeded", op.as_dict()
+    assert (inst / "world" / "level.dat").read_text() == "ORIGINAL"
+    assert sorted(p.name for p in inst.iterdir()) == ["server.properties", "world"]  # no staging leftovers
+    assert is_subvolume(inst)

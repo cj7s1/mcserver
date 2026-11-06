@@ -22,39 +22,55 @@ def _unescape(field: str) -> str:
     return field.replace("\\040", " ").replace("\\011", "\t").replace("\\012", "\n").replace("\\134", "\\")
 
 
-def mount_for(path: Path) -> dict[str, str] | None:
-    """Find the mount (from /proc/self/mountinfo) that contains ``path``.
+def mounts() -> list[dict[str, str]]:
+    """All mounts of this mount namespace, from /proc/self/mountinfo, in mount order.
 
     ``propagation`` holds the optional fields (``shared:N``, ``master:N``, ...), which tell
-    whether mounts made below this one propagate to other mount namespaces (ZFS needs that).
+    whether mounts made below a mount propagate to other mount namespaces (ZFS needs that).
+    ``root`` is the directory of the filesystem that is mounted: ``/`` for a whole filesystem
+    (a ZFS dataset), a subdirectory for a bind mount of one.
     """
     try:
-        real = os.path.realpath(path)
         lines = Path("/proc/self/mountinfo").read_text().splitlines()
     except OSError:
-        return None
-    best: dict[str, str] | None = None
+        return []
+    out = []
     for line in lines:
         pre, _, post = line.partition(" - ")
         fields = pre.split()
         post_fields = post.split()
         if len(fields) < 5 or len(post_fields) < 2:
             continue
-        mount_point = _unescape(fields[4])
-        root = _unescape(fields[3])
+        out.append(
+            {
+                "mount_point": _unescape(fields[4]),
+                "fstype": post_fields[0],
+                "source": post_fields[1],
+                "root": _unescape(fields[3]),
+                "propagation": " ".join(fields[6:]),
+            }
+        )
+    return out
+
+
+def mount_for(path: Path) -> dict[str, str] | None:
+    """Find the mount (from /proc/self/mountinfo) that contains ``path`` (see ``mounts``)."""
+    try:
+        real = os.path.realpath(path)
+    except OSError:
+        return None
+    best: dict[str, str] | None = None
+    for mount in mounts():
+        mount_point = mount["mount_point"]
         if real == mount_point or real.startswith(mount_point.rstrip("/") + "/") or mount_point == "/":
             if best is None or len(mount_point) >= len(best["mount_point"]):
-                best = {
-                    "mount_point": mount_point,
-                    "fstype": post_fields[0],
-                    "source": post_fields[1],
-                    "root": root,
-                    "propagation": " ".join(fields[6:]),
-                }
+                best = mount
     return best
 
 
-def describe_path(path: Path) -> dict[str, Any]:
+def describe_path(path: Path, *, same_host_path: bool = True) -> dict[str, Any]:
+    """Filesystem, space and snapshot support of ``path``; ``same_host_path``: the agent sees it at
+    the same path as the host (ZFS snapshots need that)."""
     path.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(path)
     mount = mount_for(path) or {}
@@ -70,7 +86,7 @@ def describe_path(path: Path) -> dict[str, Any]:
         from .zfs import environment_problem
 
         snapshot["provider"] = "zfs"
-        snapshot["reason"] = environment_problem(mount)
+        snapshot["reason"] = environment_problem(mount, same_host_path=same_host_path)
         snapshot["available"] = snapshot["reason"] is None
     elif fstype in ("fuse.shfs", "shfs"):
         snapshot["reason"] = (
@@ -92,7 +108,9 @@ def describe_path(path: Path) -> dict[str, Any]:
 
 def capabilities(settings: Settings) -> dict[str, Any]:
     return {
-        "instances": describe_path(settings.instances_dir),
+        "instances": describe_path(
+            settings.instances_dir, same_host_path=settings.host_instances_dir == settings.instances_dir
+        ),
         "backups": describe_path(settings.backups_dir),
     }
 

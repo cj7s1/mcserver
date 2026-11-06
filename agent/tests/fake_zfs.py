@@ -10,7 +10,8 @@ destroyed, promote moves the snapshots up to the origin, rename keeps snapshots.
 
 Failure injection: ``state["fail"]`` holds rules ``{"match": "<prefix of the argv>", "message":
 ..., "times": 1, "mode": "before"|"nomount"}``. "before" fails without doing anything;
-"nomount" (create/clone) creates the dataset but does not mount it, then fails.
+"nomount" (create/clone) creates the dataset but does not mount it, then fails. ``"exact": true``
+matches the whole argv instead of a prefix.
 """
 
 from __future__ import annotations
@@ -176,6 +177,12 @@ def value(state: dict, name: str, col: str) -> str:
         return "yes" if d["mounted"] else "no"
     if col == "written":
         return written(state, name)
+    if col.startswith("written@"):
+        snap = col.split("@", 1)[1]
+        full = snap if "@" in snap else f"{name}@{snap}"
+        if full not in state["snapshots"]:
+            raise ZfsFail(f"cannot get property '{col}': snapshot does not exist")
+        return "0" if tree(content_dir(state, name)) == tree(snapstore(full)) else "4096"
     if col in ("mountpoint", "origin", "canmount", "creation"):
         return str(d.get(col, "-"))
     return d["props"].get(col, "-")
@@ -379,7 +386,8 @@ def main(argv: list[str]) -> int:
     joined = " ".join(argv)
     rule = None
     for r in state.get("fail", []):
-        if r.get("times", 1) > 0 and joined.startswith(r["match"]):
+        hit = joined == r["match"] if r.get("exact") else joined.startswith(r["match"])
+        if r.get("times", 1) > 0 and hit:
             r["times"] = r.get("times", 1) - 1
             rule = r
             break

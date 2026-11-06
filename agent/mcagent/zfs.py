@@ -36,6 +36,7 @@ directory underneath into the Minecraft container. ``environment_problem`` check
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import re
 import shutil
@@ -64,11 +65,41 @@ ZFS_DEVICE = "/dev/zfs"
 LIST_COLUMNS = "name,creation,used,clones,mcpanel:label,mcpanel:kind,mcpanel:consistent"
 _META_PROPS = {"kind": "mcpanel:kind", "consistent": "mcpanel:consistent"}
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
+CAP_SYS_ADMIN = 21
+log = logging.getLogger(__name__)
 
 
 # -- environment ------------------------------------------------------------------------
 def in_container() -> bool:
     return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
+
+
+def has_sys_admin() -> bool:
+    """Whether this process has CAP_SYS_ADMIN (needed to mount datasets)."""
+    try:
+        for line in Path("/proc/self/status").read_text().splitlines():
+            if line.startswith("CapEff:"):
+                return bool((int(line.split()[1], 16) >> CAP_SYS_ADMIN) & 1)
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+def nested_bind(mount: dict[str, str]) -> str | None:
+    """A bind mount of a subdirectory below the data mount (e.g. a separately mounted backups dir).
+
+    With the data directory bind-mounted ``:rshared``, every bind mount the container runtime
+    places below it propagates back to the host at each container start, and those copies pile
+    up there (verified with Docker 29: 1, 3, 7, ... mounts). Datasets are mounted with root ``/``,
+    bind mounts of a directory are not, so they are told apart by the mountinfo root field.
+    """
+    base = (mount.get("mount_point") or "").rstrip("/")
+    if not base:
+        return None
+    for other in storage.mounts():
+        if other["mount_point"].startswith(base + "/") and other.get("root", "/") != "/":
+            return other["mount_point"]
+    return None
 
 
 def environment_problem(mount: dict[str, str] | None, *, same_host_path: bool = True) -> str | None:
@@ -81,13 +112,23 @@ def environment_problem(mount: dict[str, str] | None, *, same_host_path: bool = 
         return "zfs tools are not available: zfsutils-linux is not installed in the agent image"
     if not os.path.exists(ZFS_DEVICE):
         return "/dev/zfs is not available to the agent (pass it to the agent container as a device, see docs/UNRAID.md)"
+    if not has_sys_admin():
+        return "The agent lacks CAP_SYS_ADMIN, which mounting ZFS datasets needs (cap_add: [SYS_ADMIN], see docs/UNRAID.md)"
     if not same_host_path:
         return "ZFS snapshots need the data directory at the same path inside the agent as on the host (AGENT_HOST_DATA_ROOT differs)"
-    if in_container() and "shared:" not in (mount.get("propagation") or ""):
-        return (
-            "The data directory is not bind-mounted into the agent with shared propagation (:rshared), so "
-            "datasets the agent mounts would be invisible to Docker; see docs/UNRAID.md"
-        )
+    if in_container():
+        if "shared:" not in (mount.get("propagation") or ""):
+            return (
+                "The data directory is not bind-mounted into the agent with shared propagation (:rshared), so "
+                "datasets the agent mounts would be invisible to Docker; see docs/UNRAID.md"
+            )
+        leak = nested_bind(mount)
+        if leak:
+            return (
+                f"{leak} is a separate bind mount inside the shared data directory: with :rshared, Docker copies "
+                "it onto the host at every agent start and the copies pile up. Set MCPANEL_BACKUP_DIR to a "
+                "folder outside MCPANEL_DATA_DIR (see docs/UNRAID.md)"
+            )
     if not valid_parent(mount.get("source") or ""):
         return f"The ZFS dataset name '{mount.get('source')}' contains characters MCPanel does not handle"
     return None
@@ -122,8 +163,11 @@ def _try(args: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str
 
 
 def _message(proc: subprocess.CompletedProcess[str]) -> str:
-    lines = (proc.stderr or proc.stdout or "").strip().splitlines()
-    return lines[-1][:300] if lines else f"exit status {proc.returncode}"
+    """The line that explains a zfs failure: 'cannot ...' (later lines are often hints or lists)."""
+    lines = [line.strip() for line in (proc.stderr or proc.stdout or "").splitlines() if line.strip()]
+    if not lines:
+        return f"exit status {proc.returncode}"
+    return next((line for line in lines if line.startswith("cannot ")), lines[-1])[:300]
 
 
 def _run(args: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str]:
@@ -160,9 +204,17 @@ def _clean(value: str) -> str:
 
 
 def dataset_mounted_at(path: Path) -> str | None:
-    """The ZFS dataset mounted exactly at ``path``, if any."""
+    """The ZFS dataset mounted exactly at ``path``, if any.
+
+    A bind mount of a directory of some dataset also shows that dataset as its source, but with
+    a root other than ``/``: it is not the dataset of ``path``.
+    """
     mount = storage.mount_for(path) or {}
-    if mount.get("fstype") == "zfs" and mount.get("mount_point") == os.path.realpath(path):
+    if (
+        mount.get("fstype") == "zfs"
+        and mount.get("mount_point") == os.path.realpath(path)
+        and mount.get("root", "/") == "/"
+    ):
         return mount.get("source")
     return None
 
@@ -237,9 +289,33 @@ class ZfsSnapshots:
         return environment_problem(self._parent_mount(), same_host_path=same)
 
     def dataset(self) -> str | None:
-        """The dataset mounted at the instance directory (validated), or None for a plain folder."""
+        """The dataset mounted at the instance directory (validated), or None for a plain folder.
+
+        Anything else mounted at the folder is refused rather than treated as the server's own
+        dataset: a bind mount names the dataset it comes from, and rolling back, deleting or
+        destroying that one would hit data that is not this server's.
+        """
+        mount = storage.mount_for(self.instance_dir) or {}
+        if mount.get("mount_point") != os.path.realpath(self.instance_dir):
+            return None  # a plain folder on the data directory's filesystem
         name = dataset_mounted_at(self.instance_dir)
-        return _check_dataset(name) if name else None
+        if name is None:
+            raise AgentError(
+                "The server folder is a mount point but not a ZFS dataset of its own (a bind mount?); "
+                "MCPanel does not manage snapshots for it",
+                "invalid_dataset",
+                409,
+            )
+        _check_dataset(name)
+        mountpoint = _prop(name, "mountpoint")
+        if mountpoint != str(self.host_instance_dir):
+            raise AgentError(
+                f"ZFS dataset {name} is mounted at the server folder but its mountpoint is {mountpoint!r} "
+                "(a bind mount?); MCPanel only manages a dataset whose mountpoint is the server folder",
+                "invalid_dataset",
+                409,
+            )
+        return name
 
     def _history_re(self, live: str) -> re.Pattern[str]:
         return re.compile(rf"^{re.escape(live)}{HISTORY_SUFFIX_RE}$")
@@ -490,9 +566,15 @@ class ZfsSnapshots:
             raise self._dependents_error(name, row["clones"], family)
         _run(["destroy", f"{row['dataset']}@{name}"])
         dataset = row["dataset"]
-        if dataset != live and not self._snapshot_rows([dataset]):
-            # A history dataset without snapshots holds nothing anyone can roll back to.
-            _run(["destroy", dataset])
+        if dataset == live:
+            return
+        try:
+            if not self._snapshot_rows([dataset]):
+                # A history dataset without snapshots holds nothing anyone can roll back to.
+                _run(["destroy", dataset])
+        except AgentError as exc:
+            # The snapshot is gone, which is what was asked; the empty dataset goes with the server.
+            log.warning("Could not remove the empty history dataset %s: %s", dataset, exc)
 
     # -- rollback ------------------------------------------------------------------------
     def restore(self, name: str) -> dict[str, Any]:
@@ -506,10 +588,9 @@ class ZfsSnapshots:
             if _exists(candidate):
                 raise AgentError("Another rollback ran this second; retry", "rollback_conflict", 409)
         warnings: list[str] = []
-        # The state being replaced must stay reachable: the panel takes a safety snapshot first,
-        # this covers callers that did not (or wrote something after it).
-        existing = self._snapshot_rows([live])
-        if not existing or _prop(live, "written") not in ("0", ""):
+        # The state being replaced must stay reachable from the list: the panel takes a safety
+        # snapshot first, this covers callers that did not (or wrote something after it).
+        if not self._state_captured(live):
             auto = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-before-rollback"
             if not any(r["name"] == auto for r in self._snapshot_rows(family)):
                 self._snapshot(
@@ -592,11 +673,12 @@ class ZfsSnapshots:
                     500,
                 ) from exc
             raise
-        # The rollback is done; the rest only tidies up and never undoes it.
+        # The rollback is done; the rest only tidies up, never undoes it and never raises.
         try:
             _run(["set", f"mcpanel:instance={self.instance_id}", history])
         except AgentError as exc:
             warnings.append(f"Could not tag the history dataset {history}: {exc!s}")
+        origin = "its origin"
         for _ in range(64):
             try:
                 origin = _prop(live, "origin")
@@ -609,22 +691,44 @@ class ZfsSnapshots:
         warnings += self._tidy_history(live)
         return {"restored": name, "dataset": live, "history_dataset": history, "warnings": warnings}
 
+    def _state_captured(self, live: str) -> bool:
+        """True if the files of ``live`` are exactly its newest MCPanel snapshot.
+
+        Judged against our own snapshots only: a newer snapshot by another tool (sanoid,
+        zfs-auto-snapshot, ...) is not listed in the panel, so it does not count.
+        """
+        ours = [row for row in self._snapshot_rows([live]) if row["ours"]]
+        if not ours:
+            return False
+        newest = max(ours, key=lambda r: (int(r["creation"]) if r["creation"].isdigit() else 0, r["name"]))
+        try:
+            return _prop(live, f"written@{newest['name']}") == "0"
+        except AgentError:
+            return False  # unknown: take a snapshot to be safe
+
     def _tidy_history(self, live: str) -> list[str]:
         """Destroy history datasets that have no snapshots and no changes of their own.
 
         After a promote a history dataset can be left with no snapshots at all, its state being
         identical to the snapshot it now hangs off ('written' = 0): nothing would be lost.
+        Problems are returned as warnings: the rollback itself is already done.
         """
         warnings = []
-        family = self._family(live)
-        with_snaps = {row["dataset"] for row in self._snapshot_rows(family)}
+        try:
+            family = self._family(live)
+            with_snaps = {row["dataset"] for row in self._snapshot_rows(family)}
+        except AgentError as exc:
+            return [f"Could not check the history datasets: {exc!s}"]
         for dataset in family[1:]:
             if dataset in with_snaps:
                 continue
-            if _prop(dataset, "written") in ("0", ""):
-                _run(["destroy", dataset])
-            else:
-                warnings.append(f"History dataset {dataset} has changes but no snapshots; kept")
+            try:
+                if _prop(dataset, "written") == "0":
+                    _run(["destroy", dataset])
+                else:
+                    warnings.append(f"History dataset {dataset} has changes but no snapshots; kept")
+            except AgentError as exc:
+                warnings.append(f"Could not remove the empty history dataset {dataset}: {exc!s}")
         return warnings
 
     # -- instance deletion ---------------------------------------------------------------

@@ -150,7 +150,14 @@ no kernel module, no `zed`). The agent container additionally needs:
   Unraid's own Docker templates this access mode is called *RW/Shared*.
 
 `deploy/docker-compose.override.yml` (Compose merges volumes by container path, so this entry replaces
-the data directory mount of `docker-compose.yml`; keep host path and container path identical):
+the data directory mount of `docker-compose.yml`; keep host path and container path identical).
+**`MCPANEL_BACKUP_DIR` must point outside `MCPANEL_DATA_DIR`** (the Unraid default above,
+`/mnt/user/backups/mcpanel`, does): with `:rshared`, every other bind mount Docker places *inside* the
+data directory (the default backups directory `${MCPANEL_DATA_DIR}/backups` is one) is copied back onto
+the host at each agent start, and the copies pile up (1, 3, 7, ... mounts; reproduced with Docker 29).
+That can keep the pool busy when the array stops. The agent refuses ZFS snapshots and says so while
+such a mount exists. If you already have them, `findmnt -R ${MCPANEL_DATA_DIR}` on the host lists them;
+stop the stack and run `umount` on the extra entries (or reboot) after moving the backups directory.
 
 ```yaml
 services:
@@ -179,6 +186,16 @@ Notes and limits:
   server stays snapshot-capable after a backup restore.
 * Each dataset is a separate mount, so tools on the host that walk `/mnt/cache/appdata` (backup plugins,
   the mover) see one more filesystem per server. Keep the share on the pool (no mover to the array).
+* **Other containers** that bind-mount the whole appdata share (backup containers such as Duplicati or
+  Kopia) get a private copy of the mounts that existed when *they* started: they don't see a server
+  dataset created later (only the empty folder underneath), and after a rollback they keep the old
+  dataset mounted until they are restarted, which also stops MCPanel from destroying it ("dataset is
+  busy"). Restart them after creating servers or rolling back, or give them the share with
+  `:rslave` propagation (Unraid template access mode *RW/Slave*).
+* Verified here only with a stand-in: in a Docker 29 sandbox, a mount the agent container made below its
+  `:rshared` data mount (tmpfs instead of a dataset) appeared on the host and in a Minecraft-like
+  container started afterwards, an unmount + new mount (what a rollback does) reached both, and a
+  restarted agent saw it. Real ZFS and real Unraid are still unverified.
 
 ## 7. More than one server box
 

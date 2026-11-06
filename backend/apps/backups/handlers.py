@@ -13,7 +13,7 @@ from apps.instances.handlers import apply_container, ensure_stopped
 from apps.instances.models import Instance
 from apps.jobs.models import Job
 from apps.jobs.runner import JobContext, register
-from apps.nodes.client import AgentClient
+from apps.nodes.client import AgentClient, AgentError
 
 from .models import Backup, BackupKind, BackupStatus, RetentionPolicy
 from .retention import select_to_delete
@@ -245,7 +245,15 @@ def snapshot_create(job: Job, ctx: JobContext) -> dict[str, Any]:
     if keep and job.params.get("kind") == "scheduled":
         scheduled = [s for s in client.snapshots(instance.id)["snapshots"] if s.get("kind") == "scheduled"]
         for old in scheduled[int(keep) :]:
-            client.delete_snapshot(instance.id, old["name"])
+            try:
+                client.delete_snapshot(instance.id, old["name"])
+            except AgentError as exc:
+                # ZFS: snapshots kept from before a rollback are based on it. Keep it and go on,
+                # instead of failing every scheduled run until someone deletes those by hand.
+                if exc.error_code != "snapshot_has_dependents":
+                    raise
+                ctx.log(f"Retention: kept snapshot {old['name']}: {exc.detail}")
+                continue
             ctx.log(f"Retention: deleted snapshot {old['name']}")
     return result
 

@@ -99,6 +99,8 @@ class FakeAgent:
         self.snaps: dict[str, list[dict[str, Any]]] = {}
         self.snapshot_provider = "btrfs"  # tests may switch to "zfs"
         self.snapshot_delete_error: Exception | None = None
+        self.snapshot_dependents: set[str] = set()  # ZFS: names other datasets are cloned from
+        self.delete_data_warnings: list[str] = []
         self.operations: dict[str, dict[str, Any]] = {}
         self.foreign_ports: list[dict[str, Any]] = []
         self.remote_files: dict[str, bytes] = {}
@@ -512,7 +514,7 @@ class FakeAgent:
         self.containers.pop(iid, None)
         self.fs.pop(iid, None)
         self.repos.pop(iid, None)
-        return self._op("delete_data", iid, {"deleted": True})
+        return self._op("delete_data", iid, {"deleted": True, "warnings": list(self.delete_data_warnings)})
 
     def clone(self, instance_id: Any, target_id: Any, exclude_worlds: bool = False) -> dict[str, Any]:
         src, dst = str(instance_id), str(target_id)
@@ -758,6 +760,8 @@ class FakeAgent:
         iid = str(instance_id)
         if self.snapshot_delete_error is not None:
             raise self.snapshot_delete_error
+        if name in self.snapshot_dependents:
+            raise self._err(f"Snapshot {name} cannot be deleted yet", "snapshot_has_dependents", 409)
         before = len(self.snaps.get(iid, []))
         self.snaps[iid] = [s for s in self.snaps.get(iid, []) if s["name"] != name]
         if len(self.snaps[iid]) == before:

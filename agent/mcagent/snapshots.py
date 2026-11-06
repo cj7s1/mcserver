@@ -280,7 +280,7 @@ def swap_contents(target: Path, staging: Path) -> None:
     moved_new: list[str] = []
     try:
         for child in sorted(target.iterdir()):
-            if child.name in (staging.name, old.name):
+            if child.name in (staging.name, old.name, ".zfs"):  # .zfs: ZFS control dir (snapdir=visible)
                 continue
             child.rename(old / child.name)
             moved_old.append(child.name)

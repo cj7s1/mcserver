@@ -11,9 +11,9 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **432 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
+| `backend: uv run pytest -q -m "not integration"` | **434 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **376 passed** (btrfs, restic, real HTTPS listener, fake-`zfs` ZFS suite) |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **386 passed** (btrfs, restic, real HTTPS listener, fake-`zfs` ZFS suite) |
 | `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 16 tests |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
@@ -76,13 +76,33 @@ Status: **implemented + unit-tested; NOT verified on real ZFS.**
 * Image: `zfsutils-linux` 2.3.9 (Debian trixie contrib) installs in `python:3.13-slim` (+22 packages,
   ~33 MB) — verified with the same `apt-get install` in a throwaway container; the full agent image build
   was not run here because the sandbox proxy rejects plain-HTTP apt (405).
-* Tests: `agent/tests/test_snapshots_zfs.py` (51 tests) drive a fake `zfs` executable
+* Tests: `agent/tests/test_snapshots_zfs.py` (60 tests after the review) drive a fake `zfs` executable
   (`tests/fake_zfs.py`, emulates datasets/snapshots/clones/promote with real files) incl. real restic
   restore into a dataset; btrfs tests (real loopback btrfs) extended. Playwright: Backups page at 1440 and
   390 px with the real btrfs node and route-mocked ZFS responses (ready / convert / unavailable / dialogs),
   no horizontal overflow.
 * Needs a real host: a ZFS pool, the override in docs/UNRAID.md section 6, and a check that a dataset
   created by the agent is visible to the Minecraft container (shared propagation).
+* Independent review (same day), fixed with regression tests:
+  * Single-path restores from the backup browser failed with EXDEV on every btrfs subvolume and ZFS
+    dataset (staging was renamed across filesystems); now staged inside the volume (real btrfs test
+    reproduces the old failure).
+  * Docker copies bind mounts *inside* an `:rshared` data mount back onto the host at every agent start and
+    they multiply (reproduced: 1, 3, 7 stacked mounts) — the default `${MCPANEL_DATA_DIR}/backups` mount
+    does that. The agent now refuses ZFS snapshots while such a mount exists; docs require
+    `MCPANEL_BACKUP_DIR` outside the data dir. The propagation design itself was checked with a tmpfs
+    stand-in in Docker 29 (agent mount visible on the host and in a later container; remount propagates).
+  * A bind mount at a server folder was taken for that server's dataset (server delete would have run
+    `zfs destroy -r` on the bind's source dataset); now refused unless the dataset's `mountpoint` is the
+    server folder.
+  * A successful rollback was reported as failed when promote/tidy-up hit an error (and `origin` could be
+    unbound); these are warnings now. Deleting the last snapshot of a history dataset no longer fails when
+    the empty dataset can't be removed.
+  * The "is the current state captured" check before a rollback counted snapshots of other tools
+    (sanoid, zfs-auto-snapshot); it now uses `written@<newest MCPanel snapshot>`.
+  * Scheduled-snapshot retention failed every run on ZFS once a pruned snapshot had dependents; it keeps
+    that snapshot and logs it. The capability also reports a missing CAP_SYS_ADMIN, and the node storage
+    view honours `AGENT_HOST_DATA_ROOT`; server delete logs agent warnings in the job.
 
 ## Next recommended tasks (in order)
 

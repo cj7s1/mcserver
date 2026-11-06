@@ -73,3 +73,36 @@ def test_zfs_provider_is_passed_through(server, fake_agent, client_for, users, d
     job = Job.objects.get(pk=r.json()["id"])
     assert job.status == JobStatus.FAILED and "before a rollback" in job.error
     assert job.error_code == "snapshot_has_dependents"
+
+
+def _run(capture, job_kind, server, **params):
+    with capture(execute=True):
+        job = runner.enqueue(job_kind, title=job_kind, instance=server, params=params)
+    job.refresh_from_db()
+    return job
+
+
+def test_scheduled_retention_keeps_snapshots_with_dependents(server, fake_agent, django_capture_on_commit_callbacks):
+    """ZFS refuses to delete a snapshot that history datasets depend on: retention skips it."""
+    cap = django_capture_on_commit_callbacks
+    for _ in range(4):
+        assert _run(cap, "snapshot_create", server, kind="scheduled", keep=4).status == JobStatus.SUCCEEDED
+    names = [s["name"] for s in fake_agent.snapshots(server.id)["snapshots"]]  # newest first
+    assert len(names) == 4
+    fake_agent.snapshot_dependents = {names[2]}
+    job = _run(cap, "snapshot_create", server, kind="scheduled", keep=1)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    left = [s["name"] for s in fake_agent.snapshots(server.id)["snapshots"]]
+    assert names[2] in left and len(left) == 2  # the new one + the one with dependents
+    assert any("kept snapshot" in line and names[2] in line for line in job.log)
+    # any other delete error still fails the job
+    fake_agent.snapshot_delete_error = fake_agent._err("btrfs failed: boom", "btrfs_failed", 500)
+    job = _run(cap, "snapshot_create", server, kind="scheduled", keep=1)
+    assert job.status == JobStatus.FAILED and "boom" in job.error
+
+
+def test_delete_server_logs_agent_warnings(server, fake_agent, django_capture_on_commit_callbacks):
+    fake_agent.delete_data_warnings = ["Could not delete snapshot 20261101T000000Z: btrfs failed: busy"]
+    job = _run(django_capture_on_commit_callbacks, "delete", server)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert any("Could not delete snapshot" in line for line in job.log)

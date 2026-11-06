@@ -14,6 +14,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -32,6 +33,7 @@ class FakeZfs:
         self.state_dir.mkdir()
         self.state_file = self.state_dir / "state.json"
         self.propagation = "shared:42"
+        self.extra_mounts: list[dict[str, str]] = []
         self.save(
             {
                 "clock": 1_800_000_000,
@@ -57,10 +59,17 @@ class FakeZfs:
         self.state_file.write_text(json.dumps(state))
 
     def fail(
-        self, match: str, message: str = "injected failure", mode: str = "before", times: int = 1
+        self,
+        match: str,
+        message: str = "injected failure",
+        mode: str = "before",
+        times: int = 1,
+        exact: bool = False,
     ) -> None:
         state = self.state()
-        state["fail"].append({"match": match, "message": message, "mode": mode, "times": times})
+        state["fail"].append(
+            {"match": match, "message": message, "mode": mode, "times": times, "exact": exact}
+        )
         self.save(state)
 
     def calls(self) -> list[list[str]]:
@@ -81,20 +90,29 @@ class FakeZfs:
     def snapshots(self) -> list[str]:
         return sorted(self.state()["snapshots"])
 
+    def mounts(self) -> list[dict[str, str]]:
+        """Mounted datasets as mountinfo shows them (root '/'), plus ``extra_mounts``."""
+        out = [
+            {
+                "mount_point": d["mountpoint"],
+                "fstype": "zfs",
+                "source": name,
+                "root": "/",
+                "propagation": self.propagation,
+            }
+            for name, d in self.state()["datasets"].items()
+            if d["mounted"]
+        ]
+        return out + self.extra_mounts
+
     def mount_for(self, path: Path) -> dict[str, str]:
         real = os.path.realpath(path)
         best = None
-        for name, d in self.state()["datasets"].items():
-            mp = d["mountpoint"]
-            if d["mounted"] and (real == mp or real.startswith(mp.rstrip("/") + "/")):
-                if best is None or len(mp) > len(best["mount_point"]):
-                    best = {
-                        "mount_point": mp,
-                        "fstype": "zfs",
-                        "source": name,
-                        "root": "/",
-                        "propagation": self.propagation,
-                    }
+        for m in self.mounts():  # mount order: a later mount at the same point is on top
+            mp = m["mount_point"]
+            if real == mp or real.startswith(mp.rstrip("/") + "/"):
+                if best is None or len(mp) >= len(best["mount_point"]):
+                    best = m
         return best or {
             "mount_point": "/",
             "fstype": "ext4",
@@ -118,6 +136,8 @@ def fake(agent_settings, tmp_path, monkeypatch) -> FakeZfs:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_ZFS_STATE", str(fz.state_dir))
     monkeypatch.setattr(storage, "mount_for", fz.mount_for)
+    monkeypatch.setattr(storage, "mounts", fz.mounts)
+    monkeypatch.setattr(zfs, "has_sys_admin", lambda: True)
     monkeypatch.setattr(zfs, "ZFS_DEVICE", str(device))
     monkeypatch.setattr(zfs, "in_container", lambda: True)
     return fz
@@ -148,10 +168,58 @@ def test_environment_problems(fake, monkeypatch):
     assert "characters" in zfs.environment_problem({**base, "source": "tank/app data"})
     monkeypatch.setattr(zfs, "in_container", lambda: False)  # agent on the host: no propagation needed
     assert zfs.environment_problem({**base, "propagation": ""}) is None
+    monkeypatch.setattr(zfs, "has_sys_admin", lambda: False)
+    assert "CAP_SYS_ADMIN" in zfs.environment_problem(base)
     monkeypatch.setattr(zfs, "ZFS_DEVICE", "/nonexistent/zfs")
     assert "/dev/zfs" in zfs.environment_problem(base)
     monkeypatch.setattr(zfs.shutil, "which", lambda name: None)
     assert "zfs tools are not available" in zfs.environment_problem(base)
+
+
+def test_has_sys_admin_reads_the_effective_capabilities(monkeypatch):
+    real = zfs.Path
+
+    def status(caps: str):
+        class FakePath(type(Path())):
+            def read_text(self, *a, **k):
+                if str(self) == "/proc/self/status":
+                    return f"Name:\tpython\nCapInh:\t0000000000000000\nCapEff:\t{caps}\n"
+                return super().read_text(*a, **k)
+
+        monkeypatch.setattr(zfs, "Path", FakePath)
+
+    status("00000000a80425fb")  # Docker's default set: no CAP_SYS_ADMIN
+    assert zfs.has_sys_admin() is False
+    status("00000000a82425fb")  # + SYS_ADMIN (bit 21)
+    assert zfs.has_sys_admin() is True
+    status("garbage")
+    assert zfs.has_sys_admin() is False
+    monkeypatch.setattr(zfs, "Path", real)
+
+
+def test_nested_bind_under_the_shared_data_mount_is_refused(agent_settings, fake, monkeypatch):
+    """Docker re-mounts binds below an :rshared mount onto the host at every start (they pile up)."""
+    backups = str(agent_settings.data_root / "backups")
+    fake.extra_mounts = [
+        {
+            "mount_point": backups,
+            "fstype": "zfs",
+            "source": PARENT,
+            "root": "/appdata/backups",
+            "propagation": "",
+        }
+    ]
+    cap = ZfsSnapshots(agent_settings, uuid.uuid4()).capability()
+    assert cap["available"] is False and "MCPANEL_BACKUP_DIR" in cap["reason"] and backups in cap["reason"]
+    path = agent_settings.instances_dir / str(uuid.uuid4())
+    assert ensure_instance_dir(agent_settings, path) is False and fake.mutating() == []
+    # a dataset mounted below the data directory (root '/') is fine, and so is the agent on the host
+    fake.extra_mounts[0]["root"] = "/"
+    assert ZfsSnapshots(agent_settings, uuid.uuid4()).capability()["available"] is True
+    fake.extra_mounts[0]["root"] = "/appdata/backups"
+    fake.propagation = ""
+    monkeypatch.setattr(zfs, "in_container", lambda: False)
+    assert ZfsSnapshots(agent_settings, uuid.uuid4()).capability()["available"] is True
 
 
 def test_storage_reports_zfs(agent_settings, fake):
@@ -321,6 +389,41 @@ def test_weird_dataset_at_instance_path_is_refused(agent_settings, fake, inst):
         snaps.list()
 
 
+@pytest.mark.parametrize("root", ["/worlds/survival", "/"])
+def test_bind_mount_at_the_instance_path_is_never_taken_for_its_dataset(agent_settings, fake, root):
+    """A bind mount names the dataset it comes from; destroying or renaming that one would be data loss."""
+    iid = uuid.uuid4()
+    path = agent_settings.instances_dir / str(iid)
+    path.mkdir()
+    state = fake.state()
+    state["datasets"]["tank/worlds"] = {
+        "mountpoint": "/mnt/worlds",
+        "mounted": False,
+        "canmount": "on",
+        "origin": "-",
+        "props": {},
+        "external": True,
+    }
+    fake.save(state)
+    fake.extra_mounts = [
+        {
+            "mount_point": str(path),
+            "fstype": "zfs",
+            "source": "tank/worlds",
+            "root": root,
+            "propagation": "shared:9",
+        }
+    ]
+    snaps = ZfsSnapshots(agent_settings, iid)
+    cap = snaps.capability()
+    assert cap["available"] is False and "bind mount" in cap["reason"]
+    for action in (snaps.destroy_all, snaps.convert, lambda: snaps.create("x"), snaps.list):
+        with pytest.raises(AgentError) as err:
+            action()
+        assert err.value.code in ("invalid_dataset", "snapshots_unavailable")
+    assert fake.mutating() == [] and "tank/worlds" in fake.datasets()
+
+
 def test_create_requires_a_dataset(agent_settings, fake):
     iid = uuid.uuid4()
     (agent_settings.instances_dir / str(iid)).mkdir()
@@ -418,6 +521,74 @@ def test_rollback_takes_its_own_safety_snapshot_if_state_is_uncaptured(fake, ins
     time.sleep(1.01)
     snaps.restore(auto[0]["name"])
     assert (path / "a.txt").read_text() == "changed-without-snapshot"
+
+
+def test_rollback_does_not_count_foreign_snapshots_as_a_safety_snapshot(fake, inst):
+    """A newer snapshot by another tool (sanoid, zfs-auto-snapshot) is not listed in the panel."""
+    iid, path, snaps = inst
+    live = f"{PARENT}/mcpanel-{iid}"
+    write(path, "a.txt", "one")
+    s1 = snaps.create("one")["name"]
+    write(path, "a.txt", "changed")
+    state = fake.state()
+    state["clock"] += 1
+    foreign = f"{live}@autosnap_2026-11-06_hourly"
+    shutil.copytree(path, fake.state_dir / "snaps" / quote(foreign, safe=""), symlinks=True)
+    state["snapshots"][foreign] = {"creation": state["clock"], "props": {}}
+    fake.save(state)
+    time.sleep(1.01)
+    snaps.restore(s1)
+    assert (path / "a.txt").read_text() == "one"
+    auto = [s for s in snaps.list() if s["name"].endswith("-before-rollback")]
+    assert len(auto) == 1 and auto[0]["retained"] is True  # the replaced state is reachable from the panel
+    time.sleep(1.01)
+    snaps.restore(auto[0]["name"])
+    assert (path / "a.txt").read_text() == "changed"
+
+
+def test_rollback_promote_problems_are_warnings_not_failures(fake, inst):
+    """Once the clone is in place the rollback is done; a failing promote must not fail it."""
+    iid, path, snaps = inst
+    live = f"{PARENT}/mcpanel-{iid}"
+    write(path, "a.txt", "1")
+    s1 = snaps.create("one")["name"]
+    write(path, "a.txt", "2")
+    _safety(snaps, s1)
+    fake.fail(f"list -H -p -o origin {live}", "cannot open: I/O error", exact=True)
+    result = snaps.restore(s1)
+    assert (path / "a.txt").read_text() == "1" and snaps.capability()["instance_ready"]
+    assert any("Could not promote" in w and "I/O error" in w for w in result["warnings"]), result
+
+
+def test_rollback_tidy_up_problems_are_warnings_not_failures(fake, inst):
+    _iid, path, snaps = inst
+    write(path, "a.txt", "1")
+    s1 = snaps.create("one")["name"]
+    write(path, "a.txt", "2")
+    safety = _safety(snaps, s1)
+    history = snaps.restore(s1)["history_dataset"]
+    time.sleep(1.01)
+    _safety(snaps, safety)
+    # rolling back to the snapshot kept on 'history' empties it; removing it fails
+    fake.fail(f"destroy {history}", "cannot destroy: dataset is busy", exact=True)
+    result = snaps.restore(safety)
+    assert (path / "a.txt").read_text() == "2" and snaps.capability()["instance_ready"]
+    assert any("Could not remove the empty history dataset" in w for w in result["warnings"]), result
+    assert history in fake.datasets()
+
+
+def test_delete_last_history_snapshot_when_the_dataset_cannot_be_removed(fake, inst):
+    _iid, path, snaps = inst
+    write(path, "a.txt", "1")
+    s1 = snaps.create("one")["name"]
+    write(path, "a.txt", "2")
+    safety = _safety(snaps, s1)
+    history = snaps.restore(s1)["history_dataset"]
+    fake.fail(f"destroy {history}", "cannot destroy: dataset is busy", exact=True)
+    snaps.delete(safety)  # the snapshot is gone, which is what was asked
+    assert safety not in {s["name"] for s in snaps.list()}
+    assert history in fake.datasets()
+    assert snaps.destroy_all()["destroyed"][0] == history  # removed with the server
 
 
 def test_rollback_busy_dataset_is_undone(fake, inst):
@@ -674,6 +845,41 @@ def test_delete_instance_destroys_its_datasets(api, auth, agent_settings, fake, 
     assert op.status == "succeeded", op.as_dict()
     assert op.result["snapshots_deleted"] == 1
     assert fake.datasets() == [PARENT] and not path.exists()
+
+
+@pytest.mark.skipif(shutil.which("restic") is None, reason="restic binary not installed")
+def test_restic_restore_path_into_a_dataset_stages_inside_it(
+    api, auth, agent_settings, fake, inst, monkeypatch
+):
+    """A dataset is its own filesystem: staging must be inside it (the btrfs test proves EXDEV)."""
+    from mcagent import docker_ops
+    from mcagent.backups import Restic
+    from mcagent.main import registry
+
+    iid, path, _snaps = inst
+    monkeypatch.setattr(docker_ops, "status", lambda i: {"running": False})
+    write(path, "world/level.dat", "ORIGINAL")
+    snap = Restic(agent_settings, iid).backup(path, [f"instance:{iid}"], [])["snapshot_id"]
+    write(path, "world/level.dat", "BROKEN")
+    staged: list[Path] = []
+    real_restore_path = Restic.restore_path
+
+    def spy(self, snapshot_id, rel_parts, staging):
+        staged.append(staging)
+        return real_restore_path(self, snapshot_id, rel_parts, staging)
+
+    monkeypatch.setattr(Restic, "restore_path", spy)
+    r = api.post(f"/v1/instances/{iid}/backups/{snap}/restore-path", json={"path": "world"}, headers=auth)
+    assert r.status_code == 200, r.text
+    op = registry.get(r.json()["operation"]["id"])
+    deadline = time.monotonic() + 60
+    while op.status in ("pending", "running"):
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    assert op.status == "succeeded", op.as_dict()
+    assert staged and staged[0].parent == path
+    assert (path / "world/level.dat").read_text() == "ORIGINAL"
+    assert sorted(p.name for p in path.iterdir()) == ["world"]
 
 
 @pytest.mark.skipif(shutil.which("restic") is None, reason="restic binary not installed")
