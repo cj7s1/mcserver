@@ -267,6 +267,70 @@ def test_rollback_failure_keeps_the_old_world_aside(sr, inst, monkeypatch):
     assert kept[0].name in str(exc.value)
 
 
+@pytest.mark.parametrize(
+    ("archive", "level", "layout"),
+    [
+        ("world/w.zip", "world", "vanilla"),
+        ("world/backups/w.zip", "world", "vanilla"),
+        ("world_nether/w.zip", "world", "bukkit"),
+        ("worlds/s_the_end/w.zip", "worlds/s", "bukkit"),
+    ],
+)
+def test_archive_inside_a_replaced_world_folder_is_refused(sr, inst, archive, level, layout):
+    old_world(inst, level)
+    (inst / archive).parent.mkdir(parents=True, exist_ok=True)
+    make_zip(inst / archive, {"level.dat": LEVEL_DAT, "region/r.0.0.mca": "new"})
+    with pytest.raises(AgentError) as exc:
+        world.replace(sr, archive, level, layout)
+    assert exc.value.code == "archive_in_world"
+    assert (inst / archive).exists()  # the archive would have been deleted with the old world
+    assert (inst / level / "region" / "r.0.0.mca").read_text() == "old"
+    assert no_leftovers(inst)
+
+
+def test_archive_next_to_the_world_is_fine(sr, inst):
+    old_world(inst)
+    (inst / "world_backups").mkdir()  # same prefix, different folder
+    make_zip(inst / "world_backups" / "w.zip", {"level.dat": LEVEL_DAT, "region/r.0.0.mca": "new"})
+    world.replace(sr, "world_backups/w.zip", "world", "vanilla")
+    assert (inst / "world" / "region" / "r.0.0.mca").read_text() == "new"
+    assert (inst / "world_backups" / "w.zip").exists()
+
+
+def test_a_file_where_the_world_folder_should_be_is_not_deleted(sr, inst):
+    (inst / "world_nether").write_text("not a folder")
+    make_zip(inst / "up.zip", {"level.dat": LEVEL_DAT})
+    with pytest.raises(AgentError) as exc:
+        world.replace(sr, "up.zip", "world", "bukkit")
+    assert exc.value.code == "not_a_directory"
+    assert (inst / "world_nether").read_text() == "not a folder"
+    assert not (inst / "world").exists() and no_leftovers(inst)
+
+
+def test_macos_resource_fork_folders_are_ignored(sr, inst):
+    old_world(inst)
+    # Finder zips add __MACOSX/ next to the content; it must not hide a nested world ...
+    make_zip(
+        inst / "nested.zip",
+        {
+            "Backups/MyWorld/level.dat": LEVEL_DAT,
+            "Backups/MyWorld/region/r.0.0.mca": "new",
+            "__MACOSX/Backups/MyWorld/._level.dat": "fork",
+        },
+    )
+    result = world.replace(sr, "nested.zip", "world", "vanilla")
+    assert (inst / "world" / "region" / "r.0.0.mca").read_text() == "new"
+    assert not any("__MACOSX" in w for w in result["warnings"])
+    # ... nor end up inside a world zipped from its contents
+    make_zip(
+        inst / "bare.zip",
+        {"level.dat": LEVEL_DAT, "region/r.0.0.mca": "bare", "__MACOSX/._level.dat": "fork"},
+    )
+    world.replace(sr, "bare.zip", "world", "vanilla")
+    assert (inst / "world" / "region" / "r.0.0.mca").read_text() == "bare"
+    assert not (inst / "world" / "__MACOSX").exists()
+
+
 def test_archive_must_be_a_file(sr, inst):
     (inst / "dir.zip").mkdir()
     with pytest.raises(AgentError) as exc:
@@ -349,6 +413,32 @@ def test_api_world_replace_and_info(api, auth, agent_settings, stopped):
     assert op["result"]["installed"] == ["world"]
     assert (d / "world" / "region" / "r.0.0.mca").read_text() == "new"
     assert not (d / "up.zip").exists()
+
+
+def test_api_refuses_an_archive_inside_the_world(api, auth, agent_settings, stopped):
+    iid, d = _instance(agent_settings)
+    old_world(d)
+    make_zip(d / "world" / "w.zip", {"level.dat": LEVEL_DAT})
+    resp = api.post(f"/v1/instances/{iid}/world/replace", json={"archive": "world/w.zip"}, headers=auth)
+    assert resp.status_code == 400 and resp.json()["error"]["code"] == "archive_in_world"
+
+
+def test_api_server_started_before_the_operation_ran(api, auth, agent_settings, monkeypatch):
+    """A start that slips in between the endpoint's check and the operation must not see a swap."""
+    from mcagent import docker_ops
+
+    iid, d = _instance(agent_settings)
+    old_world(d)
+    make_zip(d / "up.zip", {"world/level.dat": LEVEL_DAT, "world/region/r.0.0.mca": "new"})
+    answers = iter([{"exists": True, "running": False}, {"exists": True, "running": True}])
+    monkeypatch.setattr(docker_ops, "status", lambda _iid: next(answers))
+    resp = api.post(
+        f"/v1/instances/{iid}/world/replace", json={"archive": "up.zip", "delete_archive": True}, headers=auth
+    )
+    op = _wait(api, auth, resp.json()["operation"]["id"])
+    assert op["status"] == "failed" and op["error_code"] == "must_stop"
+    assert (d / "world" / "region" / "r.0.0.mca").read_text() == "old"
+    assert not (d / "up.zip").exists() and no_leftovers(d)
 
 
 def test_api_failed_replace_still_deletes_the_temporary_archive(api, auth, agent_settings, stopped):

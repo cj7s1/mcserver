@@ -1,6 +1,6 @@
 /** World section of the Backups page: world folder, size, zip export and "Replace world…". */
 import { AlertTriangle, CheckCircle2, Download, FolderX, Globe, Info, Replace } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { Section } from "@/components/PageHeader";
 import { ErrorState, LoadingState } from "@/components/States";
@@ -128,8 +128,10 @@ function WorldBody({ world, instanceId, busy }: { world: WorldInfo; instanceId: 
       )}
       {world.download_url && world.running && (
         <p className="text-xs text-muted-foreground">
-          The server is running: the download saves the world to disk first (save-all flush), but changes made while it
-          downloads may be partly included. Stop the server for an exact copy.
+          {world.download_flushes
+            ? "The server is running: the download saves the world to disk first (save-all flush), but changes made while it downloads may be partly included."
+            : "The server is running: the download contains what was last saved to disk (autosave), and changes made while it downloads may be partly included."}{" "}
+          Stop the server for an exact copy.
         </p>
       )}
     </div>
@@ -151,6 +153,13 @@ export function WorldSection({
   const busy = !!instance.active_job;
   const working = busy || (!!tracked.jobId && !tracked.finished);
   const query = useWorld(instance.id, { busy: working });
+  const { refetch } = query;
+  // GET /world walks every world file, so it is not polled while a job runs; read it again once the job is over
+  const wasWorking = useRef(working);
+  useEffect(() => {
+    if (wasWorking.current && !working) void refetch();
+    wasWorking.current = working;
+  }, [working, refetch]);
   const [dialogKey, setDialogKey] = useState<number | null>(null);
   const world = query.data;
   const canReplace = canReplacePerm && (world?.can_replace ?? true);

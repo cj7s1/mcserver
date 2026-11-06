@@ -53,6 +53,8 @@ RESERVED_FOLDERS = frozenset(
 )
 FREE_SPACE_MARGIN = 128 * 1024 * 1024
 MAX_SEARCH_DEPTH = 3
+# Folders some archivers add next to the real content (macOS Finder: resource forks); never a world.
+IGNORED_ARCHIVE_DIRS = frozenset({"__MACOSX"})
 
 
 def level_parts(level_name: str) -> list[str]:
@@ -88,6 +90,27 @@ def world_paths(parts: list[str], layout: str) -> list[tuple[str, str]]:
         for role, suffix in DIMENSION_SUFFIXES.items():
             out.append((role, "/".join([*parts[:-1], parts[-1] + suffix])))
     return out
+
+
+def check_archive_location(archive: str, parts: list[str], layout: str) -> None:
+    """Refuse an archive stored inside one of the world folders it is about to replace.
+
+    The old world folders are deleted after the swap, so such an archive would be deleted
+    with them (even when the caller wants to keep it).
+    """
+    try:
+        arc = split_path(archive)
+    except PathError as exc:
+        raise AgentError(f"Invalid archive path: {exc}", "invalid_path", 400) from exc
+    for _role, rel in world_paths(parts, layout):
+        folder = rel.split("/")
+        if arc[: len(folder)] == folder:
+            raise AgentError(
+                f"The archive is inside the world folder '{rel}', which is replaced (and deleted). "
+                "Move it somewhere else in the server folder first.",
+                "archive_in_world",
+                400,
+            )
 
 
 def _kind(root: SafeRoot, rel: str) -> str | None:
@@ -180,7 +203,7 @@ def locate(root: SafeRoot, staging: str, preferred: str) -> Located:
     for _depth in range(MAX_SEARCH_DEPTH):
         if _kind(root, f"{base}/level.dat") == "file":
             return Located(overworld=base, base=base, folder_name=None)
-        entries = root.list(base)
+        entries = [e for e in root.list(base) if e.name not in IGNORED_ARCHIVE_DIRS]
         dirs = [e.name for e in entries if e.type == "directory"]
         worlds = [d for d in dirs if _kind(root, f"{base}/{d}/level.dat") == "file"]
         if worlds:
@@ -255,6 +278,14 @@ def replace(
         raise AgentError("layout must be 'vanilla' or 'bukkit'", "invalid_layout", 400)
     if _kind(root, archive) != "file":
         raise AgentError("The world archive must be a regular file in the server folder", "not_a_file", 400)
+    check_archive_location(archive, parts, layout)
+    for _role, dest in world_paths(parts, layout):
+        if _kind(root, dest) not in (None, "directory", "symlink"):
+            raise AgentError(
+                f"'{dest}' is a file, not a world folder; move it away or fix level-name in server.properties",
+                "not_a_directory",
+                409,
+            )
     token = secrets.token_hex(6)
     staging = f"{STAGING_PREFIX}new-{token}"
     aside = f"{STAGING_PREFIX}old-{token}"
@@ -286,6 +317,9 @@ def replace(
         report(0.74, "Looking for level.dat")
         found = locate(root, staging, parts[-1])
         check_level_dat(root, found.overworld)
+        for junk in IGNORED_ARCHIVE_DIRS:  # a bare world zipped on macOS: do not import its resource forks
+            if _kind(root, f"{found.overworld}/{junk}") == "directory":
+                root.delete(f"{found.overworld}/{junk}", recursive=True)
         sources: dict[str, str] = {"overworld": found.overworld}
         converted: list[str] = []
         if layout == "bukkit":

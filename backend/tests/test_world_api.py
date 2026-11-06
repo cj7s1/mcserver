@@ -147,6 +147,25 @@ def test_export_flushes_a_running_server_first(clients, server, fake_agent):
     assert AuditEvent.objects.filter(action="files.download_archive").latest("created_at").details["flushed"] is True
 
 
+def test_export_flush_needs_command_or_backup_permission(clients, server, fake_agent, make_user, client_for):
+    """save-all flush is a console command: a user who may only read files downloads what is on disk."""
+    start_container(fake_agent, server)
+    reader = make_user("u-reader")
+    role = Role.objects.create(key="reader", name="Reader", permissions=["instance.view", "instance.files.read"])
+    InstanceAccess.objects.create(user=reader, instance=server, role=role)
+    c = client_for(reader)
+    data = c.get(f"/api/instances/{server.id}/world").json()
+    assert data["download_flushes"] is False and "flush=" not in data["download_url"]
+    # even when the parameter is added by hand
+    resp = c.get(data["download_url"] + "&flush=true")
+    assert resp.status_code == 200
+    assert (str(server.id), "save-all flush") not in fake_agent.commands
+    assert "flushed" not in AuditEvent.objects.filter(action="files.download_archive").latest("created_at").details
+    # operators (instance.command / instance.backup) get the flush
+    op = clients["operator"].get(f"/api/instances/{server.id}/world").json()
+    assert op["download_flushes"] is True and "flush=true" in op["download_url"]
+
+
 # --- POST /world/replace: permissions and validation ---------------------------------------------
 def test_replace_permissions(clients, server, fake_agent, make_user, client_for, django_capture_on_commit_callbacks):
     capture = django_capture_on_commit_callbacks
@@ -364,6 +383,58 @@ def test_replace_from_archive_in_server_folder(clients, server, fake_agent, djan
     replace(clients["owner"], server, capture, data={"archive": "uploads/w.zip", "delete_archive": True})
     assert last_job(server).status == JobStatus.SUCCEEDED
     assert fake_agent.get_file(server.id, "uploads/w.zip") is None
+
+
+@pytest.mark.parametrize(
+    ("archive", "server_type"),
+    [("world/w.zip", "VANILLA"), ("world/sub/w.zip", "VANILLA"), ("world_nether/w.zip", "PAPER")],
+)
+def test_archive_inside_the_world_is_refused_before_stopping(
+    clients, make_instance, fake_agent, django_capture_on_commit_callbacks, archive, server_type
+):
+    inst = make_instance(name="Inside", server_type=server_type)
+    fake_agent.prepare(inst.id)
+    put_world(fake_agent, inst)
+    put_world(fake_agent, inst, "world_nether", "nether")
+    fake_agent.put_file(inst.id, archive, zip_bytes(NEW_WORLD))
+    start_container(fake_agent, inst)
+    resp = replace(clients["owner"], inst, django_capture_on_commit_callbacks, data={"archive": archive, "stop_if_running": True})
+    assert resp.status_code == 400 and err(resp) == "archive_in_world"
+    assert not Job.objects.filter(kind="world_replace").exists()
+    assert fake_agent.containers[str(inst.id)]["running"] is True
+    assert fake_agent.get_file(inst.id, archive) is not None
+
+
+def test_lost_connection_while_submitting_leaves_the_server_stopped(
+    clients, server, fake_agent, django_capture_on_commit_callbacks
+):
+    """The agent may have started the swap although the request timed out: do not start the server."""
+    from apps.nodes.client import AgentUnavailable
+
+    start_container(fake_agent, server)
+    fake_agent.failures["world_replace"] = AgentUnavailable("The node agent did not respond in time")
+    replace(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running="true")
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error_code == "agent_unavailable"
+    assert fake_agent.containers[str(server.id)]["running"] is False
+    server.refresh_from_db()
+    assert server.desired_state == "stopped"
+    assert "left stopped" in "\n".join(job.log)
+
+
+def test_start_failure_after_a_replace_says_the_world_was_replaced(
+    clients, server, fake_agent, django_capture_on_commit_callbacks
+):
+    from apps.nodes.client import AgentError
+
+    start_container(fake_agent, server)
+    fake_agent.failures["start"] = AgentError("Docker could not start the container", "start_failed", 500)
+    replace(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running="true")
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error_code == "start_failed"
+    assert job.error.startswith("The world was replaced, but the server could not be started again")
+    assert fake_agent.text(server.id, "world/region/r.0.0.mca") == "new"
+    assert not temp_uploads(fake_agent, server)
 
 
 def test_world_replace_job_shows_restoring_status(server):

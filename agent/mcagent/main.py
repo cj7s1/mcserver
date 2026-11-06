@@ -828,7 +828,8 @@ async def world_replace(
     status = await run_in_threadpool(docker_ops.status, instance_id)
     if status.get("running"):
         raise AgentError("Stop the server before replacing its world", "must_stop", 409)
-    world.level_parts(body.level_name)  # refuse bad names before starting an operation
+    parts = world.level_parts(body.level_name)  # refuse bad names before starting an operation
+    world.check_archive_location(body.archive, parts, body.layout)
     root = _root(settings, instance_id)
     entry = await run_in_threadpool(root.stat, body.archive)
     if entry.type != "file":
@@ -837,6 +838,10 @@ async def world_replace(
 
     def _do(op: Operation) -> dict[str, Any]:
         try:
+            # Checked again now that the operation blocks power actions: a start that slipped in
+            # between the check above and the registration would otherwise run on a world being swapped.
+            if docker_ops.status(instance_id).get("running"):
+                raise AgentError("Stop the server before replacing its world", "must_stop", 409)
             return world.replace(
                 root,
                 body.archive,

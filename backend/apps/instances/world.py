@@ -70,6 +70,40 @@ def validate_level_name(name: str) -> str:
     return "/".join(parts)
 
 
+# Sending ``save-all flush`` before a download is a console command: only for users who could run it
+# themselves (``instance.command``) or trigger the same flush through a backup (``instance.backup``).
+FLUSH_PERMISSIONS = frozenset({"instance.command", "instance.backup"})
+
+
+def may_flush(user: Any, instance: Instance) -> bool:
+    return bool(FLUSH_PERMISSIONS & user.instance_permissions(instance.pk))
+
+
+def world_folders(level: str, world_layout: str) -> list[str]:
+    """The folders a replacement swaps (keep in sync with agent/mcagent/world.py world_paths)."""
+    parts = level.split("/")
+    out = [level]
+    if world_layout == "bukkit":
+        out += ["/".join([*parts[:-1], parts[-1] + suffix]) for suffix in ("_nether", "_the_end")]
+    return out
+
+
+def check_archive_location(archive: str, level: str, world_layout: str) -> None:
+    """An archive inside a world folder would be deleted with the old world; refuse it early.
+
+    The agent re-checks this; doing it here avoids stopping the server and taking a safety backup first.
+    """
+    arc = [p for p in archive.replace("\\", "/").split("/") if p not in ("", ".")]
+    for folder in world_folders(level, world_layout):
+        parts = folder.split("/")
+        if arc[: len(parts)] == parts:
+            raise ApiError(
+                f"The archive is inside the world folder '{folder}', which is replaced (and deleted). "
+                "Move it somewhere else in the server folder first.",
+                code="archive_in_world",
+            )
+
+
 def level_name(instance: Instance, client: AgentClient) -> tuple[str, str]:
     """(world folder, where it came from: ``env`` | ``server.properties`` | ``default``)."""
     env_level = str((instance.env or {}).get("LEVEL") or "").strip()
@@ -107,14 +141,14 @@ def warnings_for(instance: Instance) -> list[str]:
     return out
 
 
-def download_url(instance: Instance, paths: list[str], level: str) -> str:
+def download_url(instance: Instance, paths: list[str], level: str, *, flush: bool = True) -> str:
     """Link to the zip export (reuses ``GET /files/archive``; several folders for bukkit layouts)."""
     name = f"{instance.name}-{level.rsplit('/', 1)[-1]}"
-    query = urlencode([*(("path", p) for p in paths), ("name", name), ("flush", "true")])
+    query = urlencode([*(("path", p) for p in paths), ("name", name), *([("flush", "true")] if flush else [])])
     return f"/api/instances/{instance.id}/files/archive?{query}"
 
 
-def describe(instance: Instance, client: AgentClient) -> dict[str, Any]:
+def describe(instance: Instance, client: AgentClient, *, flush: bool = True) -> dict[str, Any]:
     level, source = level_name(instance, client)
     world_layout = layout(instance, client)
     data: dict[str, Any] = {
@@ -144,5 +178,5 @@ def describe(instance: Instance, client: AgentClient) -> dict[str, Any]:
     present = [f["path"] for f in info["folders"] if f.get("exists")]
     data["exists"] = any(f.get("role") == "overworld" and f.get("has_level_dat") for f in info["folders"])
     if present:
-        data["download_url"] = download_url(instance, present, level)
+        data["download_url"] = download_url(instance, present, level, flush=flush)
     return data

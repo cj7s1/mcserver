@@ -24,7 +24,9 @@ export function useWorld(instanceId: string, { enabled = true, busy = false }: {
     queryKey: qk.world(instanceId),
     queryFn: () => api.get<WorldInfo>(`/instances/${instanceId}/world`),
     enabled,
-    refetchInterval: busy ? 5000 : 60_000,
+    // the agent walks every file of the world for the sizes: no polling while a job changes it
+    // (the section refetches when the job ends), and only once a minute otherwise
+    refetchInterval: busy ? false : 60_000,
     staleTime: 10_000,
   });
 }

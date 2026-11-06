@@ -784,11 +784,14 @@ class WorldView(APIView):
         from . import world
 
         instance = get_instance_for(request.user, pk, "instance.files.read")
-        data = world.describe(instance, AgentClient(instance.node))
+        flush = world.may_flush(request.user, instance)
+        data = world.describe(instance, AgentClient(instance.node), flush=flush)
         perms = request.user.instance_permissions(instance.pk)
         data.update(
             can_replace={"instance.files.write", "instance.restore"} <= perms,
             running=instance.status in RUNNING_STATUSES,
+            # whether the download link asks a running server to save first (needs instance.command/backup)
+            download_flushes=flush,
             max_upload_bytes=settings.MCPANEL_MAX_UPLOAD_BYTES or None,
             pre_restore_backup_default=bool(SystemSetting.get("pre_restore_backup")),
             archive_suffixes=list(ARCHIVE_SUFFIXES),
@@ -856,6 +859,7 @@ class WorldReplaceView(APIView):
                 raise ValidationError({"file": ["Upload a world archive, or choose an archive in the server folder"]})
             if not archive.lower().endswith(ARCHIVE_SUFFIXES):
                 raise ValidationError({"archive": ["Choose a .zip, .tar, .tar.gz or .tar.xz archive"]})
+            world.check_archive_location(archive, level, world.layout(instance, client))
             entry = client.stat_file(instance.id, archive)
             if entry.get("type") != "file":
                 raise ValidationError({"archive": ["That is not a regular file"]})
@@ -1031,18 +1035,25 @@ class FilesArchiveView(APIView):
     """Download one or more folders (e.g. a world and its dimension folders) as a zip built on the fly.
 
     ``path`` may be repeated (up to 8). ``name`` sets the download file name; ``flush=true`` asks a
-    running server to write all chunks to disk first (``save-all flush``, best effort).
+    running server to write all chunks to disk first (``save-all flush``, best effort; only for users
+    with ``instance.command`` or ``instance.backup``, since it is a console command).
     """
 
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
+        from . import world
+
         instance = get_instance_for(request.user, pk, "instance.files.read")
         paths = request.query_params.getlist("path") or [""]
         if len(paths) > 8:
             raise ValidationError({"path": ["At most 8 folders can be downloaded at once"]})
         client = AgentClient(instance.node)
         flushed = False
-        if request.query_params.get("flush") == "true" and instance.status in ("running", "unhealthy"):
+        if (
+            request.query_params.get("flush") == "true"
+            and instance.status in ("running", "unhealthy")
+            and world.may_flush(request.user, instance)  # a console command: not for read-only file access
+        ):
             try:
                 client.command(instance.id, "save-all flush", timeout=120)
                 flushed = True

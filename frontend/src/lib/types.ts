@@ -527,6 +527,8 @@ export interface WorldInfo {
   error: { code: string; message: string } | null;
   can_replace: boolean;
   running: boolean;
+  /** the download link asks a running server to save first (needs instance.command or instance.backup) */
+  download_flushes: boolean;
   max_upload_bytes: number | null;
   pre_restore_backup_default: boolean;
   archive_suffixes: string[];

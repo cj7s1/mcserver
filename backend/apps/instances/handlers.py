@@ -394,13 +394,17 @@ def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
         else:
             ctx.log("No safety backup was requested")
         ctx.progress(0.5, f"Replacing the world '{level}'", force=True)
+        # Set before the request: if it times out or the connection drops, the agent may have started
+        # the swap anyway, so only an error the agent itself reported proves the world is untouched.
+        submitted = True
         # a temporary upload is removed by the agent whatever the outcome
         op = client.world_replace(
             instance.id, archive=archive, level_name=level, layout=world_layout, delete_archive=bool(p.get("uploaded"))
         )
-        submitted = True
         done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
     except ApiError as exc:
+        # AgentError = the agent answered (a refused request or a failed operation, which rolls back);
+        # anything else after submitting (agent unreachable, auth) leaves the outcome unknown.
         intact = not submitted or (isinstance(exc, AgentError) and exc.error_code not in WORLD_STATE_UNKNOWN)
         if not intact:
             _set_desired(instance, DesiredState.STOPPED)
@@ -428,7 +432,15 @@ def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.log(f"Moved the {' and '.join(result['converted'])} from Bukkit-style folders into '{level}'")
     if was_running:
         ctx.progress(0.93, "Starting server")
-        client.start(instance.id)
+        try:
+            client.start(instance.id)
+        except ApiError as exc:
+            # the job fails, but say clearly that the world itself was replaced
+            raise ApiError(
+                f"The world was replaced, but the server could not be started again: {exc.detail}",
+                code=exc.error_code,
+                status_code=exc.status_code,
+            ) from exc
     return {
         "level_name": level,
         "layout": world_layout,

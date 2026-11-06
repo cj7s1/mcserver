@@ -787,6 +787,10 @@ class FakeAgent:
         parts = self._parts(level_name)
         if not parts or parts[0].startswith(".") or parts[0].lower() in ("mods", "plugins", "config", "logs"):
             raise self._err(f"Invalid world folder name {level_name!r}", "invalid_level_name", 400)
+        arc = self._parts(archive)
+        for _role, rel in self._world_paths(level_name, layout):
+            if arc[: len(rel.split("/"))] == rel.split("/"):
+                raise self._err(f"The archive is inside the world folder '{rel}'", "archive_in_world", 400)
         data = self._read(iid, archive)
         try:
             if failed := self._injected("world_replace", iid):
