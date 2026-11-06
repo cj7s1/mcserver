@@ -107,6 +107,13 @@ class SetupSerializer(serializers.Serializer):
     username = serializers.RegexField(r"^[\w.@+-]{3,150}$", max_length=150)
     email = serializers.EmailField(required=False, allow_blank=True)
     password = serializers.CharField(min_length=10, max_length=256, trim_whitespace=False)
+    setup_token = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        max_length=512,
+        write_only=True,
+        help_text="Required when the server sets MCPANEL_SETUP_TOKEN (see /auth/state setup_token_required)",
+    )
 
     def validate(self, attrs: dict) -> dict:
         password_validation.validate_password(attrs["password"], User(username=attrs["username"]))

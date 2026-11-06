@@ -13,6 +13,9 @@ from .models import Instance, Schedule, ServerType
 from .spec import MANAGED_ENV, restart_required
 
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+# Shown instead of custom env values to users without instance.configure: values often carry
+# secrets (webhook URLs, plugin/API tokens), while the names are needed to explain overrides.
+ENV_VALUE_HIDDEN = "********"
 RESTART_POLICIES = ("unless-stopped", "on-failure", "no")
 JVM_PRESETS = ("none", "aikar", "meowice")
 
@@ -80,6 +83,9 @@ class InstanceSerializer(serializers.ModelSerializer):
     power_countdown = serializers.SerializerMethodField()
     modpack_update = serializers.SerializerMethodField()
     node_name = serializers.CharField(source="node.name", read_only=True)
+    env_values_hidden = serializers.SerializerMethodField(
+        help_text="True when env values are masked because the caller lacks instance.configure"
+    )
 
     class Meta:
         model = Instance
@@ -115,6 +121,7 @@ class InstanceSerializer(serializers.ModelSerializer):
             "jvm_flags_preset",
             "jvm_args",
             "env",
+            "env_values_hidden",
             "restart_policy",
             "stop_timeout",
             "host_ip",
@@ -176,7 +183,11 @@ class InstanceSerializer(serializers.ModelSerializer):
             return False
 
     def get_connection(self, obj: Instance) -> dict[str, Any]:
-        return connection_info(obj)
+        # The panel-wide addresses are the same for every row: read them once per response.
+        addresses = self.context.setdefault("_address_settings", {})
+        if not addresses:
+            addresses.update(public=SystemSetting.get("public_address"), lan=SystemSetting.get("lan_address"))
+        return connection_info(obj, public=addresses["public"], lan=addresses["lan"])
 
     def get_permissions(self, obj: Instance) -> list[str]:
         request = self.context.get("request")
@@ -184,8 +195,22 @@ class InstanceSerializer(serializers.ModelSerializer):
             return []
         cache = self.context.setdefault("_perm_cache", {})
         if obj.pk not in cache:
-            cache[obj.pk] = sorted(request.user.instance_permissions(obj.pk))
+            # list views prefetch the caller's grants as ``viewer_grants`` (no query per row)
+            cache[obj.pk] = sorted(request.user.instance_permissions(obj.pk, grants=getattr(obj, "viewer_grants", None)))
         return cache[obj.pk]
+
+    def _may_configure(self, obj: Instance) -> bool:
+        request = self.context.get("request")
+        return request is not None and "instance.configure" in self.get_permissions(obj)
+
+    def get_env_values_hidden(self, obj: Instance) -> bool:
+        return bool(obj.env) and not self._may_configure(obj)
+
+    def to_representation(self, instance: Instance) -> dict[str, Any]:
+        data = super().to_representation(instance)
+        if data.get("env") and not self._may_configure(instance):
+            data["env"] = dict.fromkeys(data["env"], ENV_VALUE_HIDDEN)
+        return data
 
     def get_active_job(self, obj: Instance) -> dict[str, Any] | None:
         job = obj.active_job
@@ -265,10 +290,18 @@ class InstanceSerializer(serializers.ModelSerializer):
         return value
 
 
-def connection_info(instance: Instance) -> dict[str, Any]:
+_UNSET: Any = object()
+
+
+def connection_info(instance: Instance, *, public: Any = _UNSET, lan: Any = _UNSET) -> dict[str, Any]:
+    """Addresses players use. ``public``/``lan`` are the panel-wide settings when already read."""
     node = instance.node
-    public = SystemSetting.get("public_address") or node.public_address
-    lan = SystemSetting.get("lan_address") or node.lan_address
+    if public is _UNSET:
+        public = SystemSetting.get("public_address")
+    if lan is _UNSET:
+        lan = SystemSetting.get("lan_address")
+    public = public or node.public_address
+    lan = lan or node.lan_address
     bind = instance.host_ip
     port = instance.game_port
     suffix = "" if port == 25565 else f":{port}"

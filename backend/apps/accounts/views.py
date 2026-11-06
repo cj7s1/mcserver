@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import logging
+import os
+
+from django.conf import settings
 from django.contrib.auth import authenticate, login, logout, password_validation, update_session_auth_hash
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import connection, transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
+from django.utils.crypto import constant_time_compare
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_protect
 from drf_spectacular.utils import extend_schema
@@ -17,10 +22,10 @@ from rest_framework.views import APIView
 
 from apps.audit import service as audit
 from apps.core.errors import ApiError
-from apps.core.permissions import HasGlobalPermission
+from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
 
 from .models import InstanceAccess, PasswordResetToken, Role, User
-from .permissions import ALL_CODES, INSTANCE_CODES, PERMISSIONS, SYSTEM_ROLES
+from .permissions import ALL_CODES, INSTANCE_CODES, OWNER_GRANTED_CODES, PERMISSIONS, SYSTEM_ROLES
 from .serializers import (
     LoginSerializer,
     MeSerializer,
@@ -31,6 +36,8 @@ from .serializers import (
     UserCreateSerializer,
     UserSerializer,
 )
+
+log = logging.getLogger(__name__)
 
 
 def ensure_system_roles() -> None:
@@ -46,6 +53,36 @@ def ensure_system_roles() -> None:
         )
 
 
+def setup_token() -> str:
+    """The optional first-run setup token (MCPANEL_SETUP_TOKEN or MCPANEL_SETUP_TOKEN_FILE); '' = none."""
+    value = getattr(settings, "MCPANEL_SETUP_TOKEN", None)
+    if value is None:
+        value = os.environ.get("MCPANEL_SETUP_TOKEN", "")
+        path = os.environ.get("MCPANEL_SETUP_TOKEN_FILE", "")
+        if not value and path:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    value = fh.read()
+            except OSError:
+                log.error("MCPANEL_SETUP_TOKEN_FILE cannot be read; first-run setup stays locked")
+                return "\x00unreadable"  # never matches: a broken token file must not open setup
+    return str(value or "").strip()
+
+
+_open_setup_warned = False
+
+
+def _warn_open_setup() -> None:
+    """Log once per process that the owner account can be claimed by anyone who reaches the panel."""
+    global _open_setup_warned
+    if not _open_setup_warned:
+        _open_setup_warned = True
+        log.warning(
+            "First-run setup is open: whoever reaches the panel first can create the owner account. "
+            "Finish setup now, or set MCPANEL_SETUP_TOKEN to require a token for it."
+        )
+
+
 class AuthStateView(APIView):
     permission_classes = [AllowAny]
 
@@ -54,6 +91,11 @@ class AuthStateView(APIView):
         get_token(request)  # ensure the CSRF cookie is set for the SPA
         setup_required = not User.objects.exists()
         data = {"setup_required": setup_required, "authenticated": request.user.is_authenticated, "user": None}
+        if setup_required:
+            if setup_token():
+                data["setup_token_required"] = True
+            else:
+                _warn_open_setup()
         if request.user.is_authenticated:
             data["user"] = MeSerializer(request.user).data
         return Response(data)
@@ -74,6 +116,17 @@ class SetupView(APIView):
     def post(self, request):  # type: ignore[no-untyped-def]
         ser = SetupSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
+        expected = setup_token()
+        if expected:
+            if not constant_time_compare(ser.validated_data.get("setup_token") or "", expected):
+                audit.record("auth.setup_failed", request=request, success=False, details={"reason": "setup_token"})
+                raise ApiError(
+                    "Enter the setup token configured on the server (MCPANEL_SETUP_TOKEN) to create the owner account",
+                    code="setup_token_invalid",
+                    status_code=403,
+                )
+        else:
+            _warn_open_setup()
         with transaction.atomic():
             # Row locks cannot guard an empty table, so serialise concurrent first-run setups
             # with a transaction-scoped advisory lock; the check below then sees the winner.
@@ -169,23 +222,26 @@ class PasswordResetView(APIView):
 
     @extend_schema(request=PasswordResetSerializer, responses={204: None})
     def post(self, request):  # type: ignore[no-untyped-def]
+        # The token is only ever read from the POST body (never from the URL, which ends up in
+        # access logs); it is single-use, expires, and dies with any password change (see model).
         ser = PasswordResetSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        token = (
-            PasswordResetToken.objects.select_related("user")
-            .filter(token_hash=PasswordResetToken.digest(ser.validated_data["token"]))
-            .first()
-        )
-        if token is None or not token.is_valid:
-            raise ApiError("This reset link is invalid or has expired", code="invalid_token", status_code=400)
-        _validate_new_password(ser.validated_data["new_password"], token.user)
-        user = token.user
-        user.set_password(ser.validated_data["new_password"])
-        user.must_change_password = False
-        user.save(update_fields=["password", "must_change_password"])
-        token.used_at = timezone.now()
-        token.save(update_fields=["used_at"])
-        PasswordResetToken.objects.filter(user=user, used_at__isnull=True).update(used_at=timezone.now())
+        with transaction.atomic():
+            # Row lock: two concurrent requests with the same token cannot both use it.
+            token = (
+                PasswordResetToken.objects.select_for_update(of=("self",))
+                .select_related("user")
+                .filter(token_hash=PasswordResetToken.digest(ser.validated_data["token"]))
+                .first()
+            )
+            if token is None or not token.is_valid:
+                raise ApiError("This reset link is invalid or has expired", code="invalid_token", status_code=400)
+            _validate_new_password(ser.validated_data["new_password"], token.user)
+            user = token.user
+            user.set_password(ser.validated_data["new_password"])
+            user.must_change_password = False
+            user.save(update_fields=["password", "must_change_password"])
+            PasswordResetToken.objects.filter(user=user, used_at__isnull=True).update(used_at=timezone.now())
         audit.record("auth.password_reset", request=request, actor=user, target=user)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -201,30 +257,57 @@ def _assignable_perms(user: User) -> frozenset[str]:
     return user.role.permission_set if user.role_id else frozenset()
 
 
-def _guard_owner(request, target: User) -> None:  # type: ignore[no-untyped-def]
-    """Only the owner may touch the owner; nobody may manage a user who out-ranks them.
+def _outranked(request, target: User) -> str | None:  # type: ignore[no-untyped-def]
+    """Why ``request.user`` may not manage ``target`` (None if they may).
 
+    Only the owner may touch the owner; nobody may manage a user who out-ranks them.
     "Out-ranks" covers per-server grants too: a reset link or re-enabling an account
     hands its server access to whoever controls it.
     """
     if target.is_owner and not request.user.is_owner:
-        raise PermissionDenied("Only the owner can modify the owner account")
+        return "Only the owner can modify the owner account"
     if _is_root(request.user):
-        return
-    if not _assignable_perms(target) <= request.user.global_permissions():
-        raise PermissionDenied("You cannot manage a user who has permissions you do not have")
+        return None
+    if _is_root(target) or not _assignable_perms(target) <= request.user.global_permissions():
+        return "You cannot manage a user who has permissions you do not have"
     for grant in InstanceAccess.objects.filter(user=target).select_related("role"):
         if not (grant.role.permission_set & INSTANCE_CODES) <= request.user.instance_permissions(grant.instance_id):
-            raise PermissionDenied("You cannot manage a user who has server access you do not have")
+            return "You cannot manage a user who has server access you do not have"
+    return None
+
+
+def _guard_owner(request, target: User) -> None:  # type: ignore[no-untyped-def]
+    reason = _outranked(request, target)
+    if reason:
+        raise PermissionDenied(reason)
 
 
 def _guard_permission_grant(request, codes, what: str = "a role") -> None:  # type: ignore[no-untyped-def]
-    """Prevent privilege escalation: users can only hand out permissions they hold themselves."""
+    """Prevent privilege escalation: users can only hand out permissions they hold themselves,
+    and only the owner hands out administration rights (OWNER_GRANTED_CODES)."""
     if _is_root(request.user):
         return
+    owner_only = sorted(set(codes) & OWNER_GRANTED_CODES)
+    if owner_only:
+        raise PermissionDenied(f"Only the owner can grant {what} with these permissions: {', '.join(owner_only)}")
     missing = sorted(set(codes) - request.user.global_permissions())
     if missing:
         raise PermissionDenied(f"You cannot grant {what} with permissions you do not have: {', '.join(missing)}")
+
+
+def _guard_role_change(request, role: Role) -> None:  # type: ignore[no-untyped-def]
+    """Changing a role's permissions changes every account holding it, so it needs the same
+    standing as managing each of them (and holding everything the role currently grants)."""
+    if _is_root(request.user):
+        return
+    if not role.permission_set <= request.user.global_permissions():
+        raise PermissionDenied("You cannot change a role that has permissions you do not have")
+    for target in role.users.select_related("role"):
+        if _outranked(request, target):
+            raise PermissionDenied(
+                f"This role is assigned to '{target.username}', who has permissions you do not have; "
+                "only an account that out-ranks every holder can change it"
+            )
 
 
 def _guard_role_assignment(request, role: Role | None) -> None:  # type: ignore[no-untyped-def]
@@ -290,7 +373,9 @@ class UserResetLinkView(APIView):
         _guard_owner(request, user)
         _token, raw = PasswordResetToken.issue(user, created_by=request.user)
         audit.record("user.reset_link_issued", request=request, target=user)
-        return Response({"token": raw, "path": f"/reset-password?token={raw}", "expires_in_hours": 24}, status=201)
+        # The token travels in the URL fragment: browsers never send it to the server, so it
+        # does not end up in the panel's or a reverse proxy's access log.
+        return Response({"token": raw, "path": f"/reset-password#token={raw}", "expires_in_hours": 24}, status=201)
 
 
 class RoleListCreateView(generics.ListCreateAPIView):
@@ -301,7 +386,7 @@ class RoleListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):  # type: ignore[no-untyped-def]
         if self.request.method == "GET":
-            return [IsAuthenticated()]  # role names are needed to display access grants
+            return [IsAuthenticated(), PasswordChangeEnforced()]  # role names are needed to display access grants
         return super().get_permissions()
 
     def perform_create(self, serializer):  # type: ignore[no-untyped-def]
@@ -320,6 +405,7 @@ class RoleDetailView(generics.RetrieveUpdateDestroyAPIView):
         if serializer.instance.is_system:
             raise ValidationError({"detail": ["Built-in roles cannot be modified; create a custom role instead"]})
         if "permissions" in serializer.validated_data:
+            _guard_role_change(self.request, serializer.instance)
             _guard_permission_grant(self.request, serializer.validated_data["permissions"])
         role = serializer.save()
         audit.record("role.updated", request=self.request, target=role, details={"permissions": role.permissions})
@@ -334,6 +420,8 @@ class RoleDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class PermissionDefsView(APIView):
+    permission_classes = [IsAuthenticated, PasswordChangeEnforced]
+
     @extend_schema(responses={200: dict})
     def get(self, request):  # type: ignore[no-untyped-def]
         return Response(

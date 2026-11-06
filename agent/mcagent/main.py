@@ -15,9 +15,14 @@ import ipaddress
 import json
 import logging
 import os
+import secrets
 import shutil
+import stat
 import threading
 import time
+from collections import deque
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -92,20 +97,45 @@ def _load_blocked_networks(settings: Settings) -> None:
         log.info("Refusing agent API requests from instance networks: %s", ", ".join(map(str, nets)))
 
 
-@app.middleware("http")
-async def _refuse_instance_networks(request: Request, call_next):  # type: ignore[no-untyped-def]
-    client_ip = request.client.host if request.client else None
-    if client_ip and _blocked_networks:
-        try:
-            ip = ipaddress.ip_address(client_ip)
-        except ValueError:
-            ip = None
-        if ip is not None and any(ip in net for net in _blocked_networks):
-            log.warning("Refused agent API request from instance network address %s", client_ip)
-            return JSONResponse(
-                {"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403
-            )
-    return await call_next(request)
+def _source_blocked(client: Any) -> str | None:
+    """The client address if it is on an instance network, else None."""
+    client_ip = client[0] if client else None
+    if not client_ip or not _blocked_networks:
+        return None
+    try:
+        ip = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return None
+    return client_ip if any(ip in net for net in _blocked_networks) else None
+
+
+class _RefuseInstanceNetworks:
+    """Refuse HTTP requests *and* WebSocket handshakes from instance networks (pure ASGI).
+
+    A ``@app.middleware("http")`` function never sees WebSocket connections, so the
+    log stream would otherwise be reachable from a Minecraft container.
+    """
+
+    def __init__(self, asgi_app: Any) -> None:
+        self.app = asgi_app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in ("http", "websocket"):
+            blocked = _source_blocked(scope.get("client"))
+            if blocked:
+                log.warning("Refused agent API %s from instance network address %s", scope["type"], blocked)
+                if scope["type"] == "http":
+                    response = JSONResponse(
+                        {"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403
+                    )
+                    await response(scope, receive, send)
+                else:  # closing before accept: the handshake is answered with HTTP 403
+                    await WebSocket(scope, receive, send).close(code=4403)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_RefuseInstanceNetworks)
 
 
 @app.exception_handler(AgentError)
@@ -430,9 +460,19 @@ async def clone(
         staging = settings.staging_dir / f"clone-{body.target_instance_id}"
         if staging.exists():
             shutil.rmtree(staging)
-        ignore = None
-        if body.exclude_worlds:
-            ignore = shutil.ignore_patterns("world", "world_nether", "world_the_end")
+        worlds = {"world", "world_nether", "world_the_end"} if body.exclude_worlds else set()
+
+        def ignore(directory: str, names: list[str]) -> set[str]:
+            skipped = worlds & set(names)
+            for name in names:  # FIFOs, sockets and devices (a mod can mkfifo) are never copied
+                try:
+                    mode = os.lstat(os.path.join(directory, name)).st_mode
+                except OSError:
+                    continue
+                if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+                    skipped.add(name)
+            return skipped
+
         shutil.copytree(src, staging, symlinks=True, ignore=ignore)
         if dst.exists():
             dst.rmdir()
@@ -452,21 +492,162 @@ async def get_logs(
     return {"lines": text.splitlines()}
 
 
+# Console output is produced by the Minecraft process (third-party code): every buffer
+# between Docker and the WebSocket is bounded, and a client that cannot keep up loses the
+# oldest lines (with a notice) instead of growing the agent's memory.
+LOG_LINE_MAX_BYTES = 16 * 1024
+LOG_BUFFER_MAX_LINES = 5000
+LOG_BUFFER_MAX_BYTES = 4 * 1024 * 1024
+LOG_BATCH_MAX_LINES = 500
+LOG_BATCH_MAX_BYTES = 512 * 1024  # keeps one WebSocket message far below the panel's 8 MiB limit
+LOG_TRUNCATED_SUFFIX = " [mcpanel: line truncated]"
+
+
+class _LineSplitter:
+    """Split a byte stream into lines of at most ``max_bytes`` (longer lines are truncated)."""
+
+    def __init__(self, max_bytes: int = LOG_LINE_MAX_BYTES) -> None:
+        self.max_bytes = max_bytes
+        self._buf = bytearray()
+        self._skipping = False  # inside a line that was already emitted truncated
+
+    @staticmethod
+    def _decode(data: bytes | bytearray) -> str:
+        return bytes(data).decode("utf-8", errors="replace").rstrip("\r")
+
+    def _add(self, data: bytes, lines: list[str]) -> None:
+        if self._skipping or not data:
+            return
+        room = self.max_bytes - len(self._buf)
+        if len(data) <= room:
+            self._buf += data
+            return
+        self._buf += data[:room]
+        lines.append(self._decode(self._buf) + LOG_TRUNCATED_SUFFIX)
+        self._buf.clear()
+        self._skipping = True
+
+    def feed(self, chunk: bytes) -> list[str]:
+        lines: list[str] = []
+        pos = 0
+        while pos < len(chunk):
+            nl = chunk.find(b"\n", pos)
+            self._add(chunk[pos : len(chunk) if nl == -1 else nl], lines)
+            if nl == -1:
+                break
+            if self._skipping:
+                self._skipping = False
+            else:
+                lines.append(self._decode(self._buf))
+            self._buf.clear()
+            pos = nl + 1
+        return lines
+
+    def flush(self) -> list[str]:
+        """The pending partial line (the stream ended without a final newline)."""
+        line = None if self._skipping or not self._buf else self._decode(self._buf)
+        self._buf.clear()
+        self._skipping = False
+        return [line] if line is not None else []
+
+
+class _LogBuffer:
+    """Bounded hand-off from the Docker log thread to the WebSocket sender.
+
+    ``put`` never blocks and schedules at most one wake-up on the event loop at a time.
+    Beyond ``max_lines``/``max_bytes`` the oldest log lines are dropped and counted; the
+    client gets a notice line in their place. Control messages are never dropped.
+    """
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        max_lines: int = LOG_BUFFER_MAX_LINES,
+        max_bytes: int = LOG_BUFFER_MAX_BYTES,
+    ) -> None:
+        self._loop = loop
+        self.max_lines = max_lines
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._items: deque[tuple[dict[str, Any], int]] = deque()
+        self._held: list[dict[str, Any]] = []  # control messages displaced by dropping
+        self._lines = 0
+        self._bytes = 0
+        self._dropped = 0
+        self._wakeup = asyncio.Event()
+        self._wake_pending = False
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items) + len(self._held)
+
+    def put(self, msg: dict[str, Any]) -> None:
+        size = len(msg["line"]) if msg.get("type") == "log" else 0
+        with self._lock:
+            self._items.append((msg, size))
+            if msg.get("type") == "log":
+                self._lines += 1
+                self._bytes += size
+            while self._lines > self.max_lines or self._bytes > self.max_bytes:
+                old, old_size = self._items.popleft()
+                if old.get("type") != "log":
+                    self._held.append(old)
+                    continue
+                self._lines -= 1
+                self._bytes -= old_size
+                self._dropped += 1
+            if self._wake_pending:
+                return
+            self._wake_pending = True
+        with contextlib.suppress(RuntimeError):  # the loop is gone: the connection has ended
+            self._loop.call_soon_threadsafe(self._wakeup.set)
+
+    async def get_batch(self, timeout: float) -> list[dict[str, Any]] | None:
+        """Messages in order (None if nothing arrived within ``timeout``)."""
+        try:
+            await asyncio.wait_for(self._wakeup.wait(), timeout=timeout)
+        except TimeoutError:
+            return None
+        with self._lock:
+            self._wakeup.clear()
+            self._wake_pending = False
+            out = self._held
+            self._held = []
+            if self._dropped:
+                out.append(
+                    {
+                        "type": "log",
+                        "line": f"[mcpanel] {self._dropped} console line(s) dropped: "
+                        "the console could not keep up with the server output",
+                    }
+                )
+                self._dropped = 0
+            lines = batch_bytes = 0
+            while self._items and lines < LOG_BATCH_MAX_LINES and batch_bytes < LOG_BATCH_MAX_BYTES:
+                msg, size = self._items.popleft()
+                if msg.get("type") == "log":
+                    lines += 1
+                    batch_bytes += size
+                    self._lines -= 1
+                    self._bytes -= size
+                out.append(msg)
+            if self._items:  # more is waiting: come back without sleeping
+                self._wakeup.set()
+                self._wake_pending = True
+        return out
+
+
 @app.websocket("/v1/instances/{instance_id}/logs/stream")
 async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) -> None:
     settings = get_settings()
     if not await websocket_authorized(websocket, settings):
         return
     await websocket.accept()
-    loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=10000)
+    buffer = _LogBuffer(asyncio.get_running_loop())
     stop_event = threading.Event()
     current_stream: dict[str, Any] = {}
     tail = max(0, min(tail, 5000))
-
-    def emit(msg: dict[str, Any]) -> None:
-        with contextlib.suppress(asyncio.QueueFull):
-            loop.call_soon_threadsafe(queue.put_nowait, msg)
+    emit = buffer.put
 
     def pump() -> None:
         first = True
@@ -506,20 +687,18 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                 stop_event.wait(2)
                 continue
             current_stream["s"] = stream
-            buf = b""
+            splitter = _LineSplitter()
             try:
                 for chunk in stream:
                     if stop_event.is_set():
                         break
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        emit({"type": "log", "line": line.decode("utf-8", errors="replace").rstrip("\r")})
+                    for line in splitter.feed(chunk):
+                        emit({"type": "log", "line": line})
             except Exception as exc:  # stream broke (container stopped / daemon restarted)
                 log.debug("log stream for %s ended: %s", instance_id, exc)
             finally:
-                if buf:
-                    emit({"type": "log", "line": buf.decode("utf-8", errors="replace")})
+                for line in splitter.flush():
+                    emit({"type": "log", "line": line})
                 with contextlib.suppress(Exception):
                     stream.close()
                 current_stream.pop("s", None)
@@ -541,22 +720,21 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
     recv_task = asyncio.create_task(receiver())
     try:
         while not recv_task.done():
-            try:
-                msg = await asyncio.wait_for(queue.get(), timeout=15)
-            except TimeoutError:
+            batch = await buffer.get_batch(timeout=15)
+            if batch is None:
                 await websocket.send_json({"type": "ping"})
                 continue
-            if msg is None:
-                break
-            batch = [msg]
-            while not queue.empty() and len(batch) < 500:
-                batch.append(queue.get_nowait())
-            logs = [m["line"] for m in batch if m and m.get("type") == "log"]
-            others = [m for m in batch if m and m.get("type") != "log"]
-            if logs:
-                await websocket.send_json({"type": "logs", "lines": logs})
-            for m in others:
+            lines: list[str] = []
+            for m in batch:  # consecutive log lines go out as one message, in order
+                if m.get("type") == "log":
+                    lines.append(m["line"])
+                    continue
+                if lines:
+                    await websocket.send_json({"type": "logs", "lines": lines})
+                    lines = []
                 await websocket.send_json(m)
+            if lines:
+                await websocket.send_json({"type": "logs", "lines": lines})
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
@@ -810,25 +988,7 @@ async def create_backup(
     restic = Restic(settings, instance_id)
 
     def _backup(op: Operation) -> dict[str, Any]:
-        paused = False
-        warnings: list[str] = []
-        status = docker_ops.status(instance_id)
-        if status.get("running") and body.consistency != "none":
-            try:
-                host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
-                op.update(0.02, "Pausing world saving (save-off)")
-                asyncio.run(run_command(host, port, password, "save-off", timeout=30))
-                paused = True
-                op.update(0.04, "Flushing world to disk (save-all flush)")
-                asyncio.run(run_command(host, port, password, "save-all flush", timeout=300))
-                time.sleep(1)
-            except (RconError, AgentError) as exc:
-                if body.consistency == "require":
-                    raise AgentError(
-                        f"Could not coordinate world saving: {exc}", "consistency_failed", 409
-                    ) from exc
-                warnings.append(f"Could not pause world saving ({exc}); backup may be inconsistent")
-        try:
+        with _world_saving_paused(settings, instance_id, body.consistency, op, "backup", 0.02) as saving:
             op.update(0.06, "Running restic backup")
             summary = restic.backup(
                 source,
@@ -836,19 +996,8 @@ async def create_backup(
                 body.excludes,
                 lambda p, m: op.update(0.06 + p * 0.9, m),
             )
-        finally:
-            if paused:
-                for attempt in range(5):
-                    try:
-                        host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
-                        asyncio.run(run_command(host, port, password, "save-on", timeout=30))
-                        break
-                    except (RconError, AgentError) as exc:
-                        if attempt == 4:
-                            warnings.append(f"FAILED to re-enable world saving (save-on): {exc}")
-                        time.sleep(2)
-        summary["warnings"] = warnings + summary.get("warnings", [])
-        summary["consistent"] = paused or not status.get("running")
+        summary["warnings"] = saving.warnings + summary.get("warnings", [])
+        summary["consistent"] = saving.consistent
         return summary
 
     op = registry.start("backup", [instance_id], _backup)
@@ -1028,39 +1177,74 @@ async def backup_restore_path(
     return {"operation": op.as_dict()}
 
 
-def _coordinated_save(
-    settings: Settings, instance_id: UUID, consistency: str, op: Operation
-) -> tuple[bool, list[str]]:
-    """save-off + save-all flush on a running server. Returns (paused, warnings)."""
-    warnings: list[str] = []
-    status = docker_ops.status(instance_id)
-    if not status.get("running") or consistency == "none":
-        return False, warnings
+SAVE_SETTLE_SECONDS = 1.0  # after save-all flush, before reading the world
+SAVE_ON_ATTEMPTS = 5
+SAVE_ON_RETRY_SECONDS = 2.0
+
+
+@dataclass
+class _SavingState:
+    running: bool = False
+    paused: bool = False  # save-off and save-all flush both succeeded
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def consistent(self) -> bool:
+        return self.paused or not self.running
+
+
+def _rcon(settings: Settings, instance_id: UUID, command: str, timeout: float) -> None:
+    host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
+    asyncio.run(run_command(host, port, password, command, timeout=timeout))
+
+
+@contextlib.contextmanager
+def _world_saving_paused(
+    settings: Settings, instance_id: UUID, consistency: str, op: Operation, what: str, progress: float
+) -> Iterator[_SavingState]:
+    """``save-off`` + ``save-all flush`` on a running server for the duration of the block.
+
+    Once ``save-off`` has been sent (even if its reply was lost), ``save-on`` is sent when the
+    block ends, whatever happens: a failed flush, ``consistency=require`` refusing to go on,
+    an exception or timeout in the block. With ``require`` a failed pause raises
+    ``consistency_failed``; with ``auto`` it only adds a warning.
+    """
+    state = _SavingState(running=bool(docker_ops.status(instance_id).get("running")))
+    save_off_sent = False
     try:
-        host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
-        op.update(0.05, "Pausing world saving (save-off)")
-        asyncio.run(run_command(host, port, password, "save-off", timeout=30))
-        op.update(0.1, "Flushing world to disk (save-all flush)")
-        asyncio.run(run_command(host, port, password, "save-all flush", timeout=300))
-        time.sleep(1)
-        return True, warnings
-    except (RconError, AgentError) as exc:
-        if consistency == "require":
-            raise AgentError(f"Could not coordinate world saving: {exc}", "consistency_failed", 409) from exc
-        warnings.append(f"Could not pause world saving ({exc}); snapshot may be inconsistent")
-        return False, warnings
+        if state.running and consistency != "none":
+            try:
+                op.update(progress, "Pausing world saving (save-off)")
+                save_off_sent = True
+                _rcon(settings, instance_id, "save-off", 30)
+                op.update(progress + 0.02, "Flushing world to disk (save-all flush)")
+                _rcon(settings, instance_id, "save-all flush", 300)
+                time.sleep(SAVE_SETTLE_SECONDS)
+                state.paused = True
+            except (RconError, AgentError, OSError) as exc:
+                if consistency == "require":
+                    raise AgentError(
+                        f"Could not coordinate world saving: {exc}", "consistency_failed", 409
+                    ) from exc
+                state.warnings.append(f"Could not pause world saving ({exc}); {what} may be inconsistent")
+        yield state
+    finally:
+        if save_off_sent:
+            _resume_saving(settings, instance_id, state.warnings)
 
 
 def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -> None:
-    for attempt in range(5):
+    """Send save-on (retrying); never raises, so it cannot mask the block's own error."""
+    for attempt in range(SAVE_ON_ATTEMPTS):
         try:
-            host, port, password = docker_ops.rcon_endpoint(settings, instance_id)
-            asyncio.run(run_command(host, port, password, "save-on", timeout=30))
+            _rcon(settings, instance_id, "save-on", 30)
             return
-        except (RconError, AgentError) as exc:
-            if attempt == 4:
+        except Exception as exc:
+            if attempt == SAVE_ON_ATTEMPTS - 1:
+                log.error("Could not re-enable world saving on %s: %s", instance_id, exc)
                 warnings.append(f"FAILED to re-enable world saving (save-on): {exc}")
-            time.sleep(2)
+                return
+            time.sleep(SAVE_ON_RETRY_SECONDS)
 
 
 @app.get("/v1/instances/{instance_id}/snapshots", dependencies=[Depends(require_token)])
@@ -1083,20 +1267,10 @@ async def create_snapshot(
     await run_in_threadpool(snaps.require_ready)
 
     def _do(op: Operation) -> dict[str, Any]:
-        paused, warnings = _coordinated_save(settings, instance_id, body.consistency, op)
-        try:
+        with _world_saving_paused(settings, instance_id, body.consistency, op, "snapshot", 0.05) as saving:
             op.update(0.5, "Creating snapshot")
-            info = snaps.create(
-                body.label,
-                {
-                    "consistent": paused or not docker_ops.status(instance_id).get("running"),
-                    "kind": body.kind,
-                },
-            )
-        finally:
-            if paused:
-                _resume_saving(settings, instance_id, warnings)
-        info["warnings"] = warnings
+            info = snaps.create(body.label, {"consistent": saving.consistent, "kind": body.kind})
+        info["warnings"] = saving.warnings
         return info
 
     op = registry.start("snapshot", [instance_id], _do)

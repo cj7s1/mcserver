@@ -3,8 +3,12 @@
 * ``enqueue`` creates a Job and (for exclusive jobs) atomically claims the
   instance's operation lock, so two conflicting operations can never run at once.
 * ``run_job`` (Celery) executes the registered handler and always releases the lock.
-* A job found already RUNNING when a worker picks it up was interrupted by a worker
-  crash/restart; it is marked failed rather than blindly re-executed.
+* While the handler runs, a background thread touches ``Job.heartbeat_at`` (and so does every
+  progress/log update). A message for a job that is already RUNNING is a redelivery: with a
+  fresh heartbeat the job is still running on another worker (e.g. the broker's visibility
+  timeout expired during a long job) and the message is ignored; with a stale heartbeat the
+  worker that ran it crashed/restarted, so it is marked failed ("interrupted") rather than
+  blindly re-executed. The watchdog (``tasks.watchdog``) fails stale jobs without a redelivery.
 * Long waits inside a handler (``JobContext.sleep_until``) notice when the job was cancelled
   or abandoned meanwhile and raise ``JobCancelled``; the runner then keeps the status set by
   whoever stopped the job.
@@ -15,12 +19,15 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Any
 
 from celery import shared_task
-from django.db import transaction
+from django.conf import settings
+from django.db import connections, transaction
 from django.utils import timezone
 
 from apps.console.events import broadcast
@@ -45,6 +52,68 @@ class JobCancelled(Exception):
     def __init__(self, status: str) -> None:
         super().__init__(f"the job is {status}")
         self.status = status
+
+
+def heartbeat_interval() -> float:
+    return float(settings.MCPANEL_JOB_HEARTBEAT_SECONDS)
+
+
+def stale_after() -> timedelta:
+    """How long a RUNNING job may go without a heartbeat before it counts as interrupted."""
+    return timedelta(seconds=float(settings.MCPANEL_JOB_STALE_SECONDS))
+
+
+def last_sign_of_life(job: Job) -> datetime | None:
+    # heartbeat_at is set when the job is claimed; started_at covers rows from older versions.
+    # Neither set (should not happen for a RUNNING job) counts as stale.
+    return job.heartbeat_at or job.started_at
+
+
+def heartbeat_is_fresh(job: Job, now: datetime | None = None) -> bool:
+    last = last_sign_of_life(job)
+    return last is not None and (now or timezone.now()) - last < stale_after()
+
+
+def touch_heartbeat(job_id: Any) -> bool:
+    """Record that the job's worker is alive. Returns False once the job is no longer RUNNING."""
+    return Job.objects.filter(pk=job_id, status=JobStatus.RUNNING).update(heartbeat_at=timezone.now()) > 0
+
+
+class _Heartbeat:
+    """Touches the job's heartbeat from a daemon thread while the handler runs.
+
+    Handlers block for long stretches inside single agent calls (streamed uploads, stops,
+    waits without progress callbacks), so progress updates alone are not a reliable sign of
+    life. The thread uses its own database connection and closes it when it ends.
+    """
+
+    def __init__(self, job_id: Any, interval: float) -> None:
+        self.job_id = job_id
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _Heartbeat:
+        if self.interval > 0:
+            self._thread = threading.Thread(target=self._run, name=f"job-heartbeat-{self.job_id}", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=10)
+
+    def _run(self) -> None:
+        try:
+            while not self._stop.wait(self.interval):
+                try:
+                    if not touch_heartbeat(self.job_id):
+                        return  # finished, cancelled or abandoned meanwhile
+                except Exception as exc:  # e.g. database briefly unreachable: keep trying
+                    log.warning("job %s heartbeat failed: %s", self.job_id, exc)
+        finally:
+            connections.close_all()  # only this thread's connections
 
 
 def register(kind: str) -> Callable[[Handler], Handler]:
@@ -86,12 +155,14 @@ class JobContext:
         now = time.monotonic()
         if force or now - self._last_save > 1.0:
             self._last_save = now
-            Job.objects.filter(pk=job.pk).update(progress=job.progress, message=job.message, log=job.log)
+            Job.objects.filter(pk=job.pk).update(
+                progress=job.progress, message=job.message, log=job.log, heartbeat_at=timezone.now()
+            )
             broadcast("job.progress", job_payload(job), str(job.instance_id) if job.instance_id else None)
 
     def log(self, line: str) -> None:
         self.job.append_log(line)
-        Job.objects.filter(pk=self.job.pk).update(log=self.job.log)
+        Job.objects.filter(pk=self.job.pk).update(log=self.job.log, heartbeat_at=timezone.now())
 
     def check_cancelled(self) -> None:
         """Raise JobCancelled if someone cancelled or abandoned this job meanwhile."""
@@ -233,6 +304,12 @@ def _notify_job(job: Job) -> None:
         )
 
 
+INTERRUPTED_ERROR = (
+    "The worker running this operation stopped (crashed or restarted) before it finished. "
+    "Check the server state before retrying."
+)
+
+
 @shared_task(name="apps.jobs.runner.run_job", acks_late=True)
 def run_job(job_id: str) -> None:
     with transaction.atomic():
@@ -240,19 +317,19 @@ def run_job(job_id: str) -> None:
         if job is None:
             return
         if job.status == JobStatus.RUNNING:
-            log.warning("Job %s was interrupted (worker restart); marking failed", job_id)
-            finish(
-                job,
-                JobStatus.FAILED,
-                error="The worker restarted while this operation was running. Check the server state before retrying.",
-                error_code="interrupted",
-            )
+            if heartbeat_is_fresh(job):
+                # Redelivered message (e.g. the broker's visibility timeout expired during a long
+                # job) while the job is still alive on another worker: leave it alone.
+                log.warning("Job %s is still running on another worker (redelivered message ignored)", job_id)
+                return
+            log.warning("Job %s was interrupted (no heartbeat since %s); marking failed", job_id, last_sign_of_life(job))
+            finish(job, JobStatus.FAILED, error=INTERRUPTED_ERROR, error_code="interrupted")
             return
         if job.status != JobStatus.QUEUED:
             return
         job.status = JobStatus.RUNNING
-        job.started_at = timezone.now()
-        job.save(update_fields=["status", "started_at"])
+        job.started_at = job.heartbeat_at = timezone.now()
+        job.save(update_fields=["status", "started_at", "heartbeat_at"])
 
     ctx = JobContext(job)
     handler = HANDLERS.get(job.kind)
@@ -268,7 +345,8 @@ def run_job(job_id: str) -> None:
         )
         return
     try:
-        result = handler(job, ctx) or {}
+        with _Heartbeat(job.pk, heartbeat_interval()):
+            result = handler(job, ctx) or {}
     except JobCancelled as exc:
         # finished by the cancel/abandon request already; only make sure the lock is free
         log.info("Job %s (%s) stopped early: %s", job.id, job.kind, exc)

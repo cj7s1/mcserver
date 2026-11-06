@@ -38,6 +38,9 @@ class Job(models.Model):
     agent_operation_id = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     started_at = models.DateTimeField(null=True, blank=True)
+    # Touched periodically by the worker running the job (runner._Heartbeat); a RUNNING job
+    # whose heartbeat is stale was interrupted (worker crashed/restarted).
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

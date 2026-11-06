@@ -65,6 +65,11 @@ ALL_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS)
 INSTANCE_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS if p.scope == "instance")
 SYSTEM_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS if p.scope == "system")
 
+# Administration rights only the owner (or a superuser) may hand out, through any role: a user
+# manager could otherwise mint Administrator-equivalent accounts (custom role with every code)
+# or more user managers, which is what "only the owner assigns the Administrator role" forbids.
+OWNER_GRANTED_CODES: frozenset[str] = frozenset({"system.users", "system.settings"})
+
 OPERATOR_CODES = {
     "instance.view",
     "instance.control",

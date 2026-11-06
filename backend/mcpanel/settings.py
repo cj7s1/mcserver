@@ -238,18 +238,59 @@ CELERY_RESULT_BACKEND = None
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# With Redis as broker, a message that is still unacknowledged (acks_late: until the task
+# returns) after the visibility timeout (kombu default: 1 h) is handed to another worker. Jobs
+# (modpack installs, big backups/restores, migrations) can run for hours, so keep it far above
+# the longest job. A redelivered job message is harmless anyway: run_job ignores it while the
+# job's heartbeat is fresh (apps/jobs/runner.py).
+CELERY_BROKER_TRANSPORT_OPTIONS = {
+    "visibility_timeout": int(env("MCPANEL_CELERY_VISIBILITY_TIMEOUT", "86400") or 86400),
+}
 CELERY_TASK_ALWAYS_EAGER = env_bool("MCPANEL_CELERY_EAGER", TESTING)
 CELERY_TASK_EAGER_PROPAGATES = False
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_BEAT_SCHEDULE = {
-    "reconcile-instances": {"task": "apps.instances.tasks.reconcile_all", "schedule": 10.0},
-    "scheduler-tick": {"task": "apps.instances.tasks.scheduler_tick", "schedule": 60.0},
-    "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0},
-    "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0},
-    "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0},
-    # hourly tick; each modpack server is checked at most every 6 h (apps/modpacks/updates.py)
-    "modpack-update-check": {"task": "apps.modpacks.tasks.check_updates_due", "schedule": 3600.0},
+# Two queues with separate bindings: "celery" (default) carries jobs (apps.jobs.runner.run_job,
+# long and blocking), "periodic" the beat ticks and other short tasks. A worker started without
+# -Q consumes every queue listed here, so the stock `worker` command keeps working; a second,
+# dedicated `worker -Q periodic` keeps reconcile, schedules and the watchdog running even while
+# long jobs occupy every slot of the main worker.
+CELERY_TASK_DEFAULT_QUEUE = "celery"
+CELERY_TASK_QUEUES = {
+    "celery": {"exchange": "celery", "routing_key": "celery"},
+    "periodic": {"exchange": "periodic", "routing_key": "periodic"},
 }
+CELERY_TASK_ROUTES = {
+    "apps.instances.tasks.*": {"queue": "periodic"},
+    "apps.jobs.tasks.*": {"queue": "periodic"},
+    "apps.metrics.tasks.*": {"queue": "periodic"},
+    "apps.modpacks.tasks.*": {"queue": "periodic"},
+    "apps.notifications.*": {"queue": "periodic"},
+}
+# "expires" drops ticks that waited too long in the queue (no pile-up behind busy workers);
+# overlapping runs of the same tick are skipped by mcpanel.celery.SINGLE_FLIGHT.
+CELERY_BEAT_SCHEDULE = {
+    "reconcile-instances": {"task": "apps.instances.tasks.reconcile_all", "schedule": 10.0, "options": {"expires": 30}},
+    "scheduler-tick": {"task": "apps.instances.tasks.scheduler_tick", "schedule": 60.0, "options": {"expires": 55}},
+    "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0, "options": {"expires": 110}},
+    "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0, "options": {"expires": 50}},
+    "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0, "options": {"expires": 3000}},
+    # hourly tick; each modpack server is checked at most every 6 h (apps/modpacks/updates.py)
+    "modpack-update-check": {
+        "task": "apps.modpacks.tasks.check_updates_due",
+        "schedule": 3600.0,
+        "options": {"expires": 1800},
+    },
+}
+# Job liveness (apps/jobs/runner.py): while a handler runs, its worker touches Job.heartbeat_at
+# every MCPANEL_JOB_HEARTBEAT_SECONDS. A RUNNING job without a heartbeat for
+# MCPANEL_JOB_STALE_SECONDS was interrupted (worker crashed/restarted) and is failed by the
+# watchdog or by a redelivered message; jobs with a fresh heartbeat are left alone. A job still
+# heartbeating after MCPANEL_JOB_MAX_RUNTIME_HOURS (0 = no limit) is failed as hung.
+MCPANEL_JOB_HEARTBEAT_SECONDS = float(env("MCPANEL_JOB_HEARTBEAT_SECONDS", "30") or 30)
+MCPANEL_JOB_STALE_SECONDS = float(env("MCPANEL_JOB_STALE_SECONDS", "300") or 300)
+MCPANEL_JOB_MAX_RUNTIME_HOURS = float(env("MCPANEL_JOB_MAX_RUNTIME_HOURS", "48") or 0)
+if MCPANEL_JOB_HEARTBEAT_SECONDS <= 0 or MCPANEL_JOB_STALE_SECONDS < 3 * MCPANEL_JOB_HEARTBEAT_SECONDS:
+    raise ImproperlyConfigured("MCPANEL_JOB_STALE_SECONDS must be at least 3x MCPANEL_JOB_HEARTBEAT_SECONDS (> 0)")
 
 # --- Agent / node defaults ---------------------------------------------------
 MCPANEL_AGENT_URL = env("MCPANEL_AGENT_URL", "http://localhost:8700") or ""

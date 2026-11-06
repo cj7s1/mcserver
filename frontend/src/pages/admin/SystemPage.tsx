@@ -11,6 +11,8 @@ import { qk, useSystemInfo } from "@/lib/queries";
 import type { SystemInfo, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { AdminCallout, AdminNoPermission } from "./admin-shared";
+import { NodesSection } from "./system/NodesSection";
+import { NotificationsSection } from "./system/NotificationsSection";
 import { SettingsForm } from "./system/SettingsForm";
 import {
   HostSection,
@@ -55,8 +57,8 @@ export default function SystemPage() {
         title="System"
         description={
           info.data
-            ? `MCPanel ${info.data.version} · node “${info.data.node.name}”. Host health, storage and panel-wide defaults.`
-            : "Host health, storage and panel-wide defaults."
+            ? `MCPanel ${info.data.version} · node “${info.data.node.name}”. Host health, nodes, panel-wide defaults and notifications.`
+            : "Host health, nodes, panel-wide defaults and notifications."
         }
         actions={
           <Button
@@ -81,6 +83,8 @@ export default function SystemPage() {
         <StatusOverview info={info.data} canNodes={canNodes} />
       ) : null}
 
+      {canNodes && <NodesSection />}
+
       <div className="grid items-start gap-4 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="grid min-w-0 gap-4">
           {canSettings &&
@@ -97,6 +101,7 @@ export default function SystemPage() {
                 policy={agentPolicy(info.data?.agent)}
               />
             ) : null)}
+          {canSettings && <NotificationsSection />}
           <SecurityNotesSection />
         </div>
 

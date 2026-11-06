@@ -201,19 +201,31 @@ class SafeRoot:
 
     @contextmanager
     def open_read(self, rel: str) -> Iterator[tuple[BinaryIO, int]]:
+        """Open a regular file for reading.
+
+        ``O_NONBLOCK`` makes opening a FIFO (which a mod can create with ``mkfifo``) return
+        at once instead of waiting for a writer; anything but a regular file (FIFO, socket,
+        device) is refused by ``fstat`` before a single byte is read.
+        """
         with self._parent(rel) as (fd, name, _parts):
             try:
-                ffd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                ffd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
             except FileNotFoundError as exc:
                 raise PathError("File does not exist", "not_found", 404) from exc
             except OSError as exc:
                 if exc.errno == errno.ELOOP:
                     raise PathError("Symbolic links are not followed", "symlink") from exc
+                if exc.errno in (errno.ENXIO, errno.EOPNOTSUPP, errno.ENODEV):  # socket / device node
+                    raise PathError("Not a regular file", "not_a_file") from exc
                 raise
-            st = os.fstat(ffd)
-            if not statmod.S_ISREG(st.st_mode):
+            try:
+                st = os.fstat(ffd)
+                if not statmod.S_ISREG(st.st_mode):
+                    raise PathError("Not a regular file", "not_a_file")
+                os.set_blocking(ffd, True)  # regular file: back to normal blocking reads
+            except BaseException:
                 os.close(ffd)
-                raise PathError("Not a regular file", "not_a_file")
+                raise
             fh = os.fdopen(ffd, "rb")
             try:
                 yield fh, st.st_size
