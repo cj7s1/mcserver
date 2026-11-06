@@ -12,6 +12,7 @@ EVENTS = {
     "job.failed": "Any background job failed",
     "backup.failed": "Backup failed",
     "backup.succeeded": "Backup completed",
+    "modpack.update_available": "Modpack update available (once per new release)",
 }
 
 

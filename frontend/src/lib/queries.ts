@@ -76,7 +76,7 @@ export function useJob(id: string | null | undefined) {
     enabled: !!id,
     refetchInterval: (q) => {
       const d = q.state.data as Job | undefined;
-      return d && (d.status === "succeeded" || d.status === "failed") ? false : 1500;
+      return d && (d.status === "succeeded" || d.status === "failed" || d.status === "cancelled") ? false : 1500;
     },
   });
 }

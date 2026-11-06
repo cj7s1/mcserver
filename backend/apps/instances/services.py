@@ -74,10 +74,74 @@ def bump_revision(instance: Instance) -> None:
     instance.refresh_from_db(fields=["config_revision"])
 
 
-def power(instance: Instance, action: str, user: Any, request: Any = None) -> Job | dict[str, Any]:
+POWER_TITLES = {"start": "Start server", "stop": "Stop server", "restart": "Restart server"}
+
+
+def enqueue_power(
+    instance: Instance,
+    action: str,
+    *,
+    user: Any = None,
+    warn_minutes: int = 0,
+    warn_message: str = "",
+    title: str | None = None,
+) -> Job:
+    """Queue start/stop/restart. With ``warn_minutes`` players are warned in game first.
+
+    A warning job is enqueued non-exclusive and only takes the instance lock for its last
+    seconds (see power_warnings). An immediate stop/restart supersedes a pending countdown.
+    """
+    from apps.jobs.models import ACTIVE_STATUSES
+
+    from .power_warnings import WARNABLE_ACTIONS, cancel_countdown, pending_countdown
+
+    if action not in POWER_TITLES:
+        raise ApiError(f"Unknown power action {action!r}", code="invalid_action")
+    base_title = title or POWER_TITLES[action]
+    warn = warn_minutes if action in WARNABLE_ACTIONS else 0
+    countdown = pending_countdown(instance) if action in WARNABLE_ACTIONS else None
+    if warn and instance.status in ("running", "starting", "unhealthy"):
+        if countdown is not None:
+            raise ConflictError(
+                f"A countdown is already running for this server ({countdown.title}). Cancel it first.",
+                code="countdown_pending",
+                details={"job_id": str(countdown.id), "kind": countdown.kind},
+            )
+        current = Job.objects.filter(pk=instance.active_job_id, status__in=ACTIVE_STATUSES).first()
+        if current is not None:  # same rule as an immediate action; the lock is taken later
+            raise ConflictError(
+                f"Another operation is in progress: {current.title}",
+                code="instance_busy",
+                details={"job_id": str(current.id), "kind": current.kind},
+            )
+        return enqueue(
+            action,
+            title=f"{base_title} ({warn} min warning)",
+            instance=instance,
+            user=user,
+            params={"warn_minutes": warn, "warn_message": warn_message},
+            exclusive=False,
+        )
+    job = enqueue(action, title=base_title, instance=instance, user=user)
+    if countdown is not None:
+        try:
+            cancel_countdown(countdown.id, message=f"Superseded by '{base_title}'", notify_players=False)
+        except ConflictError:
+            pass  # it finished or entered its final seconds meanwhile
+    return job
+
+
+def power(
+    instance: Instance,
+    action: str,
+    user: Any,
+    request: Any = None,
+    *,
+    warn_minutes: int = 0,
+    warn_message: str = "",
+) -> Job | dict[str, Any]:
     if instance.archived_at:
         raise ConflictError("Unarchive this server before starting it", code="archived")
-    titles = {"start": "Start server", "stop": "Stop server", "restart": "Restart server"}
     if action == "kill":
         Instance.objects.filter(pk=instance.pk).update(desired_state="stopped")
         status = AgentClient(instance.node).kill(instance.id)
@@ -86,10 +150,13 @@ def power(instance: Instance, action: str, user: Any, request: Any = None) -> Jo
 
         reconcile_instance(instance.id)
         return status
-    if action not in titles:
-        raise ApiError(f"Unknown power action {action!r}", code="invalid_action")
-    job = enqueue(action, title=titles[action], instance=instance, user=user)
-    audit.record(f"instance.{action}", request=request, instance=instance, target=instance, details={"job": str(job.id)})
+    job = enqueue_power(instance, action, user=user, warn_minutes=warn_minutes, warn_message=warn_message)
+    details: dict[str, Any] = {"job": str(job.id)}
+    if job.params.get("warn_minutes"):
+        details["warn_minutes"] = job.params["warn_minutes"]
+        if job.params.get("warn_message"):
+            details["warn_message"] = job.params["warn_message"]
+    audit.record(f"instance.{action}", request=request, instance=instance, target=instance, details=details)
     return job
 
 

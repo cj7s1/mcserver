@@ -1,7 +1,8 @@
 # Development status
 
 _Last updated: 2026-11-06 (session 2: SpigotMC source, mods-listing speed-up, integration coverage, btrfs
-delete fix, Unraid simulation). Previous: 2026-11-03, end of session 1._ Keep this file honest. Implemented,
+delete fix, Unraid simulation, modpack update checks, restart warnings). Previous: 2026-11-03, end of
+session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
 
@@ -12,10 +13,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **480 passed** (2026-11-06, after merging SpigotMC + hash cache + integration tests; incl. OpenAPI fail-on-warn) |
+| `backend: uv run pytest -q -m "not integration"` | **542 passed** (2026-11-06, after merging SpigotMC, hash cache, integration tests, update checks and restart warnings; incl. OpenAPI fail-on-warn) |
 | `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
 | `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **354 passed**, 3 btrfs tests skipped without the mount (2026-11-06) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 15 tests (2026-11-06) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 26 tests (2026-11-06) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -99,6 +100,20 @@ second with a progress notice), one `/projects` request per 250 ids, and Modrint
 instead of 1 h. Suites: agent 350 passed, backend 435 passed, frontend tsc, lint, vitest and build clean.
 Not yet checked in a browser.
 
+### Added 2026-11-06: unit-tested only (not yet run against a real server or provider)
+
+| Feature | What exists | Verified by |
+|---|---|---|
+| **Modpack "update available"** | `apps/modpacks/{models,updates,tasks}.py` (`ModpackUpdateCheck`, migration `modpacks/0001`). Hourly beat tick checks each non-archived modpack server at most every 6 h (max 120 per tick, 20 s stagger, grouped by project so the adapters' 5-min release cache is shared). Newest release for the **pinned Minecraft version + loader** (stable only unless the pin is a pre-release) is stored with its date; failures are recorded (`status=error`, last success kept), never raised. Keyless CurseForge records "Update check unavailable without a CurseForge API key" without calling CurseForge. `modpack_update` on the instance serializer, `update_check` on `GET /instances/<id>/modpack`, `POST /instances/<id>/modpack/check` (instance.view, 30 s cooldown, audited). Notification event `modpack.update_available`, sent once per new release. UI: "Update available: X" badge in the server header → Modpack tab `?review=<id>` opens the existing update-plan dialog; check status + "Check now" on the Modpack tab. | backend tests with respx (Modrinth/CurseForge-with-key/FTB shapes, cache reuse, notify-once, errors, keyless CF, due selection, API); Modrinth modpack version shape re-checked live (read-only) |
+| **Restart/stop warnings** | `apps/instances/power_warnings.py`. `warn_minutes` (0/1/5/10/15) + optional `warn_message` on `POST /power` (stop/restart) and in restart/stop schedule payloads. The job warns via `tellraw @a` at T-N, the standard marks below N (10/5/1 min) and T-10 s, then acts; no warning when the server is not running, nobody is online or RCON is unreachable; acts early when everybody leaves; skips the action if the server stopped meanwhile. **Lock choice:** warning jobs are enqueued non-exclusive and claim the instance lock only for the last 10 s + the action (waiting up to 20 min for another exclusive job), so backups etc. are not blocked by a 15-min warning; a second countdown is refused (`countdown_pending`), an immediate stop/restart supersedes a pending countdown. `POST /instances/<id>/power/cancel` (instance.control, audited) or abandoning the job stops it within ~2 s and players are told it was cancelled. Operator text is validated (one printable line, no `§`, ≤100 chars) and only placed inside a `json.dumps` text component (root compound with `extra`, valid as JSON and as 1.21.5+ SNBT). UI: Restart/Stop confirm dialog (server header **and** library quick actions) with the warning select, message and online-player hint; live countdown banner with Cancel; warning fields in the schedule dialog. | backend tests with the FakeAgent capturing RCON commands on a fake clock (timing, lock timing, cancel, abandon, supersede, lock-wait timeout, players leaving, server stopping, injection, validation, schedules); vitest for the pure helpers |
+
+Not verified for these yet: `tellraw` output on real servers (vanilla JSON ≤1.21.4, SNBT 1.21.5+,
+Paper/Forge/Fabric), the `say` fallback, Celery beat actually firing the hourly tick, a real
+CurseForge key, and the new screens in a browser. A worker restart during a countdown fails the job
+as `interrupted` (players were warned but get no "cancelled" message). The countdown occupies one
+worker slot while it sleeps (like other long jobs). Notification channels still have no admin UI, so
+`modpack.update_available` is selectable through the API only.
+
 ### Not yet verified
 
 * **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).
@@ -129,7 +144,9 @@ Not yet checked in a browser.
 
 ## Next recommended tasks (in order)
 
-1. Browser pass over the new screens (Playwright, 1440 and 390 px, dark/light) and fix what it finds.
+1. Browser pass over the new screens (Playwright, 1440 and 390 px, dark/light) and fix what it finds,
+   including the restart-warning dialog/banner and the modpack update badge; run one real restart with a
+   warning on a vanilla server (≤1.21.4 and ≥1.21.5) and watch the chat.
 2. Admin UI still missing: Nodes screen (API + `manage.py add_node` exist), notifications channels
    screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
    wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).

@@ -17,8 +17,9 @@ pick a release, choose RAM and a port, and deploy.
 - **Servers:** Vanilla, Paper, Purpur, Folia, Fabric, Quilt, Forge, NeoForge. Versions come from the
   official metadata services, and Java is picked automatically from Mojang's requirements.
 - **Modpacks:** Modrinth, CurseForge (with or without an API key) and Feed The Beast. Releases are
-  **pinned**: restarts never upgrade silently. Updates are explicit, take a pre-update backup, and can be
-  rolled back.
+  **pinned**: restarts never upgrade silently. The panel checks for newer compatible releases every 6 h
+  ("Update available" badge, optional notification); updates are explicit, take a pre-update backup, and
+  can be rolled back.
 - **Lifecycle:** install, start, graceful stop, restart, kill, recreate (keeps world data), clone, import
   an existing server from an archive, archive, and delete with typed confirmation. Status comes from real
   health checks. Crash loops are detected and stopped, and a diagnosis names the likely cause (missing
@@ -34,8 +35,9 @@ pick a release, choose RAM and a port, and deploy.
 - **Players:** whitelist, operators, bans, kick, and online and historical player lists.
 - **Multi-user:** a permission matrix with built-in and custom roles, per-server access grants, and an
   audit log.
-- **Automation:** cron schedules (restart/backup/command), Discord/webhook notifications, and resource
-  history.
+- **Automation:** cron schedules (restart/stop/backup/snapshot/command), in-game countdown warnings
+  before restarts and stops (manual or scheduled, cancellable), Discord/webhook notifications, and
+  resource history.
 
 ## Architecture in one paragraph
 

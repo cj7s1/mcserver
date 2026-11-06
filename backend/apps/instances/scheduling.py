@@ -59,7 +59,20 @@ def execute(sched: Schedule) -> str:
     if sched.only_when_running and sched.action in ("restart", "command", "stop") and not running:
         return "Skipped: server not running"
     if sched.action in ("restart", "start", "stop"):
-        job = enqueue(sched.action, title=f"Scheduled {sched.action}: {sched.name}", instance=inst)
+        from .power_warnings import clean_message
+        from .services import enqueue_power
+
+        payload = sched.payload or {}
+        warn = int(payload.get("warn_minutes") or 0) if sched.action in ("restart", "stop") else 0
+        job = enqueue_power(
+            inst,
+            sched.action,
+            warn_minutes=warn,
+            warn_message=clean_message(payload.get("warn_message")),
+            title=f"Scheduled {sched.action}: {sched.name}",
+        )
+        if job.params.get("warn_minutes"):
+            return f"Queued job {job.id} (players warned {job.params['warn_minutes']} min before)"
         return f"Queued job {job.id}"
     if sched.action == "backup":
         job = enqueue(

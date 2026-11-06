@@ -77,6 +77,8 @@ class InstanceSerializer(serializers.ModelSerializer):
     connection = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
     active_job = serializers.SerializerMethodField()
+    power_countdown = serializers.SerializerMethodField()
+    modpack_update = serializers.SerializerMethodField()
     node_name = serializers.CharField(source="node.name", read_only=True)
 
     class Meta:
@@ -132,6 +134,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "status_updated_at",
             "restart_required",
             "active_job",
+            "power_countdown",
+            "modpack_update",
             "archived_at",
             "created_at",
             "updated_at",
@@ -195,6 +199,18 @@ class InstanceSerializer(serializers.ModelSerializer):
             "message": job.message,
             "status": job.status,
         }
+
+    def get_power_countdown(self, obj: Instance) -> dict[str, Any] | None:
+        """A restart/stop that is warning players and has not started yet (cancellable)."""
+        from .power_warnings import countdown_info
+
+        return countdown_info(obj)
+
+    def get_modpack_update(self, obj: Instance) -> dict[str, Any] | None:
+        """Result of the periodic modpack update check (None for standard servers)."""
+        from apps.modpacks.updates import summary
+
+        return summary(obj)
 
     # --- validation of editable fields --------------------------------------------------
     def validate_env(self, value: Any) -> dict[str, str]:
@@ -419,4 +435,17 @@ class ScheduleSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({"payload": ["A single-line command is required"]})
             payload["command"] = cmd.lstrip("/")
             attrs["payload"] = payload
+        if action in ("restart", "stop") and isinstance(payload, dict):
+            from .power_warnings import validate_message, validate_warn_minutes
+
+            try:
+                minutes = validate_warn_minutes(payload.get("warn_minutes"))
+                message = validate_message(payload.get("warn_message"))
+            except ValueError as exc:
+                raise serializers.ValidationError({"payload": [str(exc)]}) from exc
+            cleaned = {k: v for k, v in payload.items() if k not in ("warn_minutes", "warn_message")}
+            cleaned["warn_minutes"] = minutes
+            if message:
+                cleaned["warn_message"] = message
+            attrs["payload"] = cleaned
         return attrs

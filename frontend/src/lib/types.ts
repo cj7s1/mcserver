@@ -95,6 +95,36 @@ export interface ActiveJob {
   status: JobStatus;
 }
 
+/** Result of the periodic modpack update check (backend apps/modpacks/updates.py summary()). */
+export interface ModpackUpdateInfo {
+  /** "pending" = never checked; "unavailable" = cannot be checked (e.g. CurseForge without an API key) */
+  status: "ok" | "unavailable" | "error" | "pending";
+  detail: string;
+  checked_at: string | null;
+  last_success_at: string | null;
+  /** A newer release for the pinned Minecraft version and loader exists. */
+  available: boolean;
+  /** The pin changed since the last successful check (update/rollback); re-check to know more. */
+  stale: boolean;
+  latest: { id: string; name: string; published: string | null; minecraft_version: string } | null;
+  /** Only on POST /modpack/check: the request reused a check that ran moments ago. */
+  throttled?: boolean;
+}
+
+/** A restart/stop that warns players in game first and has not started yet (backend power_warnings.countdown_info). */
+export interface PowerCountdown {
+  job_id: string;
+  action: "restart" | "stop";
+  title: string;
+  warn_minutes: number;
+  message: string;
+  /** queued = waiting for a worker; warning = announcing; final = last 10 seconds */
+  phase: "queued" | "warning" | "final";
+  /** When the action is due (ISO); null until the worker starts the countdown. */
+  action_at: string | null;
+  status_message: string;
+}
+
 export interface Instance {
   id: string;
   name: string;
@@ -146,6 +176,9 @@ export interface Instance {
   status_updated_at: string | null;
   restart_required: boolean;
   active_job: ActiveJob | null;
+  power_countdown: PowerCountdown | null;
+  /** null for standard (non-modpack) servers */
+  modpack_update: ModpackUpdateInfo | null;
   archived_at: string | null;
   created_at: string;
   updated_at: string;

@@ -36,7 +36,9 @@ import {
   ACTION_INFO,
   DEFAULT_SNAPSHOT_KEEP,
   RUNNING_ONLY_ACTIONS,
+  scheduleWarnMinutes,
   snapshotKeep,
+  WARN_ACTIONS,
   type ScheduleDraft,
 } from "./schedules/schedule-meta";
 import { ScheduleDialog } from "./schedules/ScheduleDialog";
@@ -57,10 +59,9 @@ const TEMPLATES: { label: string; draft: Partial<ScheduleDraft>; needsBackup?: b
     draft: { name: "Hourly snapshot", action: "snapshot", cron: "0 * * * *", keep: String(DEFAULT_SNAPSHOT_KEEP) },
     needsSnapshots: true,
   },
-  { label: "Daily restart", draft: { name: "Daily restart", action: "restart", cron: "0 5 * * *" } },
   {
-    label: "Restart warning",
-    draft: { name: "Restart warning", action: "command", cron: "55 4 * * *", command: "say Server restarts in 5 minutes" },
+    label: "Daily restart",
+    draft: { name: "Daily restart", action: "restart", cron: "0 5 * * *", warnMinutes: 5, warnMessage: "Daily restart" },
   },
 ];
 
@@ -78,6 +79,12 @@ function payloadSummary(s: Schedule): string | null {
     if (s.payload?.keep === 0) return "Keeps all scheduled snapshots";
     const n = snapshotKeep(s) ?? DEFAULT_SNAPSHOT_KEEP;
     return `Keeps the newest ${n} scheduled snapshot${n === 1 ? "" : "s"}`;
+  }
+  if (WARN_ACTIONS.includes(s.action)) {
+    const minutes = scheduleWarnMinutes(s) ?? 0;
+    if (!minutes) return null;
+    const message = typeof s.payload?.warn_message === "string" && s.payload.warn_message ? ` · “${s.payload.warn_message}”` : "";
+    return `Warns players ${minutes} min before${message}`;
   }
   return null;
 }
@@ -322,6 +329,11 @@ export default function Schedules() {
             <code className="font-mono">30 3 * * 1-5</code> runs at 03:30 on weekdays. Sunday is 0 or 7.
           </li>
           <li>Scheduled backups follow the retention policy configured on the Backups page.</li>
+          <li>
+            Restarts and stops with a warning start a countdown at the scheduled time: online players are told in chat, and the
+            action follows after the chosen number of minutes (at once when nobody is online). The countdown can be cancelled
+            from the server header.
+          </li>
           <li>
             Snapshot schedules take instant btrfs snapshots (where enabled on the Backups page) and keep only the newest scheduled
             snapshots, as set per schedule (default {DEFAULT_SNAPSHOT_KEEP}). Manual and “before rollback” snapshots are never

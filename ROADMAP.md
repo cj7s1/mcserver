@@ -65,7 +65,9 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Clone instance (stopped source), restore as new
 - [x] Archive / unarchive, delete with typed confirmation
 - [x] Modpack update with pre-update backup, history, rollback to pre-update backup
+- [x] Modpack "update available" check (every 6 h, compatible MC/loader only, notify once per release, header badge → update plan) — unit-tested only
 - [x] Cron schedules: restart/start/stop/backup/command
+- [x] In-game countdown warnings before restart/stop (manual + scheduled, cancellable, lock only for the last 10 s) — unit-tested only
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
 - [ ] World import / export
 - [x] Software (non-modpack) version update workflow with automatic pre-update backup

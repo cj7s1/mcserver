@@ -1,0 +1,149 @@
+/**
+ * Restart/Stop confirmation with the optional in-game warning
+ * (POST /instances/{id}/power {action, warn_minutes, warn_message}; backend power_warnings.py).
+ */
+import { useId, useState } from "react";
+import { toast } from "sonner";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { api, ApiError, errorMessage } from "@/lib/api";
+import {
+  describeWarning,
+  isWarnMinutes,
+  powerBody,
+  WARN_MESSAGE_MAX,
+  WARN_MINUTES,
+  warnMessageError,
+  warnOptionLabel,
+  type WarnableAction,
+  type WarnMinutes,
+} from "@/lib/power-warning";
+import { useInvalidateInstance, useStats } from "@/lib/queries";
+import type { Instance } from "@/lib/types";
+import { useStoredState } from "@/pages/library/server-utils";
+
+const COPY: Record<WarnableAction, { title: string; body: string; confirm: string; verb: string }> = {
+  restart: {
+    title: "Restart",
+    body: "The server saves the world, stops and starts again. Connected players are disconnected.",
+    confirm: "Restart",
+    verb: "restart",
+  },
+  stop: {
+    title: "Stop",
+    body: "The server saves the world and stops. Connected players are disconnected.",
+    confirm: "Stop server",
+    verb: "stop",
+  },
+};
+
+function PlayersHint({ instanceId, minutes, verb }: { instanceId: string; minutes: number; verb: string }) {
+  const stats = useStats(instanceId);
+  const online = stats.data?.players?.online;
+  if (minutes === 0 || online === undefined || online === null) return null;
+  return (
+    <p className="text-xs text-muted-foreground" aria-live="polite">
+      {online === 0
+        ? `Nobody is online right now, so the ${verb} happens at once.`
+        : `${online} player${online === 1 ? " is" : "s are"} online and will see the countdown in chat.`}
+    </p>
+  );
+}
+
+export function PowerActionDialog({
+  instance,
+  action,
+  open,
+  onOpenChange,
+}: {
+  instance: Pick<Instance, "id" | "name">;
+  action: WarnableAction;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const uid = useId();
+  const invalidate = useInvalidateInstance();
+  const [minutes, setMinutes] = useStoredState<WarnMinutes>("mcpanel.power.warnMinutes", 0, isWarnMinutes);
+  const [message, setMessage] = useState("");
+  const [serverError, setServerError] = useState<string | null>(null);
+  const copy = COPY[action];
+  const localError = minutes ? warnMessageError(message) : null;
+  const messageError = localError ?? serverError;
+
+  return (
+    <ConfirmDialog
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) setServerError(null);
+        onOpenChange(o);
+      }}
+      title={`${copy.title} ${instance.name}?`}
+      confirmLabel={minutes ? `${copy.confirm} in ${minutes} min` : copy.confirm}
+      description={<p>{copy.body}</p>}
+      onConfirm={async () => {
+        if (localError) throw new Error(localError);
+        try {
+          await api.post(`/instances/${instance.id}/power`, powerBody(action, minutes, message));
+          toast.success(
+            minutes
+              ? `${copy.title} of ${instance.name} scheduled in ${minutes} min; players are being warned`
+              : `${copy.title} requested for ${instance.name}`,
+          );
+          setMessage("");
+          invalidate(instance.id);
+        } catch (err) {
+          if (err instanceof ApiError && err.fieldErrors.warn_message) setServerError(err.fieldErrors.warn_message);
+          else toast.error(errorMessage(err));
+          throw err;
+        }
+      }}
+    >
+      <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
+        <div className="grid gap-1.5">
+          <Label htmlFor={`${uid}-warn`}>Warn players in game</Label>
+          <Select value={String(minutes)} onValueChange={(v) => setMinutes(Number(v) as WarnMinutes)}>
+            <SelectTrigger id={`${uid}-warn`} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {WARN_MINUTES.map((m) => (
+                <SelectItem key={m} value={String(m)}>
+                  {warnOptionLabel(m)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {minutes
+              ? `${describeWarning(minutes)} Other operations keep working meanwhile; you can cancel until the last 10 seconds.`
+              : `The ${copy.verb} starts immediately.`}
+          </p>
+          <PlayersHint instanceId={instance.id} minutes={minutes} verb={copy.verb} />
+        </div>
+        {minutes > 0 && (
+          <div className="grid gap-1.5">
+            <Label htmlFor={`${uid}-msg`}>Message (optional)</Label>
+            <Input
+              id={`${uid}-msg`}
+              value={message}
+              maxLength={WARN_MESSAGE_MAX}
+              placeholder="e.g. Installing the new modpack version"
+              onChange={(e) => {
+                setMessage(e.target.value.replace(/[\r\n]/g, " "));
+                setServerError(null);
+              }}
+              aria-invalid={!!messageError || undefined}
+              aria-describedby={`${uid}-msg-help`}
+              autoComplete="off"
+            />
+            <p id={`${uid}-msg-help`} className={messageError ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+              {messageError ?? "Shown after each warning. Plain text, one line."}
+            </p>
+          </div>
+        )}
+      </div>
+    </ConfirmDialog>
+  );
+}
