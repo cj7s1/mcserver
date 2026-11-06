@@ -170,7 +170,10 @@ export function BackupTable({
           <TableHead className="hidden md:table-cell">Created</TableHead>
           <TableHead className="hidden text-right sm:table-cell">
             <Tip label="Added: new data this backup stored after deduplication. Source: total size of the server files it covered.">
-              <span tabIndex={0} className="cursor-help underline decoration-dotted underline-offset-2 outline-none">
+              <span
+                tabIndex={0}
+                className="cursor-help rounded-sm underline decoration-dotted underline-offset-2 outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              >
                 Size
               </span>
             </Tip>
@@ -197,7 +200,7 @@ export function BackupTable({
                     title={b.pinned ? "Pinned: never removed by retention. Click to unpin." : "Pin: keep forever, ignore retention"}
                     disabled={pinPending === b.id || b.status === "running"}
                     onClick={() => onTogglePin(b)}
-                    className={b.pinned ? "text-primary" : "text-muted-foreground/60 hover:text-foreground"}
+                    className={b.pinned ? "text-primary" : "text-muted-foreground hover:text-foreground"}
                   >
                     {pinPending === b.id ? <Loader2 className="animate-spin" /> : <Pin className={b.pinned ? "fill-current" : ""} />}
                   </Button>

@@ -1,7 +1,18 @@
 /** Installed mods/plugins: table with enable switches, removal, update checks and bulk updates. */
 import { useMutation } from "@tanstack/react-query";
-import { ArrowUpCircle, ExternalLink, Loader2, PackageSearch, RefreshCw, Search, Trash2, Upload } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  ArrowUpCircle,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink,
+  Loader2,
+  PackageSearch,
+  RefreshCw,
+  Search,
+  Trash2,
+  Upload,
+} from "lucide-react";
+import { useDeferredValue, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { ConfirmAction } from "./ConfirmAction";
 import { EmptyState } from "@/components/States";
@@ -37,6 +48,9 @@ import { Notice, ProjectIcon, type ContentEnv } from "./content-ui";
 
 type StatusFilter = "all" | "enabled" | "disabled" | "updates" | "manual";
 type SortKey = "name" | "size" | "modified";
+
+/** Rows per page. Modpacks ship 300+ jars; rendering them all made filtering and toggling sluggish. */
+const PAGE_SIZE = 50;
 
 function useUpdateFiles(env: ContentEnv, onDone?: () => void) {
   const invalidate = useInvalidateContent(env.instance.id);
@@ -134,7 +148,7 @@ function SourceBadges({ file, env }: { file: ContentFile; env: ContentEnv }) {
     badges.push({
       label: `Not for ${env.platform}`,
       tip: `Modrinth lists this version for ${file.version?.loaders.join(", ") || "another platform"}; this ${env.platform} server will probably not load it.`,
-      className: "bg-destructive/10 text-destructive",
+      className: "bg-destructive/10 text-red-700 dark:text-red-300",
     });
   if (file.compatibility && file.compatibility.minecraft === false)
     badges.push({
@@ -200,10 +214,10 @@ function InstalledRow({
   const enabled = toggle.isPending ? !!toggle.variables : file.enabled;
 
   const versionEl = (
-    <div className="flex flex-col items-start gap-1">
+    <div className="flex min-w-0 flex-col items-start gap-1">
       {file.version ? (
-        <span className="flex items-center gap-1.5">
-          <span className="max-w-40 truncate font-mono text-xs" title={file.version.name ?? undefined}>
+        <span className="flex max-w-full min-w-0 items-center gap-1.5">
+          <span className="max-w-40 min-w-0 truncate font-mono text-xs" title={file.version.version_number ?? file.version.name ?? undefined}>
             {file.version.version_number ?? "—"}
           </span>
           {file.version.version_type && file.version.version_type !== "release" && (
@@ -220,7 +234,7 @@ function InstalledRow({
           <Button
             size="xs"
             variant="outline"
-            className="border-sky-500/40 text-sky-700 dark:text-sky-300"
+            className="max-w-full border-sky-500/40 text-sky-700 dark:text-sky-300"
             disabled={updating}
             onClick={onUpdate}
             aria-label={`Update ${title} to ${update.latest.version_number ?? "the newest version"}`}
@@ -250,12 +264,18 @@ function InstalledRow({
           />
         </TableCell>
       )}
-      <TableCell className="max-w-0 min-w-36 py-2 sm:min-w-56">
+      <TableCell className="w-full max-w-0 min-w-36 py-2 sm:min-w-56">
         <div className="flex min-w-0 items-center gap-2.5">
           <ProjectIcon url={file.project?.icon_url} className={cn("size-8", !file.enabled && "opacity-50 grayscale")} />
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <span className={cn("truncate font-medium", file.enabled ? "text-foreground" : "line-through decoration-muted-foreground/50")}>
+              <span
+                className={cn(
+                  "max-w-full font-medium max-sm:line-clamp-2 max-sm:whitespace-normal max-sm:[overflow-wrap:anywhere] sm:truncate",
+                  file.enabled ? "text-foreground" : "line-through decoration-muted-foreground/50",
+                )}
+                title={title}
+              >
                 {title}
               </span>
               <SourceBadges file={file} env={env} />
@@ -263,7 +283,7 @@ function InstalledRow({
             <p className="truncate font-mono text-[11px] text-muted-foreground" title={file.filename}>
               {file.filename}
             </p>
-            <div className="mt-1 sm:hidden">{versionEl}</div>
+            <div className="mt-1 min-w-0 sm:hidden">{versionEl}</div>
           </div>
         </div>
       </TableCell>
@@ -344,6 +364,9 @@ export function InstalledContent({
   const [text, setText] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<SortKey>("name");
+  // Filtering re-renders the table; typing stays responsive while it catches up.
+  const query = useDeferredValue(text);
+  const tableRef = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [checkRequested, setCheckRequested] = useState(false);
   const [rowUpdating, setRowUpdating] = useState<string | null>(null);
@@ -361,7 +384,7 @@ export function InstalledContent({
   const mutable = env.canEdit && !env.locked;
 
   const visible = useMemo(() => {
-    const needle = text.trim().toLowerCase();
+    const needle = query.trim().toLowerCase();
     const out = files.filter((f) => {
       if (status === "enabled" && !f.enabled) return false;
       if (status === "disabled" && f.enabled) return false;
@@ -377,7 +400,20 @@ export function InstalledContent({
       return byName(a, b);
     });
     return out;
-  }, [files, text, status, sort, updateMap]);
+  }, [files, query, status, sort, updateMap]);
+
+  // A page belongs to one filter + sort; changing either starts again at the first page.
+  const pageKey = `${query}|${status}|${sort}`;
+  const [page, setPage] = useState({ key: pageKey, index: 0 });
+  if (page.key !== pageKey) setPage({ key: pageKey, index: 0 });
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  const pageIndex = Math.min(page.key === pageKey ? page.index : 0, pageCount - 1);
+  const pageRows = visible.slice(pageIndex * PAGE_SIZE, (pageIndex + 1) * PAGE_SIZE);
+  const goToPage = (index: number) => {
+    setPage({ key: pageKey, index });
+    const top = tableRef.current?.getBoundingClientRect().top;
+    if (top !== undefined && top < 0) tableRef.current?.scrollIntoView({ block: "start" });
+  };
 
   const selectable = visible.filter((f) => f.source === "modrinth");
   const allVisibleSelected = selectable.length > 0 && selectable.every((f) => selected.has(f.filename));
@@ -548,7 +584,7 @@ export function InstalledContent({
       {visible.length === 0 ? (
         <EmptyState title="Nothing matches" description="Try a different filter." className="py-8" />
       ) : (
-        <div className="rounded-lg border">
+        <div ref={tableRef} className="scroll-mt-4 rounded-lg border">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
@@ -558,7 +594,7 @@ export function InstalledContent({
                       checked={allVisibleSelected}
                       onCheckedChange={(c) => setAllVisible(c === true)}
                       disabled={selectable.length === 0}
-                      aria-label="Select all identified files shown"
+                      aria-label={`Select all ${selectable.length} identified ${env.noun.many} in this list`}
                     />
                   </TableHead>
                 )}
@@ -566,14 +602,19 @@ export function InstalledContent({
                 <TableHead className="hidden sm:table-cell">Version</TableHead>
                 <TableHead className="hidden md:table-cell">Size</TableHead>
                 <TableHead className="hidden lg:table-cell">Changed</TableHead>
-                <TableHead>Enabled</TableHead>
+                <TableHead>
+                  <span className="sm:hidden" aria-hidden>
+                    On
+                  </span>
+                  <span className="max-sm:sr-only">Enabled</span>
+                </TableHead>
                 <TableHead className="text-right">
                   <span className="sr-only">Actions</span>
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((f) => (
+              {pageRows.map((f) => (
                 <InstalledRow
                   key={f.filename}
                   file={f}
@@ -591,6 +632,24 @@ export function InstalledContent({
             </TableBody>
           </Table>
         </div>
+      )}
+      {visible.length > PAGE_SIZE && (
+        <nav className="flex flex-wrap items-center justify-between gap-2" aria-label={`Installed ${env.noun.many} pages`}>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {pageIndex * PAGE_SIZE + 1}–{pageIndex * PAGE_SIZE + pageRows.length} of {visible.length}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" disabled={pageIndex === 0} onClick={() => goToPage(pageIndex - 1)}>
+              <ChevronLeft /> Previous
+            </Button>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              Page {pageIndex + 1} of {pageCount}
+            </span>
+            <Button size="sm" variant="outline" disabled={pageIndex >= pageCount - 1} onClick={() => goToPage(pageIndex + 1)}>
+              Next <ChevronRight />
+            </Button>
+          </div>
+        </nav>
       )}
       <p className="text-xs text-muted-foreground">
         {inventory.summary.enabled} enabled · {inventory.summary.disabled} disabled · {inventory.summary.identified} identified on Modrinth ·{" "}

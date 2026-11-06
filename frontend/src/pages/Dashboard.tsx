@@ -247,8 +247,12 @@ function DashboardServerRow({ instance, withStats }: { instance: Instance; withS
     <li className="flex items-center gap-3 px-4 py-2.5">
       <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-9" />
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <Link to={`/servers/${instance.id}`} className="truncate text-sm font-medium hover:underline">
+        <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
+          <Link
+            to={`/servers/${instance.id}`}
+            className="max-w-full text-sm font-medium hover:underline max-sm:line-clamp-2 max-sm:[overflow-wrap:anywhere] sm:truncate"
+            title={instance.name}
+          >
             {instance.name}
           </Link>
           <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="shrink-0" />

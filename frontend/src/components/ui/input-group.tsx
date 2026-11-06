@@ -66,7 +66,8 @@ function InputGroupAddon({
 }
 
 const inputGroupButtonVariants = cva(
-  "flex items-center gap-2 text-sm shadow-none",
+  // On touch screens the small in-field buttons get an invisible 32px hit area.
+  "relative flex items-center gap-2 text-sm shadow-none pointer-coarse:after:absolute pointer-coarse:after:-inset-1",
   {
     variants: {
       size: {

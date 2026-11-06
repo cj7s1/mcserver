@@ -87,7 +87,7 @@ function AddPlayerForm({
 
   return (
     <form onSubmit={submit} className="grid gap-2" noValidate>
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
         <div className="grid gap-1 sm:w-56">
           <Label htmlFor={`${id}-name`}>Player name</Label>
           <Input
@@ -123,7 +123,7 @@ function AddPlayerForm({
             />
           </div>
         )}
-        <Button type="submit" className="sm:mt-[1.375rem]" disabled={act.isPending} variant={action === "ban" ? "destructive" : "default"}>
+        <Button type="submit" disabled={act.isPending} variant={action === "ban" ? "destructive" : "default"}>
           {act.isPending ? <Loader2 className="animate-spin" /> : submitIcon}
           {submitLabel}
         </Button>

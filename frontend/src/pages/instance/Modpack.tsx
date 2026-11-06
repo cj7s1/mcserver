@@ -201,7 +201,13 @@ function ReleasesError({ error, onRetry }: { error: unknown; onRetry: () => void
   if (code === "curseforge_key_missing") {
     return (
       <div className="grid gap-3">
-        <ErrorState error={error} title="CurseForge needs an API key to list releases" />
+        {/* A missing key is configuration, not a failure: no red error box. */}
+        <EmptyState
+          icon={<KeyRound className="size-5" />}
+          title="CurseForge needs an API key to list releases"
+          description={errorMessage(error)}
+          className="py-8"
+        />
         <p className="text-xs text-muted-foreground">
           The server keeps running its pinned release. Release changes, rollback points and the update history appear here once the
           panel can reach CurseForge. “Before update” backups stay restorable from the Backups tab.

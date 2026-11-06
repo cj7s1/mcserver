@@ -86,7 +86,7 @@ function ServerTableRow({ instance }: { instance: Instance }) {
   };
   return (
     <TableRow className="cursor-pointer" onClick={onRowClick}>
-      <TableCell className="pl-4">
+      <TableCell className="pl-4 max-sm:w-full max-sm:max-w-0">
         <div className="flex min-w-0 items-center gap-2.5">
           <ServerIcon
             url={instance.icon_url}
@@ -94,11 +94,13 @@ function ServerTableRow({ instance }: { instance: Instance }) {
             type={instance.server_type}
             className="size-8 rounded-md text-xs"
           />
-          <div className="min-w-0 max-w-[10rem] sm:max-w-[18rem]">
-            <Link to={`/servers/${instance.id}`} className="block truncate font-medium hover:underline">
+          <div className="min-w-0 sm:max-w-[18rem]">
+            <Link to={`/servers/${instance.id}`} className="block truncate font-medium hover:underline" title={instance.name}>
               {instance.name}
             </Link>
-            <div className="truncate text-xs text-muted-foreground">{softwareLabel(instance)}</div>
+            <div className="truncate text-xs text-muted-foreground" title={softwareLabel(instance)}>
+              {softwareLabel(instance)}
+            </div>
             <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="mt-1 sm:hidden" />
           </div>
         </div>

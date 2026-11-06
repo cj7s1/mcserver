@@ -69,7 +69,7 @@ export function BrowseBackupDialog({
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <nav
             aria-label="Folder path"
-            className="flex min-w-0 flex-1 flex-wrap items-center gap-0.5 rounded-lg border bg-muted/40 px-2 py-1 text-xs"
+            className="flex min-w-0 grow basis-64 flex-wrap items-center gap-0.5 rounded-lg border bg-muted/40 px-2 py-1 text-xs"
           >
             <Button variant="ghost" size="xs" onClick={() => setPath("")} aria-label="Server folder root" aria-current={!path ? "page" : undefined}>
               <Home />
@@ -152,12 +152,16 @@ export function BrowseBackupDialog({
                             onClick={() => setPath(e.path)}
                           >
                             <Icon className="size-3.5 shrink-0 text-sky-600 dark:text-sky-400" aria-hidden />
-                            <span className="truncate">{e.name}</span>
+                            <span className="truncate" title={e.name}>
+                              {e.name}
+                            </span>
                           </button>
                         ) : (
                           <span className="flex items-center gap-2">
                             <Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-                            <span className="truncate">{e.name}</span>
+                            <span className="truncate" title={e.name}>
+                              {e.name}
+                            </span>
                           </span>
                         )}
                       </td>

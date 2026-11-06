@@ -135,7 +135,7 @@ function ResultCard({
             MC {versions}
           </span>
           {project.updated != null && project.updated !== "" && (
-            <span title={formatDateTime(project.updated)}>· updated {relativeTime(project.updated)}</span>
+            <span title={formatDateTime(project.updated)}>Updated {relativeTime(project.updated)}</span>
           )}
         </div>
       </div>
@@ -293,7 +293,7 @@ export function ModpackBrowser({
             options={versionOptions}
             clearLabel="Any version"
             loading={mcVersions.isLoading}
-            className="h-7 text-xs"
+            className="h-7 text-xs pointer-coarse:h-8"
           />
         </div>
         <div className="grid gap-1">
