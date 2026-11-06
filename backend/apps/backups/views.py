@@ -210,26 +210,32 @@ class BackupRestoreNewView(APIView):
             "host_ip",
             "network",
         ]
+        try:
+            port = int(port) if port else None
+        except (TypeError, ValueError):
+            raise ApiError("game_port must be a port number", code="invalid_port") from None
+        # One transaction: when the source is busy (409 instance_busy) the new server record is
+        # rolled back with the failed enqueue instead of being left behind as an orphan.
         with transaction.atomic():
             if port:
-                services.check_port_available(source.node, int(port))
+                services.check_port_available(source.node, port)
             else:
                 port = services.allocate_port(source.node)
             target = Instance.objects.create(
                 name=name,
-                game_port=int(port),
+                game_port=port,
                 source=Source.RESTORED,
                 created_by=request.user,
                 **{f: getattr(source, f) for f in copy_fields},
             )
-        job = enqueue(
-            "restore_new",
-            title=f"Restore '{backup.name}' as {target.name}",
-            instance=source,
-            user=request.user,
-            params={"backup_id": str(backup.id), "target_id": str(target.id)},
-        )
-        Instance.objects.filter(pk=target.pk).update(active_job=job)
+            job = enqueue(
+                "restore_new",
+                title=f"Restore '{backup.name}' as {target.name}",
+                instance=source,
+                user=request.user,
+                params={"backup_id": str(backup.id), "target_id": str(target.id)},
+            )
+            Instance.objects.filter(pk=target.pk).update(active_job=job)
         audit.record("backup.restore_as_new", request=request, instance=source, target=target, details={"backup": str(backup.id)})
         target.refresh_from_db()
         return Response(

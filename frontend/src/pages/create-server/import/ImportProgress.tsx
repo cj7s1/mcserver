@@ -61,7 +61,7 @@ export function ImportProgress({ run, onRetry }: { run: ImportRun; onRetry: (fil
             </p>
           </Stage>
           <Stage state={states.prepare} title="Prepare the server folder and container">
-            {states.prepare === "active" && run.job && <JobProgress job={run.job} />}
+            {run.phase === "preparing" && run.job && <JobProgress job={run.job} />}
             {run.phase === "waiting" && states.prepare === "active" && (
               <p className="text-xs text-muted-foreground">Waiting for the server to report that it is ready for files…</p>
             )}

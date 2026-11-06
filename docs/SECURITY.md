@@ -6,7 +6,7 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 
 | Boundary | What protects it |
 |---|---|
-| Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation, login throttling (10/min), scrypt password hashing. |
+| Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation (scheme, host **and port** must be the panel's own origin or one of `MCPANEL_CSRF_TRUSTED_ORIGINS`, so another web app on the same machine cannot open the console with your cookies), `X-Frame-Options: DENY` and a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`) on every page, login throttling (10/min), scrypt password hashing. |
 | Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
 | Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
@@ -26,6 +26,36 @@ Minecraft process inside the container. A malicious mod can:
 Docker namespaces and the dropped capabilities raise the bar, but they are **not** a strong sandbox
 against a determined attacker. Only install mods, plugins and modpacks from sources you trust. Uploaded
 JARs are treated as untrusted and are never executed by the panel itself.
+
+## Advanced environment variables (`instance.configure`)
+
+The **Environment** tab passes extra variables to the itzg/minecraft-server container. Users with
+*Configure server* may set them, so the panel decides what that permission may do: tune the runtime
+(server.properties variables such as `MOTD`, Paper/Purpur channels, autopause, logging, CurseForge or
+Modrinth pack excludes, proxies), but not what other permissions guard. Refused, by name, prefix or
+suffix (`backend/apps/instances/spec.py`, `env_override_error`):
+
+* everything the panel sets itself (type, version, memory, JVM flags, ports, RCON, pinned pack IDs,
+  the CurseForge key, `LOAD_ENV_FROM_*`, `SKIP_`/`OVERRIDE_SERVER_PROPERTIES`);
+* installing code or content from sources the mods/plugins manager does not hash-verify
+  (*Manage mods/plugins*): `MODS`, `PLUGINS`, `SPIGET_RESOURCES`, `MODRINTH_PROJECTS`,
+  `CURSEFORGE_FILES`, `MODPACK`, `GENERIC_PACK(S)`, `PACKWIZ_URL`, `DATAPACKS`, `WORLD`, config
+  downloads, custom server jars and installers, and every `*_URL`/`*_REPO` variable;
+* running commands or changing what is executed (*Send commands*): `RCON_CMDS_*`,
+  `STOP_SERVER_DELAY_COMMAND`, `PRE_START_SCRIPT`, `SERVER_RUNNER`, `ENABLE_SSH`, unauthenticated
+  remote JMX (`ENABLE_JMX`), Java agents and `JVM_*`/`JAVA_*` option variables, and variables the
+  shell or loader act on (`PS4`, `BASH_ENV`, `LD_*`, `PATH`, ...);
+* granting operator or whitelist entries (*Manage players*): `OPS*`, `WHITELIST`, `WHITELIST_FILE`;
+* weakening protections or leaking secrets: `SKIP_LOG4J_PATCHER`, `DEBUG*` (its `set -x` trace prints
+  the RCON password into the console log), `DUMP_SERVER_PROPERTIES`.
+
+Values that were saved before these rules existed are dropped from the container at its next
+recreation (the restart banner shows), and saving the Environment tab asks you to remove them.
+
+This is a deny-list: itzg adds variables over time, so treat *Configure server* as a trusted
+permission. It also covers the JVM arguments field, where options such as `-javaagent:` or
+`-XX:OnOutOfMemoryError=` are legitimate tools but run code inside the container. Grant it only to
+people you would let install mods.
 
 ## Plugin downloads without a published hash (SpigotMC)
 
@@ -75,6 +105,12 @@ Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
 ## Network exposure
 
 * The panel binds to `127.0.0.1` by default (`MCPANEL_BIND`). On Unraid, set it to the server's LAN IP.
+* Behind a reverse proxy the panel believes `X-Forwarded-For` only from `MCPANEL_FORWARDED_ALLOW_IPS`
+  (default `127.0.0.1,::1`). Set it to the proxy's exact address; never to a whole private range or
+  `*`, because Minecraft containers and other LAN hosts could then fake their address and get around
+  the login rate limit (DEPLOYMENT.md, "HTTPS / remote access").
+* An additional node's agent port is published on `MCPANEL_NODE_BIND`, which must be set explicitly
+  (no `0.0.0.0` default).
 * For access from outside your LAN, put the panel behind an HTTPS reverse proxy (Nginx Proxy Manager,
   SWAG, Caddy, Traefik…) and set `MCPANEL_BEHIND_TLS_PROXY=true`, `MCPANEL_SECURE_COOKIES=true`,
   `MCPANEL_ALLOWED_HOSTS` and `MCPANEL_CSRF_TRUSTED_ORIGINS` to the public hostname. Prefer a VPN
@@ -88,11 +124,54 @@ Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
 
 * `MCPANEL_SECRET_KEY`, `MCPANEL_AGENT_TOKEN`, `POSTGRES_PASSWORD`, `AGENT_RESTIC_PASSWORD` come from
   the environment (or `*_FILE` variants) — never from the repository.
-* RCON passwords and provider API keys are encrypted at rest with a key derived from
-  `MCPANEL_SECRET_KEY`. Changing the secret key makes them unreadable (RCON passwords are regenerated on
-  the next container recreation; re-enter API keys).
+* RCON passwords, provider API keys, node tokens and webhook URLs are encrypted at rest with a key
+  derived from `MCPANEL_SECRET_KEY`. A value that cannot be decrypted is never silently replaced: the
+  panel logs an ERROR naming the field once, treats it as missing (the System settings API flags
+  the CurseForge key in `secrets_unreadable`, a webhook's last error says to enter the URL again) and keeps the
+  stored ciphertext, so restoring the old key brings it back. RCON passwords are regenerated
+  automatically and take effect at the next container recreation.
+* The CurseForge API key is passed only to servers of type *CurseForge modpack* (`AUTO_CURSEFORGE`),
+  as `CF_API_KEY`, because the runtime downloads the pack with it on every start. Mods on those
+  servers run in the same process and can read it; the runtime has no way to hide it (a
+  `CF_API_KEY_FILE` would have to live in `/data`, which mods can read too). Use a key you can revoke
+  in the CurseForge console if a mod misbehaves. Other server types never receive it.
+* Notification webhooks are sent from the worker, which sits on the panel's internal network. The
+  target host is resolved and refused if it is loopback, link-local (169.254.0.0/16, including cloud
+  metadata, and fe80::/10), multicast/reserved, one of MCPanel's own services (agent, postgres, redis,
+  panel, worker, beat, every node agent's address and port) or, with `MCPANEL_WEBHOOK_ALLOW_LAN=false`,
+  a private/LAN address. LAN targets are allowed by default because Home Assistant, ntfy or Gotify on
+  the LAN are the usual receivers. The request goes to the checked address (no second DNS lookup),
+  redirects are not followed and delivery errors are generic. Through an egress proxy
+  (`HTTPS_PROXY`) the proxy makes the connection, so the address check is the only protection.
+
+### Rotating the secret key
+
+1. Put the current key into `MCPANEL_SECRET_KEY_FALLBACKS` and a new random key (`openssl rand -hex 48`)
+   into `MCPANEL_SECRET_KEY` in `deploy/.env`, then `docker compose up -d`. Sessions, password reset
+   links and stored secrets made with the old key keep working.
+2. `docker compose exec panel python manage.py reencrypt_secrets` re-encrypts every stored secret
+   with the new key (`--check` only counts them).
+3. Remove the old key from `MCPANEL_SECRET_KEY_FALLBACKS` and `docker compose up -d` again. Users
+   whose sessions were signed with the old key have to log in again.
 * **Back up `AGENT_RESTIC_PASSWORD`** (or `<data root>/agent/restic-password` if it was generated).
   Without it, backups cannot be restored.
+
+## The agent treats the Minecraft process as hostile input
+
+* The instance-network source check also covers WebSocket handshakes (the console log stream),
+  which are closed with code 4403 before they are accepted.
+* RCON replies are bounded (1 MiB per packet, 4 MiB per command, all fragments within the command's
+  timeout); longer output is cut off with a note. `save-on` is always sent once `save-off` was sent,
+  even when `save-all flush` fails, times out or the backup/snapshot itself fails.
+* Console streaming keeps at most 16 KiB per line (longer lines are truncated) and a bounded backlog
+  per viewer; a viewer that cannot keep up loses the oldest lines and is told how many.
+* File reads (editor, downloads, hashing, search, zip export, archive import) refuse FIFOs, sockets
+  and device nodes without blocking; clones skip them.
+* Archive imports also bound the archive's own index: the zip central directory (128 MiB, 500 000
+  entries) is measured before it is loaded, tar headers are counted as they are read, pax/GNU
+  long-name headers are limited to 1 MiB each and 64 MiB in total, GNU sparse members are refused.
+* An abandoned folder-zip download stops its producer thread. restic's output pipes are drained
+  concurrently and a restic backup/restore is stopped after 12 hours.
 
 ## Reporting
 

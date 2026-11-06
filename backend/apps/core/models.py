@@ -49,8 +49,12 @@ class SystemSetting(models.Model):
 
     @classmethod
     def get_secret(cls, key: str) -> str:
+        """The decrypted secret, "" if unset. A secret that cannot be decrypted (secret key
+        changed) is returned as a falsy ``apps.core.crypto.UnreadableSecret``."""
         row = cls.objects.filter(key=key).first()
-        return row.secret if row and row.secret else ""
+        if row is None or row.secret is None:
+            return ""
+        return row.secret
 
     @classmethod
     def set_secret(cls, key: str, value: str) -> None:

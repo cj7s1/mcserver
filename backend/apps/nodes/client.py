@@ -19,6 +19,17 @@ from .models import Node
 
 log = logging.getLogger(__name__)
 
+# Indirection so tests can drive the polling loop of wait_operation with a fake clock.
+monotonic = time.monotonic
+sleep = time.sleep
+
+# While waiting for an agent operation, connection problems (agent restarting, connection
+# refused/reset, timeouts, a proxy answering 502/503/504) are retried with backoff for up to
+# this many seconds in a row: the operation keeps running on the node meanwhile.
+OPERATION_RECONNECT_GRACE = 300.0
+OPERATION_RETRY_MAX_DELAY = 15.0
+TRANSIENT_AGENT_STATUSES = frozenset({502, 503, 504})
+
 
 class AgentError(ApiError):
     """An error reported by the agent, with its machine-readable code."""
@@ -392,28 +403,95 @@ class AgentClient:
         return self._json("GET", f"/v1/operations/{op_id}")
 
     def wait_operation(
-        self, op_id: str, *, timeout: float = 3600, interval: float = 1.0, on_progress: Any = None
+        self,
+        op_id: str,
+        *,
+        timeout: float = 3600,
+        interval: float = 1.0,
+        on_progress: Any = None,
+        reconnect_grace: float | None = None,
     ) -> dict[str, Any]:
-        """Poll an agent operation until it finishes. Raises AgentError on failure."""
-        deadline = time.monotonic() + timeout
+        """Poll an agent operation until it finishes. Raises AgentError on failure.
+
+        Transient errors while polling (see ``is_transient``) are retried with exponential
+        backoff for up to ``reconnect_grace`` seconds in a row (default
+        ``OPERATION_RECONNECT_GRACE``) instead of abandoning a long job after one blip. Polling
+        simply resumes if the agent still knows the operation afterwards. Agent operations live
+        in the agent's memory, so if the agent comes back *without* it, it restarted and the
+        result is unknown: that is reported as ``operation_lost`` with an explicit message.
+        """
+        grace = OPERATION_RECONNECT_GRACE if reconnect_grace is None else reconnect_grace
+        deadline = monotonic() + timeout
+        outage_since: float | None = None
+        delay = interval
         while True:
             try:
                 op = self.operation(op_id)
             except AgentError as exc:
                 if exc.agent_status == 404:
                     raise AgentError(
-                        "The agent lost track of this operation (it probably restarted)", "operation_lost", 502
+                        (
+                            "The node agent restarted while this operation was running, so its result is unknown "
+                            "(the agent keeps operations in memory only). Check the server's state and files before retrying."
+                        )
+                        if outage_since is not None
+                        else "The agent lost track of this operation (it probably restarted). Check the server's state "
+                        "before retrying.",
+                        "operation_lost",
+                        502,
                     ) from exc
-                raise
+                if not self.is_transient(exc):
+                    raise
+                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline)
+                continue
+            except AgentUnavailable as exc:
+                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline)
+                continue
+            if outage_since is not None:
+                log.info(
+                    "Agent %s is back after %.0f s; operation %s is still known", self.base, monotonic() - outage_since, op_id
+                )
+                outage_since, delay = None, interval
             if on_progress:
                 on_progress(op)
             if op["status"] == "succeeded":
                 return op
             if op["status"] == "failed":
                 raise AgentError(op.get("error") or "Agent operation failed", op.get("error_code") or "operation_failed", 500)
-            if time.monotonic() > deadline:
+            if monotonic() > deadline:
                 raise AgentError("Timed out waiting for the agent operation", "operation_timeout", 504)
-            time.sleep(interval)
+            sleep(interval)
+
+    @staticmethod
+    def is_transient(exc: ApiError) -> bool:
+        """Connection-level problems that are expected to clear up (agent restart, proxy hiccup)."""
+        if isinstance(exc, AgentUnavailable):
+            return True
+        return isinstance(exc, AgentError) and exc.agent_status in TRANSIENT_AGENT_STATUSES
+
+    def _wait_for_agent(
+        self,
+        op_id: str,
+        exc: ApiError,
+        outage_since: float | None,
+        delay: float,
+        interval: float,
+        grace: float,
+        deadline: float,
+    ) -> tuple[float, float]:
+        """Back off after a transient polling error; raise once the outage lasted too long."""
+        now = monotonic()
+        if outage_since is None:
+            outage_since = now
+            log.warning("Lost contact with agent %s while waiting for operation %s: %s (retrying)", self.base, op_id, exc)
+        if now - outage_since >= grace or now >= deadline:
+            raise AgentUnavailable(
+                f"Lost contact with the node agent at {self.base} for {now - outage_since:.0f} s while waiting for an "
+                f"operation ({exc.detail}). It may still be running on the node; check the server before retrying."
+            ) from exc
+        delay = min(max(delay * 2, interval, 0.5), OPERATION_RETRY_MAX_DELAY)
+        sleep(max(0.0, min(delay, deadline - now)))
+        return outage_since, delay
 
     def ws_url(self, path: str) -> str:
         return self.base.replace("http://", "ws://").replace("https://", "wss://") + path

@@ -86,7 +86,8 @@ chmod 600 "$target"
 
 echo "Created $target with new random secrets (mode 600)."
 if [ "$mode" = node ]; then
-    echo "Next: review MCPANEL_DATA_DIR, MC_UID/MC_GID, MCPANEL_NODE_BIND and MCPANEL_NODE_HOSTNAMES, then run:"
+    echo "Next: set MCPANEL_NODE_BIND (required: this host's LAN/VPN IP that the panel connects to) and"
+    echo "review MCPANEL_DATA_DIR, MC_UID/MC_GID and MCPANEL_NODE_HOSTNAMES, then run:"
     echo "  docker compose -f docker-compose.node.yml --env-file node.env up -d --build"
     echo "Add the node in the panel (System -> Nodes) with AGENT_TOKEN from this file and the fingerprint from:"
     echo "  docker compose -f docker-compose.node.yml --env-file node.env exec agent python -m mcagent fingerprint"

@@ -14,6 +14,7 @@ from apps.instances.models import Instance
 from apps.jobs.models import Job
 from apps.jobs.runner import JobContext, register
 from apps.nodes.client import AgentClient
+from apps.nodes.models import Node
 
 from .models import Backup, BackupKind, BackupStatus, RetentionPolicy
 from .retention import select_to_delete
@@ -21,6 +22,76 @@ from .retention import select_to_delete
 log = logging.getLogger(__name__)
 
 DEFAULT_EXCLUDES = ["logs/*.log.gz", "crash-reports", ".cache", "cache", "debug", "*.tmp", "modernfix/classCache*"]
+
+
+# --- which node holds a backup -----------------------------------------------------------
+# Every node keeps its own restic repository per server, and a migration does not copy it.
+# ``Backup.meta["node_id"]`` records the node whose repository holds the snapshot: set when the
+# backup is made, and added to older rows when the server is migrated (rows from versions
+# that only stored ``left_on_node`` by name are resolved by that name). Untagged rows live on
+# the server's current node.
+def repository_node_id(backup: Backup, instance: Instance) -> int | None:
+    """Id of the node whose restic repository holds ``backup`` (None: unknown/deleted node)."""
+    meta = backup.meta or {}
+    if meta.get("node_id") is not None:
+        return int(meta["node_id"])
+    if meta.get("left_on_node"):
+        return Node.objects.filter(name=meta["left_on_node"]).values_list("pk", flat=True).first()
+    return instance.node_id
+
+
+def stored_on_current_node(backup: Backup, instance: Instance) -> bool:
+    return repository_node_id(backup, instance) == instance.node_id
+
+
+def repository_node(backup: Backup, instance: Instance) -> Node | None:
+    node_id = repository_node_id(backup, instance)
+    if node_id is None:
+        return None
+    if node_id == instance.node_id:
+        return instance.node
+    return Node.objects.filter(pk=node_id).first()
+
+
+def _node_label(backup: Backup, instance: Instance) -> str:
+    node = repository_node(backup, instance)
+    if node is not None:
+        return f"node '{node.name}'"
+    meta = backup.meta or {}
+    name = meta.get("node_name") or meta.get("left_on_node")
+    return f"a node that no longer exists ('{name}')" if name else "a node that no longer exists"
+
+
+def require_local_backup(backup: Backup, instance: Instance) -> None:
+    """Refuse in-place restores of a backup that lives in another node's repository."""
+    if stored_on_current_node(backup, instance):
+        return
+    raise ApiError(
+        f"This backup is stored in the backup repository on {_node_label(backup, instance)}, but the server now "
+        f"runs on '{instance.node.name}', so it cannot be restored in place. Restore it as a new server (created on "
+        "the node that holds it) or move the server back to that node first.",
+        code="backup_on_other_node",
+        status_code=409,
+    )
+
+
+def backup_agent(backup: Backup, instance: Instance) -> AgentClient:
+    """Agent of the node whose repository holds ``backup`` (browse, download, delete, restore as new)."""
+    node = repository_node(backup, instance)
+    if node is None:
+        raise ApiError(
+            f"This backup is stored on {_node_label(backup, instance)}; it can no longer be read.",
+            code="backup_node_missing",
+            status_code=409,
+        )
+    return AgentClient(node)
+
+
+def local_backups(instance: Instance) -> list[Backup]:
+    """Succeeded backups in the repository on the server's current node."""
+    return [
+        b for b in Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED) if stored_on_current_node(b, instance)
+    ]
 
 
 def policy_for(instance: Instance) -> RetentionPolicy:
@@ -50,7 +121,14 @@ def run_backup(
 ) -> Backup:
     client = AgentClient(instance.node)
     policy = policy_for(instance)
-    backup = Backup.objects.create(instance=instance, name=name[:120], kind=kind, created_by=user, job=job)
+    backup = Backup.objects.create(
+        instance=instance,
+        name=name[:120],
+        kind=kind,
+        created_by=user,
+        job=job,
+        meta={"node_id": instance.node_id, "node_name": instance.node.name},
+    )
     try:
         op = client.create_backup(
             instance.id,
@@ -88,7 +166,9 @@ def run_backup(
 
 def apply_retention(instance: Instance, ctx: JobContext) -> list[str]:
     policy = policy_for(instance)
-    candidates = list(Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED))
+    # only this node's repository: backups left on a previous node can neither be pruned from
+    # here nor count towards what is kept here
+    candidates = local_backups(instance)
     doomed = select_to_delete(
         candidates,
         keep_last=policy.keep_last,
@@ -140,6 +220,7 @@ def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Restore a backup over the existing instance, after a safety backup."""
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
+    require_local_backup(backup, instance)
     client = AgentClient(instance.node)
     was_running = ensure_stopped(instance, ctx)
     safety = None
@@ -169,7 +250,17 @@ def restore_new_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     source = Instance.objects.select_related("node").get(pk=job.instance_id)
     target = Instance.objects.select_related("node").get(pk=job.params["target_id"])
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=source)
-    client = AgentClient(source.node)
+    client = backup_agent(backup, source)
+    if target.node_id != client.node.pk:
+        # the snapshot is in another node's repository (the source server was migrated since):
+        # restic restores on the node that holds it, so the new server is created there
+        from apps.instances.services import allocate_port, ports_in_use
+
+        if target.game_port in ports_in_use(client.node, exclude=target):
+            target.game_port = allocate_port(client.node, exclude=target)
+        target.node = client.node
+        target.save(update_fields=["node", "game_port"])
+        ctx.log(f"The backup is stored on {client.node.name}; the restored server is created there")
     ctx.progress(0.05, f"Restoring '{backup.name}' into {target.name}", force=True)
     op = client.restore_backup(source.id, backup.snapshot_id, target_instance_id=target.id)
     client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.05, 0.8))
@@ -184,9 +275,12 @@ def delete_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
     if backup.snapshot_id:
-        client = AgentClient(instance.node)
-        op = client.forget_backups(instance.id, [backup.snapshot_id], prune=True)
-        client.wait_operation(op["id"], timeout=3 * 3600, on_progress=ctx.agent_progress(0.1, 0.8))
+        if repository_node(backup, instance) is None:
+            ctx.log(f"The backup was stored on {_node_label(backup, instance)}; removing the record only")
+        else:
+            client = backup_agent(backup, instance)
+            op = client.forget_backups(instance.id, [backup.snapshot_id], prune=True)
+            client.wait_operation(op["id"], timeout=3 * 3600, on_progress=ctx.agent_progress(0.1, 0.8))
     backup.status = BackupStatus.DELETED
     backup.save(update_fields=["status"])
     return {"deleted": str(backup.id)}
@@ -202,7 +296,8 @@ def verify_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.1, 0.85))
     result = done.get("result") or {}
     ok = bool(result.get("ok"))
-    Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED).update(verified_at=timezone.now(), verify_ok=ok)
+    # the check covered this node's repository only
+    Backup.objects.filter(pk__in=[b.pk for b in local_backups(instance)]).update(verified_at=timezone.now(), verify_ok=ok)
     if not ok:
         raise ApiError("Integrity check FAILED: " + " | ".join(result.get("output", [])[-5:]), code="verify_failed")
     return {"ok": ok, "output": result.get("output", [])}
@@ -213,6 +308,7 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Restore a single file or folder from a backup (server stopped first, restarted after)."""
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
+    require_local_backup(backup, instance)
     client = AgentClient(instance.node)
     was_running = ensure_stopped(instance, ctx)
     ctx.progress(0.2, f"Restoring {job.params['path']} from '{backup.name}'", force=True)
@@ -236,11 +332,35 @@ def snapshot_create(job: Job, ctx: JobContext) -> dict[str, Any]:
     result = done.get("result") or {}
     keep = job.params.get("keep")
     if keep and job.params.get("kind") == "scheduled":
-        scheduled = [s for s in client.snapshots(instance.id)["snapshots"] if s.get("kind") == "scheduled"]
-        for old in scheduled[int(keep) :]:
-            client.delete_snapshot(instance.id, old["name"])
-            ctx.log(f"Retention: deleted snapshot {old['name']}")
+        removed = prune_scheduled_snapshots(client, instance, ctx, label=job.params.get("label", ""), keep=int(keep))
+        if removed:
+            result = {**result, "retention_removed": removed}
     return result
+
+
+def prune_scheduled_snapshots(client: AgentClient, instance: Instance, ctx: JobContext, *, label: str, keep: int) -> list[str]:
+    """Keep the newest ``keep`` snapshots of ONE snapshot schedule and delete its older ones.
+
+    A schedule's snapshots are those of kind "scheduled" carrying its label (the scheduler
+    labels them "scheduled <schedule name>"), so each schedule's ``keep`` applies to its own
+    snapshots only. Manual and safety (pre-restore/pre-update) snapshots, snapshots of other
+    schedules and unlabelled ones are never touched. Deletion is best effort.
+    """
+    if keep < 1 or not label:
+        return []
+    listed = client.snapshots(instance.id)["snapshots"]
+    mine = [s for s in listed if s.get("kind") == "scheduled" and s.get("label") == label and s.get("name")]
+    mine.sort(key=lambda s: s["name"], reverse=True)  # names start with a UTC timestamp: newest first
+    removed = []
+    for old in mine[keep:]:
+        try:
+            client.delete_snapshot(instance.id, old["name"])
+        except ApiError as exc:
+            ctx.log(f"Retention: could not delete snapshot {old['name']}: {exc.detail}")
+            continue
+        removed.append(old["name"])
+        ctx.log(f"Retention: deleted snapshot {old['name']}")
+    return removed
 
 
 @register("snapshot_restore")

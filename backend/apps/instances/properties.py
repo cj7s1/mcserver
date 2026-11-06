@@ -3,7 +3,21 @@ plus a typed schema for the specialised editor."""
 
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any
+
+# java.util.Properties semantics (Properties.load / LineReader / loadConvert), which is how
+# Minecraft and itzg's mc-image-helper read server.properties: only \n, \r and \r\n end a
+# line; " ", \t and \f are whitespace; a line ending in an odd number of backslashes
+# continues on the next one (whose leading whitespace is skipped); "#" or "!" as the first
+# non-blank character starts a comment (comments never continue); the key ends at the first
+# unescaped "=", ":" or whitespace; keys and values are unescaped (\uXXXX, \t, \n, \r, \f,
+# any other \x is x). Parsing differently from Java would let a crafted file or value hide a
+# key from the managed-key guard (e.g. "rcon\.password" or "server\u002dport").
+_LINE_BREAK = re.compile(r"\r\n|\r|\n")
+_WS = " \t\f"
+_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _unescape(value: str) -> str:
@@ -18,7 +32,7 @@ def _unescape(value: str) -> str:
                     i += 6
                     continue
                 except ValueError:
-                    pass
+                    pass  # Java rejects the whole file here; stay lenient for display
             out.append({"n": "\n", "t": "\t", "r": "\r", "f": "\f"}.get(nxt, nxt))
             i += 2
             continue
@@ -27,49 +41,135 @@ def _unescape(value: str) -> str:
     return "".join(out)
 
 
+def _escape_char(ch: str) -> str:
+    special = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f"}
+    if ch in special:
+        return special[ch]
+    # other control characters and Unicode line/paragraph separators (U+0085, U+2028, U+2029):
+    # Java does not treat them as line ends, but editors and other tools do
+    if unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
+        return f"\\u{ord(ch):04x}"
+    return ch
+
+
 def _escape_value(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    escaped = "".join(_escape_char(ch) for ch in value)
+    # Java strips leading whitespace from values; keep it by escaping
+    return "\\" + escaped if escaped[:1] == " " else escaped
 
 
-def _split(line: str) -> tuple[str, str] | None:
-    stripped = line.lstrip()
-    if not stripped or stripped[0] in "#!":
-        return None
-    for i, ch in enumerate(stripped):
-        if ch in "=:" and (i == 0 or stripped[i - 1] != "\\"):
-            return stripped[:i].strip(), stripped[i + 1 :].lstrip()
-    return stripped.strip(), ""
+def _escape_key(key: str) -> str:
+    return "".join("\\" + ch if ch in " =:#!" else _escape_char(ch) for ch in key)
+
+
+def _format(key: str, value: str) -> str:
+    return f"{_escape_key(key)}={_escape_value(value)}"
+
+
+def _physical_lines(text: str) -> list[str]:
+    lines = _LINE_BREAK.split(text)
+    if lines and lines[-1] == "":
+        lines.pop()  # the text ended with a line break
+    return lines
+
+
+def _continues(line: str) -> bool:
+    return (len(line) - len(line.rstrip("\\"))) % 2 == 1
+
+
+def _logical_lines(lines: list[str]) -> list[tuple[int, int, str | None]]:
+    """(first, end) physical line indices of each logical line with its text (continuations
+    joined), or None for blank and comment lines. Like Java's LineReader, blank and comment
+    lines are skipped while the logical line is still empty, even right after a line that
+    held only a continuation backslash."""
+    out: list[tuple[int, int, str | None]] = []
+    buf = ""
+    start: int | None = None  # first physical line of the logical line being read
+    for i, raw in enumerate(lines):
+        line = raw.lstrip(_WS)
+        if not buf:
+            if not line or line[0] in "#!":
+                if start is None:
+                    out.append((i, i + 1, None))
+                continue
+            if start is None:
+                start = i
+        buf += line
+        if _continues(buf):
+            buf = buf[:-1]  # the backslash at the end of a line is not part of it
+            if start is None:
+                start = i
+            continue
+        out.append((start if start is not None else i, i + 1, buf))
+        buf, start = "", None
+    if start is not None:  # continuation at end of file: Java drops the backslash
+        out.append((start, len(lines), buf or None))
+    return out
+
+
+def _split(logical: str) -> tuple[str, str]:
+    """Raw (still escaped) key and value of a logical line, exactly as Properties.load splits it."""
+    key_len, value_start, has_sep, backslash = 0, len(logical), False, False
+    while key_len < len(logical):
+        ch = logical[key_len]
+        if ch in "=:" and not backslash:
+            value_start, has_sep = key_len + 1, True
+            break
+        if ch in _WS and not backslash:
+            value_start = key_len + 1
+            break
+        backslash = ch == "\\" and not backslash
+        key_len += 1
+    while value_start < len(logical):
+        ch = logical[value_start]
+        if ch not in _WS:
+            if not has_sep and ch in "=:":
+                has_sep = True
+            else:
+                break
+        value_start += 1
+    return logical[:key_len], logical[value_start:]
+
+
+def _key_of(logical: str) -> str:
+    return _unescape(_split(logical)[0])
 
 
 def parse(text: str) -> dict[str, str]:
+    """Keys and values as java.util.Properties (and so Minecraft) reads them."""
     result: dict[str, str] = {}
-    for line in text.splitlines():
-        kv = _split(line)
-        if kv:
-            result[kv[0]] = _unescape(kv[1])
+    for _start, _end, logical in _logical_lines(_physical_lines(text)):
+        if logical is not None:
+            raw_key, raw_value = _split(logical)
+            result[_unescape(raw_key)] = _unescape(raw_value)
     return result
 
 
 def update(text: str, changes: dict[str, str | None]) -> str:
     """Apply changes (None deletes) while keeping comments, order and unknown keys."""
-    lines = text.splitlines()
+    lines = _physical_lines(text)
+    groups = _logical_lines(lines)
     seen: set[str] = set()
     out: list[str] = []
-    for line in lines:
-        kv = _split(line)
-        if kv and kv[0] in changes:
-            key = kv[0]
+    for index, (start, end, logical) in enumerate(groups):
+        key = _key_of(logical) if logical is not None else None
+        if key is not None and key in changes:
             value = changes[key]
             # Java Properties (and parse()) use the *last* occurrence of a duplicated key, so
             # write the new value at the first occurrence and drop any later duplicates.
             if value is not None and key not in seen:
-                out.append(f"{key}={_escape_value(str(value))}")
+                out.append(_format(key, str(value)))
             seen.add(key)
-        else:
-            out.append(line)
+            continue
+        chunk = lines[start:end]
+        if index == len(groups) - 1 and logical is not None and end == len(lines) and _continues(chunk[-1]):
+            # a dangling continuation at the end of the file would swallow appended keys;
+            # Java ignores that backslash at EOF anyway
+            chunk = [*chunk[:-1], chunk[-1][:-1]]
+        out.extend(chunk)
     for key, value in changes.items():
         if value is not None and key not in seen:
-            out.append(f"{key}={_escape_value(str(value))}")
+            out.append(_format(key, str(value)))
     return "\n".join(out) + "\n"
 
 
@@ -78,7 +178,7 @@ def render(values: dict[str, Any]) -> str:
     for key, value in values.items():
         if isinstance(value, bool):
             value = "true" if value else "false"
-        lines.append(f"{key}={_escape_value(str(value))}")
+        lines.append(_format(key, str(value)))
     return "\n".join(lines) + "\n"
 
 
@@ -236,9 +336,11 @@ SCHEMA_KEYS = {s["key"]: s for s in SCHEMA}
 def validate_changes(changes: dict[str, Any]) -> dict[str, str | None]:
     out: dict[str, str | None] = {}
     for key, value in changes.items():
-        if not isinstance(key, str) or not key or any(c in key for c in "=:\n\r# ") or len(key) > 100:
+        # Property names are plain words (letters, digits, ".", "_", "-"): no escapes, separators,
+        # whitespace or line breaks, so the name the guard below sees is exactly the key Java reads.
+        if not isinstance(key, str) or len(key) > 100 or not _KEY_RE.fullmatch(key):
             raise ValueError(f"Invalid property name {key!r}")
-        if key in MANAGED_KEYS:
+        if _unescape(key).lower() in MANAGED_KEYS:
             raise ValueError(f"'{key}' is managed by MCPanel (change it in the Network settings instead)")
         if value is None:
             out[key] = None

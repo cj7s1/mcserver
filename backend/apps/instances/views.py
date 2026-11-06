@@ -45,11 +45,14 @@ class InstanceListView(APIView):
     @extend_schema(responses={200: InstanceSerializer(many=True)})
     def get(self, request: Request) -> Response:
         power_jobs = Job.objects.filter(kind__in=("restart", "stop"), status__in=ACTIVE_STATUSES)
+        prefetch = [Prefetch("jobs", queryset=power_jobs, to_attr="active_power_jobs")]
+        if not request.user.is_owner:
+            # the caller's own grants, so the per-row permission list costs no query
+            grants = InstanceAccess.objects.filter(user=request.user).select_related("role")
+            prefetch.append(Prefetch("access_grants", queryset=grants, to_attr="viewer_grants"))
         qs = visible_instances(
             request.user,
-            Instance.objects.select_related("node", "active_job", "modpack_update_check").prefetch_related(
-                Prefetch("jobs", queryset=power_jobs, to_attr="active_power_jobs")
-            ),
+            Instance.objects.select_related("node", "active_job", "modpack_update_check").prefetch_related(*prefetch),
         )
         archived = request.query_params.get("archived")
         if archived == "true":
@@ -195,18 +198,30 @@ class InstanceDetailView(APIView):
         ser = InstanceSerializer(instance, data=request.data, partial=True, context={"request": request})
         ser.is_valid(raise_exception=True)
         changed = {k: v for k, v in ser.validated_data.items() if getattr(instance, k) != v}
-        if instance.is_modpack and {"minecraft_version", "loader_version"} & changed.keys():
-            raise ValidationError({"minecraft_version": ["Modpack servers take their versions from the pinned modpack release"]})
+        version_fields = sorted({"minecraft_version", "loader_version"} & changed.keys())
+        if version_fields:
+            if instance.is_modpack:
+                message = "Modpack servers take their versions from the pinned modpack release"
+            else:
+                # The software update validates the version against the catalog, asks before a
+                # downgrade and takes a pre-update backup; a plain field edit would skip all that.
+                message = "Change the Minecraft or loader version through the software update (POST .../software)"
+            raise ValidationError({field: [message] for field in version_fields})
         if "game_port" in changed:
             services.check_port_available(instance.node, changed["game_port"], exclude=instance)
         for extra in changed.get("extra_ports", []):
             services.check_port_available(instance.node, extra["host_port"], exclude=instance)
         if "java_version" in changed:
-            ser.validated_data["image"] = image_for(changed["java_version"])
-        try:
-            instance = ser.save()
-        except IntegrityError as exc:
-            raise ConflictError("That port is already used by another server", code="port_conflict") from exc
+            changed["image"] = image_for(changed["java_version"])
+        if changed:
+            for field, value in changed.items():
+                setattr(instance, field, value)
+            try:
+                # only the edited columns: a full-row save would write back the stale job lock,
+                # status and whatever a running job changed since this request loaded the row
+                instance.save(update_fields=[*changed, "updated_at"])
+            except IntegrityError as exc:
+                raise ConflictError("That port is already used by another server", code="port_conflict") from exc
         if changed.keys() & self.EDITABLE_RESTART:
             services.bump_revision(instance)
         audit.record(
@@ -318,6 +333,8 @@ class InstanceActionView(APIView):
             return Response(_ser(instance, request))
         if action == "archive" and instance.archived_at:
             raise ConflictError("Server is already archived", code="archived")
+        if action == "recreate" and instance.archived_at:
+            raise ConflictError("Unarchive this server before recreating its container", code="archived")
         job = enqueue(action, title=f"{title}: {instance.name}", instance=instance, user=request.user)
         audit.record(f"instance.{action}", request=request, instance=instance, target=instance)
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
@@ -369,6 +386,8 @@ class InstanceCloneView(APIView):
         ]
         fields = {f: getattr(source, f) for f in copy_fields}
         port = ser.validated_data.get("game_port")
+        # One transaction: if the source is busy (409 instance_busy) the new record is rolled
+        # back instead of being left behind as an empty orphan server.
         with transaction.atomic():
             if port:
                 services.check_port_available(source.node, port)
@@ -377,13 +396,13 @@ class InstanceCloneView(APIView):
             target = Instance.objects.create(
                 name=ser.validated_data["name"], game_port=port, source=Source.CLONED, created_by=request.user, **fields
             )
-        job = enqueue(
-            "clone",
-            title=f"Clone {source.name} → {target.name}",
-            instance=source,
-            user=request.user,
-            params={"target_id": str(target.id), "exclude_worlds": ser.validated_data["exclude_worlds"]},
-        )
+            job = enqueue(
+                "clone",
+                title=f"Clone {source.name} → {target.name}",
+                instance=source,
+                user=request.user,
+                params={"target_id": str(target.id), "exclude_worlds": ser.validated_data["exclude_worlds"]},
+            )
         audit.record("instance.cloned", request=request, instance=source, target=target, details={"source": str(source.id)})
         return Response({"instance": _ser(target, request), "job": JobSerializer(job).data}, status=status.HTTP_202_ACCEPTED)
 
@@ -440,6 +459,27 @@ class InstanceCommandView(APIView):
         return Response({"command": command, "output": output})
 
 
+# server.properties keys whose values are credentials. They are never returned by the
+# properties API (anyone with instance.view reads it); the file manager (instance.files.read)
+# still shows the file as it is.
+SECRET_PROPERTIES = ("rcon.password", "management-server-secret")
+REDACTED_VALUE = "********"
+
+
+def redact_properties(text: str) -> str:
+    """``text`` with the values of SECRET_PROPERTIES replaced by REDACTED_VALUE."""
+    present = properties.parse(text)
+    secrets = {key: REDACTED_VALUE for key in SECRET_PROPERTIES if present.get(key)}
+    return properties.update(text, secrets) if secrets else text
+
+
+def _restore_secrets(new_text: str, current: dict[str, str]) -> str:
+    """Put back the real value of every secret the client sent back as REDACTED_VALUE."""
+    sent = properties.parse(new_text)
+    keep = {key: current.get(key) for key in SECRET_PROPERTIES if sent.get(key) == REDACTED_VALUE}
+    return properties.update(new_text, keep) if keep else new_text
+
+
 class PropertiesView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
@@ -452,13 +492,16 @@ class PropertiesView(APIView):
             if exc.error_code != "not_found":
                 raise
             raw, exists = "", False
+        raw = redact_properties(raw)
+        values = properties.parse(raw)
         return Response(
             {
                 "exists": exists,
-                "values": properties.parse(raw),
+                "values": values,
                 "raw": raw,
                 "schema": properties.SCHEMA,
                 "managed_keys": sorted(properties.MANAGED_KEYS),
+                "redacted_keys": [k for k in SECRET_PROPERTIES if values.get(k) == REDACTED_VALUE],
             }
         )
 
@@ -474,10 +517,13 @@ class PropertiesView(APIView):
             if exc.error_code != "not_found":
                 raise
             current = ""
+        before = properties.parse(current)
         if raw_text is not None:
             if not isinstance(raw_text, str) or len(raw_text) > 512 * 1024:
                 raise ValidationError({"raw": ["Invalid properties text"]})
-            before, after = properties.parse(current), properties.parse(raw_text)
+            # the GET returned secrets masked; a masked value sent back means "unchanged"
+            raw_text = _restore_secrets(raw_text, before)
+            after = properties.parse(raw_text)
             for key in properties.MANAGED_KEYS:
                 if after.get(key) != before.get(key) and key in after:
                     raise ValidationError({"raw": [f"'{key}' is managed by MCPanel"]})
@@ -486,6 +532,8 @@ class PropertiesView(APIView):
         else:
             if not isinstance(changes, dict):
                 raise ValidationError({"values": ["Provide an object of property changes"]})
+            # a masked secret sent back unchanged is not a change
+            changes = {k: v for k, v in changes.items() if not (k in SECRET_PROPERTIES and v == REDACTED_VALUE)}
             try:
                 validated = properties.validate_changes(changes)
             except ValueError as exc:
@@ -502,10 +550,11 @@ class PropertiesView(APIView):
         )
         restart = any(properties.SCHEMA_KEYS.get(k, {}).get("restart", True) for k in changed_keys)
         running = instance.status in ("running", "starting", "unhealthy")
+        shown = redact_properties(new_text)
         return Response(
             {
-                "values": properties.parse(new_text),
-                "raw": new_text,
+                "values": properties.parse(shown),
+                "raw": shown,
                 "changed": changed_keys,
                 "restart_required": restart and running,
             }
@@ -616,6 +665,25 @@ class FilesOpView(APIView):
 
 
 # --- schedules ---------------------------------------------------------------------------
+# A schedule runs its action with the panel's authority, so creating or changing one needs the
+# permission the action itself needs (instance.schedules alone only lets you see/delete them).
+SCHEDULE_ACTION_PERMISSIONS = {
+    "restart": "instance.control",
+    "start": "instance.control",
+    "stop": "instance.control",
+    "backup": "instance.backup",
+    "snapshot": "instance.backup",
+    "command": "instance.command",
+}
+
+
+def require_schedule_action(user: Any, instance: Instance, action: str, payload: dict[str, Any] | None) -> None:
+    require(user, SCHEDULE_ACTION_PERMISSIONS.get(action, "instance.configure"), instance)
+    if action == "snapshot" and isinstance(payload, dict) and payload.get("keep") is not None:
+        # "keep N" deletes older scheduled snapshots, which is a restore-level operation
+        require(user, "instance.restore", instance)
+
+
 class ScheduleListView(APIView):
     @extend_schema(responses={200: ScheduleSerializer(many=True)})
     def get(self, request: Request, pk: str) -> Response:
@@ -627,8 +695,7 @@ class ScheduleListView(APIView):
         instance = get_instance_for(request.user, pk, "instance.schedules")
         ser = ScheduleSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        if ser.validated_data["action"] == "backup":
-            require(request.user, "instance.backup", instance)
+        require_schedule_action(request.user, instance, ser.validated_data["action"], ser.validated_data.get("payload"))
         sched = ser.save(instance=instance)
         audit.record("schedule.created", request=request, instance=instance, target=sched, details=ser.data)
         return Response(ScheduleSerializer(sched).data, status=status.HTTP_201_CREATED)
@@ -647,6 +714,15 @@ class ScheduleDetailView(APIView):
         sched = self._get(request, pk, sid)
         ser = ScheduleSerializer(sched, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        changed = {k for k, v in data.items() if getattr(sched, k) != v}
+        if changed <= {"enabled"} and data.get("enabled", sched.enabled) is False:
+            pass  # switching a schedule off (or a no-op) never runs anything
+        else:
+            # every other edit (action, payload, cron, re-enabling) decides what runs and when
+            require_schedule_action(
+                request.user, sched.instance, data.get("action", sched.action), data.get("payload", sched.payload)
+            )
         sched = ser.save(next_run_at=None)
         audit.record("schedule.updated", request=request, instance=sched.instance, target=sched, details=ser.data)
         return Response(ScheduleSerializer(sched).data)
@@ -876,6 +952,8 @@ class SoftwareUpdateView(APIView):
         instance = get_instance_for(request.user, pk, "instance.configure")
         if instance.is_modpack:
             raise ApiError("Modpack servers are updated through the modpack release picker", code="use_modpack_update")
+        if instance.archived_at:
+            raise ConflictError("Unarchive this server before updating or starting it", code="archived")
         data = request.data if isinstance(request.data, dict) else {}
         mc = str(data.get("minecraft_version") or "").strip()
         loader = str(data.get("loader_version") or "").strip()

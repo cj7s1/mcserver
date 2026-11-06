@@ -306,7 +306,10 @@ def test_create_while_the_agent_is_offline_keeps_the_fingerprint(owner_client, a
 def test_update_fingerprint_repins_and_clearing_it_drops_the_cert(owner_client, agent_a, agent_b):
     node = _node(agent_a.url, agent_a.fp, agent_a.pem)
     # the agent moved to a new certificate (B): admin updates URL + fingerprint
-    r = owner_client.patch(f"/api/nodes/{node.id}", {"agent_url": agent_b.url, "tls_fingerprint": agent_b.fp}, format="json")
+    # (a new URL needs the token again; the stored one is never sent to a different URL)
+    body = {"agent_url": agent_b.url, "tls_fingerprint": agent_b.fp}
+    assert owner_client.patch(f"/api/nodes/{node.id}", body, format="json").status_code == 400
+    r = owner_client.patch(f"/api/nodes/{node.id}", {**body, "agent_token": TOKEN}, format="json")
     assert r.status_code == 200, r.json()
     node.refresh_from_db()
     assert tls.fingerprint_of_pem(node.tls_cert_pem) == agent_b.fp

@@ -9,13 +9,15 @@ django_asgi_app = get_asgi_application()
 
 from channels.auth import AuthMiddlewareStack  # noqa: E402
 from channels.routing import ProtocolTypeRouter, URLRouter  # noqa: E402
-from channels.security.websocket import AllowedHostsOriginValidator  # noqa: E402
 
 from apps.console.routing import websocket_urlpatterns  # noqa: E402
+from apps.core.middleware import WebSocketOriginValidator  # noqa: E402
 
 application = ProtocolTypeRouter(
     {
         "http": django_asgi_app,
-        "websocket": AllowedHostsOriginValidator(AuthMiddlewareStack(URLRouter(websocket_urlpatterns))),
+        # Origin must match the panel's scheme://host:port (or CSRF_TRUSTED_ORIGINS), like
+        # Django's CSRF check; Channels' AllowedHostsOriginValidator ignores scheme and port.
+        "websocket": WebSocketOriginValidator(AuthMiddlewareStack(URLRouter(websocket_urlpatterns))),
     }
 )

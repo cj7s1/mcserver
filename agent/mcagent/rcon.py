@@ -124,6 +124,8 @@ class RconClient:
             try:
                 _rid, _t, more = await self._read_packet(min(CONTINUATION_TIMEOUT, remaining))
             except RconError:
+                if time.monotonic() >= deadline:  # cut short by the deadline, not the end of output
+                    parts.append(TRUNCATED_NOTE)
                 break
             last = len(more.encode("utf-8"))
             if received + last > MAX_RESPONSE_BYTES:

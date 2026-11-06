@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.backups.handlers import run_backup
+from apps.backups.handlers import require_local_backup, run_backup
 from apps.backups.models import Backup, BackupKind, BackupStatus
 from apps.catalog.providers import resolve_java
 from apps.core.errors import ApiError
@@ -121,7 +121,7 @@ def modpack_update(job: Job, ctx: JobContext) -> dict[str, Any]:
             span=(0.05, 0.5),
             job=job,
         )
-        backup.meta = {"modpack_before": plan["current"], "modpack_after": plan["target"]}
+        backup.meta = {**(backup.meta or {}), "modpack_before": plan["current"], "modpack_after": plan["target"]}
         backup.save(update_fields=["meta"])
     ctx.progress(0.55, f"Pinning {instance.modpack_name} {plan['target']['modpack_version_name']}", force=True)
     history = list((instance.modpack_meta or {}).get("history", []))
@@ -149,6 +149,7 @@ def modpack_rollback(job: Job, ctx: JobContext) -> dict[str, Any]:
     before = (backup.meta or {}).get("modpack_before")
     if backup.kind != BackupKind.PRE_UPDATE or not before or backup.status != BackupStatus.SUCCEEDED:
         raise ApiError("Only successful pre-update backups can be used to roll back", code="not_rollback_point")
+    require_local_backup(backup, instance)
     client = AgentClient(instance.node)
     was_running = ensure_stopped(instance, ctx)
     ctx.progress(0.05, "Creating a safety backup of the current state")

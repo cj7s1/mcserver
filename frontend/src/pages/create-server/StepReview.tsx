@@ -173,7 +173,7 @@ export function StepReview({
   const importing = state.category === "import";
   if (importing) {
     warnings.push(
-      "Keep this page open until the archive is uploaded. The server is created stopped, so you can check the files before its first start.",
+      "Keep this browser tab open until the archive is uploaded. The server is created stopped, so you can check the files before its first start.",
     );
     if (state.importOverwrite && Object.keys(props).length)
       warnings.push(

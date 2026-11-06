@@ -34,14 +34,22 @@ class MCPanelTask(Task):
 
         key = f"celery:single-flight:{self.name}"
         token = uuid.uuid4().hex
-        if not cache.add(key, token, ttl):
+        try:
+            acquired = cache.add(key, token, ttl)
+        except Exception as exc:  # cache down: running unguarded beats silently skipping every tick
+            log.warning("Single-flight lock for %s unavailable (%s); running without it", self.name, exc)
+            return super().__call__(*args, **kwargs)
+        if not acquired:
             log.info("Skipping %s: the previous run is still in progress", self.name)
             return None
         try:
             return super().__call__(*args, **kwargs)
         finally:
-            if cache.get(key) == token:
-                cache.delete(key)
+            try:
+                if cache.get(key) == token:
+                    cache.delete(key)
+            except Exception as exc:  # the TTL releases it eventually
+                log.warning("Could not release the single-flight lock for %s: %s", self.name, exc)
 
 
 app = Celery("mcpanel", task_cls=MCPanelTask)

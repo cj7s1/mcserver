@@ -4,8 +4,10 @@
         --url https://192.168.1.20:8700 --token <AGENT_TOKEN> --fingerprint AB:CD:...
 
 Uses the same validation as the API: the agent certificate is read and must match the
-fingerprint before it is pinned. The token can also come from $MCPANEL_NODE_TOKEN so it
-does not end up in shell history.
+fingerprint before it is pinned, and changing an existing node's URL needs its token again
+(a stored token is never sent to a new URL). The token can also come from $MCPANEL_NODE_TOKEN
+so it does not end up in shell history. The settings-managed default node cannot be changed
+here; it follows MCPANEL_AGENT_URL / MCPANEL_AGENT_TOKEN / MCPANEL_AGENT_TLS_FINGERPRINT.
 """
 
 from __future__ import annotations
@@ -38,7 +40,6 @@ class Command(BaseCommand):
             "name": opts["name"],
             "agent_url": opts["url"],
             "tls_fingerprint": opts["fingerprint"],
-            "use_settings_token": False,
             "lan_address": opts["lan_address"],
             "public_address": opts["public_address"],
         }

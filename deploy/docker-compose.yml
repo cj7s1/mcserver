@@ -41,6 +41,7 @@ x-logging: &logging
 x-panel-env: &panel-env
   TZ: ${TZ:-UTC}
   MCPANEL_SECRET_KEY: ${MCPANEL_SECRET_KEY:?MCPANEL_SECRET_KEY is not set - run deploy/scripts/generate-secrets.sh}
+  MCPANEL_SECRET_KEY_FALLBACKS: ${MCPANEL_SECRET_KEY_FALLBACKS:-}
   MCPANEL_AGENT_URL: http://agent:8700
   MCPANEL_AGENT_TOKEN: ${MCPANEL_AGENT_TOKEN:?MCPANEL_AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh}
   MCPANEL_AGENT_TIMEOUT: ${MCPANEL_AGENT_TIMEOUT:-}
@@ -55,7 +56,7 @@ x-panel-env: &panel-env
   MCPANEL_ALLOWED_HOSTS: ${MCPANEL_ALLOWED_HOSTS:-localhost,127.0.0.1}
   MCPANEL_CSRF_TRUSTED_ORIGINS: ${MCPANEL_CSRF_TRUSTED_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
   MCPANEL_BEHIND_TLS_PROXY: ${MCPANEL_BEHIND_TLS_PROXY:-false}
-  # Empty = loopback and private ranges (see backend/container/entrypoint.sh).
+  # Empty = loopback only; set it to the reverse proxy's address (backend/container/entrypoint.sh).
   MCPANEL_FORWARDED_ALLOW_IPS: ${MCPANEL_FORWARDED_ALLOW_IPS:-}
   MCPANEL_SECURE_COOKIES: ${MCPANEL_SECURE_COOKIES:-false}
   MCPANEL_SESSION_AGE_SECONDS: ${MCPANEL_SESSION_AGE_SECONDS:-}
@@ -65,6 +66,7 @@ x-panel-env: &panel-env
   MCPANEL_PORT_RANGE_END: ${MCPANEL_PORT_RANGE_END:-25665}
   MCPANEL_MAX_UPLOAD_BYTES: ${MCPANEL_MAX_UPLOAD_BYTES:-}
   CURSEFORGE_API_KEY: ${CURSEFORGE_API_KEY:-}
+  MCPANEL_WEBHOOK_ALLOW_LAN: ${MCPANEL_WEBHOOK_ALLOW_LAN:-true}
   MCPANEL_LOG_LEVEL: ${MCPANEL_LOG_LEVEL:-INFO}
   MCPANEL_LOG_JSON: ${MCPANEL_LOG_JSON:-true}
   MCPANEL_WORKER_CONCURRENCY: ${MCPANEL_WORKER_CONCURRENCY:-}
@@ -77,6 +79,8 @@ x-panel-hardening: &panel-hardening
 
 services:
   postgres:
+    # Mutable tags on purpose, so `docker compose pull` brings security fixes (DEPLOYMENT.md,
+    # "Upgrading"). To pin an exact build use postgres:16-alpine@sha256:<digest> instead.
     image: postgres:16-alpine
     restart: unless-stopped
     environment:

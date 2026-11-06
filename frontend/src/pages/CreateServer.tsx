@@ -22,7 +22,7 @@ import {
 } from "./create-server/StepSoftware";
 import { StepType } from "./create-server/StepType";
 import { ArchivePicker } from "./create-server/import/ArchivePicker";
-import { nameFromArchive } from "./create-server/import/importModel";
+import { importPermissionProblem, nameFromArchive } from "./create-server/import/importModel";
 import { ImportProgress } from "./create-server/import/ImportProgress";
 import { ImportSoftware } from "./create-server/import/ImportSoftware";
 import { NodeSelect } from "./create-server/import/NodeSelect";
@@ -278,7 +278,7 @@ function stepIndex(step: StepId): number {
 }
 
 export default function CreateServer() {
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
@@ -394,6 +394,11 @@ export default function CreateServer() {
   });
 
   const deploy = () => {
+    const importProblem = state.category === "import" ? importPermissionProblem(user) : null;
+    if (importProblem) {
+      toast.error("This server could not be imported", { description: importProblem });
+      return;
+    }
     for (const s of STEPS) {
       const errs = validateStep(s.id, state, d);
       if (Object.keys(errs).length) {

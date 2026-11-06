@@ -263,7 +263,7 @@ def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
             span=(0.05, 0.55),
             job=job,
         )
-        backup.meta = {"software_before": before}
+        backup.meta = {**(backup.meta or {}), "software_before": before}
         backup.save(update_fields=["meta"])
         backup_id = str(backup.id)
     instance.minecraft_version = p["minecraft_version"]
@@ -280,12 +280,63 @@ def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
     return {"before": before, "after": {k: getattr(instance, k) for k in before}, "backup_id": backup_id}
 
 
+def _empty_target_folder(instance: Instance, source: AgentClient, target: AgentClient, ctx: JobContext) -> int:
+    """Make the server folder on the migration target empty before files are unpacked into it.
+
+    The folder exists there already when an earlier migration failed half-way or the server was
+    moved away from that node before: unpacking over it would merge stale files (mods or
+    worlds deleted since) into the server. Only the TARGET folder is touched, and only after a
+    probe file proves that it is not the source folder (two nodes can point at the same agent
+    or share storage). Returns the number of removed top-level entries.
+    """
+    import secrets as _secrets
+
+    from apps.nodes.client import AgentError
+
+    token = _secrets.token_hex(8)
+    probe = f".mcpanel-migrate-probe-{token}"
+    source.write_text(instance.id, probe, token, create_only=True)
+    try:
+        try:
+            seen = target.read_text(instance.id, probe).get("content")
+        except AgentError as exc:
+            if exc.agent_status != 404:
+                raise
+            seen = None
+    finally:
+        source.delete_files(instance.id, [probe])
+    if seen == token:
+        raise ApiError(
+            f"Node '{target.node.name}' stores this server in the same folder as its current node (same agent or "
+            "shared storage), so there is nothing to move. Nothing was changed.",
+            code="same_storage",
+            status_code=409,
+        )
+    if target.status(instance.id).get("exists"):
+        ctx.log(f"Removing a leftover container of this server on {target.node.name}")
+        target.remove_container(instance.id, timeout=30)
+    names = [e["name"] for e in target.list_files(instance.id, "")["entries"]]
+    if not names:
+        return 0
+    ctx.progress(None, f"Removing {len(names)} leftover item(s) of an earlier copy on {target.node.name}", force=True)
+    slow = AgentClient(target.node, timeout=3600)  # deleting a big stale world can take a while
+    for i in range(0, len(names), 500):
+        slow.delete_files(instance.id, names[i : i + 500], recursive=True)
+    if target.list_files(instance.id, "")["entries"]:
+        raise ApiError(f"Could not empty the server folder on {target.node.name}", code="target_not_empty", status_code=409)
+    return len(names)
+
+
 @register("migrate")
 def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Move a server to another node: stream its folder agent-to-agent, then recreate it there.
 
-    restic backups stay in the source node's repository (they are not copied), so a fresh
-    backup is taken on the target afterwards when requested.
+    The target folder is emptied first (see ``_empty_target_folder``) so it ends up an exact
+    copy of the source. restic backups stay in the source node's repository (they are not
+    copied): each backup records the node that holds it (``Backup.meta["node_id"]``), so they
+    are no longer offered for in-place restores, retention or verification here, while browse,
+    download and "restore as new server" keep using the node that has them
+    (``apps.backups.handlers.backup_agent``).
     """
     import secrets as _secrets
 
@@ -303,7 +354,10 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     was_running = ensure_stopped(instance, ctx)
 
     ctx.progress(0.05, f"Preparing {target_node.name}", force=True)
-    target.prepare(instance.id)
+    prepared = target.prepare(instance.id)
+    cleared = 0
+    if not prepared.get("created"):
+        cleared = _empty_target_folder(instance, source, target, ctx)
     archive = f".mcpanel-migrate-{_secrets.token_hex(6)}.zip"
     ctx.progress(0.1, "Copying server files to the target node (streamed)", force=True)
     chunks, _length, _resp = source.download(instance.id, "", endpoint="archive")
@@ -314,6 +368,7 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     target.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.6, 0.25))
 
     old_node = instance.node
+    _tag_backups_on_node(instance, old_node)  # they stay in the old node's restic repository
     port_changed = None
     if instance.game_port in ports_in_use(target_node, exclude=instance):
         new_port = allocate_port(target_node, exclude=instance)
@@ -326,26 +381,55 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     apply_container(instance, ctx, start=was_running, span=(0.88, 0.97))
 
     source.remove_container(instance.id, timeout=30)
+    from apps.backups.handlers import repository_node_id
+    from apps.backups.models import Backup, BackupStatus
+
+    on_old = [
+        b
+        for b in Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED)
+        if repository_node_id(b, instance) == old_node.pk
+    ]
     if job.params.get("delete_source"):
         ctx.log(f"Deleting the server folder and backups on {old_node.name}")
         op = source.delete_data(instance.id)
         source.wait_operation(op["id"], timeout=3600)
-    from apps.backups.models import Backup, BackupStatus
-
-    stale = Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED)
-    stale_count = stale.count()
-    if stale_count:
-        meta_note = {"left_on_node": old_node.name}
-        for b in stale:
-            b.meta = {**(b.meta or {}), **meta_note}
-            b.status = BackupStatus.DELETED if job.params.get("delete_source") else b.status
-            b.save(update_fields=["meta", "status"])
+        # delete_data removed the old node's repository; backups in other nodes' repositories stay
+        Backup.objects.filter(pk__in=[b.pk for b in on_old]).update(status=BackupStatus.DELETED)
     return {
         "from": old_node.name,
         "to": target_node.name,
         "bytes": uploaded.get("size"),
         "port_changed": port_changed,
         "restarted": was_running,
+        "target_leftovers_removed": cleared,
         "source_data_deleted": bool(job.params.get("delete_source")),
-        "backups_left_on_source": 0 if job.params.get("delete_source") else stale_count,
+        "backups_left_on_source": 0 if job.params.get("delete_source") else len(on_old),
     }
+
+
+def _tag_backups_on_node(instance: Instance, node: Any) -> None:
+    """Record ``node`` as the holder of every backup of the server that does not name one yet.
+
+    Called while ``node`` is still the server's node (before a migration switches it), so an
+    interrupted migration cannot leave untagged rows that would look local to the new node.
+    Rows from versions that only stored ``left_on_node`` (a node name) are resolved by name.
+    """
+    from apps.backups.models import Backup, BackupStatus
+    from apps.nodes.models import Node
+
+    for b in Backup.objects.filter(instance=instance).exclude(status=BackupStatus.DELETED):
+        meta = dict(b.meta or {})
+        if meta.get("node_id") is not None:
+            continue
+        legacy = meta.get("left_on_node")
+        if legacy:
+            node_id = Node.objects.filter(name=legacy).values_list("pk", flat=True).first()
+            if node_id is None:
+                continue  # that node is gone: the backup stays unreachable
+        else:
+            node_id = node.pk
+            meta["left_on_node"] = node.name
+        meta["node_id"] = node_id
+        meta.setdefault("node_name", legacy or node.name)
+        b.meta = meta
+        b.save(update_fields=["meta"])

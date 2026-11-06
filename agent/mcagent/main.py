@@ -563,12 +563,12 @@ class _LogBuffer:
     def __init__(
         self,
         loop: asyncio.AbstractEventLoop,
-        max_lines: int = LOG_BUFFER_MAX_LINES,
-        max_bytes: int = LOG_BUFFER_MAX_BYTES,
+        max_lines: int | None = None,
+        max_bytes: int | None = None,
     ) -> None:
         self._loop = loop
-        self.max_lines = max_lines
-        self.max_bytes = max_bytes
+        self.max_lines = LOG_BUFFER_MAX_LINES if max_lines is None else max_lines
+        self.max_bytes = LOG_BUFFER_MAX_BYTES if max_bytes is None else max_bytes
         self._lock = threading.Lock()
         self._items: deque[tuple[dict[str, Any], int]] = deque()
         self._held: list[dict[str, Any]] = []  # control messages displaced by dropping
@@ -1160,17 +1160,16 @@ async def backup_restore_path(
 
     def _do(op: Operation) -> dict[str, Any]:
         root = _root(settings, instance_id)
-        parent_rel = "/".join(parts[:-1])
-        if parent_rel:
-            root.mkdir(parent_rel, parents=True)  # created/validated through SafeRoot (no symlinks)
         name = parts[-1]
+        parent_rel = "/".join(parts[:-1])
+        anchor_rel = _deepest_existing_dir(root, parts[:-1])
         stage_name = f".mcpanel-tmp-restore-{secrets.token_hex(6)}"  # excluded from backups
-        with root.dir_fd(parent_rel) as parent_fd:
-            # Stage in the destination's own directory: same filesystem and btrfs subvolume, so
-            # the final rename cannot fail with EXDEV (a staging folder under <data root>/staging
-            # is outside an instance subvolume).
-            os.mkdir(stage_name, 0o700, dir_fd=parent_fd)
-            stage_fd = os.open(stage_name, _DIR_FLAGS, dir_fd=parent_fd)
+        with root.dir_fd(anchor_rel) as anchor_fd:
+            # Stage inside the destination's deepest existing folder: same filesystem and btrfs
+            # subvolume as the destination (folders created below it inherit it), so the final
+            # rename cannot fail with EXDEV as one from <data root>/staging into a subvolume does.
+            os.mkdir(stage_name, 0o700, dir_fd=anchor_fd)
+            stage_fd = os.open(stage_name, _DIR_FLAGS, dir_fd=anchor_fd)
             try:
                 op.update(0.1, f"Restoring {body.path} from backup")
                 # restic gets the staging directory as an inherited descriptor: it writes into
@@ -1180,11 +1179,14 @@ async def backup_restore_path(
                 )
                 restored_fd = os.open("r", _DIR_FLAGS, dir_fd=stage_fd)
                 try:
-                    _swap_in_restored(restored_fd, parent_fd, name)
+                    if parent_rel != anchor_rel:  # only now: a failed restore leaves no empty folders
+                        root.mkdir(parent_rel, parents=True)  # through SafeRoot (no symlinks)
+                    with root.dir_fd(parent_rel) as parent_fd:
+                        _swap_in_restored(restored_fd, parent_fd, name)
                 finally:
                     os.close(restored_fd)
             finally:
-                _remove_own_dir(parent_fd, stage_name, stage_fd)
+                _remove_own_dir(anchor_fd, stage_name, stage_fd)
                 os.close(stage_fd)
         return {"restored": "/".join(parts)}
 
@@ -1193,6 +1195,23 @@ async def backup_restore_path(
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _deepest_existing_dir(root: SafeRoot, parts: list[str]) -> str:
+    """The longest prefix of ``parts`` that exists as a directory (refusing files and links)."""
+    found = 0
+    for i in range(1, len(parts) + 1):
+        rel = "/".join(parts[:i])
+        try:
+            entry = root.stat(rel)
+        except PathError as exc:
+            if exc.code == "not_found":
+                break
+            raise
+        if entry.type != "directory":
+            raise AgentError(f"'{rel}' is not a folder", "not_a_directory", 409)
+        found = i
+    return "/".join(parts[:found])
 
 
 def _delete_entry(dir_fd: int, name: str) -> None:
@@ -1284,7 +1303,7 @@ def _world_saving_paused(
                 _rcon(settings, instance_id, "save-all flush", 300)
                 time.sleep(SAVE_SETTLE_SECONDS)
                 state.paused = True
-            except (RconError, AgentError, OSError) as exc:
+            except Exception as exc:  # RCON, Docker (container gone meanwhile) or socket errors
                 if consistency == "require":
                     raise AgentError(
                         f"Could not coordinate world saving: {exc}", "consistency_failed", 409

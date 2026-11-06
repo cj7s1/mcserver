@@ -172,6 +172,8 @@ class LoginView(APIView):
 
 
 class LogoutView(APIView):
+    permission_classes = [IsAuthenticated]  # explicit: must stay usable while must_change_password is set
+
     @extend_schema(request=None, responses={204: None})
     def post(self, request):  # type: ignore[no-untyped-def]
         audit.record("auth.logout", request=request)
@@ -196,6 +198,8 @@ def _validate_new_password(password: str, user: User) -> None:
 
 
 class PasswordChangeView(APIView):
+    permission_classes = [IsAuthenticated]  # explicit: this is how must_change_password gets cleared
+
     @extend_schema(request=PasswordChangeSerializer, responses={204: None})
     def post(self, request):  # type: ignore[no-untyped-def]
         ser = PasswordChangeSerializer(data=request.data)

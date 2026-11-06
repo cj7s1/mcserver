@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from typing import Any
 
 from django.conf import settings
 
+from apps.core.crypto import is_unreadable
 from apps.core.models import SystemSetting
+from apps.core.utils import random_secret
 
 from .models import Instance, ServerType
 
-# Environment variables the panel manages; advanced users cannot override them.
-MANAGED_ENV = {
+log = logging.getLogger(__name__)
+
+# Environment variables the panel manages itself (dedicated settings).
+_PANEL_ENV = {
     "EULA",
     "TYPE",
     "VERSION",
@@ -34,7 +39,9 @@ MANAGED_ENV = {
     "MODRINTH_VERSION",
     "MODRINTH_PROJECT",
     "MODRINTH_VERSION_ID",
+    "MODRINTH_LOADER",
     "CF_API_KEY",
+    "CF_API_KEY_FILE",
     "CF_SLUG",
     "CF_FILE_ID",
     "CF_PAGE_URL",
@@ -55,7 +62,161 @@ MANAGED_ENV = {
     "LOAD_ENV_FROM_FILE",
     "LOAD_ENV_FROM_ARCHIVE",
     "LOAD_ENV_FROM_GENERIC_PACK",
+    "SKIP_SERVER_PROPERTIES",
+    "OVERRIDE_SERVER_PROPERTIES",
 }
+
+# Extra variables (instance.env, permission instance.configure) may tune the runtime, but must
+# not do what other permissions guard, nor anything nobody can review (docs/SECURITY.md,
+# "Advanced environment variables"). Refused families, by exact name, prefix or suffix:
+#  * install code or content from sources the content manager does not hash-verify
+#    (instance.content): MODS/PLUGINS lists, SPIGET_RESOURCES, MODRINTH_PROJECTS,
+#    CURSEFORGE_FILES, MODPACK zips, GENERIC_PACK(S), PACKWIZ_URL, DATAPACKS, WORLD, extra and
+#    default config downloads, custom server jars and installers, every *_URL/*_REPO source;
+#  * run commands or replace what is executed (instance.command): RCON_CMDS_*, the stop
+#    command, pre-start scripts, SSH/WebSocket remote consoles, unauthenticated remote JMX
+#    (ENABLE_JMX), the server runner, Java agents and JVM option variables (the JVM is
+#    configured through the JVM settings), and variables the shell, the dynamic loader or the
+#    JVM read on their own (PS4, BASH_ENV, LD_*, JAVA_TOOL_OPTIONS, ...);
+#  * weaken built-in protection: SKIP_LOG4J_PATCHER (Log4Shell on old versions);
+#  * print secrets into the console log that console viewers can read (DEBUG traces the
+#    startup scripts with `set -x`, which prints the RCON password; DUMP_SERVER_PROPERTIES);
+#  * grant operator status or edit the whitelist (instance.players): OPS*, WHITELIST lists;
+#  * override panel-managed behaviour: RCON_*, the server.properties source, CF_*/FTB_* except
+#    the pack tuning options below, LOAD_ENV_FROM_*.
+_BLOCKED_EXACT = {
+    "MODS",
+    "PLUGINS",
+    "MODPACK",
+    "CURSEFORGE_FILES",
+    "DATAPACKS",
+    "WORLD",
+    "APPLY_EXTRA_FILES",
+    "DOWNLOAD_EXTRA_CONFIGS",
+    "SERVER",
+    "SERVER_RUNNER",
+    "PRE_START_SCRIPT",
+    "STOP_SERVER_DELAY_COMMAND",
+    "ENABLE_SSH",
+    "ENABLE_WEBSOCKET",
+    "ENABLE_JMX",
+    "DUMP_SERVER_PROPERTIES",
+    "SKIP_LOG4J_PATCHER",
+    "SCRIPTS",
+    "USE_MODPACK_START_SCRIPT",
+    "CLEANROOM_FROM_FILE",
+    "OPS",
+    "OPS_FILE",
+    "EXISTING_OPS_FILE",
+    "OVERRIDE_OPS",
+    "APPEND_OPS",
+    "WHITELIST",
+    "WHITELIST_FILE",
+    "EXISTING_WHITELIST_FILE",
+    "OVERRIDE_WHITELIST",
+    "APPEND_WHITELIST",
+    "WHITELIST_PROP",
+    "MODRINTH_PROJECTS",
+    "VERSION_FROM_MODRINTH_PROJECTS",
+    "PATH",
+    "HOME",
+    "ENV",
+    "BASH_ENV",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "PS4",
+    "PROMPT_COMMAND",
+    "IFS",
+    "GLOBIGNORE",
+    "_JAVA_OPTIONS",
+}
+_BLOCKED_PREFIXES = (
+    "MODS_",
+    "PLUGINS_",
+    "SPIGET_",
+    "CURSEFORGE_",
+    "GENERIC_PACK",
+    "PACKWIZ_",
+    "DATAPACKS_",
+    "VANILLATWEAKS_",
+    "WORLD_",
+    "CUSTOM_",
+    "COPY_",
+    "RCON_",
+    "SSH_",
+    "WEBSOCKET_",
+    "MC_SERVER_RUNNER",
+    "JMX_",
+    "DEBUG",
+    "JVM_",
+    "JAVA_",
+    "JDK_",
+    "LD_",
+    "BASH_FUNC_",
+    "LOAD_ENV_FROM_",
+    "SERVER_PROPERTIES",
+    "MANAGEMENT_SERVER_",
+    "DOWNLOAD_",
+    "CF_",
+    "FTB_",
+)
+_BLOCKED_SUFFIXES = (
+    "_URL",
+    "_URLS",
+    "_REPO",
+    "_INSTALLER",
+    "_CUSTOM_JAR",
+    "_LAUNCHER",
+    "_COMMAND",
+    "_COMMANDS",
+    "_SCRIPT",
+)
+# Pack tuning that only selects among files of the pinned, already verified pack.
+_ALLOWED_PACK_TUNING = {
+    "FTB_FORCE_REINSTALL",
+    "CF_EXCLUDE_MODS",
+    "CF_FORCE_INCLUDE_MODS",
+    "CF_EXCLUDE_ALL_MODS",
+    "CF_EXCLUDE_INCLUDE_FILE",
+    "CF_FORCE_SYNCHRONIZE",
+    "CF_OVERRIDES_EXCLUSIONS",
+    "CF_OVERRIDES_SKIP_EXISTING",
+    "CF_IGNORE_MISSING_FILES",
+    "CF_SET_LEVEL_FROM",
+    "CF_PARALLEL_DOWNLOADS",
+    "CF_FORCE_REINSTALL_MODLOADER",
+    "CF_API_CACHE_DEFAULT_TTL",
+    "CF_USE_HTTP2",
+    "CF_MOD_LOADER_VERSION",
+}
+
+
+def env_override_error(key: str) -> str | None:
+    """Why an extra (instance.env) variable is refused, or None if it may be set."""
+    name = str(key).upper()
+    if name in _PANEL_ENV:
+        return f"{key} is managed by MCPanel; use the dedicated setting instead"
+    if name in _ALLOWED_PACK_TUNING:
+        return None
+    if name in _BLOCKED_EXACT or name.startswith(_BLOCKED_PREFIXES) or name.endswith(_BLOCKED_SUFFIXES):
+        return (
+            f"{key} is not allowed: it would install unverified code, run commands or grant player "
+            "rights (use the mods/plugins manager, the console or the players page instead)"
+        )
+    return None
+
+
+class _ReservedEnv(frozenset):
+    """Panel-managed keys (iterating yields only those) whose ``in`` test also covers the
+    refused families above, so every ``key in MANAGED_ENV`` check enforces the full policy."""
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and env_override_error(key) is not None
+
+
+# Variables advanced users cannot set (see env_override_error); kept under this name because
+# the serializer and build_env test membership with it.
+MANAGED_ENV: frozenset[str] = _ReservedEnv(_PANEL_ENV)
 
 LOADER_ENV = {
     ServerType.FABRIC: "FABRIC_LOADER_VERSION",
@@ -132,6 +293,26 @@ def build_env(instance: Instance) -> dict[str, str]:
     return env
 
 
+def rcon_password(instance: Instance) -> str:
+    """The instance's RCON password; a new one if the stored one cannot be decrypted.
+
+    After MCPANEL_SECRET_KEY changed without MCPANEL_SECRET_KEY_FALLBACKS the stored password
+    is unreadable (apps/core/crypto.py). It is only ever used for the container the panel
+    creates next (the agent reads the running container's password from its config), so a
+    fresh one is saved: the current container keeps working and the next recreation, which the
+    changed spec hash asks for, applies the new password.
+    """
+    current = instance.rcon_password
+    if current and not is_unreadable(current):
+        return current
+    new = random_secret(32)
+    instance.rcon_password = new
+    if instance.pk and not instance._state.adding:
+        Instance.objects.filter(pk=instance.pk).update(rcon_password=new)
+        log.warning("Generated a new RCON password for server %s (the stored one was unreadable)", instance.pk)
+    return new
+
+
 def build_spec(instance: Instance) -> dict[str, Any]:
     ports = [{"container_port": 25565, "host_port": instance.game_port, "protocol": "tcp", "host_ip": instance.host_ip}]
     for extra in instance.extra_ports or []:
@@ -151,7 +332,7 @@ def build_spec(instance: Instance) -> dict[str, Any]:
         "ports": ports,
         "restart_policy": instance.restart_policy,
         "stop_timeout": instance.stop_timeout,
-        "rcon_password": instance.rcon_password,
+        "rcon_password": rcon_password(instance),
     }
     if instance.cpu_limit:
         spec["cpu_limit"] = instance.cpu_limit

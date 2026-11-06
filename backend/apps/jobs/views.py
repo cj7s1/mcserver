@@ -7,17 +7,48 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.errors import ApiError
-from apps.core.permissions import visible_instances
+from apps.core.permissions import ensure_password_current, visible_instances
 
 from .models import Job
 from .serializers import JobSerializer
 
+# Marking a job as failed releases the server's operation lock while the agent may still be
+# working (e.g. halfway through a restore), so it needs the permission that starts that kind of
+# job, not just power control. system.settings may always do it; unknown kinds need it.
+ABANDON_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "start": ("instance.control",),
+    "stop": ("instance.control",),
+    "restart": ("instance.control",),
+    "install": ("instance.configure",),
+    "recreate": ("instance.configure",),
+    "software_update": ("instance.configure",),
+    "archive": ("instance.delete",),
+    "delete": ("instance.delete",),
+    "clone": ("instance.create", "instance.files.read"),
+    "extract_archive": ("instance.files.write",),
+    "migrate": ("system.nodes", "instance.configure"),
+    "backup": ("instance.backup",),
+    "backup_verify": ("instance.backup",),
+    "snapshot_create": ("instance.backup",),
+    "restore": ("instance.restore",),
+    "restore_new": ("instance.restore", "instance.create"),
+    "restore_path": ("instance.restore",),
+    "backup_delete": ("instance.restore",),
+    "snapshot_restore": ("instance.restore",),
+    "snapshot_delete": ("instance.restore",),
+    "snapshot_convert": ("instance.restore",),
+    "modpack_update": ("instance.content",),
+    "modpack_rollback": ("instance.content", "instance.restore"),
+}
+
 
 def visible_jobs(user):  # type: ignore[no-untyped-def]
+    """Jobs of servers the user can (still) see, plus server-less jobs they started themselves."""
+    ensure_password_current(user)
     qs = Job.objects.select_related("instance", "user")
     if "instance.view" in user.global_permissions():
         return qs
-    return qs.filter(Q(instance__in=visible_instances(user)) | Q(user=user))
+    return qs.filter(Q(instance__in=visible_instances(user)) | Q(instance__isnull=True, user=user))
 
 
 class JobListView(APIView):
@@ -61,10 +92,11 @@ class JobAbandonView(APIView):
         job = visible_jobs(request.user).filter(pk=pk).first()
         if job is None:
             raise ApiError("Job not found", code="not_found", status_code=404)
-        if job.instance_id:
-            require(request.user, "instance.control", job.instance)
-        else:
-            require(request.user, "system.settings")
+        if not request.user.has_panel_perm("system.settings"):
+            if not job.instance_id:
+                require(request.user, "system.settings")
+            for code in ABANDON_PERMISSIONS.get(job.kind, ("system.settings",)):
+                require(request.user, code, job.instance)
         if job.status not in ACTIVE_STATUSES:
             raise ApiError("Only queued or running jobs can be abandoned", code="not_active", status_code=409)
         finish(job, JobStatus.FAILED, error=f"Marked as failed by {request.user.username}", error_code="abandoned")

@@ -118,7 +118,7 @@ export function ArchivePicker({
           </p>
         ) : (
           <p id={`${uid}-hint`} className="-mt-2 text-xs text-muted-foreground">
-            The upload starts after the server is created. Keep the page open until it finishes.
+            The upload starts after the server is created. Keep this browser tab open until it finishes.
           </p>
         )}
         {tooBig && (

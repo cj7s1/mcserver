@@ -80,14 +80,22 @@ case "$mode" in
             --lifespan off --no-server-header "$@"
         if is_true "${MCPANEL_BEHIND_TLS_PROXY:-}"; then
             # Trust X-Forwarded-For/-Proto only behind a reverse proxy, and only from
-            # peers in MCPANEL_FORWARDED_ALLOW_IPS (default: loopback and private
-            # ranges). uvicorn then takes the client address as the right-most
-            # X-Forwarded-For entry that is not a trusted peer. Do not use "*": uvicorn
-            # would take the LEFT-most entry, which the client controls whenever the
-            # proxy appends to X-Forwarded-For (nginx, Nginx Proxy Manager, SWAG), so
-            # the login throttle and audit IPs could be spoofed.
+            # peers in MCPANEL_FORWARDED_ALLOW_IPS: the proxy's address as this container
+            # sees it. The default is loopback only. Private ranges are NOT trusted by
+            # default: Minecraft containers (third-party mod code) and other LAN hosts
+            # live there and could otherwise fake their address (login throttle, audit
+            # log). uvicorn takes the client address as the right-most X-Forwarded-For
+            # entry that is not a trusted peer; REST_FRAMEWORK["NUM_PROXIES"] = 0 keeps
+            # Django from parsing the header again. Do not use "*": uvicorn would take the
+            # LEFT-most entry, which the client controls whenever the proxy appends to
+            # X-Forwarded-For (nginx, Nginx Proxy Manager, SWAG).
+            if [ -z "${MCPANEL_FORWARDED_ALLOW_IPS:-}" ]; then
+                echo "mcpanel: MCPANEL_BEHIND_TLS_PROXY=true but MCPANEL_FORWARDED_ALLOW_IPS is empty:" \
+                    "only 127.0.0.1/::1 are trusted, so every request appears to come from the proxy" \
+                    "(one shared login rate limit). Set it to the proxy's address (see DEPLOYMENT.md)." >&2
+            fi
             set -- "$@" --proxy-headers --forwarded-allow-ips \
-                "${MCPANEL_FORWARDED_ALLOW_IPS:-127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1,fc00::/7}"
+                "${MCPANEL_FORWARDED_ALLOW_IPS:-127.0.0.1,::1}"
         else
             set -- "$@" --no-proxy-headers
         fi

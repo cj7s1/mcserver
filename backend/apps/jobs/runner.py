@@ -305,8 +305,7 @@ def _notify_job(job: Job) -> None:
 
 
 INTERRUPTED_ERROR = (
-    "The worker running this operation stopped (crashed or restarted) before it finished. "
-    "Check the server state before retrying."
+    "The worker running this operation stopped (crashed or restarted) before it finished. Check the server state before retrying."
 )
 
 

@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.audit import service as audit
+from apps.core.crypto import is_unreadable
 from apps.core.errors import ApiError
 from apps.core.permissions import require
 
@@ -90,13 +91,16 @@ class SystemSettingsView(APIView):
     def get(self, request: Request) -> Response:
         require(request.user, "system.settings")
         values = {key: SystemSetting.get(key) for key in EDITABLE}
-        secrets = {key: bool(SystemSetting.get_secret(key)) for key in SECRETS}
+        stored = {key: SystemSetting.get_secret(key) for key in SECRETS}
+        secrets = {key: bool(value) for key, value in stored.items()}
         if not secrets["curseforge_api_key"] and settings.CURSEFORGE_API_KEY:
             secrets["curseforge_api_key"] = True
         return Response(
             {
                 "values": values,
                 "secrets_configured": secrets,
+                # stored but not decryptable with the current secret key: ask the admin to re-enter it
+                "secrets_unreadable": {key: is_unreadable(value) for key, value in stored.items()},
                 "env": {"port_range_default": [settings.MCPANEL_PORT_RANGE_START, settings.MCPANEL_PORT_RANGE_END]},
             }
         )

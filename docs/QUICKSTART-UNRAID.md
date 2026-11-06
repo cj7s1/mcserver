@@ -286,15 +286,26 @@ world is kept.
 
 ```bash
 cd /mnt/user/appdata/mcpanel-src && git pull
-cd deploy && docker compose up -d --build
+cd deploy
+docker compose pull --ignore-buildable   # newer database and Redis images
+docker compose build --pull              # rebuild the panel and agent on fresh base images
+docker compose up -d
 ```
 
 Running Minecraft servers are not restarted by a panel update. Before big updates you can back up
-the panel database:
+the panel database (run it in `deploy/`):
 
 ```bash
-docker compose exec postgres pg_dump -U mcpanel mcpanel > /mnt/user/backups/mcpanel-db.sql
+(umask 077 && mkdir -p /mnt/user/appdata/mcpanel-db-backups && \
+ docker compose exec -T postgres pg_dump -U mcpanel --exclude-table-data=django_session mcpanel \
+   > /mnt/user/appdata/mcpanel-db-backups/mcpanel-db-$(date +%F).sql)
 ```
+
+The dump contains your users' password hashes and the panel's encrypted secrets, so it is only
+readable by root (`umask 077`) and kept out of shared folders: check under **Shares → appdata** that
+the share is not exported over SMB/NFS, or use another folder that isn't. Login sessions are left out
+(`--exclude-table-data=django_session`): with them, whoever has the file could use the panel as a
+logged-in user.
 
 ---
 

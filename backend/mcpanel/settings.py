@@ -52,6 +52,10 @@ if not SECRET_KEY:
         SECRET_KEY = "insecure-development-key-do-not-use-in-production"
     else:
         raise ImproperlyConfigured("MCPANEL_SECRET_KEY (or MCPANEL_SECRET_KEY_FILE) must be set")
+# Previous secret keys, comma- or whitespace-separated, while rotating MCPANEL_SECRET_KEY:
+# signatures (sessions, password reset links) and encrypted secrets (apps/core/crypto.py)
+# made with them stay valid. Remove them after `manage.py reencrypt_secrets`.
+SECRET_KEY_FALLBACKS = (read_secret("MCPANEL_SECRET_KEY_FALLBACKS", "") or "").replace(",", " ").split()
 
 ALLOWED_HOSTS = env_list("MCPANEL_ALLOWED_HOSTS", "localhost,127.0.0.1")
 CSRF_TRUSTED_ORIGINS = env_list("MCPANEL_CSRF_TRUSTED_ORIGINS", "http://localhost:8080,http://127.0.0.1:8080")
@@ -84,6 +88,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # before WhiteNoise, so the SPA files it serves (/index.html, assets) get the headers too
+    "apps.core.middleware.SecurityHeadersMiddleware",
     "apps.core.middleware.UploadLimitMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -319,6 +325,9 @@ CURSEFORGE_API_KEY = read_secret("CURSEFORGE_API_KEY", "")
 MCPANEL_USER_AGENT = env(
     "MCPANEL_USER_AGENT", "mcpanel/0.1.0 (self-hosted Minecraft server panel; +https://github.com/cj7s1/mcserver)"
 )
+# Generic webhooks may target private/LAN addresses (Home Assistant, ntfy, Gotify...). Loopback,
+# link-local/metadata and MCPanel's own services are always refused (apps/notifications/service.py).
+MCPANEL_WEBHOOK_ALLOW_LAN = env_bool("MCPANEL_WEBHOOK_ALLOW_LAN", True)
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024

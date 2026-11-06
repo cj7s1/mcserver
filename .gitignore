@@ -18,7 +18,16 @@ frontend/playwright-report/
 .env
 *.env.local
 deploy/.env
+# node.env (AGENT_TOKEN, restic password) and any other env file generated in deploy/
+deploy/*.env
+deploy/.env.tmp.*
+deploy/docker-compose.override.yml
 deploy/secrets/
+# database dumps (password hashes, encrypted secrets, sessions)
+/*.sql
+/*.sql.gz
+deploy/*.sql
+deploy/*.sql.gz
 # Local data
 /data/
 *.log

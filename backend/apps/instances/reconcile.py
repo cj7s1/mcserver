@@ -44,6 +44,24 @@ def _ts(value: str | None):  # type: ignore[no-untyped-def]
 
 
 CRASH_LOOP_AUTOSTOP = 5
+# Prefix of the status detail set by the crash-loop auto-stop; kept until the user acts.
+AUTO_STOP_PREFIX = "Stopped automatically after"
+# At most one "instance.failed" notification per server in this window (seconds): a crash loop
+# or a flapping server must not flood the webhook.
+FAILED_NOTIFY_INTERVAL = 15 * 60
+# Columns owned by the reconciler. Jobs write other columns (container_spec_hash,
+# installed_at, node, ...) concurrently, so only these are written back from an observation.
+OBSERVED_FIELDS = (
+    "status",
+    "status_detail",
+    "container_state",
+    "health",
+    "last_exit_code",
+    "oom_killed",
+    "started_at",
+    "ready_at",
+    "status_updated_at",
+)
 
 
 def crash_restarts(instance: Instance, container: dict[str, Any] | None) -> int:
@@ -63,6 +81,50 @@ def crash_restarts(instance: Instance, container: dict[str, Any] | None) -> int:
         cache.set(key, count, 24 * 3600)
         return 0
     return count - int(baseline)
+
+
+def policy_restarts(instance: Instance, container: dict[str, Any] | None) -> int:
+    """Restarts done by Docker's restart policy since the previous observation.
+
+    Docker's RestartCount grows only when the restart policy brings an exited server back
+    (a crash, or a stop from inside the game), never for restarts the panel performs; a manual
+    start resets it and a recreated container starts at 0, so the baseline is kept per
+    container id (in the cache) and only increases count.
+    """
+    c = container or {}
+    key = f"policyrestarts:{instance.pk}"
+    if not c.get("exists") or not c.get("id"):
+        cache.delete(key)
+        return 0
+    current = (str(c["id"]), int(c.get("restart_count") or 0))
+    previous = cache.get(key)
+    previous = tuple(previous) if previous else None
+    if previous != current:
+        cache.set(key, current, 7 * 24 * 3600)
+    if previous is None or previous[0] != current[0] or current[1] <= previous[1]:
+        return 0
+    return current[1] - previous[1]
+
+
+def _notify_failed(instance: Instance, title: str, message: str, data: dict[str, Any]) -> bool:
+    """Send "instance.failed", at most once per server per FAILED_NOTIFY_INTERVAL."""
+    if not cache.add(f"notify:instance.failed:{instance.pk}", 1, FAILED_NOTIFY_INTERVAL):
+        return False
+    from apps.notifications.service import notify
+
+    notify("instance.failed", title, message, instance=instance, data=data)
+    return True
+
+
+def _notify_unexpected_restart(instance: Instance, restarts: int) -> None:
+    times = "" if restarts == 1 else f" ({restarts} times)"
+    _notify_failed(
+        instance,
+        f"{instance.name} restarted unexpectedly",
+        f"The server process exited without being stopped from the panel and Docker restarted it{times}. "
+        "Unless this was an in-game /stop or /restart, check the console log for the crash.",
+        {"status": "restarted", "detail": instance.status_detail},
+    )
 
 
 def _stop_crash_loop(instance: Instance, restarts: int) -> None:
@@ -86,7 +148,7 @@ def _stop_crash_loop(instance: Instance, restarts: int) -> None:
     Instance.objects.filter(pk=instance.pk).update(desired_state="stopped")
     instance.desired_state = "stopped"
     instance.status = Status.FAILED
-    instance.status_detail = (f"Stopped automatically after {restarts} crashes during startup.{summary}")[:500]
+    instance.status_detail = (f"{AUTO_STOP_PREFIX} {restarts} crashes during startup.{summary}")[:500]
     audit.record("instance.crash_loop_stopped", instance=instance, target=instance, success=False, details={"restarts": restarts})
     from apps.notifications.service import notify
 
@@ -102,21 +164,41 @@ def _stop_crash_loop(instance: Instance, restarts: int) -> None:
 def apply_observation(
     instance: Instance, container: dict[str, Any] | None, *, agent_ok: bool = True, agent_error: str = ""
 ) -> bool:
-    """Update an instance from an agent container description. Returns True if changed."""
+    """Update an instance from an agent container description. Returns True if changed.
+
+    Only the reconciler's own columns (OBSERVED_FIELDS) are written, and only while the
+    instance still is on the node and in the archive state the observation was made for, so
+    a slow reconcile never writes stale values over what a job changed meanwhile.
+    installed_at and container_spec_hash are only ever filled in when still empty.
+    """
     job_kind = None
     if instance.active_job_id:
         job = Job.objects.filter(pk=instance.active_job_id, status__in=ACTIVE_STATUSES).only("kind").first()
         job_kind = job.kind if job else None
     before = (instance.status, instance.status_detail, instance.container_state, instance.health)
+    newly_installed = False
+    adopt_spec_hash = ""
     if not agent_ok:
         instance.status, instance.status_detail = Status.UNKNOWN, (agent_error or "Node agent unreachable")[:500]
     else:
         restarts = crash_restarts(instance, container) if not job_kind else 0
+        unexpected = policy_restarts(instance, container)
         status, detail = state.compute(instance, container, job_kind, crash_restarts=restarts)
+        if (
+            status == Status.STOPPED
+            and not job_kind
+            and instance.desired_state != "running"
+            and before[0] == Status.FAILED
+            and before[1].startswith(AUTO_STOP_PREFIX)
+        ):
+            # keep explaining why the server was stopped until the user starts it again
+            status, detail = Status.FAILED, before[1]
         instance.status, instance.status_detail = status, detail[:500]
         if restarts >= CRASH_LOOP_AUTOSTOP and instance.desired_state == "running":
             _stop_crash_loop(instance, restarts)
             status = instance.status
+        elif unexpected and not job_kind and instance.desired_state == "running":
+            _notify_unexpected_restart(instance, unexpected)
         c = container or {}
         instance.container_state = c.get("status") or ""
         instance.health = c.get("health") or ""
@@ -124,40 +206,32 @@ def apply_observation(
         instance.oom_killed = bool(c.get("oom_killed"))
         instance.started_at = _ts(c.get("started_at")) if c.get("running") else instance.started_at
         if c.get("spec_hash") and not instance.container_spec_hash:
-            instance.container_spec_hash = c["spec_hash"]
+            adopt_spec_hash = instance.container_spec_hash = c["spec_hash"]
         if status == Status.RUNNING:
             now = timezone.now()
             if instance.ready_at is None or (instance.started_at and instance.ready_at < instance.started_at):
                 instance.ready_at = now
             if instance.installed_at is None:
                 instance.installed_at = now
-                try:
-                    from apps.modpacks.pinning import pin_installed_release
-
-                    pin_installed_release(instance)
-                except Exception as exc:  # pinning is best effort; never break reconciliation
-                    log.warning("pinning failed for %s: %s", instance.pk, exc)
+                newly_installed = True
         elif status not in (Status.RUNNING, Status.BACKING_UP):
             instance.ready_at = (
                 None if status in (Status.STOPPED, Status.FAILED, Status.STARTING, Status.INSTALLING) else instance.ready_at
             )
     after = (instance.status, instance.status_detail, instance.container_state, instance.health)
     instance.status_updated_at = timezone.now()
-    instance.save(
-        update_fields=[
-            "status",
-            "status_detail",
-            "container_state",
-            "health",
-            "last_exit_code",
-            "oom_killed",
-            "started_at",
-            "ready_at",
-            "installed_at",
-            "container_spec_hash",
-            "status_updated_at",
-        ]
-    )
+    same = Instance.objects.filter(pk=instance.pk, node_id=instance.node_id, archived_at__isnull=instance.archived_at is None)
+    if not same.update(**{f: getattr(instance, f) for f in OBSERVED_FIELDS}):
+        return False  # moved, archived or deleted meanwhile: this observation is stale
+    if adopt_spec_hash:
+        same.filter(container_spec_hash="").update(container_spec_hash=adopt_spec_hash)
+    if newly_installed and same.filter(installed_at__isnull=True).update(installed_at=instance.installed_at):
+        try:
+            from apps.modpacks.pinning import pin_installed_release
+
+            pin_installed_release(instance)
+        except Exception as exc:  # pinning is best effort; never break reconciliation
+            log.warning("pinning failed for %s: %s", instance.pk, exc)
     if before != after:
         broadcast("instance.status", instance_payload(instance), str(instance.id))
         _notify_transition(instance, before[0], after[0])
@@ -172,13 +246,7 @@ def _notify_transition(instance: Instance, old: str, new: str) -> None:
 
     data = {"status": new, "detail": instance.status_detail}
     if new == Status.FAILED:
-        notify(
-            "instance.failed",
-            f"{instance.name} failed",
-            instance.status_detail or "The server failed.",
-            instance=instance,
-            data=data,
-        )
+        _notify_failed(instance, f"{instance.name} failed", instance.status_detail or "The server failed.", data)
     elif new == Status.RUNNING and old in (
         Status.STARTING,
         Status.INSTALLING,
