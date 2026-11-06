@@ -1,6 +1,7 @@
 # Development status
 
-_Last updated: 2026-11-06 (SpigotMC plugin source); before that 2026-11-03, end of session 1._ Keep this file honest. Implemented,
+_Last updated: 2026-11-06 (session 2: SpigotMC source, mods-listing speed-up, integration coverage, btrfs
+delete fix, Unraid simulation). Previous: 2026-11-03, end of session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
 
@@ -11,12 +12,28 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **476 passed** on 2026-11-06 with the SpigotMC source (was 431; incl. OpenAPI fail-on-warn, real-TLS node tests) |
-| `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s); not re-run for SpigotMC |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener); 2026-11-06 without the btrfs mount: 325 passed, 3 skipped |
+| `backend: uv run pytest -q -m "not integration"` | **480 passed** (2026-11-06, after merging SpigotMC + hash cache + integration tests; incl. OpenAPI fail-on-warn) |
+| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **354 passed**, 3 btrfs tests skipped without the mount (2026-11-06) |
 | `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 15 tests (2026-11-06) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
+
+### Integration coverage added 2026-11-06 (and a bug it found)
+
+New `-m integration` files: `test_integration_snapshots.py` (btrfs over a TLS-pinned node),
+`test_integration_backup_browse.py`, `test_integration_content.py` (Paper 1.21.1 + Chunky from
+Modrinth), `test_integration_import.py`; shared helpers in `tests/integration_support.py`.
+
+**Fixed: deleting a server on btrfs orphaned its snapshots.** The agent's `DELETE /v1/instances/<id>/data`
+removed the container, the folder and the restic repo but never `<data root>/snapshots/<id>/`: read-only
+subvolumes stayed on disk, invisible in the panel (also hit by migrate with "delete source"). It now
+purges them (`BtrfsSnapshots.purge()`) *before* deleting the files, so a btrfs failure leaves the server
+intact for a retry. Agent tests: `test_purge_deletes_read_only_snapshots`,
+`test_delete_data_removes_snapshots` (real btrfs). The sandbox agents on :8700/:8701 run from the main
+checkout and must be restarted to pick the fix up; until then
+`test_deleting_a_server_removes_its_snapshots` fails against :8701 (it passed against the fixed agent
+code run on :8711 with the same data root).
 
 ### Verified on real Minecraft servers through the real API (sandbox)
 
@@ -37,7 +54,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Webhook notifications (test + real backup event) | local receiver |
 | Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
-| SpigotMC source (2026-11-06): `spigot_source.install/update/details` against **live** Spiget + Modrinth and a real (throwaway) agent process: LuckPerms 5.5.71 (mirror current) and Chunky 1.5.3 (mirror outdated, installed only after confirmation) landed with the right SHA-256; premium, external and `.zip` resources refused; re-install refused; update reports up to date; a wrong SHA-256 is refused by the agent and leaves no file | **not** through the HTTP API/UI, **not** loaded by a running Paper server |
+| SpigotMC source (2026-11-06): `spigot_source.install/update/details` against **live** Spiget + Modrinth and a real (throwaway) agent process: LuckPerms 5.5.71 (mirror current) and Chunky 1.5.3 (mirror outdated, installed only after confirmation) landed with the right SHA-256; premium, external and `.zip` resources refused; re-install refused; update reports up to date; a wrong SHA-256 is refused by the agent and leaves no file | then through the **HTTP API** on the dev panel: search, install of PlaceholderAPI 2.12.3 (resource 6245) on 'Paper Plugins', SHA-256 on disk matches, and the **running Paper 1.21.1 server loaded it** (RCON `plugins`: Chunky, PlaceholderAPI). UI not opened in a browser yet |
 | World export as zip (`/files/archive?path=world`) | zip validated |
 | Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
 | TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
@@ -151,3 +168,6 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   `posix_fadvise(DONTNEED)` only empties the guest page cache (the host still caches the file), so it
   cannot reproduce a cold read. Use folders that have not been read recently and check them with
   `mincore`.
+* btrfs snapshots are read-only subvolumes outside the server folder: anything that deletes a server's
+  data must delete them with `btrfs subvolume delete` (`shutil.rmtree` cannot).
+* Several agents/sessions share one Postgres here: run pytest with a unique `MCPANEL_TEST_DB_NAME`.

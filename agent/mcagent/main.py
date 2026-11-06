@@ -380,13 +380,20 @@ async def command(
 async def delete_data(
     instance_id: UUID, body: DeleteDataRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    """Permanently delete an instance's container, files and backup repository."""
+    """Permanently delete an instance's container, files, snapshots and backup repository."""
+    from .snapshots import BtrfsSnapshots
+
     if body.confirm != instance_id:
         raise AgentError("Confirmation id does not match", "confirmation_mismatch", 400)
 
     def _delete(op: Operation) -> dict[str, Any]:
         op.update(0.1, "Removing container")
         docker_ops.remove_container(instance_id, timeout=30)
+        snapshots = BtrfsSnapshots(settings, instance_id)
+        if snapshots.snap_dir.is_dir():
+            # before the files: if btrfs refuses, the server is still intact and the delete can be retried
+            op.update(0.2, "Deleting filesystem snapshots")
+            snapshots.purge()
         path = docker_ops.instance_dir(settings, instance_id)
         if path.exists():
             op.update(0.3, "Deleting instance files")

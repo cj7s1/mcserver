@@ -198,6 +198,27 @@ class BtrfsSnapshots:
         _run([_btrfs(), "subvolume", "delete", str(path)])
         self._meta_path(name).unlink(missing_ok=True)
 
+    def purge(self) -> int:
+        """Delete every snapshot of the instance and its snapshot folder (the server is being deleted).
+
+        Snapshots are read-only subvolumes, which a plain recursive delete cannot remove.
+        Returns the number of snapshots deleted.
+        """
+        if not self.snap_dir.is_dir():
+            return 0
+        removed = 0
+        for entry in sorted(self.snap_dir.iterdir()):
+            if entry.is_dir() and not entry.is_symlink():
+                if is_subvolume(entry):
+                    _run([_btrfs(), "subvolume", "delete", str(entry)])
+                else:
+                    shutil.rmtree(entry)
+                removed += 1
+            else:
+                entry.unlink()
+        self.snap_dir.rmdir()
+        return removed
+
     def restore(self, name: str) -> dict[str, Any]:
         self.require_ready()
         snap = self._validate(name)
