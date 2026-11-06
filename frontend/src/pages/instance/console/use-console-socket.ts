@@ -9,8 +9,10 @@
  * connection has stayed up for a while so a server that accepts and immediately
  * drops us does not cause a tight loop.
  */
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { closeSocket, wsUrl } from "@/lib/events";
+import { qk } from "@/lib/queries";
 
 export type ConsoleServerMessage =
   | { type: "hello"; can_command: boolean }
@@ -26,7 +28,10 @@ export type ConsoleServerMessage =
 /** Synthetic events emitted by the hook itself. */
 export type ConsoleLocalEvent = { type: "_open"; reconnect: boolean } | { type: "_disconnected" };
 
-export type ConnState = "connecting" | "connected" | "agent_lost" | "stream_closed" | "reconnecting";
+export type ConnState = "connecting" | "connected" | "agent_lost" | "stream_closed" | "reconnecting" | "denied";
+
+/** Close codes the panel uses when a session ended (4401) or access was revoked (4403): never retry those. */
+export const NO_RETRY_CLOSE_CODES = new Set([4401, 4403]);
 
 const MAX_BACKOFF = 30_000;
 const HEALTHY_AFTER = 10_000;
@@ -45,6 +50,12 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
   const [retryAt, setRetryAt] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<() => void>(() => {});
+  const qc = useQueryClient();
+  // 4401: the session is gone (logout elsewhere, expiry, password change) -> refresh auth to show the login page.
+  const onDenied = useRef<(code: number) => void>(() => {});
+  onDenied.current = (code: number) => {
+    if (code === 4401) void qc.invalidateQueries({ queryKey: qk.auth });
+  };
 
   useEffect(() => {
     const life = { disposed: false };
@@ -97,11 +108,17 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
         }
         handler.current(msg);
       };
-      sock.onclose = () => {
+      sock.onclose = (ev: CloseEvent) => {
         if (wsRef.current === sock) wsRef.current = null;
         clearTimeout(healthyTimer);
         if (life.disposed || ws !== sock) return;
         handler.current({ type: "_disconnected" });
+        if (NO_RETRY_CLOSE_CODES.has(ev.code)) {
+          setState("denied");
+          setRetryAt(null);
+          onDenied.current(ev.code);
+          return;
+        }
         if (immediate) {
           immediate = false;
           connect();

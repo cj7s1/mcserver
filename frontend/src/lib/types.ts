@@ -66,6 +66,8 @@ export interface Me {
 
 export interface AuthState {
   setup_required: boolean;
+  /** present (true) when MCPANEL_SETUP_TOKEN is configured and setup is still open */
+  setup_token_required?: boolean;
   authenticated: boolean;
   user: Me | null;
 }

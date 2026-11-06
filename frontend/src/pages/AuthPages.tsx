@@ -1,12 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Boxes, Loader2 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { z } from "zod";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
 
@@ -82,7 +83,9 @@ export function LoginPage() {
 
 export function SetupPage() {
   const qc = useQueryClient();
-  const [form, setForm] = useState({ username: "", email: "", password: "", confirm: "" });
+  const { state } = useAuth();
+  const tokenRequired = !!state?.setup_token_required;
+  const [form, setForm] = useState({ username: "", email: "", password: "", confirm: "", setupToken: "" });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -94,7 +97,12 @@ export function SetupPage() {
     if (form.password !== form.confirm) return setError("Passwords do not match");
     setBusy(true);
     try {
-      await api.post("/auth/setup", { username: form.username, email: form.email, password: form.password });
+      await api.post("/auth/setup", {
+        username: form.username,
+        email: form.email,
+        password: form.password,
+        ...(tokenRequired ? { setup_token: form.setupToken.trim() } : {}),
+      });
       await qc.invalidateQueries({ queryKey: qk.auth });
     } catch (err) {
       setError(errorMessage(err));
@@ -110,6 +118,20 @@ export function SetupPage() {
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
           </Alert>
+        )}
+        {tokenRequired && (
+          <div className="grid gap-1.5">
+            <Label htmlFor="su-token">Setup token</Label>
+            <Input
+              id="su-token"
+              type="password"
+              autoComplete="off"
+              value={form.setupToken}
+              onChange={(e) => setForm({ ...form, setupToken: e.target.value })}
+              required
+            />
+            <p className="text-xs text-muted-foreground">The value of MCPANEL_SETUP_TOKEN from the server's .env file.</p>
+          </div>
         )}
         <div className="grid gap-1.5">
           <Label htmlFor="su-username">Username</Label>
@@ -139,7 +161,14 @@ export function SetupPage() {
 export function ResetPasswordPage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const token = params.get("token") ?? "";
+  // Reset links carry the token in the URL fragment (#token=…) so it never reaches server or proxy logs;
+  // ?token= is still read for links issued by older versions. Strip it from the address bar right away.
+  const [token] = useState(() => readResetToken(window.location.hash, params.get("token")));
+  useEffect(() => {
+    if (window.location.hash || params.has("token")) {
+      window.history.replaceState(window.history.state, "", window.location.pathname);
+    }
+  }, [params]);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -192,4 +221,10 @@ export function ResetPasswordPage() {
       )}
     </AuthCard>
   );
+}
+
+/** Token from a reset link: the URL fragment (#token=…) first, then the legacy ?token= query. */
+export function readResetToken(hash: string, query: string | null): string {
+  const fromHash = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash).get("token");
+  return (fromHash || query || "").trim();
 }

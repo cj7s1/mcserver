@@ -110,6 +110,23 @@ export interface RequestOptions {
   headers?: Record<string, string>;
 }
 
+let csrfPrimer: Promise<void> | null = null;
+
+/**
+ * Make sure Django's CSRF cookie exists before an unsafe request. Pages that never loaded /auth/state
+ * (e.g. a password-reset link opened in a fresh browser) would otherwise fail with "CSRF cookie not set".
+ */
+export async function ensureCsrfCookie(): Promise<void> {
+  if (getCookie("mcpanel_csrftoken")) return;
+  csrfPrimer ??= fetch(buildUrl("/auth/state"), { credentials: "same-origin", headers: { Accept: "application/json" } })
+    .then(() => undefined)
+    .catch(() => undefined)
+    .finally(() => {
+      csrfPrimer = null;
+    });
+  await csrfPrimer;
+}
+
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json", ...(opts.headers ?? {}) };
   let body: BodyInit | undefined;
@@ -120,6 +137,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     body = JSON.stringify(opts.body);
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    await ensureCsrfCookie();
     const token = getCookie("mcpanel_csrftoken");
     if (token) headers["X-CSRFToken"] = token;
   }

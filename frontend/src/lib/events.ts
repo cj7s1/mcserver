@@ -62,9 +62,14 @@ export function useLiveEvents(enabled: boolean): boolean {
           /* ignore malformed */
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (ev: CloseEvent) => {
         setConnected(false);
         if (life.closed) return;
+        // 4401 session gone / 4403 access revoked: do not retry; refresh auth (shows login if signed out)
+        if (ev.code === 4401 || ev.code === 4403) {
+          void qc.invalidateQueries({ queryKey: qk.auth });
+          return;
+        }
         timer = setTimeout(connect, retry.current);
         retry.current = Math.min(retry.current * 2, 30_000);
       };

@@ -32,6 +32,12 @@ const STYLES: Record<ConnState, { label: string; dot: string; text: string; puls
     text: "text-muted-foreground",
     help: "The node agent ended the log stream; reconnecting",
   },
+  denied: {
+    label: "Access ended",
+    dot: "bg-zinc-400",
+    text: "text-muted-foreground",
+    help: "Your session ended or your access to this server's console was revoked; reload the page after signing in again",
+  },
   reconnecting: {
     label: "Disconnected",
     dot: "bg-red-500",
