@@ -27,3 +27,21 @@ export function jobDurationLabel(job: Pick<Job, "started_at" | "finished_at">, n
   const s = jobDurationSeconds(job, now);
   return s === null ? "—" : formatDuration(s);
 }
+
+export function isJobActive(job: Pick<Job, "status">): boolean {
+  return job.status === "queued" || job.status === "running";
+}
+
+/**
+ * Whether the current user may POST /jobs/{id}/abandon (backend apps/jobs/views.py JobAbandonView):
+ * the job must be queued or running, and the user needs instance.control on the job's server,
+ * or system.settings for jobs that belong to no server.
+ */
+export function canAbandonJob(
+  job: Pick<Job, "status" | "instance">,
+  perms: { instance?: readonly string[] | null; global?: readonly string[] | null },
+): boolean {
+  if (!isJobActive(job)) return false;
+  if (job.instance) return !!perms.instance?.includes("instance.control");
+  return !!perms.global?.includes("system.settings");
+}

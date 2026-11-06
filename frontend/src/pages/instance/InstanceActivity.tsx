@@ -12,8 +12,9 @@ import { formatDateTime, relativeTime } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import type { AuditEvent, Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { InstanceJobItem } from "./activity/InstanceJobItem";
 import { useInstanceContext } from "./InstanceLayout";
-import { isJobActive, JobItem, useInstanceJobs } from "./overview/instance-jobs";
+import { isJobActive, useInstanceJobs } from "./overview/instance-jobs";
 import { capitalize, useNow } from "./overview/overview-utils";
 
 type JobFilter = "all" | "active" | "failed" | "succeeded";
@@ -25,7 +26,7 @@ const JOB_FILTERS: { value: JobFilter; label: string; test: (j: Job) => boolean 
   { value: "succeeded", label: "Succeeded", test: (j) => j.status === "succeeded" },
 ];
 
-function JobsSection({ instance, now }: { instance: Instance; now: number }) {
+function JobsSection({ instance, now, canControl }: { instance: Instance; now: number; canControl: boolean }) {
   const jobs = useInstanceJobs(instance.id, instance.active_job);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [text, setText] = useState("");
@@ -81,7 +82,13 @@ function JobsSection({ instance, now }: { instance: Instance; now: number }) {
       ) : (
         <ul className="grid gap-2">
           {list.map((j) => (
-            <JobItem key={j.id} job={j} now={now} defaultOpen={j.id === instance.active_job?.id} />
+            <InstanceJobItem
+              key={j.id}
+              job={j}
+              now={now}
+              defaultOpen={j.id === instance.active_job?.id}
+              canAbandon={canControl}
+            />
           ))}
         </ul>
       )}
@@ -237,11 +244,11 @@ function AuditSection({ instance, now }: { instance: Instance; now: number }) {
 }
 
 export default function InstanceActivity() {
-  const { instance } = useInstanceContext();
+  const { instance, can } = useInstanceContext();
   const now = useNow(15_000);
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4">
-      <JobsSection key={`jobs-${instance.id}`} instance={instance} now={now} />
+      <JobsSection key={`jobs-${instance.id}`} instance={instance} now={now} canControl={can("instance.control")} />
       <AuditSection key={`audit-${instance.id}`} instance={instance} now={now} />
     </div>
   );

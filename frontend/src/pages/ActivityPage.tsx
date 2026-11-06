@@ -8,12 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { useAuth } from "@/hooks/use-auth";
 import { formatDateTime, relativeTime } from "@/lib/format";
 import { useInstances, useJobs } from "@/lib/queries";
 import type { Job, JobStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { AbandonJobButton } from "./activity/AbandonJobButton";
 import { JobStatusIcon, JobStatusText } from "./activity/job-status";
-import { JOB_STATUSES, jobDurationLabel, jobStatusLabel } from "./activity/job-utils";
+import { canAbandonJob, JOB_STATUSES, jobDurationLabel, jobStatusLabel } from "./activity/job-utils";
 
 const LIMIT = 100;
 
@@ -36,6 +38,11 @@ export default function ActivityPage() {
     limit: LIMIT,
   });
   const instances = useInstances("all");
+  const { user } = useAuth();
+  const instancePerms = useMemo(
+    () => new Map((instances.data ?? []).map((i) => [i.id, i.permissions] as const)),
+    [instances.data],
+  );
 
   const setParam = (key: string, value: string) =>
     setParams(
@@ -178,7 +185,16 @@ export default function ActivityPage() {
           </div>
           <ul className="divide-y" aria-label="Jobs">
             {list.map((job) => (
-              <JobRow key={job.id} job={job} open={expanded.has(job.id)} onToggle={() => toggle(job.id)} />
+              <JobRow
+                key={job.id}
+                job={job}
+                open={expanded.has(job.id)}
+                onToggle={() => toggle(job.id)}
+                canAbandon={canAbandonJob(job, {
+                  instance: job.instance ? instancePerms.get(job.instance) : null,
+                  global: user?.permissions,
+                })}
+              />
             ))}
           </ul>
         </div>
@@ -187,7 +203,17 @@ export default function ActivityPage() {
   );
 }
 
-function JobRow({ job, open, onToggle }: { job: Job; open: boolean; onToggle: () => void }) {
+function JobRow({
+  job,
+  open,
+  onToggle,
+  canAbandon,
+}: {
+  job: Job;
+  open: boolean;
+  onToggle: () => void;
+  canAbandon: boolean;
+}) {
   const detailsId = `job-details-${job.id}`;
   const summary = job.status === "failed" && job.error ? job.error : job.message;
   return (
@@ -253,15 +279,24 @@ function JobRow({ job, open, onToggle }: { job: Job; open: boolean; onToggle: ()
           <Progress value={job.progress * 100} className="h-1" aria-label={`${job.title} progress`} />
         </div>
       )}
-      {open && <JobDetails job={job} id={detailsId} />}
+      {open && <JobDetails job={job} id={detailsId} canAbandon={canAbandon} />}
     </li>
   );
 }
 
-function JobDetails({ job, id }: { job: Job; id: string }) {
+function JobDetails({ job, id, canAbandon }: { job: Job; id: string; canAbandon: boolean }) {
   const hasResult = job.result && Object.keys(job.result).length > 0;
   return (
     <div id={id} className="grid gap-3 border-t bg-muted/30 px-4 py-3 md:pl-[4.25rem]">
+      {canAbandon && (
+        <div className="flex flex-col gap-2 rounded-lg border bg-background px-3 py-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-xs text-muted-foreground">
+            Is this job stuck? Marking it as failed releases the {job.instance ? "server's" : "operation"} lock. It does not
+            stop work the agent may still be doing.
+          </p>
+          <AbandonJobButton job={job} className="shrink-0 self-start sm:self-auto" />
+        </div>
+      )}
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3 lg:grid-cols-6">
         <Meta label="Created" value={formatDateTime(job.created_at)} />
         <Meta label="Started" value={formatDateTime(job.started_at)} />
