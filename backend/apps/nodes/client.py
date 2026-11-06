@@ -181,8 +181,9 @@ class AgentClient:
         )
 
     def download(
-        self, instance_id: UUID, path: str, *, endpoint: str = "download"
+        self, instance_id: UUID, path: str | list[str], *, endpoint: str = "download"
     ) -> tuple[Iterator[bytes], int | None, httpx.Response]:
+        """Stream a file (``download``) or a zip of one or more folders (``archive``)."""
         client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=300), verify=self.verify)
         try:
             req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/{endpoint}", params={"path": path})
@@ -279,6 +280,21 @@ class AgentClient:
                 "overwrite": overwrite,
                 "delete_archive": delete_archive,
             },
+        )["operation"]
+
+    # -- worlds --------------------------------------------------------------------------
+    def world_info(self, instance_id: UUID, level_name: str, layout: str) -> dict[str, Any]:
+        return self._json(
+            "GET", f"/v1/instances/{instance_id}/world", params={"level_name": level_name, "layout": layout}, timeout=120
+        )
+
+    def world_replace(
+        self, instance_id: UUID, *, archive: str, level_name: str, layout: str, delete_archive: bool = False
+    ) -> dict[str, Any]:
+        return self._json(
+            "POST",
+            f"/v1/instances/{instance_id}/world/replace",
+            json={"archive": archive, "level_name": level_name, "layout": layout, "delete_archive": delete_archive},
         )["operation"]
 
     # -- backups -------------------------------------------------------------------------

@@ -19,10 +19,12 @@ os.environ.setdefault("MCPANEL_TESTING", "1")
 
 import copy
 import hashlib
+import io
 import itertools
 import json
 import time
 import uuid
+import zipfile
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 from urllib.parse import urlparse
@@ -79,6 +81,8 @@ class FakeAgent:
         "search_files",
         "hash_files",
         "fetch_file",
+        "world_info",
+        "world_replace",
         "list_backups",
         "create_backup",
         "restore_backup",
@@ -576,9 +580,29 @@ class FakeAgent:
         size = self._write(str(instance_id), path, content.encode(), overwrite=not create_only)
         return {"path": path, "size": size}
 
-    def download(self, instance_id: Any, path: str) -> tuple[Iterator[bytes], int | None, Any]:
-        data = self._read(str(instance_id), path)
-        return iter([data]), len(data), None
+    def download(
+        self, instance_id: Any, path: str | list[str], *, endpoint: str = "download"
+    ) -> tuple[Iterator[bytes], int | None, Any]:
+        iid = str(instance_id)
+        if endpoint != "archive":
+            data = self._read(iid, path)  # type: ignore[arg-type]
+            return iter([data]), len(data), None
+        root = self._root(iid)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            for item in [path] if isinstance(path, str) else list(path):
+                parts = self._parts(item)
+                rel = "/".join(parts)
+                kind = self._kind(root, rel)
+                if kind is None:
+                    raise self._err("Does not exist", "not_found", 404)
+                if kind != "directory":
+                    raise self._err("Only folders can be downloaded as a zip", "not_a_directory", 400)
+                prefix = parts[-1] if parts else "server"
+                for f, data in sorted(root["files"].items()):
+                    if not rel or f.startswith(rel + "/"):
+                        zf.writestr(f"{prefix}/{f[len(rel) + 1 :] if rel else f}", data)
+        return iter([buf.getvalue()]), None, None
 
     def upload(self, instance_id: Any, path: str, chunks: Iterable[bytes] | bytes, overwrite: bool = False) -> dict[str, Any]:
         data = chunks if isinstance(chunks, bytes) else b"".join(chunks)
@@ -716,6 +740,144 @@ class FakeAgent:
             raise self._err("Downloaded file failed SHA-256 verification", "hash_mismatch", 502)
         size = self._write(str(instance_id), path, data, overwrite=overwrite)
         return {"path": path, "size": size, "sha1": h1, "sha512": h512}
+
+    # -- worlds (agent/mcagent/world.py semantics, zip archives only) --------------------
+    WORLD_DIMENSIONS = {"nether": ("_nether", "DIM-1"), "end": ("_the_end", "DIM1")}
+
+    def _world_paths(self, level_name: str, layout: str) -> list[tuple[str, str]]:
+        parts = self._parts(level_name)
+        out = [("overworld", "/".join(parts))]
+        if layout == "bukkit":
+            for role, (suffix, _dim) in self.WORLD_DIMENSIONS.items():
+                out.append((role, "/".join([*parts[:-1], parts[-1] + suffix])))
+        return out
+
+    def world_info(self, instance_id: Any, level_name: str, layout: str) -> dict[str, Any]:
+        root = self.fs.get(str(instance_id)) or {"files": {}, "dirs": set(), "mtime": {}}
+        folders, total = [], 0
+        for role, rel in self._world_paths(level_name, layout):
+            exists = self._kind(root, rel) == "directory"
+            files = {p: v for p, v in root["files"].items() if p.startswith(rel + "/")} if exists else {}
+            size = sum(len(v) for v in files.values())
+            entry: dict[str, Any] = {
+                "role": role,
+                "path": rel,
+                "exists": exists,
+                "type": "directory" if exists else None,
+                "has_level_dat": f"{rel}/level.dat" in root["files"],
+                "bytes": size,
+                "files": len(files),
+                "modified": max((root["mtime"].get(p, 0.0) for p in files), default=None),
+            }
+            if role == "overworld" and exists:
+                entry["dimensions"] = [
+                    r for r, (_s, dim) in self.WORLD_DIMENSIONS.items() if self._kind(root, f"{rel}/{dim}") == "directory"
+                ]
+            total += size
+            folders.append(entry)
+        leftovers = sorted(d for d in root["dirs"] if "/" not in d and d.startswith(".mcpanel-world-"))
+        return {"level_name": level_name, "layout": layout, "folders": folders, "total_bytes": total, "leftovers": leftovers}
+
+    def world_replace(
+        self, instance_id: Any, *, archive: str, level_name: str, layout: str, delete_archive: bool = False
+    ) -> dict[str, Any]:
+        iid = str(instance_id)
+        if self.containers.get(iid, {}).get("running"):
+            raise self._err("Stop the server before replacing its world", "must_stop", 409)
+        parts = self._parts(level_name)
+        if not parts or parts[0].startswith(".") or parts[0].lower() in ("mods", "plugins", "config", "logs"):
+            raise self._err(f"Invalid world folder name {level_name!r}", "invalid_level_name", 400)
+        data = self._read(iid, archive)
+        try:
+            if failed := self._injected("world_replace", iid):
+                return failed
+            return self._world_swap(iid, data, parts, layout)
+        finally:
+            if delete_archive:
+                self._root(iid)["files"].pop("/".join(self._parts(archive)), None)
+
+    def _world_swap(self, iid: str, data: bytes, parts: list[str], layout: str) -> dict[str, Any]:
+        def fail(message: str, code: str) -> dict[str, Any]:
+            return self._op("world_replace", iid, error=(message, code))
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                names = {n: zf.read(n) for n in zf.namelist() if not n.endswith("/")}
+        except zipfile.BadZipFile:
+            return fail("The archive is corrupt or truncated", "archive_corrupt")
+        tops = {n.split("/", 1)[0] for n in names}
+        if len(tops) == 1 and all("/" in n for n in names):  # strip=auto
+            names = {n.split("/", 1)[1]: v for n, v in names.items()}
+        base, main, siblings = "", None, {}
+        for _depth in range(3):
+            if f"{base}level.dat" in names:
+                main = ""
+                break
+            dirs = sorted({n[len(base) :].split("/", 1)[0] for n in names if n.startswith(base) and "/" in n[len(base) :]})
+            worlds = [d for d in dirs if f"{base}{d}/level.dat" in names]
+            if worlds:
+                dims = {w for w in worlds for s, _d in self.WORLD_DIMENSIONS.values() if w.endswith(s) and w[: -len(s)] in worlds}
+                primary = [w for w in worlds if w not in dims]
+                if parts[-1] in primary:
+                    main = parts[-1]
+                elif len(primary) == 1:
+                    main = primary[0]
+                elif "world" in primary:
+                    main = "world"
+                else:
+                    return fail(f"The archive contains several worlds ({', '.join(primary)})", "multiple_worlds")
+                siblings = {r: f"{base}{main}{s}/" for r, (s, _d) in self.WORLD_DIMENSIONS.items() if f"{main}{s}" in dirs}
+                main = f"{main}/"
+                break
+            if len(dirs) != 1:
+                break
+            base = f"{base}{dirs[0]}/"
+        if main is None:
+            return fail("No Minecraft world found in the archive", "no_level_dat")
+        prefix = f"{base}{main}"
+        if not names[f"{prefix}level.dat"].startswith(b"\x1f\x8b"):
+            return fail("level.dat is not a Java Edition level file", "invalid_world")
+
+        def subtree(pre: str) -> dict[str, bytes]:
+            return {n[len(pre) :]: v for n, v in names.items() if n.startswith(pre)}
+
+        trees = {"overworld": subtree(prefix)}
+        converted = []
+        if layout == "bukkit":
+            trees.update({role: subtree(pre) for role, pre in siblings.items()})
+        else:
+            for role, pre in siblings.items():
+                dim = self.WORLD_DIMENSIONS[role][1]
+                moved = {f"{dim}/{k[len(dim) + 1 :]}": v for k, v in subtree(pre).items() if k.startswith(f"{dim}/")}
+                if moved and not any(k.startswith(f"{dim}/") for k in trees["overworld"]):
+                    trees["overworld"].update(moved)
+                    converted.append(role)
+        root = self._root(iid)
+        replaced, installed = [], []
+        for role, dest in self._world_paths("/".join(parts), layout):
+            if self._kind(root, dest) is not None:
+                self.delete_files(iid, [dest], recursive=True)
+                replaced.append(dest)
+            if role in trees:
+                root["dirs"].add(dest)
+                for rel, content in trees[role].items():
+                    self.put_file(iid, f"{dest}/{rel}", content)
+                installed.append(dest)
+        return self._op(
+            "world_replace",
+            iid,
+            {
+                "level_name": "/".join(parts),
+                "layout": layout,
+                "installed": installed,
+                "replaced": replaced,
+                "converted": converted,
+                "files": sum(len(t) for t in trees.values()),
+                "bytes": sum(len(v) for t in trees.values() for v in t.values()),
+                "skipped_count": 0,
+                "warnings": [],
+            },
+        )
 
     # -- snapshots (btrfs semantics) -----------------------------------------------------
     def snapshots(self, instance_id: Any) -> dict[str, Any]:

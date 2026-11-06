@@ -60,6 +60,7 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 | Backups (restic), backup browser, retention | `apps/backups/{handlers,retention,views}.py` | `backups.py` |
 | Snapshots (btrfs) | `apps/backups/handlers.py` (snapshot_*) | `snapshots.py` |
 | Import / export (archives) | `apps/instances/views.py` (Import/Extract/Archive) | `archive.py` |
+| World import / export (level-name, Bukkit dims, replace + rollback) | `apps/instances/{world,views,handlers}.py` (`world_replace` job) | `world.py` |
 | Metrics + player history | `apps/metrics` | `/stats` |
 | Notifications | `apps/notifications` | — |
 | Nodes (multi-host) | `apps/nodes` | one agent per host |

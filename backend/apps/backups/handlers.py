@@ -47,6 +47,7 @@ def run_backup(
     span: tuple[float, float] = (0.0, 1.0),
     consistency: str = "auto",
     job: Job | None = None,
+    excludes: list[str] | None = None,
 ) -> Backup:
     client = AgentClient(instance.node)
     policy = policy_for(instance)
@@ -57,7 +58,7 @@ def run_backup(
             str(backup.id),
             tags=[f"kind:{kind}"],
             consistency=consistency,
-            excludes=DEFAULT_EXCLUDES + list(policy.excludes or []),
+            excludes=DEFAULT_EXCLUDES + list(policy.excludes or []) + list(excludes or []),
         )
         done = client.wait_operation(
             op["id"], timeout=6 * 3600, interval=1.5, on_progress=ctx.agent_progress(span[0], span[1] - span[0])

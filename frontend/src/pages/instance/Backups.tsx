@@ -1,4 +1,4 @@
-/** Instance backups: restic backups, restore, file browser, retention, integrity checks and btrfs snapshots. */
+/** Instance backups: restic backups, restore, file browser, retention, integrity checks, btrfs snapshots and world import/export. */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Archive, Camera, Clock, HardDrive, KeyRound, Lock, Pin, Plus, ShieldCheck } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -22,6 +22,8 @@ import { SnapshotsSection } from "./backups/SnapshotsSection";
 import { TrackedJobBanner } from "./backups/TrackedJobBanner";
 import { useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
 import { isSnapshotJob } from "./backups/snapshot-utils";
+import { WorldSection } from "./backups/WorldSection";
+import { isWorldJob } from "./backups/world-utils";
 
 type DialogState = { type: BackupAction | "create" | "verify"; backup?: Backup; key: number } | null;
 
@@ -85,6 +87,7 @@ export default function Backups() {
     backup: can("instance.backup"),
     restore: can("instance.restore"),
     files: can("instance.files.read"),
+    filesWrite: can("instance.files.write"),
     createInstance: auth.can("instance.create"),
   };
   const busy = !!instance.active_job;
@@ -118,8 +121,10 @@ export default function Backups() {
   const backups = query.data?.backups ?? [];
   const restorable = backups.filter((b) => b.status === "succeeded").length;
   const onStarted = tracked.track;
-  // jobs are exclusive per instance, so one tracker serves both sections; show it where it belongs
-  const snapshotJob = !!tracked.jobId && isSnapshotJob(tracked.job?.kind ?? instance.active_job?.kind);
+  // jobs are exclusive per instance, so one tracker serves every section; show it where it belongs
+  const trackedKind = tracked.job?.kind ?? instance.active_job?.kind;
+  const snapshotJob = !!tracked.jobId && isSnapshotJob(trackedKind);
+  const worldJob = !!tracked.jobId && isWorldJob(trackedKind);
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -141,12 +146,12 @@ export default function Backups() {
         }
         className="min-w-0 [&>div:last-child]:p-0"
       >
-        {busy && (!tracked.jobId || snapshotJob) && (
+        {busy && (!tracked.jobId || snapshotJob || worldJob) && (
           <p className="border-b px-4 py-2 text-xs text-muted-foreground">
             Another operation is running ({instance.active_job?.title}). Backup actions are available when it finishes.
           </p>
         )}
-        {!snapshotJob && <TrackedJobBanner tracked={tracked} />}
+        {!snapshotJob && !worldJob && <TrackedJobBanner tracked={tracked} />}
         {query.isLoading ? (
           <LoadingState label="Loading backups…" />
         ) : query.error ? (
@@ -200,6 +205,15 @@ export default function Backups() {
         showTracked={snapshotJob}
       />
 
+      {perms.files && (
+        <WorldSection
+          instance={instance}
+          canReplacePerm={perms.restore && perms.filesWrite}
+          tracked={tracked}
+          showTracked={worldJob}
+        />
+      )}
+
       <section className="grid gap-3 rounded-xl border bg-muted/30 p-4 text-xs text-muted-foreground md:grid-cols-2">
         <div className="grid content-start gap-1.5">
           <p className="flex items-center gap-1.5 font-medium text-foreground">
@@ -212,7 +226,8 @@ export default function Backups() {
           </p>
           <p>
             <Pin className="mr-1 inline size-3" aria-hidden />
-            Pin a backup to keep it forever. “Before restore” and “Before update” safety backups are created automatically.
+            Pin a backup to keep it forever. “Before restore” and “Before update” safety backups are created automatically
+            (also before a world is replaced).
           </p>
         </div>
         <div className="grid content-start gap-1.5">

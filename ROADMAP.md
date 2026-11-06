@@ -65,7 +65,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Modpack update with pre-update backup, history, rollback to pre-update backup
 - [x] Cron schedules: restart/start/stop/backup/command
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
-- [ ] World import / export
+- [x] World import / export (replace from an archive with safety backup + rollback; zip export incl. Bukkit dimension folders)
 - [x] Software (non-modpack) version update workflow with automatic pre-update backup
 
 ## Phase 8 — Unraid

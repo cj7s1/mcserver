@@ -37,7 +37,7 @@ class UploadLimitMiddleware:
     Content-Length are refused for the upload endpoints.
     """
 
-    UPLOAD_HINTS = ("/files/upload", "/import", "/content/upload")
+    UPLOAD_HINTS = ("/files/upload", "/import", "/content/upload", "/world/replace")
 
     def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
         self.get_response = get_response

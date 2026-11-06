@@ -494,6 +494,44 @@ export interface SystemSettings {
   env: { port_range_default: [number, number] };
 }
 
+/** One folder of a world (GET /instances/{id}/world, agent/mcagent/world.py info()). */
+export interface WorldFolder {
+  role: "overworld" | "nether" | "end";
+  path: string;
+  exists: boolean;
+  type: string | null;
+  has_level_dat: boolean;
+  bytes: number;
+  files: number;
+  /** unix seconds of the newest file */
+  modified: number | null;
+  /** overworld only: vanilla-layout dimensions found inside the world folder */
+  dimensions?: ("nether" | "end")[];
+}
+
+/** GET /instances/{id}/world (backend apps/instances/world.py describe() + WorldView). */
+export interface WorldInfo {
+  level_name: string;
+  level_name_source: "env" | "server.properties" | "default";
+  /** bukkit: nether/end live in <level>_nether / <level>_the_end; vanilla: inside the world folder */
+  layout: "vanilla" | "bukkit";
+  folders: WorldFolder[];
+  total_bytes: number;
+  /** the world folder exists and has a level.dat */
+  exists: boolean;
+  /** .mcpanel-world-* folders left behind by an interrupted replacement */
+  leftovers: string[];
+  /** zip export (GET /files/archive with every existing world folder); null when there is nothing to export */
+  download_url: string | null;
+  warnings: string[];
+  error: { code: string; message: string } | null;
+  can_replace: boolean;
+  running: boolean;
+  max_upload_bytes: number | null;
+  pre_restore_backup_default: boolean;
+  archive_suffixes: string[];
+}
+
 export interface ContentItem {
   filename: string;
   enabled: boolean;

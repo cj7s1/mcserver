@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Backup, Instance, Job, RetentionPolicy } from "@/lib/types";
 import { SNAPSHOT_JOB_KINDS, snapshotsKey } from "./snapshot-utils";
+import { WORLD_JOB_KINDS } from "./world-utils";
 
 export interface BackupsResponse {
   backups: Backup[];
@@ -48,6 +49,7 @@ export const BACKUP_JOB_KINDS = [
   "restore_new",
   "restore_path",
   ...SNAPSHOT_JOB_KINDS,
+  ...WORLD_JOB_KINDS,
 ];
 
 /** restic excludes always applied by the backend (backend/apps/backups/handlers.py DEFAULT_EXCLUDES). */
@@ -67,7 +69,7 @@ export const KIND_INFO: Record<Backup["kind"], { label: string; className: strin
   pre_restore: {
     label: "Before restore",
     className: "bg-violet-500/10 text-violet-700 dark:text-violet-300",
-    hint: "Safety backup taken automatically before a restore replaced the server files.",
+    hint: "Safety backup taken automatically before a restore or a world replacement changed the server files.",
   },
   pre_update: {
     label: "Before update",
@@ -123,6 +125,7 @@ export function useTrackedJob(instance: Instance) {
     handled.current = job.id;
     qc.invalidateQueries({ queryKey: qk.backups(instance.id) });
     qc.invalidateQueries({ queryKey: snapshotsKey(instance.id) });
+    qc.invalidateQueries({ queryKey: qk.world(instance.id) });
     invalidate(instance.id);
     if (job.status === "succeeded") toast.success(`${job.title}: done`);
     else if (job.status === "failed") toast.error(`${job.title} failed${job.error ? `: ${job.error}` : ""}`);

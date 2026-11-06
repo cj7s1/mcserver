@@ -178,6 +178,13 @@ class ExtractRequest(BaseModel):
     delete_archive: bool = False
 
 
+class WorldReplaceRequest(BaseModel):
+    archive: str = Field(min_length=1, max_length=4096)
+    level_name: str = Field(default="world", min_length=1, max_length=200)
+    layout: Literal["vanilla", "bukkit"] = "vanilla"
+    delete_archive: bool = False
+
+
 class RestorePathRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 

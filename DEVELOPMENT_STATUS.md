@@ -11,10 +11,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
+| `backend: uv run pytest -q -m "not integration"` | **459 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests, 27 world import/export tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **377 passed** (btrfs, restic, real HTTPS listener, world swap/rollback on a real filesystem) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 16 tests |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -38,6 +38,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
 | World export as zip (`/files/archive?path=world`) | zip validated |
+| **World import/export** (`GET /world`, `POST /world/replace`, job `world_replace`) through the real API + worker + agent + restic, on an isolated stack (own DB, agent :8702, API :8010, worker on Redis db 7), Playwright at 1440/390 px, light/dark | singleplayer save zip → vanilla `world`; whole Paper server zip → `survival` + `survival_nether` (level-name, plugins/server.properties ignored); zip without level.dat → job failed `no_level_dat`, world unchanged; `.tar.gz` already in the server folder → replaced and deleted; level.dat hashes match the sources; export zip valid; safety backups (“Before restore”) exclude the temporary upload. **No Minecraft server loaded the replaced worlds** (no container was started) |
 | Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
 | TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
 | `deploy/docker-compose.node.yml` agent container (healthy, TLS-aware healthcheck) added with a pin; a real vanilla 1.21.1 server ran there (RCON ok); instance-network containers get 403 | |
@@ -51,6 +52,10 @@ and the worker+beat. All tests pass on `main` of this branch:
   checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
   stopped to save credits.
 * CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub. ZFS snapshots.
+* World replace with a **running** server (stop → replace → start) and a Minecraft server actually loading the
+  replaced world (Paper migrating a singleplayer world's `DIM-1` into `world_nether`): unit-tested with the fake
+  agent only. Worlds above the panel upload limit (`MCPANEL_MAX_UPLOAD_BYTES`, 2 GiB) must be copied into the
+  server folder first and chosen with “From the server folder”.
 
 ## Next recommended tasks (in order)
 

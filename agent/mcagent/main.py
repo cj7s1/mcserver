@@ -19,7 +19,7 @@ import shutil
 import threading
 import time
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import docker.errors
@@ -54,6 +54,7 @@ from .schemas import (
     RestoreRequest,
     SnapshotRequest,
     StopRequest,
+    WorldReplaceRequest,
     WriteTextRequest,
 )
 
@@ -619,16 +620,21 @@ async def files_download(
 
 @app.get("/v1/instances/{instance_id}/files/archive", dependencies=[Depends(require_token)])
 async def files_archive(
-    instance_id: UUID, path: str = "", settings: Settings = Depends(get_settings)
+    instance_id: UUID,
+    path: list[str] = Query(default=[""]),
+    settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
-    """Download a directory (e.g. a world) as a zip streamed on the fly."""
-    from .archive import stream_zip
+    """Download one or more directories (e.g. a world and its dimensions) as a zip streamed on the fly."""
+    from .archive import MAX_ZIP_FOLDERS, stream_zip
 
+    if len(path) > MAX_ZIP_FOLDERS:
+        raise AgentError(f"At most {MAX_ZIP_FOLDERS} folders can be zipped at once", "invalid_path", 400)
     root = _root(settings, instance_id)
-    entry = await run_in_threadpool(root.stat, path)
-    if entry.type != "directory":
-        raise AgentError("Only folders can be downloaded as a zip", "not_a_directory", 400)
-    gen = await run_in_threadpool(lambda: stream_zip(root, path))
+    for p in path:
+        entry = await run_in_threadpool(root.stat, p)
+        if entry.type != "directory":
+            raise AgentError("Only folders can be downloaded as a zip", "not_a_directory", 400)
+    gen = await run_in_threadpool(lambda: stream_zip(root, path[0] if len(path) == 1 else path))
     return StreamingResponse(gen, media_type="application/zip")
 
 
@@ -790,6 +796,61 @@ async def files_extract(
         return result
 
     op = registry.start("import", [instance_id], _do)
+    return {"operation": op.as_dict()}
+
+
+# --- worlds --------------------------------------------------------------------------
+@app.get("/v1/instances/{instance_id}/world", dependencies=[Depends(require_token)])
+async def world_info(
+    instance_id: UUID,
+    level_name: str = Query("world", min_length=1, max_length=200),
+    layout: Literal["vanilla", "bukkit"] = "vanilla",
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """The world folders of ``level_name`` (with bukkit-style dimension folders), with sizes."""
+    from . import world
+
+    return await run_in_threadpool(world.info, _root(settings, instance_id), level_name, layout)
+
+
+@app.post("/v1/instances/{instance_id}/world/replace", dependencies=[Depends(require_token)])
+async def world_replace(
+    instance_id: UUID, body: WorldReplaceRequest, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    """Replace the world with the one found in an archive inside the instance (server must be stopped).
+
+    The new world is extracted into a staging folder, the old world folders are moved aside,
+    the new ones renamed into place and the old ones deleted only afterwards; any failure
+    puts the old world back. ``delete_archive`` removes the archive whatever the outcome.
+    """
+    from . import world
+
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    if status.get("running"):
+        raise AgentError("Stop the server before replacing its world", "must_stop", 409)
+    world.level_parts(body.level_name)  # refuse bad names before starting an operation
+    root = _root(settings, instance_id)
+    entry = await run_in_threadpool(root.stat, body.archive)
+    if entry.type != "file":
+        raise AgentError("The world archive must be a regular file", "not_a_file", 400)
+    inst_dir = docker_ops.instance_dir(settings, instance_id)
+
+    def _do(op: Operation) -> dict[str, Any]:
+        try:
+            return world.replace(
+                root,
+                body.archive,
+                body.level_name,
+                body.layout,
+                free_bytes=lambda: shutil.disk_usage(inst_dir).free,
+                progress=lambda p, m: op.update(p, m),
+            )
+        finally:
+            if body.delete_archive:
+                with contextlib.suppress(PathError, OSError):
+                    root.delete(body.archive)
+
+    op = registry.start("world_replace", [instance_id], _do)
     return {"operation": op.as_dict()}
 
 
