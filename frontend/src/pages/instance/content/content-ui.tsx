@@ -1,9 +1,10 @@
 /** Shared building blocks for the mods/plugins manager. */
 import { useMutation } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Download, Info, Package, X, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronLeft, ChevronRight, Download, ExternalLink, Info, Package, X, XCircle } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -82,6 +83,142 @@ export function Notice({
       </div>
       {action && <div className="flex shrink-0 flex-wrap gap-2 sm:ml-2">{action}</div>}
     </div>
+  );
+}
+
+// --- provider search results (Hangar, SpigotMC) ------------------------------------------
+/** One search hit from a plugin source; same layout as the Modrinth browser rows. */
+export function SourceResultRow({
+  title,
+  url,
+  site,
+  author,
+  description,
+  iconUrl,
+  meta,
+  action,
+}: {
+  title: string;
+  /** Project page (already checked to be http(s)). */
+  url: string | null;
+  /** Site name for link labels, e.g. "Hangar". */
+  site: string;
+  author?: string | null;
+  description?: string | null;
+  iconUrl?: string | null;
+  /** Small stats and badges under the description. */
+  meta?: ReactNode;
+  action?: ReactNode;
+}) {
+  return (
+    <li className="flex flex-col gap-3 rounded-lg border bg-card p-3 sm:flex-row sm:items-start">
+      <div className="flex min-w-0 flex-1 gap-3">
+        <ProjectIcon url={iconUrl} className="size-12 rounded-lg" />
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
+            {url ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="truncate font-medium hover:underline focus-visible:underline"
+                aria-label={`${title} on ${site} (opens in a new tab)`}
+              >
+                {title}
+              </a>
+            ) : (
+              <span className="truncate font-medium">{title}</span>
+            )}
+            {author && <span className="text-xs text-muted-foreground">by {author}</span>}
+          </div>
+          {description && <p className="mt-0.5 line-clamp-2 text-sm break-words text-muted-foreground">{description}</p>}
+          {meta && <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">{meta}</div>}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-2 sm:flex-col sm:items-end">
+        {action}
+        {url && (
+          <Button asChild variant="ghost" size="icon-sm" className="sm:hidden">
+            <a href={url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${title} on ${site}`}>
+              <ExternalLink />
+            </a>
+          </Button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/** "Installed" pill, a (possibly locked) install button, or nothing for read-only users. */
+export function InstallAction({
+  env,
+  installed,
+  title,
+  onInstall,
+  label = "Install…",
+}: {
+  env: ContentEnv;
+  installed: boolean;
+  title: string;
+  onInstall: () => void;
+  label?: string;
+}) {
+  if (installed)
+    return (
+      <span className="inline-flex h-7 items-center gap-1 rounded-lg bg-emerald-500/10 px-2.5 text-xs font-medium text-emerald-700 dark:text-emerald-300">
+        <CheckCircle2 className="size-3.5" aria-hidden /> Installed
+      </span>
+    );
+  if (!env.canEdit) return null;
+  if (env.locked)
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0}>
+            <Button size="sm" disabled>
+              <Download /> Install
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>{env.locked}</TooltipContent>
+      </Tooltip>
+    );
+  return (
+    <Button size="sm" onClick={onInstall} aria-label={`Install ${title}`}>
+      <Download /> {label}
+    </Button>
+  );
+}
+
+export function Pager({
+  label,
+  summary,
+  canPrev,
+  canNext,
+  busy,
+  onPrev,
+  onNext,
+}: {
+  label: string;
+  summary: ReactNode;
+  canPrev: boolean;
+  canNext: boolean;
+  busy: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <nav className="flex flex-wrap items-center justify-between gap-2" aria-label={label}>
+      <span className="text-xs text-muted-foreground tabular-nums">{summary}</span>
+      <div className="flex gap-2">
+        <Button size="sm" variant="outline" disabled={!canPrev || busy} onClick={onPrev}>
+          <ChevronLeft /> Previous
+        </Button>
+        <Button size="sm" variant="outline" disabled={!canNext || busy} onClick={onNext}>
+          Next <ChevronRight />
+        </Button>
+      </div>
+    </nav>
   );
 }
 

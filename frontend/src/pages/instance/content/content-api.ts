@@ -46,10 +46,15 @@ export interface ContentFile {
   size: number;
   modified: number | null;
   sha1: string;
-  /** modrinth = identified by hash; hangar = installed from Hangar by the panel; manual = not on Modrinth; unknown = identification failed */
-  source: "modrinth" | "hangar" | "manual" | "unknown";
+  /**
+   * modrinth = identified by hash; hangar / spigot = installed from Hangar / SpigotMC by the panel;
+   * manual = not on Modrinth; unknown = identification failed
+   */
+  source: "modrinth" | "hangar" | "spigot" | "manual" | "unknown";
   /** Set when source is "hangar" (recorded at install time; Hangar has no hash lookup). */
   hangar?: { slug: string; version: string };
+  /** Set when source is "spigot": recorded at install time, and the file still has the recorded hash. */
+  spigot?: { resource_id: number; title: string | null; version: string | null; url: string | null };
   project: ContentProjectSummary | null;
   version: ContentVersion | null;
   compatibility: { loader: boolean; minecraft: boolean | null } | null;
@@ -65,7 +70,15 @@ export interface ContentInventory {
   restart_required_for_changes: boolean;
   identification: { available: boolean; error: string | null };
   warnings: string[];
-  summary: { total: number; enabled: number; disabled: number; identified: number; manual: number; hangar?: number };
+  summary: {
+    total: number;
+    enabled: number;
+    disabled: number;
+    identified: number;
+    manual: number;
+    hangar?: number;
+    spigot?: number;
+  };
   files: ContentFile[];
 }
 
@@ -266,6 +279,135 @@ export interface HangarInstallResponse {
 /** Hangar search pages are fixed at 20 results by the backend. */
 export const HANGAR_PAGE_SIZE = 20;
 
+// --- SpigotMC via Spiget (api.spiget.org, Paper-family plugin servers only) -----------------
+/** Why a resource cannot be installed automatically. */
+export type SpigotUnavailableReason = "premium" | "external" | "not_a_jar";
+
+export interface SpigotResource {
+  id: number;
+  title: string;
+  /** One-line summary (plain text). */
+  description: string | null;
+  icon_url: string | null;
+  downloads: number | null;
+  likes: number | null;
+  rating: { average: number | null; count: number | null } | null;
+  /** Minecraft versions the author says were tested, for the resource as a whole (e.g. "1.21"). */
+  tested_versions: string[];
+  updated: string | null;
+  released: string | null;
+  premium: boolean;
+  price: number | null;
+  currency: string | null;
+  external: boolean;
+  file_type: string | null;
+  file_size: string | null;
+  external_url: string | null;
+  source_url: string | null;
+  url: string;
+  installable: boolean;
+  reason: SpigotUnavailableReason | null;
+  reason_message: string | null;
+  /** Whether tested_versions covers this server's Minecraft version; null when the author lists none. */
+  tested: boolean | null;
+  installed: boolean;
+}
+
+export interface SpigotSearchResponse {
+  query: string;
+  page: number;
+  /** Number of result pages Spiget reports (0 when nothing matched). */
+  pages: number;
+  size: number;
+  results: SpigotResource[];
+  minecraft_version: string | null;
+}
+
+export interface SpigotVersion {
+  id: number;
+  name: string;
+  released: string | null;
+  downloads: number | null;
+  /** Download page on SpigotMC (opens in the browser; the panel cannot download it). */
+  url: string;
+}
+
+/** Codes the install/update endpoints accept in `confirm`. */
+export type SpigotWarningCode = "untested_minecraft_version" | "mirror_outdated" | "mirror_unknown";
+
+export interface SpigotWarning {
+  code: SpigotWarningCode;
+  message: string;
+}
+
+export interface SpigotMirror {
+  available: boolean;
+  error?: string;
+  size?: number | null;
+  sha1?: string | null;
+  uploaded_at?: string | null;
+  /** current = stored after SpigotMC's latest release; outdated = before it; unknown = cannot tell */
+  freshness?: "current" | "outdated" | "unknown";
+}
+
+export interface SpigotInstalledFile {
+  filename: string;
+  enabled: boolean;
+  sha1: string;
+  version: string | null;
+  update_available: boolean;
+}
+
+export interface SpigotDetails {
+  resource: SpigotResource & { author: string | null; description_text: string };
+  versions: SpigotVersion[];
+  latest_version: SpigotVersion | null;
+  mirror: SpigotMirror | null;
+  warnings: SpigotWarning[];
+  installed_files: SpigotInstalledFile[];
+  minecraft_version: string | null;
+}
+
+export interface SpigotInstallResponse {
+  installed: {
+    filename: string;
+    resource_id: number;
+    title: string;
+    version: string | null;
+    latest_version: string | null;
+    mirror: "current" | "outdated" | "unknown";
+    size: number | null;
+    sha256: string;
+  };
+  warnings: string[];
+  notes: string[];
+  restart_required: boolean;
+}
+
+export interface SpigotUpdateResponse {
+  status: "updated" | "up_to_date";
+  filename: string;
+  new_filename?: string;
+  from_version?: string | null;
+  to_version?: string | null;
+  version?: string | null;
+  latest_version?: string | null;
+  size?: number | null;
+  sha256?: string;
+  warnings: string[];
+  restart_required: boolean;
+}
+
+/** Spiget search pages are fixed at 20 results by the backend. */
+export const SPIGOT_PAGE_SIZE = 20;
+
+/** "1.8 … 1.21, 26.1, 26.2" — the author's tested versions, shortened. */
+export function testedSummary(res: Pick<SpigotResource, "tested_versions">): string {
+  const t = res.tested_versions;
+  if (!t.length) return "no versions listed";
+  return t.length > 4 ? `${t[0]} … ${t.slice(-3).join(", ")}` : t.join(", ");
+}
+
 // --- keys and paths ---------------------------------------------------------------------
 export const contentKeys = {
   inventory: (id: string) => [...qk.content(id), "inventory"] as const,
@@ -274,6 +416,8 @@ export const contentKeys = {
   versions: (id: string, projectId: string) => [...qk.content(id), "versions", projectId] as const,
   hangarSearch: (id: string, params: { q: string; offset: number }) => [...qk.content(id), "hangar", "search", params] as const,
   hangarVersions: (id: string, slug: string) => [...qk.content(id), "hangar", "versions", slug] as const,
+  spigotSearch: (id: string, params: { q: string; page: number }) => [...qk.content(id), "spigot", "search", params] as const,
+  spigotResource: (id: string, resourceId: number) => [...qk.content(id), "spigot", "resource", resourceId] as const,
 };
 
 export const contentPath = (id: string, sub = "") => `/instances/${id}/content/${sub}`;
@@ -355,6 +499,30 @@ export function useHangarVersions(instanceId: string, slug: string | null) {
   });
 }
 
+export function useSpigotSearch(instanceId: string, params: { q: string; page: number }, enabled = true) {
+  return useQuery({
+    queryKey: contentKeys.spigotSearch(instanceId, params),
+    queryFn: ({ signal }) =>
+      api.get<SpigotSearchResponse>(contentPath(instanceId, "spigot/search"), { q: params.q, page: params.page }, signal),
+    enabled,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
+export function useSpigotResource(instanceId: string, resourceId: number | null) {
+  return useQuery({
+    queryKey: contentKeys.spigotResource(instanceId, resourceId ?? 0),
+    queryFn: () => api.get<SpigotDetails>(contentPath(instanceId, `spigot/resources/${resourceId}`)),
+    enabled: resourceId != null,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+}
+
 /** Invalidate the inventory and everything derived from it (installed flags, updates). */
 export function useInvalidateContent(instanceId: string) {
   const qc = useQueryClient();
@@ -416,7 +584,7 @@ export function useRestartServer(instance: Instance) {
 
 // --- small formatting helpers -----------------------------------------------------------
 export function displayTitle(file: ContentFile): string {
-  return file.project?.title || file.hangar?.slug || file.filename.replace(/\.jar(\.disabled)?$/, "");
+  return file.project?.title || file.hangar?.slug || file.spigot?.title || file.filename.replace(/\.jar(\.disabled)?$/, "");
 }
 
 export function modrinthUrl(project: { url?: string | null; slug?: string | null; id?: string | null } | null | undefined) {

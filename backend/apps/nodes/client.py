@@ -209,14 +209,19 @@ class AgentClient:
 
         return _iter(), int(length) if length else None, resp
 
-    def upload(self, instance_id: UUID, path: str, chunks: Iterator[bytes] | bytes, overwrite: bool = False) -> dict[str, Any]:
-        return self._json(
-            "PUT",
-            f"/v1/instances/{instance_id}/files/upload",
-            params={"path": path, "overwrite": str(overwrite).lower()},
-            content=chunks,
-            timeout=3600,
-        )
+    def upload(
+        self,
+        instance_id: UUID,
+        path: str,
+        chunks: Iterator[bytes] | bytes,
+        overwrite: bool = False,
+        sha256: str | None = None,
+    ) -> dict[str, Any]:
+        """Stream ``chunks`` to ``path``; with ``sha256`` the agent commits only matching bytes."""
+        params = {"path": path, "overwrite": str(overwrite).lower()}
+        if sha256:
+            params["sha256"] = sha256
+        return self._json("PUT", f"/v1/instances/{instance_id}/files/upload", params=params, content=chunks, timeout=3600)
 
     def mkdir(self, instance_id: UUID, path: str, parents: bool = False) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/files/mkdir", json={"path": path, "parents": parents})

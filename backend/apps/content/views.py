@@ -81,9 +81,10 @@ class ContentListView(APIView):
     )
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, READ)
-        from . import hangar_source
+        from . import hangar_source, spigot_source
 
-        return Response(hangar_source.annotate_inventory(instance, service.inventory(instance)))
+        inventory = hangar_source.annotate_inventory(instance, service.inventory(instance))
+        return Response(spigot_source.annotate_inventory(instance, inventory))
 
 
 class ContentUpdatesView(APIView):
@@ -320,6 +321,98 @@ class HangarInstallView(APIView):
             target=instance,
             details={"slug": slug[:64], "version": result["installed"]["version"]},
         )
+        return Response(result)
+
+
+class SpigotSearchView(APIView):
+    @extend_schema(responses={200: dict}, summary="Search SpigotMC (via Spiget) for plugins")
+    def get(self, request: Request, pk: str) -> Response:
+        from . import spigot_source
+
+        instance = get_instance_for(request.user, pk, READ)
+        query = request.query_params.get("q", "")
+        if len(query) > MAX_QUERY_LENGTH:
+            raise ApiError(f"Search text may be at most {MAX_QUERY_LENGTH} characters", code="invalid_parameter")
+        page = _int(request.query_params.get("page"), 1, 1, 500, "page")
+        return Response(spigot_source.search(instance, query.strip(), page))
+
+
+class SpigotResourceView(APIView):
+    @extend_schema(responses={200: dict}, summary="A SpigotMC resource: plain-text details, versions, what can be installed")
+    def get(self, request: Request, pk: str, resource_id: int) -> Response:
+        from . import spigot_source
+
+        instance = get_instance_for(request.user, pk, READ)
+        return Response(spigot_source.details(instance, resource_id))
+
+
+class SpigotInstallView(APIView):
+    parser_classes = [JSONParser]
+
+    @extend_schema(request=dict, responses={201: dict}, summary="Install a free SpigotMC plugin from Spiget's mirror")
+    def post(self, request: Request, pk: str) -> Response:
+        from apps.modpacks import spiget
+
+        from . import spigot_source
+
+        instance = get_instance_for(request.user, pk, WRITE)
+        data = _body(request)
+        resource_id = spiget.validate_resource_id(data.get("resource_id"))
+        confirm = spigot_source.normalize_confirm(data.get("confirm"))
+        details = {"resource_id": resource_id, "confirmed": sorted(confirm)}
+        result = _audited(
+            request,
+            instance,
+            "content.spigot_install",
+            details,
+            lambda: spigot_source.install(instance, resource_id, confirm),
+        )
+        installed = result["installed"]
+        audit.record(
+            "content.spigot_install",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={
+                **details,
+                "filename": installed["filename"],
+                "version": installed["version"],
+                "mirror": installed["mirror"],
+                "sha256": installed["sha256"],
+            },
+        )
+        return Response(result, status=status.HTTP_201_CREATED)
+
+
+class SpigotUpdateView(APIView):
+    parser_classes = [JSONParser]
+
+    @extend_schema(request=dict, responses={200: dict}, summary="Replace a SpigotMC-installed plugin with Spiget's current copy")
+    def post(self, request: Request, pk: str) -> Response:
+        from . import spigot_source
+
+        instance = get_instance_for(request.user, pk, WRITE)
+        data = _body(request)
+        filename = service.validate_filename(data.get("filename"))
+        confirm = spigot_source.normalize_confirm(data.get("confirm"))
+        details = {"filename": filename, "confirmed": sorted(confirm)}
+        result = _audited(
+            request, instance, "content.spigot_update", details, lambda: spigot_source.update(instance, filename, confirm)
+        )
+        if result["status"] == "updated":
+            audit.record(
+                "content.spigot_update",
+                request=request,
+                instance=instance,
+                target=instance,
+                details={
+                    **details,
+                    "new_filename": result["new_filename"],
+                    "from_version": result["from_version"],
+                    "to_version": result["to_version"],
+                    "sha256": result["sha256"],
+                },
+            )
         return Response(result)
 
 
