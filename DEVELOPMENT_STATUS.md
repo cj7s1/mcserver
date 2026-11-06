@@ -11,10 +11,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
+| `backend: uv run pytest -q -m "not integration"` | **432 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
 | `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **376 passed** (btrfs, restic, real HTTPS listener, fake-`zfs` ZFS suite) |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 16 tests |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -50,7 +50,39 @@ and the worker+beat. All tests pass on `main` of this branch:
   browser, snapshots, files zip/extract, Hangar tab, migrate dialog, CurseForge-by-URL wizard) were
   checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
   stopped to save credits.
-* CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub. ZFS snapshots.
+* CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub.
+* **ZFS snapshots: implemented + unit-tested; NOT verified on real ZFS** (no ZFS kernel module in the
+  sandbox). See the section below.
+
+## ZFS snapshot provider (worktree branch, 2026-11-06)
+
+Status: **implemented + unit-tested; NOT verified on real ZFS.**
+
+* Agent: `mcagent/zfs.py` (`ZfsSnapshots`, same interface as `BtrfsSnapshots`), picked by
+  `snapshots.snapshot_provider()` from the instances directory's filesystem. Dataset per server
+  (`<parent>/mcpanel-<id>`, explicit mountpoint) at prepare time; convert = dataset at a temp mountpoint,
+  `cp -a`, swap; snapshots with `mcpanel:*` user properties; rollback = clone + rename + promote (never
+  `zfs rollback -r`, never `destroy -R`; newer snapshots stay on `<dataset>-old-<epoch>` history
+  datasets; every step undone in reverse on failure); delete refuses snapshots that history datasets
+  depend on. Capability checks: fstype, `zfs` binary, `/dev/zfs`, same host/container path, `:rshared`
+  propagation when containerised, dataset name pattern, `zfs list` reaching the kernel module.
+* Also fixed on the way: deleting a server now deletes its snapshots (btrfs snapshot subvolumes used to be
+  left behind; on ZFS the dataset must be destroyed because a mount point cannot be renamed); restic
+  restores and clones into a subvolume/dataset swap contents in place, so the server stays
+  snapshot-capable (previously a restic restore turned a btrfs subvolume back into a plain folder).
+* Backend: provider-agnostic convert message, rollback warnings in the job log; fake agent can report
+  `zfs`. Frontend: wording follows `capability.provider`, "Kept from before a rollback" marker,
+  `instance_ready` with fallback to `instance_is_subvolume`.
+* Image: `zfsutils-linux` 2.3.9 (Debian trixie contrib) installs in `python:3.13-slim` (+22 packages,
+  ~33 MB) — verified with the same `apt-get install` in a throwaway container; the full agent image build
+  was not run here because the sandbox proxy rejects plain-HTTP apt (405).
+* Tests: `agent/tests/test_snapshots_zfs.py` (51 tests) drive a fake `zfs` executable
+  (`tests/fake_zfs.py`, emulates datasets/snapshots/clones/promote with real files) incl. real restic
+  restore into a dataset; btrfs tests (real loopback btrfs) extended. Playwright: Backups page at 1440 and
+  390 px with the real btrfs node and route-mocked ZFS responses (ready / convert / unavailable / dialogs),
+  no horizontal overflow.
+* Needs a real host: a ZFS pool, the override in docs/UNRAID.md section 6, and a check that a dataset
+  created by the agent is visible to the Minecraft container (shared propagation).
 
 ## Next recommended tasks (in order)
 
@@ -59,7 +91,7 @@ and the worker+beat. All tests pass on `main` of this branch:
    screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
    wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).
 3. Validate on Unraid; then (only when the user asks) the Phase 10 security audit.
-4. Roadmap: ZFS snapshots, SpigotMC source, CurseForge per-mod search (needs a key).
+4. Roadmap: verify ZFS snapshots on a real pool, SpigotMC source, CurseForge per-mod search (needs a key).
 
 ## Environment notes (cloud sandbox)
 

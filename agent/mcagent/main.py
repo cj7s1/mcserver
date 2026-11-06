@@ -375,9 +375,14 @@ async def delete_data(
         raise AgentError("Confirmation id does not match", "confirmation_mismatch", 400)
 
     def _delete(op: Operation) -> dict[str, Any]:
+        from .snapshots import snapshot_provider
+
         op.update(0.1, "Removing container")
         docker_ops.remove_container(instance_id, timeout=30)
         path = docker_ops.instance_dir(settings, instance_id)
+        op.update(0.2, "Deleting snapshots")
+        # On ZFS this destroys the instance dataset itself (a mount point cannot be renamed).
+        snapshots = snapshot_provider(settings, instance_id).destroy_all()
         if path.exists():
             op.update(0.3, "Deleting instance files")
             trash = settings.trash_dir / f"{instance_id}-{int(time.time())}"
@@ -387,7 +392,11 @@ async def delete_data(
         if repo.exists():
             op.update(0.8, "Deleting backup repository")
             shutil.rmtree(repo, ignore_errors=True)
-        return {"deleted": True}
+        return {
+            "deleted": True,
+            "snapshots_deleted": snapshots["snapshots"],
+            "warnings": snapshots["warnings"],
+        }
 
     op = registry.start("delete_data", [instance_id], _delete)
     return {"operation": op.as_dict()}
@@ -408,13 +417,26 @@ async def clone(
         raise AgentError("Stop the source server before cloning it", "source_running", 409)
 
     def _clone(op: Operation) -> dict[str, Any]:
+        from .snapshots import ensure_instance_dir, is_volume_root, swap_contents
+
         op.update(0.05, "Copying files")
-        staging = settings.staging_dir / f"clone-{body.target_instance_id}"
-        if staging.exists():
-            shutil.rmtree(staging)
         ignore = None
         if body.exclude_worlds:
             ignore = shutil.ignore_patterns("world", "world_nether", "world_the_end")
+        ensure_instance_dir(settings, dst)  # subvolume / dataset where supported
+        if is_volume_root(dst):
+            # Copy inside the target volume, then move the entries into place.
+            staging = dst / f".mcpanel-clone-{int(time.time())}"
+            try:
+                shutil.copytree(src, staging, symlinks=True, ignore=ignore)
+                swap_contents(dst, staging)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            return {"bytes": storage.dir_size(dst)}
+        staging = settings.staging_dir / f"clone-{body.target_instance_id}"
+        if staging.exists():
+            shutil.rmtree(staging)
         shutil.copytree(src, staging, symlinks=True, ignore=ignore)
         if dst.exists():
             dst.rmdir()
@@ -869,7 +891,17 @@ async def restore_backup(
         raise AgentError("Target instance directory is not empty", "target_not_empty", 409)
 
     def _restore(op: Operation) -> dict[str, Any]:
-        staging = settings.staging_dir / f"restore-{target_id}-{int(time.time())}"
+        from .snapshots import ensure_instance_dir, is_volume_root, swap_contents
+
+        if body.target_instance_id:
+            ensure_instance_dir(settings, target_dir)  # subvolume / dataset where supported
+        # A btrfs subvolume or ZFS dataset stays in place: restore inside it and swap entries.
+        in_place = is_volume_root(target_dir)
+        stamp = int(time.time())
+        if in_place:
+            staging = target_dir / f".mcpanel-restore-{stamp}"
+        else:
+            staging = settings.staging_dir / f"restore-{target_id}-{stamp}"
         op.update(0.02, "Restoring snapshot into staging area")
         try:
             result = restic.restore(body.snapshot_id, staging, lambda p, m: op.update(0.02 + p * 0.9, m))
@@ -877,6 +909,13 @@ async def restore_backup(
             shutil.rmtree(staging, ignore_errors=True)
             raise
         op.update(0.94, "Swapping restored files into place")
+        if in_place:
+            try:
+                swap_contents(target_dir, staging)
+            except BaseException:
+                shutil.rmtree(staging, ignore_errors=True)
+                raise
+            return result
         old = None
         if target_dir.exists():
             old = settings.trash_dir / f"pre-restore-{target_id}-{int(time.time())}"
@@ -1065,11 +1104,11 @@ def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -
 
 @app.get("/v1/instances/{instance_id}/snapshots", dependencies=[Depends(require_token)])
 async def list_snapshots(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
-    from .snapshots import BtrfsSnapshots
+    from .snapshots import snapshot_provider
 
-    snaps = BtrfsSnapshots(settings, instance_id)
+    snaps = snapshot_provider(settings, instance_id)
     cap = await run_in_threadpool(snaps.capability)
-    items = await run_in_threadpool(snaps.list) if cap.get("instance_is_subvolume") else []
+    items = await run_in_threadpool(snaps.list) if cap.get("instance_ready") else []
     return {"capability": cap, "snapshots": items}
 
 
@@ -1077,9 +1116,9 @@ async def list_snapshots(instance_id: UUID, settings: Settings = Depends(get_set
 async def create_snapshot(
     instance_id: UUID, body: SnapshotRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    from .snapshots import BtrfsSnapshots
+    from .snapshots import snapshot_provider
 
-    snaps = BtrfsSnapshots(settings, instance_id)
+    snaps = snapshot_provider(settings, instance_id)
     await run_in_threadpool(snaps.require_ready)
 
     def _do(op: Operation) -> dict[str, Any]:
@@ -1107,9 +1146,9 @@ async def create_snapshot(
 async def delete_snapshot(
     instance_id: UUID, name: str, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    from .snapshots import BtrfsSnapshots
+    from .snapshots import snapshot_provider
 
-    await run_in_threadpool(BtrfsSnapshots(settings, instance_id).delete, name)
+    await run_in_threadpool(snapshot_provider(settings, instance_id).delete, name)
     return {"deleted": name}
 
 
@@ -1117,24 +1156,25 @@ async def delete_snapshot(
 async def restore_snapshot(
     instance_id: UUID, name: str, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    from .snapshots import BtrfsSnapshots
+    from .snapshots import snapshot_provider
 
     if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
         raise AgentError("Stop the server before rolling back to a snapshot", "must_stop", 409)
-    snaps = BtrfsSnapshots(settings, instance_id)
+    snaps = snapshot_provider(settings, instance_id)
     op = registry.start("restore", [instance_id], lambda _op: snaps.restore(name))
     return {"operation": op.as_dict()}
 
 
 @app.post("/v1/instances/{instance_id}/snapshots/convert", dependencies=[Depends(require_token)])
-async def convert_to_subvolume(
+async def convert_for_snapshots(
     instance_id: UUID, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    from .snapshots import BtrfsSnapshots
+    """Make a plain server folder a btrfs subvolume or ZFS dataset (server stopped)."""
+    from .snapshots import snapshot_provider
 
     if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
         raise AgentError("Stop the server before enabling snapshots", "must_stop", 409)
-    snaps = BtrfsSnapshots(settings, instance_id)
+    snaps = snapshot_provider(settings, instance_id)
     op = registry.start("import", [instance_id], lambda _op: snaps.convert())
     return {"operation": op.as_dict()}
 

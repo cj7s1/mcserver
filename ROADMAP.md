@@ -43,7 +43,9 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Integrity check (`restic check --read-data-subset`)
 - [x] Pre-update backups (modpack updates)
 - [x] Backup end-to-end validation on a real server (API + worker + restic)
-- [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules) — [ ] ZFS
+- [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules)
+- [x] ZFS snapshot provider (dataset per server, clone+promote rollback that keeps newer snapshots, convert,
+      delete with dependency checks) — unit-tested against a fake `zfs` only; [ ] verify on a real ZFS pool
 - [x] Backup browser (list/download/restore single path) incl. UI
 
 ## Phase 5 — Mods, plugins, players
@@ -92,4 +94,5 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 ## Dependencies
 - Modpack update/rollback depends on backups (done) and provider adapters (done).
 - Content manager depends on agent `/files/hashes` + `/files/fetch` (done).
-- Snapshot providers depend on agent running with btrfs-progs/zfs tools and access to the pool path.
+- Snapshot providers depend on agent running with btrfs-progs/zfs tools and access to the pool path
+  (ZFS: `/dev/zfs`, CAP_SYS_ADMIN and an `:rshared` data mount, see docs/UNRAID.md section 6).

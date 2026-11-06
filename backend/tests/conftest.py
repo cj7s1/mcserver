@@ -97,6 +97,8 @@ class FakeAgent:
         self.fs: dict[str, dict[str, Any]] = {}
         self.repos: dict[str, list[dict[str, Any]]] = {}
         self.snaps: dict[str, list[dict[str, Any]]] = {}
+        self.snapshot_provider = "btrfs"  # tests may switch to "zfs"
+        self.snapshot_delete_error: Exception | None = None
         self.operations: dict[str, dict[str, Any]] = {}
         self.foreign_ports: list[dict[str, Any]] = []
         self.remote_files: dict[str, bytes] = {}
@@ -717,16 +719,17 @@ class FakeAgent:
         size = self._write(str(instance_id), path, data, overwrite=overwrite)
         return {"path": path, "size": size, "sha1": h1, "sha512": h512}
 
-    # -- snapshots (btrfs semantics) -----------------------------------------------------
+    # -- snapshots (btrfs / zfs semantics; the agent's provider decides) --------------------
     def snapshots(self, instance_id: Any) -> dict[str, Any]:
         iid = str(instance_id)
         return {
             "capability": {
-                "provider": "btrfs",
+                "provider": self.snapshot_provider,
                 "available": True,
-                "fstype": "btrfs",
+                "fstype": self.snapshot_provider,
                 "reason": None,
                 "instance_is_subvolume": iid in self.fs,
+                "instance_ready": iid in self.fs,
             },
             "snapshots": [{k: v for k, v in s.items() if k != "tree"} for s in reversed(self.snaps.get(iid, []))],
         }
@@ -753,6 +756,8 @@ class FakeAgent:
 
     def delete_snapshot(self, instance_id: Any, name: str) -> dict[str, Any]:
         iid = str(instance_id)
+        if self.snapshot_delete_error is not None:
+            raise self.snapshot_delete_error
         before = len(self.snaps.get(iid, []))
         self.snaps[iid] = [s for s in self.snaps.get(iid, []) if s["name"] != name]
         if len(self.snaps[iid]) == before:

@@ -224,6 +224,13 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     return {"restored": job.params["path"], "backup": str(backup.id), "restarted": was_running}
 
 
+# Snapshot jobs are provider-agnostic: the node's agent picks btrfs or ZFS by filesystem.
+CONVERT_MESSAGES = {
+    "btrfs": "Converting the server folder to a btrfs subvolume (reflink copy)",
+    "zfs": "Converting the server folder to its own ZFS dataset (copying the files)",
+}
+
+
 @register("snapshot_create")
 def snapshot_create(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
@@ -254,11 +261,15 @@ def snapshot_restore(job: Job, ctx: JobContext) -> dict[str, Any]:
     client.wait_operation(op["id"], timeout=1800)
     ctx.progress(0.6, f"Rolling back to snapshot {name}", force=True)
     op = client.restore_snapshot(instance.id, name)
-    client.wait_operation(op["id"], timeout=3600)
+    done = client.wait_operation(op["id"], timeout=3600)
+    # ZFS rollbacks report tidy-up problems (e.g. a history dataset that could not be promoted).
+    warnings = [str(w) for w in (done.get("result") or {}).get("warnings") or []]
+    for warning in warnings:
+        ctx.log(f"Warning: {warning}")
     if was_running:
         ctx.progress(0.9, "Starting server")
         client.start(instance.id)
-    return {"restored": name, "restarted": was_running}
+    return {"restored": name, "restarted": was_running, "warnings": warnings}
 
 
 @register("snapshot_delete")
@@ -272,8 +283,9 @@ def snapshot_delete(job: Job, ctx: JobContext) -> dict[str, Any]:
 def snapshot_convert(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     client = AgentClient(instance.node)
+    provider = (client.snapshots(instance.id).get("capability") or {}).get("provider")
     was_running = ensure_stopped(instance, ctx)
-    ctx.progress(0.2, "Converting the server folder to a btrfs subvolume (reflink copy)", force=True)
+    ctx.progress(0.2, CONVERT_MESSAGES.get(provider, "Preparing the server folder for snapshots"), force=True)
     op = client.convert_snapshots(instance.id)
     done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
     if was_running:

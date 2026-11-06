@@ -1,4 +1,8 @@
-"""Native filesystem snapshots (btrfs) for instance directories.
+"""Native filesystem snapshots for instance directories: btrfs here, ZFS in ``zfs.py``.
+
+``snapshot_provider`` picks the provider from the filesystem of the instances directory; both
+have the same interface (capability, require_ready, convert, create, list, delete, restore,
+destroy_all). btrfs design:
 
 Design:
 * On btrfs, each instance directory is a **subvolume** (new instances are created as
@@ -11,12 +15,14 @@ Design:
 
 Every command is an argv list built from validated values (UUIDs and generated names).
 Snapshots are not backups: they live on the same disk. Use restic backups for disaster
-recovery. ZFS support is not implemented yet.
+recovery.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,9 +32,9 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from . import storage
 from .config import Settings
 from .docker_ops import AgentError
-from .storage import mount_for
 
 NAME_RE = re.compile(r"^\d{8}T\d{6}Z(-[a-z0-9-]{1,40})?$")
 
@@ -51,7 +57,7 @@ def _run(args: list[str], timeout: int = 600) -> subprocess.CompletedProcess[str
 def is_subvolume(path: Path) -> bool:
     # On btrfs, subvolume roots always have inode number 256.
     try:
-        return path.stat().st_ino == 256 and (mount_for(path) or {}).get("fstype") == "btrfs"
+        return path.stat().st_ino == 256 and (storage.mount_for(path) or {}).get("fstype") == "btrfs"
     except FileNotFoundError:
         return False
 
@@ -71,7 +77,7 @@ class BtrfsSnapshots:
 
     # -- capability ----------------------------------------------------------------
     def capability(self) -> dict[str, Any]:
-        mount = mount_for(self.settings.instances_dir) or {}
+        mount = storage.mount_for(self.settings.instances_dir) or {}
         fstype = mount.get("fstype")
         info: dict[str, Any] = {
             "provider": "btrfs",
@@ -79,14 +85,17 @@ class BtrfsSnapshots:
             "fstype": fstype,
             "reason": None,
             "instance_is_subvolume": False,
+            "instance_ready": False,
         }
         if fstype != "btrfs":
-            info["reason"] = f"The data directory is on '{fstype}', not btrfs"
+            info["reason"] = (
+                f"The data directory is on '{fstype}', which has no native snapshots (btrfs or ZFS needed)"
+            )
             return info
         if not shutil.which("btrfs"):
             info["reason"] = "btrfs-progs is not installed in the agent image"
             return info
-        info["instance_is_subvolume"] = is_subvolume(self.instance_dir)
+        info["instance_is_subvolume"] = info["instance_ready"] = is_subvolume(self.instance_dir)
         info["available"] = True
         if not info["instance_is_subvolume"]:
             info["reason"] = (
@@ -215,20 +224,100 @@ class BtrfsSnapshots:
         _run([_btrfs(), "subvolume", "delete", str(old)])
         return {"restored": name}
 
+    def destroy_all(self) -> dict[str, Any]:
+        """Delete every snapshot of this instance (used when the instance itself is deleted)."""
+        destroyed: list[str] = []
+        warnings: list[str] = []
+        if not self.snap_dir.is_dir():
+            return {"destroyed": destroyed, "snapshots": 0, "warnings": warnings}
+        for entry in sorted(self.snap_dir.iterdir()):
+            if entry.is_dir() and not entry.is_symlink() and is_subvolume(entry):
+                try:
+                    _run([_btrfs(), "subvolume", "delete", str(entry)])
+                    destroyed.append(entry.name)
+                except AgentError as exc:
+                    warnings.append(f"Could not delete snapshot {entry.name}: {exc!s}")
+            elif entry.suffix == ".json" and entry.is_file():
+                entry.unlink()
+        with contextlib.suppress(OSError):
+            self.snap_dir.rmdir()
+        return {"destroyed": destroyed, "snapshots": len(destroyed), "warnings": warnings}
+
+
+def snapshot_provider(settings: Settings, instance_id: UUID) -> Any:
+    """BtrfsSnapshots or ZfsSnapshots, by the filesystem of the instances directory."""
+    if (storage.mount_for(settings.instances_dir) or {}).get("fstype") == "zfs":
+        from .zfs import ZfsSnapshots
+
+        return ZfsSnapshots(settings, instance_id)
+    return BtrfsSnapshots(settings, instance_id)
+
+
+def is_volume_root(path: Path) -> bool:
+    """True if ``path`` is a btrfs subvolume or a mount point (a ZFS dataset).
+
+    Such a directory must stay where it is: renaming a mount point fails (EBUSY), and swapping a
+    plain directory in for a subvolume would silently turn snapshots off for that server.
+    """
+    if not path.is_dir() or path.is_symlink():
+        return False
+    if is_subvolume(path):
+        return True
+    return (storage.mount_for(path) or {}).get("mount_point") == os.path.realpath(path)
+
+
+def swap_contents(target: Path, staging: Path) -> None:
+    """Replace the entries of ``target`` with those of ``staging`` (a directory inside it).
+
+    Used instead of renaming whole directories when ``target`` is a volume root; every rename
+    stays inside one filesystem. On failure, everything moved so far is moved back.
+    """
+    if staging.parent != target:
+        raise AgentError("Staging directory must be inside the target", "internal", 500)
+    old = target / f".mcpanel-old-{int(time.time())}"
+    old.mkdir()
+    moved_old: list[str] = []
+    moved_new: list[str] = []
+    try:
+        for child in sorted(target.iterdir()):
+            if child.name in (staging.name, old.name):
+                continue
+            child.rename(old / child.name)
+            moved_old.append(child.name)
+        for child in sorted(staging.iterdir()):
+            child.rename(target / child.name)
+            moved_new.append(child.name)
+    except BaseException:
+        for name in reversed(moved_new):
+            (target / name).rename(staging / name)
+        for name in reversed(moved_old):
+            (old / name).rename(target / name)
+        old.rmdir()
+        raise
+    staging.rmdir()
+    shutil.rmtree(old, ignore_errors=True)
+
 
 def ensure_instance_dir(settings: Settings, path: Path) -> bool:
-    """Create an instance directory; on btrfs (with tools available) create a subvolume.
+    """Create an instance directory: a subvolume on btrfs, its own dataset on ZFS (when the
+    tools and privileges are there), a plain directory otherwise.
 
-    Returns True if a subvolume was created.
+    Returns True if a subvolume or dataset was created.
     """
     if path.exists():
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
-    if (mount_for(path.parent) or {}).get("fstype") == "btrfs" and shutil.which("btrfs"):
+    fstype = (storage.mount_for(path.parent) or {}).get("fstype")
+    if fstype == "btrfs" and shutil.which("btrfs"):
         try:
             BtrfsSnapshots.create_subvolume(path)
             return True
         except AgentError:
             pass  # fall back to a plain directory (e.g. missing privileges)
+    elif fstype == "zfs":
+        from .zfs import create_instance_dataset
+
+        if create_instance_dataset(settings, path):
+            return True
     path.mkdir(parents=True, exist_ok=True)
     return False

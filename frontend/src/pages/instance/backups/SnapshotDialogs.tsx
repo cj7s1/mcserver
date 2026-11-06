@@ -1,4 +1,4 @@
-/** Take / enable / roll back / delete dialogs for btrfs snapshots on the Backups page. */
+/** Take / enable / roll back / delete dialogs for btrfs and ZFS snapshots on the Backups page. */
 import { useMutation } from "@tanstack/react-query";
 import { Camera, Loader2 } from "lucide-react";
 import { useState, type FormEvent } from "react";
@@ -142,11 +142,14 @@ export function CreateSnapshotDialog({
 
 export function EnableSnapshotsDialog({
   instance,
+  provider,
   open,
   onOpenChange,
   onStarted,
 }: {
   instance: Instance;
+  /** "btrfs" | "zfs" from the snapshot capability */
+  provider: string | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onStarted: (job: Job) => void;
@@ -173,10 +176,18 @@ export function EnableSnapshotsDialog({
               ? "The server is stopped briefly (players are disconnected)."
               : "The server stays stopped during the conversion."}
           </li>
-          <li>
-            The server folder is copied into a new btrfs subvolume using <strong className="text-foreground">reflinks</strong>{" "}
-            (copy-on-write): file data is shared instead of duplicated, so it is fast and needs almost no extra space.
-          </li>
+          {provider === "zfs" ? (
+            <li>
+              The server folder is copied into a new <strong className="text-foreground">ZFS dataset</strong> of its own. This
+              needs free space for a full copy while it runs (unless the pool supports block cloning) and takes longer for big
+              worlds.
+            </li>
+          ) : (
+            <li>
+              The server folder is copied into a new btrfs subvolume using <strong className="text-foreground">reflinks</strong>{" "}
+              (copy-on-write): file data is shared instead of duplicated, so it is fast and needs almost no extra space.
+            </li>
+          )}
           <li>The original folder is swapped out and removed only after the copy succeeded. Files and settings stay the same.</li>
           <li>{running ? "The server is started again." : "The server is left stopped."}</li>
         </ol>
@@ -257,12 +268,14 @@ export function RollbackSnapshotDialog({
 export function DeleteSnapshotDialog({
   instance,
   snapshot,
+  provider,
   open,
   onOpenChange,
   onStarted,
 }: {
   instance: Instance;
   snapshot: Snapshot;
+  provider: string | null;
   open: boolean;
   onOpenChange: (o: boolean) => void;
   onStarted: (job: Job) => void;
@@ -289,6 +302,12 @@ export function DeleteSnapshotDialog({
             The snapshot is removed permanently and cannot be rolled back to anymore. The live server is not affected. Disk
             space is freed only for data that no other snapshot or the live files still share.
           </p>
+          {provider === "zfs" && (
+            <p className="text-xs text-muted-foreground">
+              ZFS refuses to delete a snapshot that snapshots kept from before a rollback are based on; the error names them,
+              delete those first.
+            </p>
+          )}
         </div>
       }
       onConfirm={async () => {

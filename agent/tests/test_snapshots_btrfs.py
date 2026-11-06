@@ -84,3 +84,23 @@ def test_invalid_names_rejected(setup):
     for bad in ["../x", "20260101T000000Z/../../etc", "nope"]:
         with pytest.raises(AgentError):
             snaps.delete(bad)
+
+
+def test_destroy_all_and_in_place_swap(setup):
+    from mcagent.snapshots import is_volume_root, swap_contents
+
+    settings, iid = setup
+    inst = settings.instances_dir / str(iid)
+    ensure_instance_dir(settings, inst)
+    (inst / "a.txt").write_text("old")
+    snaps = BtrfsSnapshots(settings, iid)
+    snaps.create("one")
+    assert is_volume_root(inst) and not is_volume_root(inst.parent)
+    staging = inst / ".mcpanel-restore-1"
+    staging.mkdir()
+    (staging / "b.txt").write_text("new")
+    swap_contents(inst, staging)  # renames stay inside the subvolume (cross-subvolume would be EXDEV)
+    assert sorted(p.name for p in inst.iterdir()) == ["b.txt"] and is_subvolume(inst)
+    result = snaps.destroy_all()
+    assert result["snapshots"] == 1 and result["warnings"] == []
+    assert not snaps.snap_dir.exists()

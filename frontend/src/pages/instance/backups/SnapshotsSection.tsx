@@ -1,4 +1,4 @@
-/** Snapshots section of the Backups page: native btrfs snapshots of the server folder. */
+/** Snapshots section of the Backups page: native btrfs or ZFS snapshots of the server folder. */
 import { Camera, CalendarClock, Info, Layers, Lock, RotateCcw, Trash2, Zap } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
@@ -13,10 +13,12 @@ import type { TrackedJob } from "./backup-utils";
 import { SnapshotKindBadge } from "./SnapshotBits";
 import { CreateSnapshotDialog, DeleteSnapshotDialog, EnableSnapshotsDialog, RollbackSnapshotDialog } from "./SnapshotDialogs";
 import {
+  providerLabel,
   snapshotState,
   snapshotTime,
   snapshotTitle,
   useSnapshots,
+  volumeNoun,
   type Snapshot,
   type SnapshotCapability,
 } from "./snapshot-utils";
@@ -48,9 +50,10 @@ function Unavailable({ cap, nodeName }: { cap: SnapshotCapability; nodeName: str
         {cap.fstype && !cap.reason?.includes(cap.fstype) ? ` (filesystem: ${cap.fstype})` : ""}
       </p>
       <p>
-        Snapshots need the server data directory of node <strong className="text-foreground">{nodeName}</strong> on a btrfs
-        filesystem (for example an Unraid btrfs pool) and btrfs-progs in the agent image. ZFS is not supported yet. The restic
-        backups above work on every filesystem.
+        Snapshots need the server data directory of node <strong className="text-foreground">{nodeName}</strong> on a btrfs or
+        ZFS pool (for example an Unraid cache pool). The agent container also needs extra privileges: see “Snapshots on
+        Unraid” in docs/UNRAID.md (ZFS additionally needs /dev/zfs and a shared bind mount). The restic backups above work on
+        every filesystem.
       </p>
     </Notice>
   );
@@ -113,6 +116,14 @@ function SnapshotTable({
                 <p className="text-sm font-medium [overflow-wrap:anywhere] sm:truncate" title={title}>
                   {title}
                 </p>
+                {s.retained && (
+                  <p
+                    className="text-[10px] text-muted-foreground"
+                    title="ZFS keeps snapshots newer than a rollback target on a separate history dataset; they work like any other snapshot."
+                  >
+                    Kept from before a rollback
+                  </p>
+                )}
                 {s.label.trim() && (
                   <code className="block truncate font-mono text-[10px] text-muted-foreground" title={s.name}>
                     {s.name}
@@ -208,7 +219,7 @@ export function SnapshotsSection({
           )}
         </span>
       }
-      description="Instant btrfs snapshots of the server folder for quick rollbacks. Stored on the same disk as the server."
+      description={`Instant ${cap?.available ? `${providerLabel(cap.provider)} ` : ""}snapshots of the server folder for quick rollbacks. Stored on the same disk as the server.`}
       actions={
         state === "ready" &&
         perms.backup && (
@@ -249,11 +260,19 @@ export function SnapshotsSection({
                 ) : undefined
               }
             >
-              <p>
-                This server's folder is a plain directory on a btrfs filesystem. Enabling snapshots turns it into a btrfs
-                subvolume: the server is stopped briefly and its files are copied with reflinks (shared, not duplicated), then
-                it is started again if it was running.
-              </p>
+              {cap.provider === "zfs" ? (
+                <p>
+                  This server's folder is a plain directory on a ZFS pool. Enabling snapshots turns it into its own ZFS dataset:
+                  the server is stopped, its files are copied into the new dataset (this needs free space for a full copy unless
+                  the pool supports block cloning), then it is started again if it was running.
+                </p>
+              ) : (
+                <p>
+                  This server's folder is a plain directory on a {providerLabel(cap.provider)} filesystem. Enabling snapshots
+                  turns it into a {volumeNoun(cap.provider)}: the server is stopped briefly and its files are copied with
+                  reflinks (shared, not duplicated), then it is started again if it was running.
+                </p>
+              )}
               {!perms.restore && (
                 <p className="flex items-center gap-1.5">
                   <Lock className="size-3" aria-hidden /> Enabling snapshots requires the “Restore backups” permission.
@@ -296,7 +315,14 @@ export function SnapshotsSection({
         <CreateSnapshotDialog key={dialog.key} instance={instance} open onOpenChange={(o) => !o && close()} onStarted={onStarted} />
       )}
       {dialog?.type === "enable" && (
-        <EnableSnapshotsDialog key={dialog.key} instance={instance} open onOpenChange={(o) => !o && close()} onStarted={onStarted} />
+        <EnableSnapshotsDialog
+          key={dialog.key}
+          instance={instance}
+          provider={cap?.provider ?? null}
+          open
+          onOpenChange={(o) => !o && close()}
+          onStarted={onStarted}
+        />
       )}
       {dialog?.type === "rollback" && (
         <RollbackSnapshotDialog
@@ -312,6 +338,7 @@ export function SnapshotsSection({
         <DeleteSnapshotDialog
           key={dialog.key}
           instance={instance}
+          provider={cap?.provider ?? null}
           snapshot={dialog.snapshot}
           open
           onOpenChange={(o) => !o && close()}

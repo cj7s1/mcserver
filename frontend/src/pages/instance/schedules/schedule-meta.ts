@@ -1,6 +1,6 @@
 import type { Schedule } from "@/lib/types";
 
-/** The backend also knows "snapshot" (btrfs filesystem snapshots); lib/types predates it. */
+/** The backend also knows "snapshot" (btrfs/ZFS filesystem snapshots); lib/types predates it. */
 export type ScheduleAction = Schedule["action"] | "snapshot";
 
 /** Default number of scheduled snapshots a snapshot schedule keeps (backend scheduling.execute). */
@@ -19,7 +19,7 @@ export const ACTION_INFO: Record<string, { label: string; description: string }>
   snapshot: {
     label: "Snapshot",
     description:
-      "Takes an instant btrfs snapshot of the server folder (world saving is paused for a moment if the server is running), then deletes the oldest scheduled snapshots beyond the keep count.",
+      "Takes an instant filesystem snapshot (btrfs or ZFS) of the server folder (world saving is paused for a moment if the server is running), then deletes the oldest scheduled snapshots beyond the keep count.",
   },
 };
 

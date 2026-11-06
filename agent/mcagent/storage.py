@@ -23,7 +23,11 @@ def _unescape(field: str) -> str:
 
 
 def mount_for(path: Path) -> dict[str, str] | None:
-    """Find the mount (from /proc/self/mountinfo) that contains ``path``."""
+    """Find the mount (from /proc/self/mountinfo) that contains ``path``.
+
+    ``propagation`` holds the optional fields (``shared:N``, ``master:N``, ...), which tell
+    whether mounts made below this one propagate to other mount namespaces (ZFS needs that).
+    """
     try:
         real = os.path.realpath(path)
         lines = Path("/proc/self/mountinfo").read_text().splitlines()
@@ -45,6 +49,7 @@ def mount_for(path: Path) -> dict[str, str] | None:
                     "fstype": post_fields[0],
                     "source": post_fields[1],
                     "root": root,
+                    "propagation": " ".join(fields[6:]),
                 }
     return best
 
@@ -62,13 +67,11 @@ def describe_path(path: Path) -> dict[str, Any]:
         else:
             snapshot["available"] = True
     elif fstype == "zfs":
+        from .zfs import environment_problem
+
         snapshot["provider"] = "zfs"
-        if not shutil.which("zfs"):
-            snapshot["reason"] = "zfs utilities are not installed in the agent image"
-        elif not os.path.exists("/dev/zfs"):
-            snapshot["reason"] = "/dev/zfs is not available to the agent container"
-        else:
-            snapshot["available"] = True
+        snapshot["reason"] = environment_problem(mount)
+        snapshot["available"] = snapshot["reason"] is None
     elif fstype in ("fuse.shfs", "shfs"):
         snapshot["reason"] = (
             "Unraid user shares (/mnt/user) cannot be snapshotted; point the data directory at a pool path such as /mnt/cache/..."
