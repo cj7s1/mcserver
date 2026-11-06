@@ -51,7 +51,8 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Whitelist / operators / bans / kick (RCON when running, JSON files when stopped)
 - [x] Online players (RCON `list`)
 - [ ] CurseForge mod search for individual mods
-- [x] Hangar plugin source (search/versions/install) — [ ] SpigotMC
+- [x] Hangar plugin source (search/versions/install) incl. its browse tab
+- [x] SpigotMC plugin source via Spiget (search/details/install/update of free jars from Spiget's mirror; premium/external/archives link to SpigotMC) — not yet tried in a browser or on a running Paper server
 
 ## Phase 6 — Multi-user
 - [x] Permission matrix, system roles, custom roles, per-server grants

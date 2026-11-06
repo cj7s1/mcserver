@@ -1,5 +1,5 @@
-/** Mods / plugins manager: installed files, Modrinth browser and jar upload. */
-import { Blocks, Download, Package, Plus, RotateCw, Search, Upload } from "lucide-react";
+/** Mods / plugins manager: installed files, Modrinth browser (+ Hangar and SpigotMC for plugin servers) and jar upload. */
+import { Blocks, Download, Droplets, Package, Plus, RotateCw, Search, Store, Upload } from "lucide-react";
 import { useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { toast } from "sonner";
@@ -15,10 +15,19 @@ import { BrowseContent } from "./content/BrowseContent";
 import { isRunningLike, nouns, useContentInventory, useRestartHint, useRestartServer } from "./content/content-api";
 import type { ContentReport } from "./content/content-report";
 import { Notice, ReportCard, type ContentEnv } from "./content/content-ui";
+import { HangarBrowse } from "./content/HangarBrowse";
 import { InstalledContent } from "./content/InstalledContent";
+import { SpigotBrowse } from "./content/SpigotBrowse";
 import { UploadJar } from "./content/UploadJar";
 
-type TabId = "installed" | "browse" | "upload";
+type TabId = "installed" | "browse" | "hangar" | "spigot" | "upload";
+
+function pickTab(requested: string | null, plugins: boolean, canEdit: boolean): TabId {
+  if (requested === "browse") return requested;
+  if ((requested === "hangar" || requested === "spigot") && plugins) return requested;
+  if (requested === "upload" && canEdit) return requested;
+  return "installed";
+}
 
 function NoContentSupport({ instance }: { instance: Instance }) {
   const { can } = useAuth();
@@ -84,8 +93,8 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
   const inventory = useContentInventory(instance.id);
   const [params, setParams] = useSearchParams();
   const canEdit = can("instance.content");
-  const requested = params.get("tab") as TabId | null;
-  const tab: TabId = requested === "browse" || (requested === "upload" && canEdit) ? requested : "installed";
+  const plugins = instance.content_kind === "plugins";
+  const tab = pickTab(params.get("tab"), plugins, canEdit);
   const [report, setReport] = useState<ContentReport | null>(null);
   const [browse, setBrowse] = useState({ key: 0, query: "" });
   const hint = useRestartHint(instance);
@@ -178,14 +187,24 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as TabId)}>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <TabsList aria-label={`${noun.Many} sections`}>
+          <TabsList aria-label={`${noun.Many} sections`} className="max-w-full justify-start overflow-x-auto">
             <TabsTrigger value="installed" className="px-3">
               <Package /> Installed
               <span className="rounded-full bg-muted-foreground/15 px-1.5 text-[11px] tabular-nums">{inv.summary.total}</span>
             </TabsTrigger>
             <TabsTrigger value="browse" className="px-3">
-              <Search /> Browse
+              <Search /> {plugins ? "Modrinth" : "Browse"}
             </TabsTrigger>
+            {plugins && (
+              <>
+                <TabsTrigger value="hangar" className="px-3">
+                  <Droplets /> Hangar
+                </TabsTrigger>
+                <TabsTrigger value="spigot" className="px-3">
+                  <Store /> SpigotMC
+                </TabsTrigger>
+              </>
+            )}
             {canEdit && (
               <TabsTrigger value="upload" className="px-3">
                 <Upload /> Upload
@@ -221,6 +240,23 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
             <BrowseContent key={browse.key} env={env} initialQuery={browse.query} />
           </Section>
         </TabsContent>
+        {plugins && (
+          <>
+            <TabsContent value="hangar" className="mt-2">
+              <Section title="Find plugins on Hangar" description="PaperMC's plugin repository. Downloads are verified against the SHA-256 Hangar publishes.">
+                <HangarBrowse env={env} />
+              </Section>
+            </TabsContent>
+            <TabsContent value="spigot" className="mt-2">
+              <Section
+                title="Find plugins on SpigotMC"
+                description="Free SpigotMC plugins through the Spiget API. Premium and externally hosted resources link to SpigotMC instead."
+              >
+                <SpigotBrowse env={env} />
+              </Section>
+            </TabsContent>
+          </>
+        )}
         {canEdit && (
           // kept mounted so uploads in progress survive switching tabs
           <TabsContent value="upload" forceMount className="mt-2 data-[state=inactive]:hidden">

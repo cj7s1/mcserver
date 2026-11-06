@@ -9,7 +9,7 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 | Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation, login throttling (10/min), scrypt password hashing. |
 | Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
-| Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-512. |
+| Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
 | Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). |
 
 ## What Docker does **not** protect you from
@@ -26,6 +26,34 @@ Minecraft process inside the container. A malicious mod can:
 Docker namespaces and the dropped capabilities raise the bar, but they are **not** a strong sandbox
 against a determined attacker. Only install mods, plugins and modpacks from sources you trust. Uploaded
 JARs are treated as untrusted and are never executed by the panel itself.
+
+## Plugin downloads without a published hash (SpigotMC)
+
+Modrinth, CurseForge and Hangar publish a hash for every file, and the agent's `/files/fetch` only downloads
+from their CDNs when the file matches that hash. SpigotMC publishes none: the panel reaches it through the
+Spiget API, whose CDN (`cdn.spiget.org`) holds a copy of each free resource's latest file
+(`docs/reference/spiget-api.md`). SpigotMC itself answers automated clients with a Cloudflare browser
+challenge; the panel does not try to get around it.
+
+Two designs were considered:
+
+1. *Panel hashes, agent re-downloads*: the panel downloads the jar, computes its SHA-256 and gives URL + hash to
+   `/files/fetch`. That would add `cdn.spiget.org` to the agent's allow-list, download every jar twice, and the
+   hash would only prove that both downloads matched, not that the file is what the author uploaded. It also
+   leaves a window in which the file the panel inspected and the file the agent stores can differ.
+2. *Panel downloads once and streams the verified bytes to the agent* (**chosen**). The panel fetches only
+   `https://cdn.spiget.org/file/spiget-resources/<id>.jar` (the host and path of Spiget's redirect are checked,
+   redirects are never followed, the size is capped at 200 MB), checks the bytes against the SHA-1 the CDN's
+   storage reports, refuses anything that is not a Bukkit/Paper plugin jar for this server, and uploads exactly
+   those bytes with their SHA-256. The agent commits the file only if the SHA-256 of what it received matches
+   (`PUT /files/upload?sha256=`), with the same path confinement as every other write. The agent's download
+   allow-list is unchanged.
+
+What this does **not** protect against: a malicious or compromised upload on SpigotMC, or a compromised Spiget
+mirror. There is no publisher hash to compare against, so a SpigotMC install has the same trust level as a jar
+you upload yourself. Premium (paid) and externally hosted resources are never downloaded; the panel links to
+SpigotMC instead. The mirror can lag behind SpigotMC, so the panel asks for confirmation when Spiget's copy was
+stored before the latest release and records the version read from the jar's `plugin.yml`.
 
 ## The agent is privileged
 

@@ -17,4 +17,8 @@ urlpatterns = [
     path("hangar/search", views.HangarSearchView.as_view()),
     path("hangar/projects/<str:slug>/versions", views.HangarVersionsView.as_view()),
     path("hangar/install", views.HangarInstallView.as_view()),
+    path("spigot/search", views.SpigotSearchView.as_view()),
+    path("spigot/resources/<int:resource_id>", views.SpigotResourceView.as_view()),
+    path("spigot/install", views.SpigotInstallView.as_view()),
+    path("spigot/update", views.SpigotUpdateView.as_view()),
 ]

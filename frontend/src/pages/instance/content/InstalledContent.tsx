@@ -20,6 +20,7 @@ import {
   contentPath,
   displayTitle,
   modrinthUrl,
+  safeHttpUrl,
   useContentUpdates,
   useInvalidateContent,
   versionTypeClass,
@@ -110,6 +111,18 @@ function SourceBadges({ file, env }: { file: ContentFile; env: ContentEnv }) {
       tip: "Modrinth could not be reached to identify this file.",
       className: "bg-muted text-muted-foreground",
     });
+  if (file.source === "hangar")
+    badges.push({
+      label: "Hangar",
+      tip: `Installed from Hangar${file.hangar?.version ? ` (version ${file.hangar.version})` : ""}. Hangar has no update check here; look for newer versions in the Hangar tab.`,
+      className: "bg-sky-500/10 text-sky-700 dark:text-sky-300",
+    });
+  if (file.source === "spigot")
+    badges.push({
+      label: "SpigotMC",
+      tip: `Installed from SpigotMC via Spiget${file.spigot?.version ? ` (version ${file.spigot.version})` : ""}. Open it in the SpigotMC tab to check Spiget's copy for an update.`,
+      className: "bg-orange-500/10 text-orange-700 dark:text-orange-300",
+    });
   if (file.compatibility && !file.compatibility.loader)
     badges.push({
       label: `Not for ${env.platform}`,
@@ -176,7 +189,7 @@ function InstalledRow({
     onError: (err) => toast.error(errorMessage(err)),
   });
   const mutable = env.canEdit && !env.locked;
-  const link = modrinthUrl(file.project);
+  const link = file.source === "spigot" ? safeHttpUrl(file.spigot?.url) : modrinthUrl(file.project);
   const enabled = toggle.isPending ? !!toggle.variables : file.enabled;
 
   const versionEl = (
@@ -264,7 +277,7 @@ function InstalledRow({
         <div className="flex items-center justify-end gap-0.5">
           {link && (
             <Button asChild variant="ghost" size="icon-sm">
-              <a href={link} target="_blank" rel="noopener noreferrer" aria-label={`Open ${title} on Modrinth`}>
+              <a href={link} target="_blank" rel="noopener noreferrer" aria-label={`Open ${title} on ${file.source === "spigot" ? "SpigotMC" : "Modrinth"}`}>
                 <ExternalLink />
               </a>
             </Button>
@@ -286,7 +299,9 @@ function InstalledRow({
                   <p>
                     {file.source === "modrinth"
                       ? `It can be reinstalled from Modrinth later.`
-                      : `This file is not on Modrinth, so it can only be recovered from a backup.`}{" "}
+                      : file.source === "spigot" || file.source === "hangar"
+                        ? `It can be installed again from the ${file.source === "spigot" ? "SpigotMC" : "Hangar"} tab, possibly in a newer version.`
+                        : `This file is not on Modrinth, so it can only be recovered from a backup.`}{" "}
                     To keep the file but stop loading it, disable it instead. Worlds may lose blocks or items this{" "}
                     {env.noun.one} added.
                   </p>

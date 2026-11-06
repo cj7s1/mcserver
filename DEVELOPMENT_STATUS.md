@@ -1,6 +1,6 @@
 # Development status
 
-_Last updated: 2026-11-03, end of session 1 (wrap-up at the user's request)._ Keep this file honest. Implemented,
+_Last updated: 2026-11-06 (SpigotMC plugin source); before that 2026-11-03, end of session 1._ Keep this file honest. Implemented,
 unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
 **different** levels, and nothing has been validated on Unraid yet.
 
@@ -11,10 +11,10 @@ and the worker+beat. All tests pass on `main` of this branch:
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **431 passed** (incl. OpenAPI fail-on-warn, real-TLS node tests) |
-| `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s) |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 12 tests |
+| `backend: uv run pytest -q -m "not integration"` | **476 passed** on 2026-11-06 with the SpigotMC source (was 431; incl. OpenAPI fail-on-warn, real-TLS node tests) |
+| `backend: … -m integration` (real agent + Docker) | passed: vanilla lifecycle + backup/restore (78.6 s); not re-run for SpigotMC |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **321 passed** (btrfs, restic, real HTTPS listener); 2026-11-06 without the btrfs mount: 325 passed, 3 skipped |
+| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 15 tests (2026-11-06) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack |
 
@@ -37,6 +37,7 @@ and the worker+beat. All tests pass on `main` of this branch:
 | Webhook notifications (test + real backup event) | local receiver |
 | Modrinth content manager: LuckPerms on Paper, Ledger + deps on Fabric, update/toggle/delete | live Modrinth |
 | Hangar plugin install (Chunky 1.4.40, SHA-256 verified) loaded by Paper 1.21.1 | live Hangar |
+| SpigotMC source (2026-11-06): `spigot_source.install/update/details` against **live** Spiget + Modrinth and a real (throwaway) agent process: LuckPerms 5.5.71 (mirror current) and Chunky 1.5.3 (mirror outdated, installed only after confirmation) landed with the right SHA-256; premium, external and `.zip` resources refused; re-install refused; update reports up to date; a wrong SHA-256 is refused by the agent and leaves no file | **not** through the HTTP API/UI, **not** loaded by a running Paper server |
 | World export as zip (`/files/archive?path=world`) | zip validated |
 | Server migration between nodes (Fabric Test, 145 MB, local → btrfs-node) | started on the target with its world |
 | TLS-pinned remote node (btrfs-node over HTTPS): wrong fingerprint refused before any request; start, `wss` console + RCON, btrfs snapshot, stop | |
@@ -63,6 +64,25 @@ Unraid hardware.
   checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
   stopped to save credits.
 * CurseForge **with** an API key (keyless path verified). GitHub Actions CI on GitHub. ZFS snapshots.
+* SpigotMC tab, SpigotMC dialog and the Hangar browse tab (the Hangar install dialog existed but no tab
+  rendered it until now): tsc/lint/build/vitest only, not opened in a browser. The SpigotMC endpoints are
+  covered by 45 mocked backend tests plus the live adapter/agent run above, not by an API-level live run.
+
+### SpigotMC realities (verified live, see `docs/reference/spiget-api.md`)
+
+* Only **Spiget's mirror of the latest file** can be installed: per-version downloads go to
+  `www.spigotmc.org`, which serves automated clients a Cloudflare challenge. Older versions are links only.
+* The mirror can lag (Chunky: mirror 1.5.3, SpigotMC 1.5.66). Detected from the B2 upload timestamp vs the
+  latest release date; the user must confirm, and the version recorded is the jar's `plugin.yml` version.
+* No publisher hash exists. The panel downloads once (cdn.spiget.org only, no redirects), checks the CDN's
+  SHA-1, inspects the jar (Bukkit/Paper only, Folia needs `folia-supported`), and streams it to the agent with
+  a SHA-256 the agent verifies (`PUT /files/upload?sha256=`). The agent download allow-list is unchanged.
+  An older agent ignores `sha256`; the install then reports that the node did not re-check the hash.
+* Tested Minecraft versions are author-declared per resource ("1.21"), so they only produce a warning that
+  must be confirmed, never a guarantee.
+* Jars that are byte-identical to a Modrinth release (LuckPerms, Chunky) are listed as Modrinth files in the
+  inventory, so Modrinth's update check handles them; other SpigotMC installs are labelled "SpigotMC" and
+  updated from the SpigotMC dialog.
 
 ## Next recommended tasks (in order)
 
@@ -71,7 +91,8 @@ Unraid hardware.
    screen (API exists), job "Mark as failed" button (`POST /jobs/<id>/abandon`), import-existing-server
    wizard mode (`POST /instances/<id>/import` exists; Files upload + extract also works).
 3. Validate on Unraid; then (only when the user asks) the Phase 10 security audit.
-4. Roadmap: ZFS snapshots, SpigotMC source, CurseForge per-mod search (needs a key).
+4. Roadmap: ZFS snapshots, CurseForge per-mod search (needs a key). SpigotMC: install one plugin through the
+   UI on a running Paper server and check it loads (only the adapter + agent path was run live).
 
 ## Environment notes (cloud sandbox)
 

@@ -638,19 +638,26 @@ async def files_upload(
     instance_id: UUID,
     path: str,
     overwrite: bool = False,
+    sha256: str | None = Query(default=None, pattern="^[0-9a-fA-F]{64}$"),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
+    """Store the request body at ``path``. With ``sha256`` the file is only committed when the
+    received bytes match it (the panel sends the hash of a file it downloaded and inspected)."""
     root = _root(settings, instance_id)
     writer = await run_in_threadpool(root.open_writer, path, overwrite=overwrite, max_bytes=UPLOAD_LIMIT)
+    digest = hashlib.sha256()
     try:
         async for chunk in request.stream():
             if chunk:
+                digest.update(chunk)
                 await run_in_threadpool(writer.write, chunk)
+        if sha256 and digest.hexdigest() != sha256.lower():
+            raise AgentError("Uploaded file failed SHA-256 verification", "hash_mismatch", 422)
         size = await run_in_threadpool(writer.commit)
     except BaseException:
         await run_in_threadpool(writer.abort)
         raise
-    return {"path": path, "size": size}
+    return {"path": path, "size": size, "sha256": digest.hexdigest()}
 
 
 @app.post("/v1/instances/{instance_id}/files/mkdir", dependencies=[Depends(require_token)])

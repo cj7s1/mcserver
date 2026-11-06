@@ -580,10 +580,20 @@ class FakeAgent:
         data = self._read(str(instance_id), path)
         return iter([data]), len(data), None
 
-    def upload(self, instance_id: Any, path: str, chunks: Iterable[bytes] | bytes, overwrite: bool = False) -> dict[str, Any]:
+    def upload(
+        self,
+        instance_id: Any,
+        path: str,
+        chunks: Iterable[bytes] | bytes,
+        overwrite: bool = False,
+        sha256: str | None = None,
+    ) -> dict[str, Any]:
         data = chunks if isinstance(chunks, bytes) else b"".join(chunks)
+        digest = hashlib.sha256(data).hexdigest()
+        if sha256 and digest != sha256.lower():
+            raise self._err("Uploaded file failed SHA-256 verification", "hash_mismatch", 422)
         size = self._write(str(instance_id), path, data, overwrite=overwrite)
-        return {"path": path, "size": size}
+        return {"path": path, "size": size, "sha256": digest}
 
     def mkdir(self, instance_id: Any, path: str, parents: bool = False) -> dict[str, Any]:
         root = self._root(str(instance_id))
