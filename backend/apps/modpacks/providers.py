@@ -53,7 +53,10 @@ def _request(method: str, url: str, *, headers: dict[str, str] | None = None, pr
         raise UpstreamError(f"{provider} returned HTTP {resp.status_code}", code="provider_error")
     if not resp.content:
         return None
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise UpstreamError(f"{provider} returned a response that is not JSON", code="provider_bad_response") from exc
 
 
 def _cached(key: str, ttl: int, fn: Any) -> Any:
@@ -325,7 +328,12 @@ class CurseForge:
                 "Browsing CurseForge needs an API key. Add one in System settings, or deploy by entering a pack URL.",
                 code="curseforge_key_missing",
             )
-        return _request("GET", f"{CURSEFORGE_API}{path}", params=params, headers={"x-api-key": key}, provider="CurseForge")
+        data = _request("GET", f"{CURSEFORGE_API}{path}", params=params, headers={"x-api-key": key}, provider="CurseForge")
+        # Every CurseForge v1 response is wrapped in {"data": ...}; anything else (e.g. an empty body during
+        # an outage) must not surface as a KeyError/TypeError (HTTP 500) in the callers.
+        if not isinstance(data, dict) or "data" not in data:
+            raise UpstreamError("CurseForge returned an empty or unexpected response", code="provider_bad_response")
+        return data
 
     @staticmethod
     def _project(m: dict[str, Any]) -> dict[str, Any]:
