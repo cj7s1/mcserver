@@ -124,6 +124,11 @@ class WriteTextRequest(BaseModel):
     create_only: bool = False
 
 
+class RetireRequest(BaseModel):
+    # how long the container must have been stopped (by the Docker host's clock) to be retired
+    settle_seconds: float = Field(default=10.0, ge=0, le=3600)
+
+
 class DeleteDataRequest(BaseModel):
     confirm: UUID  # must equal the instance id, a deliberate second key
 

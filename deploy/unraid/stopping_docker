@@ -11,9 +11,17 @@
 #   1. Asks the panel to stop all running servers (python manage.py host_shutdown): the world
 #      is saved first, every server gets up to 45 s, and the panel marks the servers so that it
 #      starts them again after the next boot, one per minute.
-#   2. If the panel container is not running or the command fails: plain "docker stop" for
-#      every running container with the label io.mcpanel.managed=true, in parallel, with what
-#      is left of the time. Servers the panel did not mark stay stopped after the next boot.
+#   2. If the panel container runs but the command fails, or the panel does not know the command
+#      (an older MCPanel release, e.g. after a rollback): nothing more. The servers that still
+#      run are stopped by Docker itself a moment later, with Docker's own timeout, and because
+#      they were running when Docker went down, Docker starts them again at the next boot.
+#   3. Only if no panel container runs at all: plain "docker stop" for every running container
+#      with the label io.mcpanel.managed=true, in parallel, with up to 45 s each. Docker counts
+#      that as a manual stop and nobody marks these servers, so THEY STAY STOPPED after the next
+#      boot until they are started in the panel.
+#
+# A plain "docker stop" is never used while the panel runs: it would leave every server stopped
+# after the next boot that the panel did not mark.
 #
 # It finishes within 60 s (a watchdog ends it after 70 s whatever happens) and always exits 0,
 # so it can never block the shutdown. Everything is logged to the syslog with the tag
@@ -23,7 +31,10 @@ set -u
 PATH="${PATH:+${PATH}:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
-PROJECT="${MCPANEL_COMPOSE_PROJECT:-mcpanel}" # Compose project of the panel stack
+# Compose project of the panel stack. Unraid passes no environment to this hook: to use another
+# project name, install the hook with "install-hook.sh install --project <name>", which writes
+# the name into the line below of the installed copy.
+PROJECT="${MCPANEL_COMPOSE_PROJECT:-mcpanel}"
 STOP_SECONDS=45                               # what a server gets to stop
 COMMAND_LIMIT=60                              # hard limit for the panel command
 BUDGET=60                                     # the hook as a whole
@@ -53,6 +64,7 @@ running_servers() {
     timeout 10 docker ps --filter "label=io.mcpanel.managed=true" --format '{{.ID}} {{.Names}}' 2>/dev/null
 }
 
+# Only for "no panel container is running": see the header for what it costs.
 fallback() {
     local servers left seconds count id name
     servers="$(running_servers)"
@@ -72,7 +84,7 @@ fallback() {
         return 0
     fi
     log "fallback: docker stop -t ${seconds} for ${count} running server(s), without the panel"
-    log "fallback: servers the panel did not mark stay stopped after the next boot; start them in the panel"
+    log "fallback: these servers stay stopped after the next boot (nobody marked them); start them in the panel"
     while read -r id name; do
         [ -n "${id}" ] || continue
         (
@@ -88,8 +100,21 @@ fallback() {
     return 0
 }
 
+# The panel runs but did not stop the servers: say what happens to them now.
+left_to_docker() {
+    local servers count
+    servers="$(running_servers)"
+    if [ -z "${servers}" ]; then
+        log "no Minecraft server container is running any more"
+        return 0
+    fi
+    count="$(printf '%s\n' "${servers}" | wc -l)"
+    log "${count} running server(s) are left to Docker's own stop (its timeout, no save first); Docker starts them again at the next boot"
+    return 0
+}
+
 main() {
-    local panel rc
+    local panel rc unknown status
     if ! command -v docker >/dev/null 2>&1; then
         log "docker is not installed: nothing to do"
         return 0
@@ -101,21 +126,41 @@ main() {
     panel="$(timeout 10 docker ps -q \
         --filter "label=com.docker.compose.project=${PROJECT}" \
         --filter "label=com.docker.compose.service=panel" 2>/dev/null | head -n 1)"
-    if [ -n "${panel}" ]; then
-        log "Docker is about to stop: asking the panel to stop the running servers (up to ${STOP_SECONDS}s each)"
-        timeout -k 5 "${COMMAND_LIMIT}" docker exec "${panel}" \
-            python manage.py host_shutdown --timeout "${STOP_SECONDS}" 2>&1 |
-            while IFS= read -r line; do log "${line}"; done
-        rc="${PIPESTATUS[0]}"
-        if [ "${rc}" -eq 0 ]; then
-            log "finished after ${SECONDS}s"
-            return 0
-        fi
-        log "the panel command failed (exit ${rc}) after ${SECONDS}s"
-    else
+    if [ -z "${panel}" ]; then
         log "the panel container (project ${PROJECT}, service panel) is not running"
+        fallback
+        return 0
     fi
-    fallback
+    log "Docker is about to stop: asking the panel to stop the running servers (up to ${STOP_SECONDS}s each)"
+    # The reader ends with status 1 when the panel said that it has no such command.
+    timeout -k 5 "${COMMAND_LIMIT}" docker exec "${panel}" \
+        python manage.py host_shutdown --timeout "${STOP_SECONDS}" 2>&1 |
+        {
+            unknown=0
+            while IFS= read -r line; do
+                log "${line}"
+                case "${line}" in
+                    *"Unknown command: 'host_shutdown'"*) unknown=1 ;;
+                esac
+            done
+            exit "${unknown}"
+        }
+    status=("${PIPESTATUS[@]}")
+    rc="${status[0]}"
+    unknown="${status[1]}"
+    if [ "${rc}" -eq 0 ]; then
+        log "finished after ${SECONDS}s"
+        return 0
+    fi
+    if [ "${unknown}" -ne 0 ]; then
+        log "this panel has no host_shutdown command (an MCPanel release from before this hook): nothing was stopped by the panel"
+        log "while that release is in use, take the hook out: install-hook.sh remove, and delete its entry at boot"
+    else
+        log "the panel command failed (exit ${rc}) after ${SECONDS}s"
+    fi
+    # No "docker stop" here: it would keep every server stopped after the next boot that the
+    # panel did not mark, and the panel is the only one that could start it again.
+    left_to_docker
     return 0
 }
 

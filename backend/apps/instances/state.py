@@ -33,6 +33,7 @@ JOB_STATUS = {
 }
 
 STARTUP_GRACE = timedelta(minutes=10)
+OOM_DETAIL = "Killed: out of memory. Increase the memory allocation."
 CRASH_LOOP_RESTARTS = 3
 
 
@@ -64,7 +65,17 @@ def compute(
         return JOB_STATUS[job_kind], ""
 
     if not container or not container.get("exists"):
-        if instance.installed_at is None and instance.applied_revision == 0:
+        # A stopped server has no container: the agent kept a record of its last run
+        # (reconcile.maybe_retire). That run is over and was meant to end, so only what still
+        # needs attention is carried over from it: the out-of-memory kill.
+        last_run = (container or {}).get("last_run") or None
+        if last_run:
+            if last_run.get("oom_killed"):
+                return Status.FAILED, OOM_DETAIL
+            return Status.STOPPED, ""
+        if instance.installed_at is None:
+            # never installed, whatever was applied: a container that was created and removed
+            # again without a start (create without starting, clone) does not change that
             return Status.CREATED, "Not installed yet"
         return Status.STOPPED, "No container (will be created on start)"
 
@@ -92,9 +103,10 @@ def compute(
         return Status.UNHEALTHY, "Server process is running but not answering status pings"
     if state in ("created", "exited", "dead"):
         if container.get("oom_killed"):
-            return Status.FAILED, "Killed: out of memory. Increase the memory allocation."
-        if instance.resume_after_boot and state == "exited":
+            return Status.FAILED, OOM_DETAIL
+        if instance.resume_after_boot and instance.desired_state == "running" and state == "exited":
             # stopped by `manage.py host_shutdown`; scheduling.resume_flagged_servers starts it again
+            # (only while it is still meant to run, and it drops a mark it will not act on)
             unclean = "" if exit_code in (0, None) else f" (exit code {exit_code}: not a clean stop)"
             return Status.STOPPED, f"Stopped because the host was shutting down{unclean}; it is started again automatically"
         if instance.desired_state == "running" and exit_code not in (0, None):

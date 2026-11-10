@@ -553,6 +553,101 @@ def test_undeletable_snapshot_does_not_block_deleting_the_server(env, api, monke
     assert (env.snaps.snap_dir / f"{name}.json").is_file()  # still labelled
 
 
+def test_destroy_all_does_not_follow_a_symlinked_snapshot_folder(env):
+    """The snapshot folder of the server is a link to somewhere else (planted, or left by a manual
+    move): deleting the server must not delete what the link points to."""
+    elsewhere = env.settings.data_root / "elsewhere"
+    victim = elsewhere / "20260101T000000Z-not-ours"  # named like a snapshot
+    victim.mkdir(parents=True)
+    (victim / "level.dat").write_text("precious")
+    (elsewhere / "20260101T000000Z-not-ours.json").write_text("{}")
+    (elsewhere / "notes.txt").write_text("keep")
+    env.snaps.snap_dir.parent.mkdir(parents=True, exist_ok=True)
+    env.snaps.snap_dir.symlink_to(elsewhere, target_is_directory=True)
+    try:
+        result = env.snaps.destroy_all()
+        assert result["destroyed"] == [] and result["snapshots"] == 0
+        assert (victim / "level.dat").read_text() == "precious"
+        assert sorted(p.name for p in elsewhere.iterdir()) == [
+            "20260101T000000Z-not-ours",
+            "20260101T000000Z-not-ours.json",
+            "notes.txt",
+        ]
+        assert env.snaps.snap_dir.is_symlink()  # the link itself is not ours to judge
+    finally:
+        env.snaps.snap_dir.unlink(missing_ok=True)
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+# -- removing a tree file by file -----------------------------------------------------------
+def _tree(tmp_path: Path) -> Path:
+    tree = tmp_path / "doomed"
+    (tree / "world").mkdir(parents=True)
+    (tree / "world" / "level.dat").write_text("x")
+    (tree / "notes.txt").write_text("x")
+    return tree
+
+
+def test_remove_files_removes_a_tree(tmp_path):
+    tree = _tree(tmp_path)
+    snapshots._remove_files(tree)
+    assert not tree.exists()
+
+
+def test_remove_files_reports_a_tree_that_is_still_there(tmp_path, monkeypatch):
+    """shutil.rmtree goes on after an entry it cannot remove and returns normally: a subvolume that
+    is still there afterwards must be an error, or a delete that freed nothing reads as done."""
+    tree = _tree(tmp_path)
+    real_rmtree = shutil.rmtree
+
+    def partly(path, onexc=None, **_kwargs):
+        (Path(path) / "notes.txt").unlink()
+        onexc(os.unlink, str(Path(path) / "world" / "level.dat"), PermissionError(13, "Permission denied"))
+        onexc(os.rmdir, str(Path(path) / "world"), OSError(39, "Directory not empty"))
+        onexc(os.rmdir, str(path), OSError(39, "Directory not empty"))
+
+    with monkeypatch.context() as m:
+        m.setattr(snapshots.shutil, "rmtree", partly)
+        with pytest.raises(OSError) as raised:
+            snapshots._remove_files(tree)
+        message = str(raised.value)
+        assert "Permission denied" in message and "(and 2 more)" in message
+        assert (tree / "world" / "level.dat").exists()
+
+        # nothing reported and nothing removed (another kind of refusal): still not "done"
+        m.setattr(snapshots.shutil, "rmtree", lambda path, onexc=None, **_kwargs: None)
+        with pytest.raises(OSError, match="is still there"):
+            snapshots._remove_files(tree)
+
+        # a file that vanished meanwhile (another thread removing the same tree) is no error
+        def raced(path, onexc=None, **_kwargs):
+            onexc(os.unlink, str(Path(path) / "notes.txt"), FileNotFoundError(2, "No such file or directory"))
+            real_rmtree(path)
+
+        m.setattr(snapshots.shutil, "rmtree", raced)
+        snapshots._remove_files(tree)
+    assert not tree.exists()
+
+
+def test_file_by_file_delete_that_leaves_files_is_not_reported_as_deleted(env, monkeypatch):
+    """Through the callers: a subvolume the kernel will not delete and whose files cannot all be
+    removed is an error from delete_subvolume, and remove_tree says that it is still there."""
+    writable = env.settings.instances_dir / "staging.mcpanel-restore-9"
+    BtrfsSnapshots.create_subvolume(writable)
+    (writable / "f").write_text("x")
+    with monkeypatch.context() as m:
+        m.setattr(snapshots, "_native_delete", lambda _path: EPERM)
+        m.setattr(snapshots, "_make_writable", lambda _path: None)
+        m.setattr(snapshots.shutil, "rmtree", lambda path, onexc=None, **_kwargs: None)
+        with pytest.raises(AgentError) as raised:
+            snapshots.delete_subvolume(writable)
+        assert raised.value.code == "btrfs_failed" and "file by file failed too" in str(raised.value)
+        assert snapshots._discard(writable) is not None
+    assert writable.is_dir()
+    snapshots.remove_tree(writable)
+    assert not writable.exists()
+
+
 # -- other callers of the delete helper -----------------------------------------------------
 def test_remove_tree_removes_subvolumes_snapshots_and_plain_trees(env):
     name = env.snaps.create("ro")["name"]

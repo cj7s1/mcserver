@@ -464,7 +464,15 @@ class InstanceLogsView(APIView):
             tail = max(1, min(int(request.query_params.get("tail", "500")), 20000))
         except ValueError:
             tail = 500
-        return Response({"lines": AgentClient(instance.node).logs(instance.id, tail=tail)})
+        try:
+            lines = AgentClient(instance.node).logs(instance.id, tail=tail)
+        except ApiError as exc:
+            # A server that never ran has neither a container nor a record of a last run: its
+            # console history is empty, not an error.
+            if exc.error_code != "no_container":
+                raise
+            lines = []
+        return Response({"lines": lines})
 
 
 class CommandSerializer(serializers.Serializer):

@@ -5,15 +5,27 @@
 #   $EDITOR .env                           # data dir, bind address, hosts, UID/GID
 #   docker compose up -d --build
 #
-# Services: postgres, redis, panel (web UI + API + WebSockets), worker (Celery jobs and
-# periodic tasks), worker-periodic (Celery, only the short periodic tasks: reconcile,
-# schedules, watchdog, metrics), beat (Celery scheduler, exactly one), agent (the ONLY
-# service with the Docker socket).
+# Upgrades: ./scripts/upgrade.sh status | dry-run | run | rollback (DEPLOYMENT.md, "Upgrading").
+#
+# Services (three containers):
+#   postgres  the database
+#   agent     the ONLY service with the Docker socket; creates the Minecraft containers
+#   panel     everything else, as processes of one container under a small supervisor
+#             (backend/container/supervise.py): redis (Unix socket only, no persistence),
+#             web (UI + API + WebSockets), worker (Celery: jobs, and periodic tasks when a
+#             slot is free), periodic (Celery, 2 slots, only the short periodic tasks:
+#             reconcile, schedules, watchdog, metrics, so they keep running while long jobs
+#             fill every worker slot) and beat (Celery scheduler).
+#             `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status`
+#             shows them; every log line of `docker compose logs panel` starts with the
+#             name of the process that wrote it.
+# Optional fourth container: redis, only with the profile `external-redis` (see the
+# service below). It is the way back if Redis inside the panel container ever misbehaves.
 #
 # Networks:
-#   internal           panel, worker, beat, agent, postgres, redis. Not marked
-#                      `internal: true` because the panel and worker need outbound
-#                      HTTPS to Mojang/Modrinth/CurseForge/FTB.
+#   internal           panel, agent, postgres (and redis with the profile). Not marked
+#                      `internal: true` because the panel needs outbound HTTPS to
+#                      Mojang/Modrinth/CurseForge/FTB.
 #   mcpanel_instances  shared by the agent and every Minecraft container it creates,
 #                      so the agent reaches RCON (25575) via the container IP without
 #                      publishing it. Postgres/Redis/panel are NOT on this network.
@@ -39,7 +51,16 @@ x-logging: &logging
     max-size: "10m"
     max-file: "5"
 
-# Environment shared by panel, worker and beat (see backend/mcpanel/settings.py).
+# The panel container carries the log of five processes, so it gets twice the space
+# (5 x 20 MB). The periodic worker and the scheduler log at WARNING and no process logs a
+# line per tick, which leaves requests, jobs and warnings: months of history at home use.
+x-panel-logging: &panel-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+# Environment of the panel container (see backend/mcpanel/settings.py).
 x-panel-env: &panel-env
   TZ: ${TZ:-UTC}
   MCPANEL_SECRET_KEY: ${MCPANEL_SECRET_KEY:?MCPANEL_SECRET_KEY is not set - run deploy/scripts/generate-secrets.sh}
@@ -51,7 +72,11 @@ x-panel-env: &panel-env
   MCPANEL_AGENT_TIMEOUT: ${MCPANEL_AGENT_TIMEOUT:-}
   MCPANEL_AGENT_TLS_FINGERPRINT: ${MCPANEL_AGENT_TLS_FINGERPRINT:-}
   MCPANEL_AGENT_CA_BUNDLE: ${MCPANEL_AGENT_CA_BUNDLE:-}
-  MCPANEL_REDIS_URL: redis://redis:6379/0
+  # Redis runs inside the panel container and is reached through a Unix socket: it has no
+  # network listener. Both variables are empty in a normal .env. With the `external-redis`
+  # profile set MCPANEL_REDIS_URL=redis://redis:6379/0 (the broker URL follows it).
+  MCPANEL_REDIS_URL: ${MCPANEL_REDIS_URL:-unix:///run/mcpanel/redis.sock?db=0}
+  MCPANEL_CELERY_BROKER_URL: ${MCPANEL_CELERY_BROKER_URL:-${MCPANEL_REDIS_URL:-redis+socket:///run/mcpanel/redis.sock}}
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
   POSTGRES_DB: ${POSTGRES_DB:-mcpanel}
@@ -74,13 +99,16 @@ x-panel-env: &panel-env
   MCPANEL_LOG_LEVEL: ${MCPANEL_LOG_LEVEL:-INFO}
   MCPANEL_LOG_JSON: ${MCPANEL_LOG_JSON:-true}
   MCPANEL_WORKER_CONCURRENCY: ${MCPANEL_WORKER_CONCURRENCY:-}
+  # Remove the container of a server that is stopped (empty or true = on; false keeps exited containers).
+  MCPANEL_RETIRE_STOPPED_CONTAINERS: ${MCPANEL_RETIRE_STOPPED_CONTAINERS:-}
   # Job reliability tuning; empty = the defaults in backend/mcpanel/settings.py.
   MCPANEL_CELERY_VISIBILITY_TIMEOUT: ${MCPANEL_CELERY_VISIBILITY_TIMEOUT:-}
   MCPANEL_JOB_HEARTBEAT_SECONDS: ${MCPANEL_JOB_HEARTBEAT_SECONDS:-}
   MCPANEL_JOB_STALE_SECONDS: ${MCPANEL_JOB_STALE_SECONDS:-}
   MCPANEL_JOB_MAX_RUNTIME_HOURS: ${MCPANEL_JOB_MAX_RUNTIME_HOURS:-}
 
-# The panel processes run as UID 10001 and need no Linux capabilities.
+# The panel processes run as UID 10001 and need no Linux capabilities. `init: true` puts
+# tini in front of the supervisor (signal forwarding, reaping).
 x-panel-hardening: &panel-hardening
   init: true
   cap_drop: [ALL]
@@ -88,8 +116,9 @@ x-panel-hardening: &panel-hardening
 
 services:
   postgres:
-    # Mutable tags on purpose, so `docker compose pull` brings security fixes (DEPLOYMENT.md,
-    # "Upgrading"). To pin an exact build use postgres:16-alpine@sha256:<digest> instead.
+    # Mutable tag on purpose, so `./scripts/upgrade.sh run` (which pulls it) brings security
+    # fixes (DEPLOYMENT.md, "Upgrading"). To pin an exact build use
+    # postgres:16-alpine@sha256:<digest> instead.
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
@@ -112,7 +141,14 @@ services:
       start_period: 60s
     logging: *logging
 
+  # NOT started by default. Redis normally runs inside the panel container. To run it as its
+  # own container instead (as before the single panel container), put these two lines into
+  # .env and run `./scripts/upgrade.sh run --no-build`:
+  #   COMPOSE_PROFILES=external-redis
+  #   MCPANEL_REDIS_URL=redis://redis:6379/0
+  # Remove them again (and run the same command) to go back to the default.
   redis:
+    profiles: ["external-redis"]
     image: redis:7-alpine
     restart: unless-stopped
     # Cache, Channels layer and Celery broker. RDB snapshots keep queued tasks across
@@ -134,6 +170,9 @@ services:
       context: ..
       dockerfile: agent/Dockerfile
     image: mcpanel/agent:${MCPANEL_IMAGE_TAG:-local}
+    # Built here, never pulled: `docker compose pull` must not fetch an image of this name
+    # from a registry (it would get the Docker socket).
+    pull_policy: never
     restart: unless-stopped
     init: true
     # Root inside the container is required (Docker socket, chown of instance data);
@@ -169,97 +208,46 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
+      args:
+        # set by deploy/scripts/upgrade.sh; the image label io.mcpanel.revision records it
+        MCPANEL_REVISION: ${MCPANEL_REVISION:-unknown}
     image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
-    command: ["web"]
+    # Built here, never pulled (it receives every secret of the stack).
+    pull_policy: never
+    # One container for the web server, both Celery workers, the scheduler and Redis
+    # (backend/container/entrypoint.sh, supervise.py). Migrations run before they start.
+    command: ["all"]
     restart: unless-stopped
     <<: *panel-hardening
     environment: *panel-env
     ports:
       - "${MCPANEL_BIND:-127.0.0.1}:${MCPANEL_PORT:-8080}:8000"
     networks: [internal]
+    # The supervisor's status file and the Redis socket: memory only, this user only.
+    tmpfs:
+      - /run/mcpanel:uid=10001,gid=10001,mode=0700,size=16m
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
       agent:
         condition: service_started
-    # Health check: /api/health (database + cache), defined in backend/Dockerfile.
-    logging: *logging
-
-  worker:
-    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
-    command: ["worker"]
-    restart: unless-stopped
-    <<: *panel-hardening
-    environment: *panel-env
-    networks: [internal]
-    depends_on:
-      # The web container applies migrations; start jobs only after it is healthy.
-      panel:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+    # Healthy = /api/health (database + cache) answers, every process of the container
+    # runs, both workers answered a ping in the last 2 minutes and the reconcile tick ran
+    # in the last 3 minutes. `docker inspect -f '{{json .State.Health.Log}}' <container>`
+    # names the part that is down.
     healthcheck:
-      test: ["CMD-SHELL", "celery -A mcpanel inspect ping --destination \"celery@$${HOSTNAME}\" --timeout 10 > /dev/null"]
-      interval: 60s
-      timeout: 30s
+      test: ["CMD", "python", "/usr/local/bin/mcpanel-healthcheck.py", "all"]
+      interval: 30s
+      timeout: 15s
       retries: 3
-      start_period: 60s
-    # Celery finishes running tasks on SIGTERM (warm shutdown). Jobs cut off by a
-    # hard kill are marked failed by the job runner instead of being re-run blindly.
+      start_period: 120s
+    # On a stop the job worker gets up to 110 s to finish the running jobs (Celery warm
+    # shutdown); the supervisor stops everything else in order and is done after 116 s at
+    # the latest. Jobs cut off by a hard kill are marked failed by the job runner instead of
+    # being re-run blindly. Unraid's own Stop/Restart buttons give 10 s only: use them when
+    # no job is running, or `docker compose restart panel`.
     stop_grace_period: 2m
-    logging: *logging
-
-  # Second worker that consumes ONLY the "periodic" queue (beat ticks: reconcile, schedules,
-  # job watchdog, metrics, modpack update checks). The main worker above consumes both queues;
-  # while long jobs (modpack installs, big backups) occupy all of its slots, server status,
-  # schedules and the watchdog keep running here. It never runs jobs.
-  worker-periodic:
-    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
-    command: ["worker", "-Q", "periodic", "-c", "2", "-n", "periodic@%h"]
-    restart: unless-stopped
-    <<: *panel-hardening
-    environment:
-      <<: *panel-env
-      # fixed concurrency (-c 2 above): the main worker's MCPANEL_WORKER_CONCURRENCY must not apply
-      MCPANEL_WORKER_CONCURRENCY: ""
-    networks: [internal]
-    depends_on:
-      panel:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A mcpanel inspect ping --destination \"periodic@$${HOSTNAME}\" --timeout 10 > /dev/null"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 60s
-    stop_grace_period: 1m
-    logging: *logging
-
-  beat:
-    image: mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}
-    command: ["beat"]
-    restart: unless-stopped
-    <<: *panel-hardening
-    environment: *panel-env
-    networks: [internal]
-    depends_on:
-      panel:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    # Beat serves no HTTP and has no ping endpoint; the image's /api/health check
-    # does not apply. Crashes are handled by the restart policy.
-    healthcheck:
-      disable: true
-    logging: *logging
+    logging: *panel-logging
 
 networks:
   internal: {}

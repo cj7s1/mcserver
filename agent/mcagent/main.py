@@ -35,7 +35,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
-from . import __version__, docker_ops, hashcache, storage, tls
+from . import __version__, docker_ops, hashcache, lastrun, storage, tls
 from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
@@ -57,6 +57,7 @@ from .schemas import (
     RenameRequest,
     RestorePathRequest,
     RestoreRequest,
+    RetireRequest,
     SnapshotRequest,
     StopRequest,
     WorldReplaceRequest,
@@ -73,6 +74,16 @@ app = FastAPI(
     title="MCPanel Agent", version=__version__, docs_url=None, redoc_url=None, openapi_url="/v1/openapi.json"
 )
 TEXT_LIMIT = 5 * 1024 * 1024
+# What this agent can do beyond the first API version, for panels that must work with older
+# agents too (GET /v1/info, "features"):
+#   retire  POST /instances/{id}/retire and DELETE /instances/{id}/last-run exist, and the status,
+#           list, logs and log-stream answers carry the last-run record of a server without a container
+FEATURES = ["retire"]
+# How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
+# 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
+LIFECYCLE_LOCK_WAIT = 60.0
+OPERATION_LOCK_WAIT = 300.0
+RETIRE_LOCK_WAIT = 3.0
 UPLOAD_LIMIT = int(os.environ.get("AGENT_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 1024)))
 
 
@@ -249,6 +260,9 @@ async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     caps = await run_in_threadpool(storage.capabilities, settings)
     return {
         "version": __version__,
+        # what this agent does when it creates a container (docker_ops.CONTAINER_FORMAT)
+        "container_format": docker_ops.CONTAINER_FORMAT,
+        "features": list(FEATURES),
         "docker": docker_info,
         "restic": await run_in_threadpool(restic_available, settings),
         "storage": caps,
@@ -272,8 +286,13 @@ async def ports() -> dict[str, Any]:
 
 # --- instances: lifecycle ------------------------------------------------------------
 @app.get("/v1/instances", dependencies=[Depends(require_token)])
-async def list_instances() -> dict[str, Any]:
-    return {"containers": await run_in_threadpool(docker_ops.list_managed)}
+async def list_instances(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Every managed container, and under ``last_runs`` the last-run record (without console
+    lines) of every server that has one, by instance id: a stopped server has no container."""
+    return {
+        "containers": await run_in_threadpool(docker_ops.list_managed),
+        "last_runs": await run_in_threadpool(lastrun.summaries, settings),
+    }
 
 
 @app.post("/v1/instances/{instance_id}/prepare", dependencies=[Depends(require_token)])
@@ -325,20 +344,27 @@ async def apply_spec(
         ensure_instance_dir(settings, path)
         with contextlib.suppress(PermissionError):
             os.chown(path, settings.runtime_uid, settings.runtime_gid)
-        existing = docker_ops.get_container(instance_id)
-        was_running = False
-        if existing is not None:
-            existing.reload()
-            was_running = existing.status in ("running", "restarting")
-            op.update(0.88, "Stopping and removing previous container (data is kept)")
-            docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout, settings=settings)
-        op.update(0.92, "Creating container")
-        c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
-        if body.start or was_running:
-            op.update(0.96, "Starting container")
-            docker_ops.start(instance_id)
-        c.reload()
-        return {"container": docker_ops.describe(c), "recreated": existing is not None}
+        # one step for a retire: the container it looks at is not replaced under it
+        with docker_ops.instance_lock(instance_id, wait=OPERATION_LOCK_WAIT):
+            existing = docker_ops.get_container(instance_id)
+            was_running = False
+            if existing is not None:
+                existing.reload()
+                was_running = existing.status in ("running", "restarting")
+                op.update(0.88, "Stopping and removing previous container (data is kept)")
+                docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout, settings=settings)
+            op.update(0.92, "Creating container")
+            c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
+            if body.start or was_running:
+                op.update(0.96, "Starting container")
+                docker_ops.start(instance_id)
+            c.reload()
+            return {
+                "container": docker_ops.describe(c),
+                "recreated": existing is not None,
+                # how this container was created; the panel stores it with the spec hash
+                "container_format": docker_ops.CONTAINER_FORMAT,
+            }
 
     op = registry.start("apply", [instance_id], _apply)
     return {"operation": op.as_dict()}
@@ -348,15 +374,53 @@ async def apply_spec(
 async def remove_container(
     instance_id: UUID, timeout: int = Query(60, ge=1, le=900), settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
+    """Stop and remove the container (archive, migration). The last-run record of a container
+    that has run is saved first, best effort (``docker_ops.remove_container``)."""
     registry.assert_lifecycle_allowed(instance_id)
-    removed = await run_in_threadpool(
-        docker_ops.remove_container, instance_id, timeout=timeout, settings=settings
-    )
-    return {"removed": removed}
+
+    def _remove() -> bool:
+        with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            return docker_ops.remove_container(instance_id, timeout=timeout, settings=settings)
+
+    return {"removed": await run_in_threadpool(_remove)}
+
+
+@app.post("/v1/instances/{instance_id}/retire", dependencies=[Depends(require_token)])
+async def retire(
+    instance_id: UUID, body: RetireRequest | None = None, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    """Remove the container of a stopped server after saving its last-run record.
+
+    One step under the per-server lock (``docker_ops.retire``): a running container is refused
+    (409 ``container_running``), one that stopped less than ``settle_seconds`` ago too
+    (409 ``not_settled``); the record is written before the container is removed, and when it
+    cannot be written the container stays (500 ``last_run_failed``). No container at all is
+    success. The answer says what happened and carries ``last_run``, the record without its
+    console lines (null when the server has none).
+    """
+    registry.assert_lifecycle_allowed(instance_id)
+    settle = body.settle_seconds if body else RetireRequest().settle_seconds
+
+    def _retire() -> dict[str, Any]:
+        with docker_ops.instance_lock(instance_id, wait=RETIRE_LOCK_WAIT):
+            registry.assert_lifecycle_allowed(instance_id)
+            result = docker_ops.retire(settings, instance_id, settle)
+        result["last_run"] = lastrun.summary(settings, instance_id)
+        return result
+
+    return await run_in_threadpool(_retire)
+
+
+@app.delete("/v1/instances/{instance_id}/last-run", dependencies=[Depends(require_token)])
+async def forget_last_run(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Delete the last-run record (the server moved to another node; its history went with it)."""
+    return {"deleted": await run_in_threadpool(lastrun.delete, settings, instance_id)}
 
 
 @app.get("/v1/instances/{instance_id}/status", dependencies=[Depends(require_token)])
 async def instance_status(instance_id: UUID) -> dict[str, Any]:
+    """The container's state; for a server without a container ``exists`` is false and
+    ``last_run`` holds its last-run record without the console lines (absent: it never ran)."""
     st = await run_in_threadpool(docker_ops.status, instance_id)
     active = registry.active_for(instance_id)
     st["operation"] = active.as_dict() if active else None
@@ -365,8 +429,15 @@ async def instance_status(instance_id: UUID) -> dict[str, Any]:
 
 @app.post("/v1/instances/{instance_id}/start", dependencies=[Depends(require_token)])
 async def start(instance_id: UUID) -> dict[str, Any]:
+    """Start the existing container. A server without one (404 ``no_container``) is started
+    with an apply, which creates it."""
     registry.assert_lifecycle_allowed(instance_id)
-    await run_in_threadpool(docker_ops.start, instance_id)
+
+    def _start() -> None:
+        with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            docker_ops.start(instance_id)
+
+    await run_in_threadpool(_start)
     return await run_in_threadpool(docker_ops.status, instance_id)
 
 
@@ -377,8 +448,9 @@ async def stop(
     """Graceful stop (``docker_ops.graceful_stop``): flush, ``docker stop``, RCON ``stop`` if needed.
 
     Answers with the container status as before, plus ``stop``: what the stop did
-    (``flushed``, ``stop_sent_via_rcon``, ``warnings``). It can take the stop timeout plus
-    the flush (``docker_ops.flush_timeout``) plus a few seconds.
+    (``flushed``, ``stop_sent_via_rcon``, ``warnings``, ``exit_code`` of the run it ended; null
+    when the container was not running). It can take the stop timeout plus the flush
+    (``docker_ops.flush_timeout``) plus a few seconds.
     """
     registry.assert_lifecycle_allowed(instance_id)
     result = await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None, settings)
@@ -391,10 +463,21 @@ async def stop(
 async def restart(
     instance_id: UUID, body: StopRequest | None = None, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    """The graceful stop of ``/stop``, then start; the answer carries the same ``stop`` field."""
+    """The graceful stop of ``/stop``, then start; the answer carries the same ``stop`` field.
+
+    The container status in the answer describes the new run (``exit_code`` is 0 again), so the
+    exit code of the run that was stopped is in ``stop.exit_code``.
+    """
     registry.assert_lifecycle_allowed(instance_id)
-    result = await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None, settings)
-    await run_in_threadpool(docker_ops.start, instance_id)
+
+    def _restart() -> docker_ops.StopResult:
+        # stop and start of the same container: a retire must not remove it in between
+        with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            stopped = docker_ops.stop(instance_id, body.timeout if body else None, settings)
+            docker_ops.start(instance_id)
+            return stopped
+
+    result = await run_in_threadpool(_restart)
     status = await run_in_threadpool(docker_ops.status, instance_id)
     status["stop"] = result.as_dict()
     return status
@@ -402,6 +485,8 @@ async def restart(
 
 @app.post("/v1/instances/{instance_id}/kill", dependencies=[Depends(require_token)])
 async def kill(instance_id: UUID) -> dict[str, Any]:
+    """Kill the server process. Takes no lock and removes nothing, so it also works while a
+    stop or a restart is in progress; a server that is not running is left alone."""
     await run_in_threadpool(docker_ops.kill, instance_id)
     return await run_in_threadpool(docker_ops.status, instance_id)
 
@@ -432,7 +517,7 @@ async def command(
 async def delete_data(
     instance_id: UUID, body: DeleteDataRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    """Permanently delete an instance's container, files, snapshots and backup repository."""
+    """Permanently delete an instance's container, last-run record, files, snapshots and backup repository."""
     from .snapshots import snapshot_provider
 
     if body.confirm != instance_id:
@@ -440,27 +525,58 @@ async def delete_data(
 
     def _delete(op: Operation) -> dict[str, Any]:
         op.update(0.1, "Removing container")
-        docker_ops.remove_container(instance_id, timeout=30, settings=settings)
-        # Before the files: if btrfs or ZFS refuses, the server is still intact and the delete
-        # can be retried. On ZFS this destroys the server's dataset itself (with its history
-        # datasets): a mount point cannot be renamed into the trash.
+        with docker_ops.instance_lock(instance_id, wait=OPERATION_LOCK_WAIT):
+            docker_ops.remove_container(instance_id, timeout=30, settings=settings, save_last_run=False)
+        record_warning = None
+        try:
+            lastrun.delete(settings, instance_id)
+        except OSError as exc:
+            record_warning = (
+                f"Could not delete the saved console output of the server's last run "
+                f"({lastrun.path(settings, instance_id)}): {exc}"
+            )
+        # Snapshots go before the files. On btrfs this never fails the delete: a snapshot or a
+        # folder left by a rollback that cannot be removed stays on disk and is named in the
+        # result (warnings, leftovers), and the server is deleted all the same. On ZFS it
+        # destroys the server's dataset itself (with its history datasets), because a mount point
+        # cannot be renamed into the trash; if ZFS refuses, the operation fails, what was not
+        # destroyed is still there and the delete can be retried.
         op.update(0.2, "Deleting filesystem snapshots")
         snapshots = snapshot_provider(settings, instance_id).destroy_all()
+        warnings = list(snapshots.get("warnings") or [])
+        leftovers = list(snapshots.get("leftovers") or [])
+        if record_warning:
+            warnings.append(record_warning)
+            leftovers.append(str(lastrun.path(settings, instance_id)))
+
+        def remove(tree: Path, what: str) -> None:
+            shutil.rmtree(tree, ignore_errors=True)
+            if os.path.lexists(tree):
+                leftovers.append(str(tree))
+                warnings.append(
+                    f"Could not delete all of {what}: the rest is in {tree}. It still uses disk space; "
+                    "delete it on the host"
+                )
+
         path = docker_ops.instance_dir(settings, instance_id)
         if path.exists():
             op.update(0.3, "Deleting instance files")
             trash = settings.trash_dir / f"{instance_id}-{int(time.time())}"
             path.rename(trash)
-            shutil.rmtree(trash, ignore_errors=True)
+            remove(trash, "the server's files")
         hashcache.HashCache(settings.hash_cache_dir).forget(instance_id)
         repo = settings.backups_dir / "restic" / str(instance_id)
         if repo.exists():
             op.update(0.8, "Deleting backup repository")
-            shutil.rmtree(repo, ignore_errors=True)
+            remove(repo, "the backup repository")
+        for warning in warnings:
+            log.warning("Deleting %s: %s", instance_id, warning)
         return {
             "deleted": True,
             "snapshots_deleted": snapshots["snapshots"],
-            "warnings": snapshots["warnings"],
+            "warnings": warnings,
+            # paths (as the agent sees them) of what is still on disk
+            "leftovers": leftovers,
         }
 
     op = registry.start("delete_data", [instance_id], _delete)
@@ -539,10 +655,15 @@ async def clone(
 # --- logs ----------------------------------------------------------------------------
 @app.get("/v1/instances/{instance_id}/logs", dependencies=[Depends(require_token)])
 async def get_logs(
-    instance_id: UUID, tail: int = Query(500, ge=1, le=20000), since: int | None = None
+    instance_id: UUID,
+    tail: int = Query(500, ge=1, le=20000),
+    since: int | None = None,
+    settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    text = await run_in_threadpool(docker_ops.logs, instance_id, tail, since)
-    return {"lines": text.splitlines()}
+    """The last ``tail`` console lines (``docker_ops.console_history``): the container log, with
+    the end of the previous run in front of it; for a server without a container, the end of
+    its last run."""
+    return {"lines": await run_in_threadpool(docker_ops.console_history, instance_id, tail, since, settings)}
 
 
 # Console output is produced by the Minecraft process (third-party code): every buffer
@@ -694,8 +815,25 @@ class _LogBuffer:
         return out
 
 
+def _previous_run_head(settings: Settings, instance_id: UUID, c: Any, tail: int) -> list[str]:
+    """The lines of the last-run record a console shows in front of the first ``tail`` lines of
+    container ``c``: as many as the container's own log leaves free. Never raises."""
+    try:
+        previous = docker_ops.previous_run_lines(settings, instance_id, c)
+        if not previous:
+            return []
+        room = tail - docker_ops.count_log_lines(c, tail)
+        return previous[-room:] if room > 0 else []
+    except Exception as exc:
+        log.debug("previous run of %s not shown: %s", instance_id, exc)
+        return []
+
+
 @app.websocket("/v1/instances/{instance_id}/logs/stream")
 async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) -> None:
+    """Live console output. It opens with the last ``tail`` lines: of the container's log, with
+    the end of the previous run (the last-run record) in front while that log is shorter, or of
+    the last run alone while the server has no container (state ``missing``)."""
     settings = get_settings()
     if not await websocket_authorized(websocket, settings):
         return
@@ -710,6 +848,7 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
         first = True
         last_state = None
         since: int | None = None
+        attached_id: str | None = None  # the container whose log was read last
         while not stop_event.is_set():
             try:
                 c = docker_ops.get_container(instance_id)
@@ -720,23 +859,43 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                 if last_state != "missing":
                     emit({"type": "state", "state": "missing"})
                     last_state = "missing"
+                if first:
+                    # a stopped server has no container: the console opens with the end of its last run
+                    first = False
+                    if tail > 0:
+                        for line in docker_ops.previous_run_lines(settings, instance_id, None)[-tail:]:
+                            emit({"type": "log", "line": line})
                 stop_event.wait(2)
                 continue
-            c.reload()
+            try:
+                c.reload()
+            except docker.errors.NotFound:  # removed between the two calls
+                stop_event.wait(1)
+                continue
             state = c.status
+            container_id = getattr(c, "id", None)
             if state != last_state:
                 emit({"type": "state", "state": state})
                 last_state = state
-            if state != "running" and not first:
+            if state != "running" and not first and container_id == attached_id:
                 stop_event.wait(2)
                 continue
             kwargs: dict[str, Any] = {"stream": True, "follow": True, "stdout": True, "stderr": True}
             if first:
                 kwargs["tail"] = tail if tail > 0 else 0
+                if tail > 0:
+                    # the end of the previous run fills what the new container's log leaves of the tail
+                    for line in _previous_run_head(settings, instance_id, c, tail):
+                        emit({"type": "log", "line": line})
+            elif container_id != attached_id:
+                # a container created since the last read (a stopped server gets a new one at
+                # every start): everything it has printed so far is new
+                kwargs["tail"] = "all"
             else:
                 kwargs["since"] = since or int(time.time())
                 kwargs["tail"] = "all"
             first = False
+            attached_id = container_id
             try:
                 stream = c.logs(**kwargs)
             except Exception as exc:
@@ -764,7 +923,15 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
             stop_event.wait(1)
         emit({"type": "closed"})
 
-    thread = threading.Thread(target=pump, daemon=True, name=f"logs-{instance_id.hex[:8]}")
+    def guarded_pump() -> None:
+        try:
+            pump()
+        except Exception as exc:  # whatever went wrong, the console is told and can reconnect
+            log.exception("log stream for %s failed", instance_id)
+            emit({"type": "error", "message": f"Log stream failed: {type(exc).__name__}"})
+            emit({"type": "closed"})
+
+    thread = threading.Thread(target=guarded_pump, daemon=True, name=f"logs-{instance_id.hex[:8]}")
     thread.start()
 
     async def receiver() -> None:

@@ -31,6 +31,11 @@ OPERATION_RETRY_MAX_DELAY = 15.0
 TRANSIENT_AGENT_STATUSES = frozenset({502, 503, 504})
 
 
+# What an agent says it can do (GET /v1/info, "features") is remembered per node for this long.
+# "Not supported" is remembered for a shorter time, so an updated agent is noticed soon.
+FEATURES_TTL = 300
+FEATURES_MISSING_TTL = 60
+
 # The agent's stop first asks the server to save (``save-all flush``, up to 60 s) and then runs
 # ``docker stop`` with the requested timeout, so its answer can take about timeout + 75 s.
 STOP_EXTRA_SECONDS = 120
@@ -120,12 +125,45 @@ class AgentClient:
     def info(self) -> dict[str, Any]:
         return self._json("GET", "/v1/info")
 
+    def features(self, *, refresh: bool = False) -> frozenset[str]:
+        """What this node's agent says it can do beyond the first API version (``features`` of
+        GET /v1/info), cached per node. An agent from before the list existed has none.
+
+        An agent that cannot be asked right now counts as having none, and that is not
+        remembered: the next call asks again.
+        """
+        from django.core.cache import cache
+
+        key = f"agent-features:{self.node.pk}:{self.base}"
+        cached = None if refresh else cache.get(key)
+        if cached is not None:
+            return frozenset(cached)
+        try:
+            reported = self.info().get("features")
+        except ApiError as exc:
+            log.debug("could not read the features of the agent at %s: %s", self.base, exc)
+            return frozenset()
+        found = sorted(str(f) for f in reported) if isinstance(reported, list) else []
+        cache.set(key, found, FEATURES_TTL if found else FEATURES_MISSING_TTL)
+        return frozenset(found)
+
+    def supports(self, feature: str) -> bool:
+        return feature in self.features()
+
     def published_ports(self) -> list[dict[str, Any]]:
         return self._json("GET", "/v1/ports")["ports"]
 
     # -- containers ----------------------------------------------------------------------
     def list_containers(self) -> list[dict[str, Any]]:
         return self._json("GET", "/v1/instances")["containers"]
+
+    def list_state(self) -> dict[str, Any]:
+        """``containers`` like :meth:`list_containers`, plus ``last_runs``: the last-run record
+        (without console lines) of every server that has one, by instance id. A stopped server
+        has no container; agents without the ``retire`` feature report no records."""
+        data = self._json("GET", "/v1/instances")
+        last_runs = data.get("last_runs")
+        return {"containers": data["containers"], "last_runs": last_runs if isinstance(last_runs, dict) else {}}
 
     def prepare(self, instance_id: UUID, files: dict[str, str] | None = None) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/prepare", json={"files": files or {}})
@@ -140,7 +178,24 @@ class AgentClient:
             "DELETE", f"/v1/instances/{instance_id}/container", params={"timeout": timeout}, timeout=timeout + STOP_EXTRA_SECONDS
         )["removed"]
 
+    def retire(self, instance_id: UUID, *, settle_seconds: float = 10.0) -> dict[str, Any]:
+        """Remove the container of a stopped server after the agent saved its last-run record.
+
+        Only agents with the ``retire`` feature. Answers ``{"retired", "reason", "recorded",
+        "last_run"}``; no container is success (``retired`` false). The agent refuses a
+        container that runs (409 ``container_running``) or stopped less than ``settle_seconds``
+        ago (409 ``not_settled``), and keeps the container when the record cannot be written
+        (``last_run_failed``).
+        """
+        return self._json("POST", f"/v1/instances/{instance_id}/retire", json={"settle_seconds": settle_seconds}, timeout=120)
+
+    def forget_last_run(self, instance_id: UUID) -> bool:
+        """Delete the last-run record of a server on this node (agents with the ``retire`` feature)."""
+        return bool(self._json("DELETE", f"/v1/instances/{instance_id}/last-run").get("deleted"))
+
     def status(self, instance_id: UUID) -> dict[str, Any]:
+        """The container's state. Without a container ``exists`` is false and ``last_run`` (when
+        present) is the last-run record: exit code, out-of-memory flag, restart count, times."""
         return self._json("GET", f"/v1/instances/{instance_id}/status")
 
     def start(self, instance_id: UUID) -> dict[str, Any]:

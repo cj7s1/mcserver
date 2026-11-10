@@ -23,6 +23,28 @@ STALE_QUEUED = timedelta(hours=2)
 REDISPATCH_QUEUED_AFTER = timedelta(minutes=15)
 
 
+def resend_queued_jobs() -> int:
+    """Dispatch every job that is still QUEUED again; returns how many.
+
+    Called when a worker that runs jobs becomes ready (mcpanel/celery.py): after a restart of the
+    panel container, or of Redis alone, the queue is empty (Redis keeps nothing on disk), and
+    without this a waiting job would only start when the watchdog re-sends it after
+    REDISPATCH_QUEUED_AFTER. run_job only claims QUEUED jobs, so a message that was not lost
+    after all makes the second one a no-op. Jobs older than STALE_QUEUED are left to the
+    watchdog, which fails them as never started.
+    """
+    pks = list(
+        Job.objects.filter(status=JobStatus.QUEUED, created_at__gte=timezone.now() - STALE_QUEUED)
+        .order_by("created_at")
+        .values_list("pk", flat=True)
+    )
+    for pk in pks:
+        run_job.delay(str(pk))
+    if pks:
+        log.info("Sent %d queued job(s) again after the worker start: %s", len(pks), ", ".join(str(pk) for pk in pks))
+    return len(pks)
+
+
 def _fail_if(pk: Any, still_bad: Callable[[Job], bool], **kwargs: str) -> bool:
     """Fail the job under a row lock if ``still_bad(job)`` holds after re-reading it."""
     with transaction.atomic():

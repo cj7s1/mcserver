@@ -693,37 +693,138 @@ def test_node_stack_refuses_to_start_without_bind(tmp_path):
     assert subprocess.run(cmd, capture_output=True, text=True, timeout=60).returncode == 0
 
 
-def _run_entrypoint(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
-    """Run the panel entrypoint in web mode with stub python/uvicorn that print their argv."""
+def _run_entrypoint(tmp_path: Path, *args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    """Run the panel entrypoint (web mode unless args say otherwise) with stub python/uvicorn/celery that print their argv."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    for name, body in (("python", "cat >/dev/null 2>&1 || true\nexit 0\n"), ("uvicorn", 'printf "%s\\n" "$@"\n')):
+    stubs = (
+        ("python", "cat >/dev/null 2>&1 || true\nexit 0\n"),
+        ("uvicorn", 'printf "%s\\n" "$@"\n'),
+        ("celery", 'printf "%s\\n" "$@"\n'),
+    )
+    for name, body in stubs:
         script = bin_dir / name
         script.write_text("#!/bin/sh\n" + body)
         script.chmod(script.stat().st_mode | stat.S_IEXEC)
     full_env = {"PATH": f"{bin_dir}:/usr/bin:/bin", **env}
     entrypoint = REPO / "backend" / "container" / "entrypoint.sh"
     return subprocess.run(
-        ["sh", str(entrypoint), "web"], capture_output=True, text=True, env=full_env, timeout=30, stdin=subprocess.DEVNULL
+        ["sh", str(entrypoint), *(args or ("web",))],
+        capture_output=True,
+        text=True,
+        env=full_env,
+        timeout=30,
+        stdin=subprocess.DEVNULL,
     )
 
 
+# `serve` is the web server of the single panel container (`all`, backend/container/supervise.py):
+# it must build exactly the command of `web`, so the proxy-header flags cannot drift apart.
 @pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
-def test_entrypoint_trusts_only_loopback_proxies_by_default(tmp_path):
-    out = _run_entrypoint(tmp_path, MCPANEL_BEHIND_TLS_PROXY="true")
+@pytest.mark.parametrize("mode", ["web", "serve"])
+def test_entrypoint_trusts_only_loopback_proxies_by_default(tmp_path, mode):
+    out = _run_entrypoint(tmp_path, mode, MCPANEL_BEHIND_TLS_PROXY="true")
     assert out.returncode == 0, out.stderr
     args = out.stdout.splitlines()
     assert args[args.index("--forwarded-allow-ips") + 1] == "127.0.0.1,::1"
     assert "172.16.0.0/12" not in out.stdout and "--proxy-headers" in args
     assert "MCPANEL_FORWARDED_ALLOW_IPS" in out.stderr  # tells the admin to set it
 
-    out = _run_entrypoint(tmp_path, MCPANEL_BEHIND_TLS_PROXY="true", MCPANEL_FORWARDED_ALLOW_IPS="192.168.1.10")
+    out = _run_entrypoint(tmp_path, mode, MCPANEL_BEHIND_TLS_PROXY="true", MCPANEL_FORWARDED_ALLOW_IPS="192.168.1.10")
     args = out.stdout.splitlines()
     assert args[args.index("--forwarded-allow-ips") + 1] == "192.168.1.10"
     assert out.stderr == ""
 
-    out = _run_entrypoint(tmp_path)
+    out = _run_entrypoint(tmp_path, mode)
     assert "--no-proxy-headers" in out.stdout.splitlines() and "--forwarded-allow-ips" not in out.stdout
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"MCPANEL_BEHIND_TLS_PROXY": "true"},
+        {"MCPANEL_BEHIND_TLS_PROXY": "TRUE", "MCPANEL_FORWARDED_ALLOW_IPS": "192.168.1.10,10.0.0.2"},
+        {"MCPANEL_BEHIND_TLS_PROXY": "no", "MCPANEL_FORWARDED_ALLOW_IPS": "192.168.1.10"},
+    ],
+)
+def test_entrypoint_serve_is_the_web_command_without_the_migration(tmp_path, env):
+    web = _run_entrypoint(tmp_path, "web", **env)
+    serve = _run_entrypoint(tmp_path, "serve", **env)
+    assert web.returncode == serve.returncode == 0
+    assert serve.stdout == web.stdout and serve.stderr == web.stderr
+    assert web.stdout.splitlines()[:8] == [
+        "mcpanel.asgi:application",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8000",
+        "--lifespan",
+        "off",
+        "--no-server-header",
+    ]
+    # only `web` waits for the database and migrates (the stub python logs what it is asked to run)
+    source = (REPO / "backend" / "container" / "entrypoint.sh").read_text()
+    branch = source[source.index("    web | serve)") : source.index("    worker)")]
+    assert branch.count("uvicorn mcpanel.asgi:application") == 1  # one place builds the command
+    assert (
+        'if [ "$mode" = web ]; then\n            wait_for_database\n            python manage.py migrate --noinput\n        fi'
+        in branch
+    )
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+def test_entrypoint_worker_concurrency_never_overrides_an_explicit_one(tmp_path):
+    """Celery takes the last value of a repeated option: appending --concurrency after `-c 2`
+    turned the periodic worker into as many slots as the job worker."""
+
+    def worker(*args: str, **env: str) -> list[str]:
+        out = _run_entrypoint(tmp_path, "worker", *args, **env)
+        assert out.returncode == 0, out.stderr
+        return out.stdout.splitlines()
+
+    base = ["-A", "mcpanel", "worker", "-l", "info"]
+    # the single worker role is unchanged: empty = Celery's default (one slot per CPU), a number is passed on
+    assert worker() == base
+    assert worker(MCPANEL_WORKER_CONCURRENCY="") == base
+    assert worker(MCPANEL_WORKER_CONCURRENCY="4") == [*base, "--concurrency", "4"]
+    # the periodic worker keeps its own count in every spelling
+    periodic = ["-Q", "periodic", "-c", "2", "-n", "periodic@%h"]
+    assert worker(*periodic) == [*base, *periodic]
+    assert worker(*periodic, MCPANEL_WORKER_CONCURRENCY="4") == [*base, *periodic]
+    for explicit in (["-c2"], ["--concurrency", "2"], ["--concurrency=2"]):
+        assert worker(*explicit, MCPANEL_WORKER_CONCURRENCY="4") == [*base, *explicit]
+    # an explicit log level replaces the default instead of being added to it
+    assert worker("-l", "warning", MCPANEL_WORKER_CONCURRENCY="3") == [
+        "-A",
+        "mcpanel",
+        "worker",
+        "-l",
+        "warning",
+        "--concurrency",
+        "3",
+    ]
+    for bad in ("0", "four", "-1"):
+        out = _run_entrypoint(tmp_path, "worker", MCPANEL_WORKER_CONCURRENCY=bad)
+        assert out.returncode == 64 and "MCPANEL_WORKER_CONCURRENCY must be a positive integer" in out.stderr
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+def test_entrypoint_beat_keeps_its_schedule_in_memory_only_when_asked(tmp_path):
+    out = _run_entrypoint(tmp_path, "beat")
+    assert out.stdout.splitlines() == ["-A", "mcpanel", "beat", "-l", "info", "--schedule", "/tmp/celerybeat-schedule"]
+    # what the single panel container runs: no schedule file (a pickle) next to the web process
+    out = _run_entrypoint(tmp_path, "beat", "-S", "celery.beat:Scheduler", "-l", "warning")
+    assert out.stdout.splitlines() == ["-A", "mcpanel", "beat", "-S", "celery.beat:Scheduler", "-l", "warning"]
+    assert "--schedule" not in out.stdout and "/tmp" not in out.stdout
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="needs a POSIX shell")
+def test_entrypoint_rejects_unknown_modes_and_arguments_to_all(tmp_path):
+    for args in (("nonsense",), ("all", "extra"), ("migrate", "extra")):
+        out = _run_entrypoint(tmp_path, *args)
+        assert out.returncode == 64 and "usage: mcpanel-entrypoint {all|web|worker|beat|manage}" in out.stderr
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
@@ -743,8 +844,12 @@ def test_generated_env_files_and_dumps_are_git_ignored(path):
 def test_docs_keep_secrets_out_of_history_shares_and_stale_images():
     deployment = (REPO / "DEPLOYMENT.md").read_text()
     quickstart = (REPO / "docs" / "QUICKSTART-UNRAID.md").read_text()
-    assert "build --pull" in deployment and "pull --ignore-buildable" in deployment
-    assert "build --pull" in quickstart
+    # upgrades go through the script: it pulls the database image and rebuilds on fresh base images.
+    # `docker compose pull --ignore-buildable` always failed on the stack with image-only services.
+    for doc in (deployment, quickstart):
+        assert "./scripts/upgrade.sh run" in doc and "pull --ignore-buildable" not in doc
+    upgrade = (REPO / "deploy" / "scripts" / "upgrade.sh").read_text()
+    assert "build --pull" in upgrade
     assert "read -rs MCPANEL_NODE_TOKEN" in deployment
     assert "MCPANEL_NODE_TOKEN=<" not in deployment
     for doc in (deployment, quickstart):

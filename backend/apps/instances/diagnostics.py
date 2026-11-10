@@ -254,17 +254,24 @@ def manual_downloads(instance: Instance) -> dict[str, Any]:
 
 
 def diagnose(instance: Instance, tail: int = 1500) -> dict[str, Any]:
+    """Problems found in the console output and the state of the server's last (or current) run.
+
+    A stopped server has no container: the agent then answers both the console lines and the
+    restart count from the record it kept of the last run, so the cause of a crash loop is
+    still shown after the server was stopped.
+    """
     client = AgentClient(instance.node)
     try:
         lines = client.logs(instance.id, tail=tail)
     except ApiError as exc:
-        if exc.error_code == "no_container":
+        if exc.error_code == "no_container":  # no container and no record of an earlier run
             lines = []
         else:
             raise
     issues = analyze_logs(instance, lines)
     status = client.status(instance.id)
-    restarts = int(status.get("restart_count") or 0)
+    run = status if status.get("exists") else (status.get("last_run") or {})
+    restarts = int(run.get("restart_count") or 0)
     if restarts >= 3 and instance.ready_at is None:
         issues.insert(
             0,

@@ -411,6 +411,39 @@ def test_migrate_replaces_leftovers_in_the_target_folder(make_instance, two_node
     assert inst.node_id == b.pk
 
 
+def test_migrate_deletes_the_last_run_record_on_both_nodes(make_instance, two_nodes, django_capture_on_commit_callbacks):
+    """The record an agent keeps of a stopped server's last run (console output included) does not
+    move with the server: the source's is deleted, and so is one the target still holds from an
+    earlier stay."""
+    from apps.instances.spec import build_spec
+
+    a, b, agents, _ = two_nodes
+    inst = make_instance(name="Mover")
+    for agent, line in ((agents[a.pk], "last run on A"), (agents[b.pk], "an earlier stay on B")):
+        agent.put_file(inst.id, "server.properties", "motd=current\n")
+        agent.apply(inst.id, build_spec(inst), start=True)
+        agent.log_lines[str(inst.id)] = [line]
+        agent.stop(inst.id)
+        assert agent.retire(inst.id, settle_seconds=0)["recorded"] is True
+    job = _migrate(inst, b, django_capture_on_commit_callbacks)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert agents[a.pk].last_runs == {} and agents[b.pk].last_runs == {}
+    assert agents[b.pk].logs(inst.id) == []  # the new container's own (empty) log, nothing in front of it
+    assert agents[a.pk].status(inst.id) == {"exists": False, "operation": None}
+    assert job.result["restarted"] is False
+
+
+def test_migrate_between_older_agents_asks_for_no_record(make_instance, two_nodes, django_capture_on_commit_callbacks):
+    a, b, agents, _ = two_nodes
+    for agent in agents.values():
+        agent.features = []  # agents from before the last-run record
+    inst = make_instance(name="Mover")
+    agents[a.pk].put_file(inst.id, "server.properties", "motd=current\n")
+    job = _migrate(inst, b, django_capture_on_commit_callbacks)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert not agents[a.pk].called("forget_last_run") and not agents[b.pk].called("forget_last_run")
+
+
 def test_migrate_refuses_when_both_nodes_share_the_folder(make_instance, two_nodes, django_capture_on_commit_callbacks):
     a, b, agents, install = two_nodes
     shared = agents[a.pk]

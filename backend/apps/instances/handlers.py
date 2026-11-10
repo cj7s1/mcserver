@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from django.utils import timezone
@@ -9,12 +10,14 @@ from django.utils import timezone
 from apps.core.errors import ApiError, ConflictError
 from apps.jobs.models import Job
 from apps.jobs.runner import JobContext, register
-from apps.nodes.client import AgentClient
+from apps.nodes.client import AgentClient, AgentError
 
 from . import properties
 from .models import DesiredState, Instance, Status
 from .reconcile import reconcile_instance
-from .spec import build_spec, restart_required, spec_hash
+from .spec import CONTAINER_FORMAT, applied_container_format, build_spec, restart_required, spec_hash
+
+log = logging.getLogger(__name__)
 
 
 def _instance(job: Job) -> Instance:
@@ -44,10 +47,20 @@ def apply_container(
     ctx.progress(span[0], "Preparing container (pulling the runtime image if needed)", force=True)
     op = client.apply(instance.id, spec, start=start)
     result = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(span[0], span[1]))
-    instance.container_spec_hash = spec_hash(spec)
+    done = result.get("result") or {}
+    # The hash records how the agent really created the container: one made by an agent that is
+    # older than the panel does not match the current hash and keeps reading restart-required.
+    applied = applied_container_format(done)
+    if applied < CONTAINER_FORMAT:
+        ctx.log(
+            f"warning: the agent of node '{instance.node.name}' is older than the panel, so this container was "
+            "created without what newer versions add (a longer stop time when Docker itself stops the server). "
+            "Update the agent and restart the server; until then it keeps showing 'restart required'."
+        )
+    instance.container_spec_hash = spec_hash(spec, applied)
     instance.applied_revision = Instance.objects.filter(pk=instance.pk).values_list("config_revision", flat=True).first() or 0
     instance.save(update_fields=["container_spec_hash", "applied_revision"])
-    return result.get("result", {})
+    return done
 
 
 def _set_desired(instance: Instance, desired: str) -> None:
@@ -61,6 +74,22 @@ def _set_desired(instance: Instance, desired: str) -> None:
     instance.resume_after_boot = False
     instance.resume_flagged_at = None
     Instance.objects.filter(pk=instance.pk).update(desired_state=desired, resume_after_boot=False, resume_flagged_at=None)
+
+
+def _drop_resume_mark(instance: Instance) -> None:
+    """Settle the "start again after the host restart" mark this job found, without a decision
+    about ``desired_state``: the job ends with the server left stopped on purpose (it was marked
+    as failed half-way), so the panel must not start the server by itself afterwards.
+
+    Only the mark the job saw when it began is dropped (``instance`` is the copy loaded then): a
+    job that was marked as failed no longer owns the server, and a mark written since then
+    belongs to whatever happened after it.
+    """
+    if not instance.resume_after_boot:
+        return
+    Instance.objects.filter(pk=instance.pk, resume_after_boot=True, resume_flagged_at=instance.resume_flagged_at).update(
+        resume_after_boot=False, resume_flagged_at=None
+    )
 
 
 @register("install")
@@ -83,18 +112,86 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     return {"started": start}
 
 
+def start_server(
+    instance: Instance, ctx: JobContext, *, span: tuple[float, float] = (0.1, 0.8), apply_changes: bool = False
+) -> bool:
+    """Start the server, creating its container when there is none. Returns True when it was (re)created.
+
+    ``span`` is (where the job's progress stands, how much of it creating the container may take).
+
+    The one way a job starts a server. A stopped server normally has no container: the
+    reconciler removes it once the server is meant to be stopped (``reconcile.maybe_retire``),
+    and the agent keeps the record of its last run. So "start" means "create the container from
+    the current configuration and start it" whenever there is none, also for the jobs that stop
+    a server, work on its files and start it again (restore, rollback, world replace and reset),
+    and also when the container disappears between the status request and the start.
+
+    ``apply_changes`` (the Start job): an existing container whose configuration is out of date
+    is recreated too. Without it an existing container is started as it is, as those jobs
+    always did.
+    """
+    client = AgentClient(instance.node)
+    status = client.status(instance.id)
+    exists = bool(status.get("exists"))
+    outdated = exists and apply_changes and (restart_required(instance) or not instance.container_spec_hash)
+    if exists and not outdated:
+        if apply_changes:
+            ctx.progress(0.3, "Starting container")
+        try:
+            client.start(instance.id)
+            return False
+        except AgentError as exc:
+            if exc.error_code != "no_container":
+                raise
+            # removed between the two requests (a retire that was already on its way)
+            status = client.status(instance.id)
+            exists = bool(status.get("exists"))
+    if outdated:
+        ctx.progress(span[0], "Applying configuration")
+    else:
+        ctx.progress(span[0], "Creating the server's container (a stopped server has none; world data is kept)")
+    previous = status if exists else (status.get("last_run") or {})
+    done = apply_container(instance, ctx, start=True, span=span)
+    try:
+        _note_runtime_image(instance, ctx, previous, done)
+    except Exception:  # a note only: the server is started
+        log.exception("could not compare the runtime image of %s with its last run", instance.pk)
+    return True
+
+
+def _note_runtime_image(instance: Instance, ctx: JobContext, previous: dict[str, Any], applied: dict[str, Any]) -> None:
+    """Say so when the same image tag now is a different image than the server last ran on.
+
+    A stopped server holds no container, so nothing pins its runtime image: after the image was
+    updated or removed and downloaded again, the tag (``stable-java21``) can point to a newer
+    build. ``previous`` is the last container (or the record of the last run), ``applied`` the
+    result of the apply. Agents that do not report image ids are skipped.
+    """
+    from apps.audit import service as audit
+
+    current = applied.get("container") if isinstance(applied, dict) else None
+    if not isinstance(current, dict):
+        return
+    before, now = previous.get("image_id"), current.get("image_id")
+    if not before or not now or before == now or previous.get("image") != current.get("image"):
+        return
+    ctx.log(
+        f"note: the runtime image {current.get('image')} is not the build this server last ran on "
+        f"({str(before)[:19]} then, {str(now)[:19]} now): the image was updated or downloaded again since."
+    )
+    audit.record(
+        "instance.runtime_image_changed",
+        instance=instance,
+        target=instance,
+        details={"image": current.get("image"), "previous_image_id": before, "image_id": now},
+    )
+
+
 @register("start")
 def start(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = _instance(job)
-    client = AgentClient(instance.node)
     _set_desired(instance, DesiredState.RUNNING)
-    status = client.status(instance.id)
-    if not status.get("exists") or restart_required(instance) or not instance.container_spec_hash:
-        ctx.progress(0.1, "Applying configuration")
-        apply_container(instance, ctx, start=True, span=(0.1, 0.8))
-    else:
-        ctx.progress(0.3, "Starting container")
-        client.start(instance.id)
+    start_server(instance, ctx, apply_changes=True)
     return {}
 
 
@@ -112,7 +209,12 @@ def _warn_players_first(job: Job, ctx: JobContext, action: str) -> dict[str, Any
 
 
 def _log_stop(ctx: JobContext, answer: Any) -> None:
-    """Say in the job log what the agent's graceful stop did (agents before this field send none)."""
+    """Say in the job log what the agent's graceful stop did (agents before this field send none).
+
+    ``stop.exit_code`` is the exit code of the run the stop ended (none when nothing was running).
+    After a restart the container status in the answer describes the new run, so the status'
+    own ``exit_code`` is never used here.
+    """
     info = answer.get("stop") if isinstance(answer, dict) else None
     if not isinstance(info, dict):
         return
@@ -122,8 +224,15 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
         ctx.log("The server was still starting; the stop was delivered as soon as it accepted commands")
     for warning in info.get("warnings") or []:
         ctx.log(f"warning: {warning}")
-    if isinstance(answer, dict) and answer.get("exit_code") == 137:
-        ctx.log("warning: the server did not stop in time and was killed")
+    exit_code = info.get("exit_code")
+    if exit_code == 137:
+        ctx.log("warning: the server did not stop in time and was killed (exit code 137); its last changes may not be saved")
+    elif exit_code not in (0, None):
+        # e.g. 255: the server runner gave up waiting for the server to stop and ended it
+        ctx.log(
+            f"warning: the server did not shut down cleanly (exit code {exit_code}): it was ended when its time to stop "
+            "ran out, or it failed while stopping. Its last changes may not be saved; see the end of the console log"
+        )
 
 
 @register("stop")
@@ -135,7 +244,12 @@ def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.2, f"Stopping server gracefully (up to {instance.stop_timeout}s)", force=True)
     status = AgentClient(instance.node).status(instance.id)
     if status.get("exists"):
-        _log_stop(ctx, AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout))
+        try:
+            _log_stop(ctx, AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout))
+        except AgentError as exc:
+            if exc.error_code != "no_container":
+                raise
+            # it was not running and its container was removed between the two requests: stopped
     return {}
 
 
@@ -148,14 +262,26 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
     _set_desired(instance, DesiredState.RUNNING)
     status = client.status(instance.id)
     if not status.get("exists") or restart_required(instance):
-        # also the case for a container made by an older release (spec.CONTAINER_FORMAT)
-        ctx.progress(0.1, "Configuration changed; recreating container (world data is kept)")
+        if status.get("exists"):
+            # changed settings, or a container made by an older release or agent (spec.CONTAINER_FORMAT)
+            ctx.progress(
+                0.1, "Recreating the container to apply changed settings or a newer MCPanel version (world data is kept)"
+            )
+        else:
+            ctx.progress(0.1, "The server has no container; creating it (world data is kept)")
         if status.get("running"):
             _log_stop(ctx, client.stop(instance.id, timeout=instance.stop_timeout))
         apply_container(instance, ctx, start=True, span=(0.2, 0.9))
     else:
         ctx.progress(0.2, "Restarting server", force=True)
-        _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
+        try:
+            _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
+        except AgentError as exc:
+            if exc.error_code != "no_container":
+                raise
+            # the server was stopped and its container was removed between the two requests
+            ctx.progress(0.2, "The server has no container; creating it (world data is kept)")
+            apply_container(instance, ctx, start=True, span=(0.2, 0.9))
     return {}
 
 
@@ -168,7 +294,7 @@ def recreate(job: Job, ctx: JobContext) -> dict[str, Any]:
     was_running = bool(status.get("running"))
     if was_running:
         ctx.progress(0.05, "Stopping server", force=True)
-        client.stop(instance.id, timeout=instance.stop_timeout)
+        _log_stop(ctx, client.stop(instance.id, timeout=instance.stop_timeout))
     apply_container(instance, ctx, start=was_running or job.params.get("start", False), span=(0.1, 0.95))
     return {"restarted": was_running}
 
@@ -195,15 +321,22 @@ def delete(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.1, "Deleting container, files and backups", force=True)
     op = client.delete_data(instance.id)
     done = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(0.1, 0.8))
-    for warning in (done.get("result") or {}).get("warnings") or []:
-        ctx.log(f"Warning: {warning}")  # e.g. a btrfs snapshot that could not be deleted
+    # The server is gone even when something could not be removed (e.g. a btrfs snapshot): what
+    # stayed on the node's disk is in the job's result as well as in its log.
+    agent_result = done.get("result") or {}
+    warnings = [str(w) for w in agent_result.get("warnings") or []]
+    leftovers = [str(path) for path in agent_result.get("leftovers") or []]
+    for warning in warnings:
+        ctx.log(f"Warning: {warning}")
+    if leftovers:
+        ctx.log(f"Still on the disk of node '{instance.node.name}': {', '.join(leftovers)}")
     name = instance.name
     instance_id = str(instance.id)
     # detach the job from the instance before deleting so the job history survives
     Job.objects.filter(instance=instance).update(instance=None)
     job.instance_id = None
     instance.delete()
-    return {"deleted": instance_id, "name": name}
+    return {"deleted": instance_id, "name": name, "warnings": warnings, "leftovers": leftovers}
 
 
 @register("clone")
@@ -397,6 +530,8 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     cleared = 0
     if not prepared.get("created"):
         cleared = _empty_target_folder(instance, source, target, ctx)
+    # a record of a run this server had on the target node before it was moved away
+    _forget_last_run(target, instance, ctx)
     archive = f".mcpanel-migrate-{_secrets.token_hex(6)}.zip"
     ctx.progress(0.1, "Copying server files to the target node (streamed)", force=True)
     chunks, _length, _resp = source.download(instance.id, "", endpoint="archive")
@@ -420,6 +555,8 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     apply_container(instance, ctx, start=was_running, span=(0.88, 0.97))
 
     source.remove_container(instance.id, timeout=30)
+    # the record of the last run does not move with the server and must not stay behind
+    _forget_last_run(source, instance, ctx)
     from apps.backups.handlers import repository_node_id
     from apps.backups.models import Backup, BackupStatus
 
@@ -444,6 +581,20 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
         "source_data_deleted": bool(job.params.get("delete_source")),
         "backups_left_on_source": 0 if job.params.get("delete_source") else len(on_old),
     }
+
+
+def _forget_last_run(client: AgentClient, instance: Instance, ctx: JobContext) -> None:
+    """Delete the record an agent keeps of the server's last run (console output included) on a
+    node the server is leaving or returning to. Agents without the feature keep no record."""
+    if not client.supports("retire"):
+        return
+    try:
+        client.forget_last_run(instance.id)
+    except ApiError as exc:
+        ctx.log(
+            f"warning: could not delete the saved console output of the last run on {client.node.name}: {exc.detail}. "
+            "It is removed when the server is deleted on that node."
+        )
 
 
 def _tag_backups_on_node(instance: Instance, node: Any) -> None:
@@ -555,7 +706,7 @@ def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
             )
         elif was_running:
             try:
-                client.start(instance.id)
+                start_server(instance, ctx, span=(0.93, 0.06))
                 ctx.log("The previous world is unchanged; the server was started again")
             except ApiError as start_exc:
                 ctx.log(f"Could not start the server again: {start_exc.detail}")
@@ -573,7 +724,7 @@ def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
     if was_running:
         ctx.progress(0.93, "Starting server")
         try:
-            client.start(instance.id)
+            start_server(instance, ctx, span=(0.93, 0.06))
         except ApiError as exc:
             # the job fails, but say clearly that the world itself was replaced
             raise ApiError(
@@ -636,12 +787,25 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
     p = job.params
     seed_mode = p.get("seed_mode", "keep")
     keep = list(p.get("keep") or [])
-    was_running = False
+    was_running = False  # the server ran and this job asked the agent to stop it
+    stopped = False  # the agent answered that stop
     submitted = False  # the reset request was sent: only the agent's own answer says what happened
     started = False  # the agent accepted it and runs the operation
     previous_seed: str | None = None
     seed_unconfirmed = False  # the request that sets level-seed is out: only its answer says whether it was written
     safety_id = None
+
+    def still_owner(last_line: str) -> None:
+        """Stop here (JobCancelled) when the job was marked as failed meanwhile: it no longer owns
+        the server, so it does nothing more to it. The server is then left as it is on purpose,
+        which also settles a pending "start again after the host restart" mark."""
+        try:
+            ctx.check_cancelled()
+        except JobCancelled:
+            _drop_resume_mark(instance)
+            _log_after_cancel(job, ctx, last_line)
+            raise
+
     try:
         if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
             raise ConflictError("This server is archived; unarchive it before resetting its world", code="archived")
@@ -660,14 +824,24 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
         )
         for warning in plan["warnings"]:
             ctx.log(f"warning: {warning}")
+        # checked before every step that acts on the server: the stop, the backup, the reset, the start
+        still_owner("This job was marked as failed before it did anything: nothing was changed.")
         if world.is_live(client.status(instance.id)):
             if not p.get("stop_if_running"):
                 raise ConflictError("The server is running. Confirm that it may be stopped to reset the world.", code="must_stop")
             ctx.progress(0.02, "Stopping server", force=True)
-            client.stop(instance.id, timeout=instance.stop_timeout)
-            reconcile_instance(instance.id)
+            # Set before the request: if its answer is lost the agent may have stopped the server
+            # anyway, and a failure that left the world untouched has to start it again.
             was_running = True
+            answer = client.stop(instance.id, timeout=instance.stop_timeout)
+            stopped = True
+            _log_stop(ctx, answer)
+            reconcile_instance(instance.id)
         if p.get("pre_restore_backup", True):
+            still_owner(
+                "This job was marked as failed before the safety backup was taken: nothing was deleted"
+                + (", and the server was left stopped." if was_running else ".")
+            )
             ctx.progress(0.05, "Creating a safety backup of the current state", force=True)
             safety = run_backup(
                 instance,
@@ -693,16 +867,10 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
             )
         else:
             ctx.log("No safety backup was requested")
-        try:
-            ctx.check_cancelled()
-        except JobCancelled:
-            _log_after_cancel(
-                job,
-                ctx,
-                "This job was marked as failed before the world was touched: nothing was deleted"
-                + (", and the server was left stopped." if was_running else "."),
-            )
-            raise
+        still_owner(
+            "This job was marked as failed before the world was touched: nothing was deleted"
+            + (", and the server was left stopped." if was_running else ".")
+        )
         if seed_mode in ("random", "custom"):
             seed = world.validate_seed(p.get("seed", "")) if seed_mode == "custom" else ""
             seed_unconfirmed = True
@@ -722,21 +890,22 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
     except ApiError as exc:
         # Compensation acts on the server, so it needs the lock: a job that was marked as failed
         # meanwhile no longer owns the server and does nothing more.
-        try:
-            ctx.check_cancelled()
-        except JobCancelled:
-            _log_after_cancel(
-                job,
-                ctx,
-                f"This job was marked as failed, and then the reset failed ({exc.detail}). Nothing more was done: "
+        still_owner(
+            f"This job was marked as failed, and then the reset failed ({exc.detail}). Nothing more was done: "
+            + (
+                "the server was not started again and server.properties was left as it is. Check the world "
+                "folder before starting the server."
+                if submitted
+                else "the world was not touched"
                 + (
-                    "the server was not started again and server.properties was left as it is. Check the world "
-                    "folder before starting the server."
-                    if submitted
-                    else "the world was not touched" + (", and the server was left stopped." if was_running else ".")
-                ),
+                    ", and the server was left stopped."
+                    if stopped
+                    else ", and the server may have been stopped: check it."
+                    if was_running
+                    else "."
+                )
             )
-            raise
+        )
         if not submitted:
             untouched = True
         elif not started:
@@ -765,8 +934,18 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
             )
         if was_running:
             try:
-                client.start(instance.id)
-                ctx.log("The world is unchanged; the server was started again")
+                # the stop itself failed (nothing else runs before ``stopped``): the server may be
+                # stopped (its answer was lost) or still running (the agent refused)
+                if stopped or not world.is_live(client.status(instance.id)):
+                    start_server(instance, ctx, span=(0.93, 0.06))
+                    ctx.log("The world is unchanged; the server was started again")
+                elif isinstance(exc, AgentError):
+                    ctx.log("The world is unchanged; the server was not stopped and is still running")
+                else:
+                    ctx.log(
+                        "The world is unchanged. The stop got no answer and the server is running at the moment; "
+                        "if it stops after all, start it again"
+                    )
             except ApiError as start_exc:
                 ctx.log(f"Could not start the server again: {start_exc.detail}")
         detail = str(exc.detail).removesuffix("Nothing was changed.").rstrip()
@@ -783,16 +962,10 @@ def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
     for warning in result.get("warnings") or []:
         ctx.log(f"warning: {warning}")
     if was_running:
-        try:
-            ctx.check_cancelled()
-        except JobCancelled:
-            _log_after_cancel(
-                job, ctx, "The world was reset. This job was marked as failed meanwhile, so the server was left stopped."
-            )
-            raise
+        still_owner("The world was reset. This job was marked as failed meanwhile, so the server was left stopped.")
         ctx.progress(0.93, "Starting server")
         try:
-            client.start(instance.id)
+            start_server(instance, ctx, span=(0.93, 0.06))
         except ApiError as exc:
             # the job fails, but say clearly that the world itself was reset
             raise ApiError(

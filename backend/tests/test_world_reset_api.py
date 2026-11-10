@@ -1170,6 +1170,202 @@ def test_abandoned_during_a_successful_agent_call_does_not_start_the_server(
     assert "The world was reset" in log_of(job) and "left stopped" in log_of(job)
 
 
+def abandon_when_running(inst):
+    """Like ``abandon``, for agent methods the request itself calls before the job exists."""
+
+    def _hook(*_args, **_kwargs):
+        job = Job.objects.filter(instance=inst, kind="world_reset").order_by("-created_at").first()
+        if job is not None and job.status == JobStatus.RUNNING:
+            runner.finish(job, JobStatus.FAILED, error="Marked as failed by owner", error_code="abandoned")
+
+    return _hook
+
+
+def test_abandoned_before_the_stop_neither_stops_the_server_nor_takes_a_backup(
+    clients, server, fake_agent, django_capture_on_commit_callbacks
+):
+    """Marked as failed while the job was still checking the plan: it must not touch the server."""
+    start_container(fake_agent, server)
+    fake_agent.hooks["read_text"] = abandon_when_running(server)  # the job's first agent call
+    resp = reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    assert resp.status_code == 202, resp.json()
+    job = last_job(server)
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "abandoned")
+    assert named(fake_agent, "stop", "create_backup", "world_reset", "write_text", "start") == []
+    assert fake_agent.containers[str(server.id)]["running"] is True  # players were not disconnected
+    assert Backup.objects.filter(instance=server).count() == 0
+    assert "marked as failed before it did anything" in log_of(job)
+    server.refresh_from_db()
+    assert server.active_job_id is None
+
+
+def test_abandoned_during_the_stop_takes_no_backup(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    start_container(fake_agent, server)
+    fake_agent.hooks["stop"] = abandon(server)
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    job = last_job(server)
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "abandoned")
+    assert named(fake_agent, "stop", "create_backup", "world_reset", "start") == ["stop"]
+    assert Backup.objects.filter(instance=server).count() == 0
+    assert fake_agent.containers[str(server.id)]["running"] is False
+    assert "before the safety backup was taken" in log_of(job) and "the server was left stopped" in log_of(job)
+    assert fake_agent.text(server.id, "world/region/r.0.0.mca") == "old"
+
+
+def test_stop_whose_answer_is_lost_is_followed_by_a_start(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    """The agent stopped the server but its answer never arrived: "the world was not changed" must
+    not leave the server stopped (review 2026-11-10)."""
+    start_container(fake_agent, server)
+
+    def stopped_without_an_answer(instance_id, **_kwargs):
+        fake_agent._set_exited(fake_agent.containers[str(instance_id)], 0)
+        raise AgentUnavailable("The node agent did not respond in time (POST /stop)")
+
+    fake_agent.hooks["stop"] = stopped_without_an_answer
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error_code == "agent_unavailable"
+    assert job.error.startswith("The world was not changed.")
+    assert named(fake_agent, "stop", "create_backup", "world_reset", "start") == ["stop", "start"]
+    assert fake_agent.containers[str(server.id)]["running"] is True
+    assert "The world is unchanged; the server was started again" in log_of(job)
+    assert fake_agent.text(server.id, "world/region/r.0.0.mca") == "old"
+    server.refresh_from_db()
+    assert server.desired_state == "running"
+
+
+def test_stop_that_the_agent_refused_leaves_the_server_running(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    start_container(fake_agent, server)
+    fake_agent.failures["stop"] = AgentError("Instance is busy with a 'backup' operation", "instance_busy", 409)
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error_code == "instance_busy"
+    assert job.error.startswith("The world was not changed.")
+    assert not fake_agent.called("start") and not fake_agent.called("world_reset")
+    assert fake_agent.containers[str(server.id)]["running"] is True
+    assert "The world is unchanged; the server was not stopped and is still running" in log_of(job)
+
+
+def test_stop_without_an_answer_that_did_not_stop_the_server(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    """No answer and the server runs: it is not started (it runs), and the log does not claim more than is known."""
+    start_container(fake_agent, server)
+    fake_agent.failures["stop"] = AgentUnavailable("The node agent did not respond in time (POST /stop)")
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error.startswith("The world was not changed.")
+    assert not fake_agent.called("start") and fake_agent.containers[str(server.id)]["running"] is True
+    assert "The stop got no answer and the server is running at the moment" in log_of(job)
+
+
+def test_abandoned_while_the_stop_fails_does_not_claim_the_server_is_stopped(
+    clients, server, fake_agent, django_capture_on_commit_callbacks
+):
+    start_container(fake_agent, server)
+    fake_agent.hooks["stop"] = abandon(server)
+    fake_agent.failures["stop"] = AgentUnavailable("The node agent did not respond in time (POST /stop)")
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True)
+    job = last_job(server)
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "abandoned")
+    assert not fake_agent.called("start") and not fake_agent.called("create_backup")
+    assert "the world was not touched, and the server may have been stopped: check it." in log_of(job)
+
+
+def test_what_the_stop_did_is_in_the_job_log(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    start_container(fake_agent, server)
+    fake_agent.stop_exit_code = 255  # the server runner gave up waiting and ended the server
+    fake_agent.stop_info = {"warnings": ["save-all flush before the stop failed, the world may not be saved: timed out"]}
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, stop_if_running=True, pre_restore_backup=False)
+    job = last_job(server)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    text = log_of(job)
+    assert "warning: save-all flush before the stop failed" in text
+    assert "warning: the server did not shut down cleanly (exit code 255)" in text
+
+
+def mark_for_resume(inst) -> None:
+    """As ``manage.py host_shutdown`` leaves a server it stopped: meant to run, marked."""
+    from datetime import timedelta
+
+    Instance.objects.filter(pk=inst.pk).update(
+        desired_state="running", resume_after_boot=True, resume_flagged_at=timezone.now() - timedelta(minutes=5)
+    )
+    inst.refresh_from_db()
+
+
+@pytest.mark.parametrize(
+    ("hook", "failed_operation", "line"),
+    [
+        ("read_text", None, "before it did anything"),
+        ("create_backup", None, "before the world was touched"),
+        (
+            "world_reset",
+            ("the world could not be put back; it is in .mcpanel-world-old-x", "world_rollback_failed"),
+            "then the reset failed",
+        ),
+    ],
+    ids=["before-anything", "during-the-backup", "rollback-failed"],
+)
+def test_abandoned_reset_settles_the_start_after_boot_mark(
+    hook, failed_operation, line, clients, server, fake_agent, monkeypatch, django_capture_on_commit_callbacks
+):
+    """The server waits to be started again after a host shutdown; a reset of it is marked as
+    failed half-way. Whatever state that left, the panel must not start the server by itself."""
+    from datetime import timedelta
+
+    from apps.instances import scheduling
+    from apps.instances.spec import build_spec, current_spec_hash
+
+    fake_agent.apply(server.id, build_spec(server), start=False)
+    Instance.objects.filter(pk=server.pk).update(container_spec_hash=current_spec_hash(server), installed_at=timezone.now())
+    mark_for_resume(server)
+    monkeypatch.setattr(scheduling, "runtime_started_at", lambda: timezone.now() - timedelta(minutes=1))
+    fake_agent.hooks[hook] = abandon_when_running(server)
+    if failed_operation:
+        fake_agent.failed_operations["world_reset"] = failed_operation
+    # this test is about the handler: the resume step's own check of failed jobs is tested elsewhere
+    monkeypatch.setattr(scheduling, "_job_that_left_it_stopped", lambda *_a, **_k: None)
+    resp = reset(clients["manager"], server, django_capture_on_commit_callbacks)
+    assert resp.status_code == 202, resp.json()
+    job = last_job(server)
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "abandoned") and line in log_of(job)
+    server.refresh_from_db()
+    assert (server.resume_after_boot, server.resume_flagged_at) == (False, None)
+    assert server.desired_state == "running"  # no decision about that was made
+    with django_capture_on_commit_callbacks(execute=True):
+        result = scheduling.resume_flagged_servers()
+    assert result == {"started": None, "cleared": [], "waiting": 0}
+    assert fake_agent.containers[str(server.id)]["running"] is False and not fake_agent.called("start")
+
+
+def test_reset_with_an_unknown_outcome_settles_the_start_after_boot_mark(
+    clients, server, fake_agent, django_capture_on_commit_callbacks
+):
+    mark_for_resume(server)
+    fake_agent.failed_operations["world_reset"] = ("the world could not be put back", "world_rollback_failed")
+    reset(clients["manager"], server, django_capture_on_commit_callbacks, pre_restore_backup=False)
+    job = last_job(server)
+    assert job.status == JobStatus.FAILED and job.error_code == "world_rollback_failed"
+    server.refresh_from_db()
+    assert (server.resume_after_boot, server.resume_flagged_at, server.desired_state) == (False, None, "stopped")
+
+
+def test_a_mark_written_after_the_job_began_is_not_dropped_by_it(clients, server, fake_agent, django_capture_on_commit_callbacks):
+    """The job was marked as failed and lost the server; the server was then started by someone
+    and stopped by host_shutdown again. That newer mark is not this job's to settle."""
+    mark_for_resume(server)
+    newer = timezone.now()
+
+    def abandon_then_host_shutdown(*_args, **_kwargs):
+        abandon(server)()
+        Instance.objects.filter(pk=server.pk).update(resume_after_boot=True, resume_flagged_at=newer)
+
+    fake_agent.hooks["create_backup"] = abandon_then_host_shutdown
+    reset(clients["manager"], server, django_capture_on_commit_callbacks)
+    assert last_job(server).error_code == "abandoned"
+    server.refresh_from_db()
+    assert (server.resume_after_boot, server.resume_flagged_at) == (True, newer)
+
+
 def test_start_failure_after_a_reset_says_the_world_was_reset(clients, server, fake_agent, django_capture_on_commit_callbacks):
     start_container(fake_agent, server)
     fake_agent.failures["start"] = AgentError("Docker could not start the container", "start_failed", 500)

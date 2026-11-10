@@ -7,10 +7,13 @@ cannot express privileged mode, extra capabilities, devices or extra mounts.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import re
 import threading
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -22,6 +25,7 @@ from docker.errors import APIError, ImageNotFound, NotFound
 # arguments to the low-level API call; see create_container() for why it is used directly.
 from docker.models.containers import Container, _create_container_args
 
+from . import lastrun
 from .config import Settings, get_settings
 from .rcon import RconError, RconUnavailable, run_command_sync
 from .schemas import InstanceSpec
@@ -35,6 +39,15 @@ LABEL_SPEC_HASH = "io.mcpanel.spec-hash"
 LABEL_STOP_TIMEOUT = "io.mcpanel.stop-timeout"
 GAME_PORT = 25565
 RCON_PORT = 25575
+
+# How this agent turns a spec into a container, for what the spec itself does not show. The panel
+# keeps the same list (backend/apps/instances/spec.py, CONTAINER_FORMAT) and mixes the number the
+# agent reports (GET /v1/info and the result of an apply) into the hash behind "restart
+# required", so a container created by an agent that is older than the panel keeps reading
+# restart-required until an up-to-date agent has recreated it. Raise it together with the panel's.
+#   1  agents before the shutdown-safety fix (they report no number)
+#   2  the container gets Docker's stop timeout (Config.StopTimeout), see build_create_kwargs
+CONTAINER_FORMAT = 2
 
 # Graceful stop (see graceful_stop). Seconds.
 RCON_PROBE_TIMEOUT = 3.0  # connect + login: "does RCON answer quickly?"
@@ -289,13 +302,184 @@ def create_container(settings: Settings, instance_id: UUID, spec: InstanceSpec, 
         ) from exc
 
 
-def remove_container(instance_id: UUID, *, timeout: int = 60, settings: Settings | None = None) -> bool:
+def remove_container(
+    instance_id: UUID, *, timeout: int = 60, settings: Settings | None = None, save_last_run: bool = True
+) -> bool:
+    """Stop (gracefully) and remove the container. Returns False when there was none.
+
+    With ``save_last_run`` the last-run record of a container that has run is saved first, so
+    the console history survives a recreation or an archive too. Unlike :func:`retire` that is
+    best effort here: the caller asked for the container to go (it is being replaced or the
+    server archived), so a record that cannot be written is a warning in the agent log.
+    """
     c = get_container(instance_id)
     if c is None:
         return False
-    graceful_stop(settings or get_settings(), c, timeout)  # its warnings are in the agent log
+    settings = settings or get_settings()
+    graceful_stop(settings, c, timeout)  # its warnings are in the agent log
+    if save_last_run:
+        try:
+            save_last_run_record(settings, instance_id, c)
+        except Exception as exc:
+            log.warning(
+                "The last-run record of %s was not saved before its container was removed: %s", c.name, exc
+            )
     c.remove(v=False)
     return True
+
+
+# --- retiring the container of a stopped server ---------------------------------------------------
+# States in which a container is not running and Docker will not start it by itself (a container
+# waiting for its restart policy is "restarting").
+RETIRABLE_STATES = ("created", "exited", "dead")
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+
+_instance_locks_guard = threading.Lock()
+_instance_locks: dict[UUID, threading.Lock] = {}
+
+
+@contextlib.contextmanager
+def instance_lock(instance_id: UUID, wait: float | None = None) -> Iterator[None]:
+    """The per-server lock around every sequence that removes, creates or starts its container.
+
+    Retiring a container (inspect, save the last-run record, remove) must not interleave with a
+    start, a restart (stop, then start of the same container) or an apply (remove, create,
+    start). ``wait`` is how long to wait for the lock (None: as long as it takes); when it runs
+    out the answer is 409 ``instance_busy``. A kill and a stop never take it: they only act on a
+    running container, which a retire refuses.
+    """
+    with _instance_locks_guard:
+        lock = _instance_locks.setdefault(instance_id, threading.Lock())
+    if not lock.acquire(timeout=-1 if wait is None else wait):
+        raise AgentError("Another container operation is in progress for this server", "instance_busy", 409)
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def _timestamp(value: Any) -> datetime | None:
+    """A Docker timestamp (RFC 3339 with up to nine fraction digits) as an aware datetime."""
+    m = _TS_RE.match(str(value or ""))
+    if not m or m.group(1).startswith("0001-"):
+        return None
+    try:
+        return datetime.fromisoformat(m.group(1) + (m.group(2) or "")[:7] + m.group(3).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def stopped_seconds(described: dict[str, Any], now: datetime | None = None) -> float | None:
+    """How long a container that is not running has been in that state; None when Docker does not say.
+
+    Since it finished, or since it was created when it never ran. Both times and "now" come
+    from the Docker host, so this does not depend on the panel's clock.
+    """
+    since = _timestamp(described.get("finished_at")) if described.get("started_at") else None
+    since = since or _timestamp(described.get("created_at"))
+    if since is None:
+        return None
+    return ((now or datetime.now(UTC)) - since).total_seconds()
+
+
+def read_console_tail(c: Container) -> tuple[list[str], bool]:
+    """The end of the container's console output, bounded and cleaned (see lastrun.collect_tail)."""
+    stream = c.logs(
+        stream=True, follow=False, stdout=True, stderr=True, timestamps=False, tail=lastrun.MAX_LINES
+    )
+    try:
+        return lastrun.collect_tail(stream)
+    finally:
+        with contextlib.suppress(Exception):
+            stream.close()
+
+
+def save_last_run_record(settings: Settings, instance_id: UUID, c: Container) -> bool:
+    """Write the last-run record of a container that is not running. Returns False (and writes
+    nothing, keeping an older record) when the container never ran. Raises when the record cannot
+    be built or written."""
+    described = describe(c)
+    if not lastrun.has_run(described):
+        return False
+    lines, truncated = read_console_tail(c)
+    lastrun.write(settings, instance_id, lastrun.build(instance_id, described, lines, truncated))
+    return True
+
+
+def retire(settings: Settings, instance_id: UUID, settle_seconds: float = 0.0) -> dict[str, Any]:
+    """Remove the container of a stopped server, after saving its last-run record.
+
+    The caller holds :func:`instance_lock`. In order:
+
+    * no container: nothing to do, which is success (``retired`` false, ``reason`` "no_container");
+    * running, restarting or paused: refused with 409 ``container_running``. Only a container
+      Docker will not start again by itself is retired;
+    * in that state for less than ``settle_seconds``: refused with 409 ``not_settled``, so a
+      container that was stopped a moment ago (by a job that may start it again) is left alone;
+    * it has run: the last-run record is written. If that fails the container STAYS and the
+      error is 500 ``last_run_failed``. A container that never ran has nothing to record, and an
+      older record is kept;
+    * the container is removed. Already gone (someone else removed it meanwhile) is success.
+    """
+    c = get_container(instance_id)
+    if c is None:
+        return {"retired": False, "reason": "no_container", "recorded": False}
+    try:
+        c.reload()
+    except NotFound:  # removed between the two calls
+        return {"retired": False, "reason": "no_container", "recorded": False}
+    described = describe(c)
+    state = described.get("status")
+    if (
+        described.get("running")
+        or described.get("restarting")
+        or state in ("running", "restarting", "paused")
+    ):
+        raise AgentError(
+            "The server's container is running; only the container of a stopped server is retired",
+            "container_running",
+            409,
+        )
+    if state not in RETIRABLE_STATES:
+        raise AgentError(f"The container is in state '{state}'; try again later", "container_busy", 409)
+    stopped_for = stopped_seconds(described)
+    if stopped_for is not None and stopped_for < settle_seconds:
+        raise AgentError(
+            f"The container stopped {max(stopped_for, 0):.0f} s ago; it is retired after {settle_seconds:.0f} s",
+            "not_settled",
+            409,
+        )
+    try:
+        recorded = save_last_run_record(settings, instance_id, c)
+    except Exception as exc:
+        log.exception("Could not save the last-run record of %s; its container is kept", c.name)
+        raise AgentError(
+            f"The last-run record of the server could not be saved ({type(exc).__name__}: {exc}), "
+            "so its container was kept",
+            "last_run_failed",
+            500,
+        ) from exc
+    try:
+        c.remove(v=False)
+    except NotFound:
+        pass  # removed by someone else meanwhile: the result is the same
+    except APIError as exc:
+        text = str(exc.explanation or exc).lower()
+        if exc.status_code == 409 and "running" in text:
+            # started from outside the agent since the check above (docker start, Unraid's tab)
+            raise AgentError(
+                "The server's container was started meanwhile; it was not removed", "container_running", 409
+            ) from exc
+        if not (exc.status_code == 409 and "removal" in text and "in progress" in text):
+            raise
+    log.info(
+        "Retired the container of %s (%s, exit code %s%s)",
+        instance_id,
+        state,
+        described.get("exit_code"),
+        "" if recorded else ", never started: no record",
+    )
+    return {"retired": True, "reason": "", "recorded": recorded}
 
 
 _BUILTIN_NETWORKS = frozenset({"host", "none", "bridge"})
@@ -376,12 +560,18 @@ class StopResult:
     flushed: bool = False  # the server answered `save-all flush` before the stop
     stop_sent_via_rcon: bool = False  # the agent delivered `stop` itself (RCON was not up at first)
     warnings: list[str] = field(default_factory=list)
+    # Exit code of the run this stop ended: 0 = the server shut down by itself, anything else =
+    # it was ended (137: Docker's SIGKILL at the timeout) or failed while stopping. None when
+    # nothing was stopped (the container was not running) or Docker did not say. After /restart
+    # the container status describes the new run, so this is the only place it is reported.
+    exit_code: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "flushed": self.flushed,
             "stop_sent_via_rcon": self.stop_sent_via_rcon,
             "warnings": list(self.warnings),
+            "exit_code": self.exit_code,
         }
 
 
@@ -520,6 +710,12 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
         except AgentError as exc:
             target = None
             result.warnings.append(f"The world was not flushed before the stop: {exc}")
+        except Exception as exc:
+            # Whatever went wrong while reading the container's RCON address (e.g. a port entry
+            # Docker reports in a form describe() does not expect): `docker stop` still runs.
+            log.exception("Unexpected error while working out the RCON address of %s before a stop", c.name)
+            target = None
+            result.warnings.append(f"The world was not flushed before the stop: {type(exc).__name__}: {exc}")
         if target is not None and not _flush_before_stop(target, flush_timeout(timeout), result):
             courier = _RconStopCourier(c.id, c.name, target)
     if courier is not None:
@@ -529,9 +725,27 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
     finally:
         if courier is not None:
             courier.finish(result)
+    result.exit_code = _stopped_exit_code(c)
     for warning in result.warnings:
         log.warning("Stopping %s: %s", c.name, warning)
     return result
+
+
+def _stopped_exit_code(c: Container) -> int | None:
+    """Exit code of the run ``docker stop`` just ended; None when Docker does not say.
+
+    Never raises: the stop itself has happened, its exit code is only reported.
+    """
+    try:
+        c.reload()
+        state = c.attrs.get("State") or {}
+    except Exception as exc:
+        log.warning("Could not read the exit code of %s after its stop: %s", c.name, exc)
+        return None
+    if state.get("Running"):
+        return None
+    code = state.get("ExitCode")
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
 def stop(instance_id: UUID, timeout: int | None, settings: Settings | None = None) -> StopResult:
@@ -540,8 +754,14 @@ def stop(instance_id: UUID, timeout: int | None, settings: Settings | None = Non
 
 
 def kill(instance_id: UUID) -> None:
-    c = require_container(instance_id)
-    c.reload()
+    """Kill the server process. A server that is not running, with or without a container, is left alone."""
+    c = get_container(instance_id)
+    if c is None:
+        return
+    try:
+        c.reload()
+    except NotFound:  # removed meanwhile (a stopped server's container is retired): nothing runs
+        return
     if c.status in ("running", "restarting", "paused"):
         c.kill()
 
@@ -581,6 +801,8 @@ def describe(c: Container) -> dict[str, Any]:
         "id": c.id,
         "name": c.name,
         "image": attrs.get("Config", {}).get("Image"),
+        # what the tag pointed to when the container was created (sha256:...)
+        "image_id": attrs.get("Image") or None,
         "status": state.get("Status"),
         "running": bool(state.get("Running")),
         "restarting": bool(state.get("Restarting")),
@@ -599,11 +821,21 @@ def describe(c: Container) -> dict[str, Any]:
     }
 
 
-def status(instance_id: UUID) -> dict[str, Any]:
+def status(instance_id: UUID, settings: Settings | None = None) -> dict[str, Any]:
+    """The container's state. Without a container: ``exists`` false, and ``last_run`` (the
+    last-run record without its console lines) when the server has run before."""
     c = get_container(instance_id)
+    if c is not None:
+        try:
+            c.reload()
+        except NotFound:  # removed between the two calls
+            c = None
     if c is None:
-        return {"exists": False}
-    c.reload()
+        answer: dict[str, Any] = {"exists": False}
+        last_run = lastrun.summary(settings or get_settings(), instance_id)
+        if last_run is not None:
+            answer["last_run"] = last_run
+        return answer
     return describe(c)
 
 
@@ -637,8 +869,13 @@ def published_ports() -> list[dict[str, Any]]:
 
 
 def stats(instance_id: UUID) -> dict[str, Any]:
-    c = require_container(instance_id)
-    c.reload()
+    c = get_container(instance_id)
+    if c is None:  # a stopped server has no container
+        return {"running": False}
+    try:
+        c.reload()
+    except NotFound:
+        return {"running": False}
     if c.status != "running":
         return {"running": False}
     s = c.stats(stream=False)
@@ -681,20 +918,94 @@ def stats(instance_id: UUID) -> dict[str, Any]:
 
 def logs(instance_id: UUID, tail: int = 500, since: int | None = None) -> str:
     c = require_container(instance_id)
+    return _container_log(c, tail, since)
+
+
+def _container_log(c: Container, tail: int, since: int | None = None) -> str:
     kwargs: dict[str, Any] = {"tail": tail, "timestamps": False, "stdout": True, "stderr": True}
     if since:
         kwargs["since"] = since
     return c.logs(**kwargs).decode("utf-8", errors="replace")
 
 
+def previous_run_lines(settings: Settings, instance_id: UUID, c: Container | None) -> list[str]:
+    """Console lines of the last-run record that belong in front of the log of container ``c``.
+
+    Empty when there is no record, or when the record describes ``c`` itself (its removal
+    failed after the record was written): those lines are in the container's own log.
+    Never raises; the record must not be able to break the console.
+    """
+    try:
+        record = lastrun.load(settings, instance_id)
+        if record is None or (c is not None and record.get("container_id") == c.id):
+            return []
+        return lastrun.console_lines(record)
+    except Exception:
+        log.exception("Reading the last-run record of %s failed", instance_id)
+        return []
+
+
+def console_history(
+    instance_id: UUID, tail: int = 500, since: int | None = None, settings: Settings | None = None
+) -> list[str]:
+    """The last ``tail`` lines of console output: the container log, with the end of the
+    previous run (the last-run record) in front of it while the log is shorter than ``tail``.
+
+    Without a container the answer is the last-run record alone; without either it is
+    404 ``no_container`` as before. ``since`` reads the current container only.
+    """
+    settings = settings or get_settings()
+    c = get_container(instance_id)
+    lines: list[str] = []
+    if c is not None:
+        try:
+            lines = _container_log(c, tail, since).splitlines()
+        except NotFound:  # removed between the two calls: answer like for a server without one
+            c = None
+    if c is None:
+        previous = [] if since else previous_run_lines(settings, instance_id, None)
+        if not previous and lastrun.summary(settings, instance_id) is None:
+            raise AgentError(
+                "The instance has no container; apply its configuration first", "no_container", 404
+            )
+        return previous[-tail:]
+    if not since and len(lines) < tail:
+        previous = previous_run_lines(settings, instance_id, c)
+        if previous:
+            lines = previous[-(tail - len(lines)) :] + lines
+    return lines
+
+
+def count_log_lines(c: Container, tail: int) -> int:
+    """How many of the last ``tail`` lines the container's log holds (counted, not kept)."""
+    stream = c.logs(stream=True, follow=False, stdout=True, stderr=True, timestamps=False, tail=tail)
+    count = 0
+    last = b"\n"
+    try:
+        for chunk in stream:
+            if chunk:
+                count += chunk.count(b"\n")
+                last = chunk[-1:]
+    finally:
+        with contextlib.suppress(Exception):
+            stream.close()
+    return count if last == b"\n" else count + 1
+
+
 def rcon_endpoint(settings: Settings, instance_id: UUID) -> tuple[str, int, str]:
     """Return (host, port, password) for the instance's RCON listener.
 
     The password is read from the container's own configuration so it never has to
-    travel in agent API requests.
+    travel in agent API requests. A server without a container is "not running" like one
+    whose container is stopped.
     """
-    c = require_container(instance_id)
-    c.reload()
+    c = get_container(instance_id)
+    if c is None:
+        raise AgentError("The server is not running", "not_running", 409)
+    try:
+        c.reload()
+    except NotFound as exc:
+        raise AgentError("The server is not running", "not_running", 409) from exc
     if c.status != "running":
         raise AgentError("The server is not running", "not_running", 409)
     return _rcon_target(settings, c)

@@ -100,9 +100,10 @@ Anything that can talk to the Docker socket is effectively root on the host. The
 * requires the bearer token on every request (except the unauthenticated `/v1/health`, which reveals
   only whether Docker is reachable).
 
-Native snapshots need extra privileges, granted only through an override file (docs/UNRAID.md
-section 6), never by the default stack: `CAP_SYS_ADMIN` for btrfs and ZFS, plus `/dev/zfs` and an
-`:rshared` data mount for ZFS. They do not change the trust model (the agent is root-equivalent through
+btrfs snapshots need no extra privilege: the default stack takes, rolls back and deletes them (deleting
+file by file). Extra privileges are granted only through an override file (docs/UNRAID.md section 6),
+never by the default stack: `CAP_SYS_ADMIN` makes btrfs deletes instant and is required for ZFS
+snapshots, which also need `/dev/zfs` and an `:rshared` data mount. They do not change the trust model (the agent is root-equivalent through
 the Docker socket already), but `/dev/zfs` lets the agent administer *every* dataset on the host's
 pools. The agent only builds `zfs` argv lists from dataset names it read from `/proc/self/mountinfo`
 or `zfs list` and validated against a strict pattern; requests can name a snapshot (validated
@@ -130,6 +131,31 @@ Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
   on the Docker host only; making them reachable from the internet is a deliberate step you take on
   your router.
 * RCON (25575) is never published; only the agent reaches it on the container network.
+* Redis (job queue, live events, cache) has no password and its cache holds pickled objects, so
+  whoever can write to it can run code in the panel. It therefore has no network listener at all:
+  it runs inside the panel container on a Unix socket (`--port 0`, mode 700) in `/run/mcpanel`, a
+  memory-only directory of the panel's runtime user. Nothing outside that container can reach it,
+  the agent and the Minecraft containers included. Only with the optional `external-redis` Compose
+  profile is Redis a container on the internal network again, as it was before.
+
+## One panel container
+
+The web server, both Celery workers, the scheduler and Redis are processes of one container
+(`panel`), all as UID 10001 without any Linux capability, under a supervisor that needs none either.
+Before, they were five containers of the same image with the same secrets, network and user, so no
+secret and no network boundary was given up. What is gone is the separation of processes and
+files between the LAN-facing web process and the others: they share `/tmp`, `/run/mcpanel` and one
+user. What was done about it:
+
+* The scheduler keeps its schedule in memory. Its usual file is a pickle that is loaded at start; in
+  a shared `/tmp` a file-write bug in the web process would have become code execution at the next
+  scheduler start.
+* The supervisor's status file and the Redis socket are in `/run/mcpanel` (mode 0700, tmpfs), not
+  under a fixed name in `/tmp`. The status file is JSON and is only read, never executed.
+* Redis is started with `PATH`, `TZ` and `LANG` only: none of the panel's secrets are in its
+  environment.
+* The agent stays its own container. The panel container still has no Docker socket, no host
+  folders and no capabilities.
 
 ## Secrets
 
@@ -146,10 +172,11 @@ Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
   servers run in the same process and can read it; the runtime has no way to hide it (a
   `CF_API_KEY_FILE` would have to live in `/data`, which mods can read too). Use a key you can revoke
   in the CurseForge console if a mod misbehaves. Other server types never receive it.
-* Notification webhooks are sent from the worker, which sits on the panel's internal network. The
-  target host is resolved and refused if it is loopback, link-local (169.254.0.0/16, including cloud
-  metadata, and fe80::/10), multicast/reserved, one of MCPanel's own services (agent, postgres, redis,
-  panel, worker, beat, every node agent's address and port) or, with `MCPANEL_WEBHOOK_ALLOW_LAN=false`,
+* Notification webhooks are sent from the periodic worker inside the panel container, which sits on
+  the internal network. The target host is resolved and refused if it is loopback (which now is the
+  panel container itself), link-local (169.254.0.0/16, including cloud metadata, and fe80::/10),
+  multicast/reserved, one of MCPanel's own services (agent, postgres, panel, redis if it runs as a
+  container, every node agent's address and port) or, with `MCPANEL_WEBHOOK_ALLOW_LAN=false`,
   a private/LAN address. LAN targets are allowed by default because Home Assistant, ntfy or Gotify on
   the LAN are the usual receivers. The request goes to the checked address (no second DNS lookup),
   redirects are not followed and delivery errors are generic. Through an egress proxy

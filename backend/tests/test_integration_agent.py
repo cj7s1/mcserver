@@ -7,7 +7,8 @@ Skipped unless ``MCPANEL_IT_AGENT_URL`` is set, e.g.::
 Optional: ``MCPANEL_IT_AGENT_TOKEN`` (default ``dev-agent-token``),
 ``MCPANEL_IT_AGENT_DATA_ROOT`` (the agent's data root as seen from this machine, default
 ``/srv/mcpanel-dev``; set it empty to skip on-disk checks), ``MCPANEL_IT_READY_TIMEOUT``
-(seconds, default 360). Game ports are taken from 25600-25650.
+(seconds, default 360), ``MCPANEL_IT_BIND_IP`` (host address the game port is published on,
+default ``127.0.0.1``). Game ports are taken from 25600-25650.
 
 The test drives the real job handlers (install / stop / start / backup / restore /
 delete) through the job runner, so it exercises the panel's code paths, the agent API,
@@ -27,6 +28,7 @@ from .integration_support import (
     READY_TIMEOUT,
     InstanceTracker,
     Timer,
+    backup_repo_dir,
     container_names,
     make_node,
     rcon,
@@ -123,7 +125,8 @@ def test_vanilla_lifecycle_and_backup_restore(it_node, tracker):
         # --- stop / start keeps the world -----------------------------------------------------
         run_job("stop", inst)
         inst = wait_status(inst, "stopped", 120)
-        assert client.status(iid)["running"] is False
+        # (a stopped server's container is removed some seconds after the stop: no "running" key then)
+        assert not client.status(iid).get("running")
         timer.mark("stop")
         run_job("start", inst)
         inst = wait_status(inst, "running", READY_TIMEOUT)
@@ -138,6 +141,9 @@ def test_vanilla_lifecycle_and_backup_restore(it_node, tracker):
             assert backup.status == BackupStatus.SUCCEEDED and backup.snapshot_id
             assert backup.consistent is True, backup.warnings
             assert backup.files_count and backup.files_count > 10
+            if DATA_ROOT:
+                # the repository is where the agent says it is: the check after the delete means something
+                assert backup_repo_dir(it_node, iid).is_dir(), backup_repo_dir(it_node, iid)
             timer.mark("online backup (save-off/save-all/restic/save-on)")
 
             _set_block(inst, "diamond_block")
@@ -159,12 +165,13 @@ def test_vanilla_lifecycle_and_backup_restore(it_node, tracker):
             print("[it] restic not available on the agent: backup/restore scenario SKIPPED", flush=True)
 
         # --- delete removes container, files and backups ----------------------------------------
+        repo = backup_repo_dir(it_node, iid)  # asked before the delete; not always <data root>/backups
         run_job("delete", inst)
         assert not Instance.objects.filter(pk=iid).exists()
         assert client.status(iid) == {"exists": False, "operation": None}
         if DATA_ROOT:
             assert not tracker.path("instances", str(iid)).exists()
-            assert not tracker.path("backups", "restic", str(iid)).exists()
+            assert not repo.exists(), repo
         assert container_names(iid) in ("", None)
         timer.mark("delete")
     finally:

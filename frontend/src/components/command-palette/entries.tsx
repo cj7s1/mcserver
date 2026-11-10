@@ -221,7 +221,7 @@ export function powerConfirmCopy(i: Instance, action: Exclude<PowerAction, "star
   return {
     title: `Restart ${i.name}?`,
     description: i.restart_required
-      ? "Players are disconnected while the server restarts. The changed configuration is applied: the container is recreated and world data is kept."
+      ? "Players are disconnected while the server restarts. The container is recreated to apply changed settings or a newer MCPanel version; world data is kept."
       : "Players are disconnected while the server restarts.",
     confirmLabel: "Restart server",
     destructive: false,

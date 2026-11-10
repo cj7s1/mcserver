@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/lib/api";
 import { qk, useInvalidateInstance } from "@/lib/queries";
+import { RESTART_REQUIRED_NOTE } from "@/lib/restart-required";
 import type { Instance, InstanceStatus, Job } from "@/lib/types";
 
 export type PowerAction = "start" | "stop" | "restart";
@@ -13,6 +14,23 @@ export const RUNNING_LIKE: readonly InstanceStatus[] = ["running", "starting", "
 
 export function isRunningLike(i: Pick<Instance, "status">): boolean {
   return RUNNING_LIKE.includes(i.status);
+}
+
+export interface CardNote {
+  text: string;
+  tone: "error" | "muted" | "warning";
+}
+
+/**
+ * The one line a server card shows below its facts while no job runs: why the server is down
+ * (e.g. "Stopped because the host was shutting down; it is started again automatically"), or
+ * that a restart is due. A running server's detail stays in the badge's tooltip.
+ */
+export function cardNote(i: Pick<Instance, "status" | "status_detail" | "restart_required">): CardNote | null {
+  if (i.status === "failed" && i.status_detail) return { text: i.status_detail, tone: "error" };
+  if (i.status === "stopped" && i.status_detail) return { text: i.status_detail, tone: "muted" };
+  if (i.restart_required) return { text: RESTART_REQUIRED_NOTE, tone: "warning" };
+  return null;
 }
 
 export type StatusBucket = "running" | "busy" | "stopped" | "failed";

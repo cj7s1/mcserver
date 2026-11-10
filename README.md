@@ -45,8 +45,10 @@ pick a release, choose RAM and a port, and deploy.
 
 ## Architecture in one paragraph
 
-A Django/Channels **panel** (API + WebSockets + React SPA) and a Celery **worker** never touch Docker.
-A separate **node agent** (FastAPI) is the only component with the Docker socket. It is reachable only
+A Django/Channels **panel** (API + WebSockets + React SPA) and its Celery **workers** never touch Docker;
+together with the scheduler and Redis they are the processes of one unprivileged `panel` container. A
+separate **node agent** (FastAPI) is the only component with the Docker socket, and PostgreSQL is the
+third container. The agent is reachable only
 on the internal network, requires a bearer token, and independently enforces a strict container policy
 (an image allow-list, no privileged mode, dropped capabilities, only the server folder mounted). Minecraft
 runs in [`itzg/minecraft-server`](https://github.com/itzg/docker-minecraft-server) containers. Details are

@@ -35,8 +35,10 @@ from .models import EVENTS, NotificationChannel
 log = logging.getLogger(__name__)
 COLORS = {"failed": 0xE5484D, "crash": 0xE5484D, "succeeded": 0x30A46C, "running": 0x30A46C, "stopped": 0x8B8D98}
 
-# Compose service names of the stack: never a webhook target, whatever they resolve to.
-INTERNAL_SERVICE_NAMES = ("agent", "postgres", "redis", "panel", "worker", "beat")
+# Compose service names of the stack (deploy/docker-compose.yml): never a webhook target, whatever
+# they resolve to. "redis" is a service only with the external-redis profile; by default Redis is a
+# Unix socket inside the panel container and has no address at all.
+INTERNAL_SERVICE_NAMES = ("agent", "postgres", "redis", "panel")
 BLOCKED_HOSTNAMES = {
     *INTERNAL_SERVICE_NAMES,
     "localhost",

@@ -264,7 +264,7 @@ describe("ResetWorldDialog: options", () => {
 
   it("offers the safety backup ticked, with how long it is kept", async () => {
     const first = await setup();
-    const backup = await within(first.dialog).findByRole("checkbox", { name: /Take a safety backup of the whole server folder first \(recommended\)/ });
+    const backup = await within(first.dialog).findByRole("checkbox", { name: /Take a safety backup of the server folder first \(recommended\)/ });
     expect(backup).toBeChecked();
     expect(backup).toHaveAccessibleDescription("If it fails or does not contain the world, nothing is deleted. Kept 14 days.");
   });
@@ -324,7 +324,7 @@ describe("ResetWorldDialog: confirmation", () => {
     expect(within(alert).getByRole("heading", { name: "Reset the world of Vanilla Test?" })).toBeInTheDocument();
     expect(within(alert).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
       "The server is stopped (players are disconnected) and stays offline during the backup.",
-      "A safety backup of the whole server folder is taken and checked (“Before restore”). If it fails or does not contain the world, nothing is deleted.",
+      "A safety backup of the server folder is taken and checked (“Before restore”); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
       "The world folders bruh, bruh_nether and bruh_the_end (2.0 GB in total) are deleted, with all player data in them. " +
         "Carried over into the new world: bruh/datapacks, bruh/paper-world.yml and bruh_nether/paper-world.yml.",
       "The seed setting is kept (level-seed: -4172144997902289642): the new world is generated from this seed.",

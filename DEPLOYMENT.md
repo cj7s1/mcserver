@@ -34,7 +34,7 @@ Start the stack:
 
 ```bash
 docker compose up -d --build
-docker compose ps          # all services healthy (beat has no health check)
+docker compose ps          # postgres, agent and panel: all three healthy after about a minute
 ```
 
 Open `http://<MCPANEL_BIND>:<MCPANEL_PORT>/`, create the owner account (enter `MCPANEL_SETUP_TOKEN` if you
@@ -42,18 +42,69 @@ set it), and create a server.
 
 ## What runs
 
+Three containers:
+
 | Service | Image | Privileges |
 |---|---|---|
-| `panel` | `mcpanel/panel` (`web`) | UID 10001, no capabilities. Runs migrations on start and serves API, WebSockets and UI. |
-| `worker` | same (`worker`) | Celery jobs: installs, backups, restores, updates (and periodic tasks when it has a free slot). |
-| `worker-periodic` | same (`worker -Q periodic`) | Celery, periodic tasks only (reconcile loop, schedules, job watchdog, metrics, modpack update checks), so they keep running while long jobs fill every `worker` slot. Never runs jobs. |
-| `beat` | same (`beat`) | Scheduler: queues the periodic tasks above. Run exactly one. |
+| `panel` | `mcpanel/panel` (`all`) | UID 10001, no capabilities, no Docker socket. Applies database migrations on start, then runs everything except the database and the agent as processes of one container (below). |
 | `agent` | `mcpanel/agent` | Root, Docker socket, data directory. Never published. It refuses requests coming from the Minecraft network. |
-| `postgres`, `redis` | upstream | Internal network only. |
+| `postgres` | upstream | Internal network only. |
+
+Inside `panel`, a small supervisor (`backend/container/supervise.py`) starts and watches five
+processes. Every line of `docker compose logs panel` begins with the name of the process that
+wrote it:
+
+| Process | What it does |
+|---|---|
+| `[redis]` | Job queue, live events and cache. A Unix socket inside the container only (no network port), nothing on disk. Started first, stopped last. |
+| `[web]` | API, WebSockets and UI (uvicorn). |
+| `[worker]` | Celery jobs: installs, backups, restores, updates (and periodic tasks when it has a free slot). `MCPANEL_WORKER_CONCURRENCY` jobs at a time. |
+| `[periodic]` | Celery, periodic tasks only (reconcile loop, schedules, job watchdog, metrics, modpack update checks), so they keep running while long jobs fill every `[worker]` slot. Always 2 slots. Never runs jobs. |
+| `[beat]` | Scheduler: queues the periodic tasks above. |
+
+```bash
+docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status   # state of each process
+docker compose logs --tail 200 panel | grep -F '[worker]'                     # one process's lines
+```
+
+What to expect from it:
+
+* A process that exits is started again after 1, 2, 4 ... at most 30 seconds, for as long as it
+  takes; the others keep running. While it is down the health check fails and says which one:
+  `docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' mcpanel-panel-1`, and
+  `components` in `/api/health`. After three failed checks (about 90 seconds) Docker shows the
+  container as **unhealthy**. If Redis dies it is started again and the other four are restarted
+  after it.
+* **Healthy** means: the database and the cache answer, all five processes run, both workers
+  answered a ping in the last 2 minutes and the reconcile task ran in the last 3 minutes.
+* `docker compose stop panel` / `restart panel` / `down` give running jobs up to 110 seconds to
+  finish. A job that needs longer is cut off and shown as failed ("interrupted") a few minutes
+  later; check that server before you retry. So restart the panel when the Activity page is empty.
+* Restarting the panel container empties Redis. Jobs that were still waiting are sent again at the
+  start. Lost: webhook notifications that were waiting for a retry or were queued in the last
+  seconds before the stop, and the crash-loop counters (they start counting again).
+* The panel log is capped at 5 x 20 MB. The scheduler and the periodic worker only log warnings
+  and errors and the 10-second ticks are not logged, so that is months of requests and jobs.
 
 The agent creates Minecraft containers itself (named `mcpanel-<id>`, label `io.mcpanel.managed=true`)
 on the `mcpanel_instances` network. Because Compose doesn't manage them, `docker compose down` does
 **not** stop running servers. Stop them in the panel first if you want everything down.
+
+### Redis as its own container (optional)
+
+Redis can run as a fourth container again, as it did before it moved into the panel container.
+Use this if Redis inside the panel container ever misbehaves. Put both lines into `.env`:
+
+```
+COMPOSE_PROFILES=external-redis
+MCPANEL_REDIS_URL=redis://redis:6379/0
+```
+
+and run `./scripts/upgrade.sh run --no-build`. The panel then starts no Redis of its own
+(`mcpanel-supervise.py status` lists four processes). To go back, remove the two lines and run
+`./scripts/upgrade.sh run --no-build` again: it also removes the `redis` container, which a plain
+`docker compose up -d --remove-orphans` leaves running. `--no-build` only applies the change (no
+pull, no build, no database dump) and leaves the rollback point of the last upgrade as it is.
 
 ## HTTPS / remote access
 
@@ -139,7 +190,7 @@ Notes:
 * Using your own certificate instead: set `AGENT_TLS=files`, `AGENT_TLS_CERT_FILE` and
   `AGENT_TLS_KEY_FILE` in a compose override. Pin it the same way, or leave the fingerprint empty and
   let the panel verify it against public CAs plus `MCPANEL_AGENT_CA_BUNDLE` (a PEM file mounted into
-  panel and worker), in which case the URL's host name must match the certificate.
+  the panel container), in which case the URL's host name must match the certificate.
 * A plain `http://` node still works but the API flags it with a warning: its token and console
   traffic cross the network unencrypted.
 * If the **default** node is remote (`MCPANEL_AGENT_URL=https://…`), pin it with
@@ -150,26 +201,76 @@ Notes:
 ```bash
 cd mcserver && git pull
 cd deploy
-docker compose pull --ignore-buildable   # newer postgres/redis images (security fixes)
-docker compose build --pull              # rebuild panel and agent on fresh base images
-docker compose up -d
+./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
+./scripts/upgrade.sh run
 ```
 
-`docker compose up -d --build` alone reuses the base images (`python`, `node`) already on the host and
-never updates `postgres`/`redis`, so it skips their security fixes; run the two commands above at
-least monthly. On additional nodes: `docker compose -f docker-compose.node.yml --env-file node.env build
+`upgrade.sh` needs only bash, docker with the compose plugin and git. `run` does this, and stops
+with a message if a step fails (before step 6 the old version is still running, untouched):
+
+1. Refuses while a job is queued or running (it asks the database). `--force` skips this.
+2. Records the rollback point: the git revision that is deployed, the image of every running
+   container (tagged `mcpanel-rollback/<name>:<time>` so that no prune removes it) and the state of
+   the database migrations.
+3. Dumps the database without login sessions to `deploy/upgrade-backup-<time>.sql` and copies
+   `.env` next to it (both mode 600, the newest three are kept).
+4. Pulls the upstream images (`postgres`) and rebuilds panel and agent on fresh base images
+   (`docker compose build --pull`), so security fixes of the base images and of Redis arrive.
+5. Refuses if the new version changes the database schema, unless you pass `--with-migrations`
+   (the dry run lists the migration files).
+6. Stops and removes the containers of services the new version no longer has, then
+   `docker compose up -d --remove-orphans`.
+7. Waits until every service is healthy, checks that no container of an older layout is left and
+   prints what changed.
+
+`./scripts/upgrade.sh status` shows what runs, which revision it was built from, the processes
+inside the panel container, queued and running jobs and the rollback point.
+
+The rollback point needs the git revision that is running now. Images built by this script carry
+it as a label. The first time (images built by hand) the script takes the revision the checkout
+was at before your last `git pull`, checks that its compose file has exactly the services that
+are running, and says so (`from: ... [assumed ...]` in the dry run). If that is not what you were
+running, pass it: `./scripts/upgrade.sh run --from <revision>`.
+
+`./scripts/upgrade.sh rollback` takes the last `run` back: it checks out the recorded revision
+(the checkout is then on a detached HEAD), points the image names back at the saved images, undoes
+the database migrations of the upgrade and brings that layout up. To upgrade again later:
+`git checkout <your branch>`, then `./scripts/upgrade.sh run`.
+
+Running Minecraft servers are not touched by an upgrade or a rollback: they are not part of the
+Compose project. The panel is away for under a minute. The script keeps the images of one
+rollback point; older builds that nothing refers to any more show up as `<none>` in
+`docker images` and go away with `docker image prune`.
+
+Run `./scripts/upgrade.sh run` at least monthly even without new commits: it rebuilds on current
+base images. On additional nodes: `docker compose -f docker-compose.node.yml --env-file node.env build
 --pull`, then `... up -d`. The certificate (and so the pin) survives upgrades because it lives in the
 data directory.
 
-The compose file uses tags (`postgres:16-alpine`, `redis:7-alpine`), which move to new patch releases
-when you pull. To pin exact builds instead, put a digest in a `docker-compose.override.yml`, e.g.
-`services: {postgres: {image: "postgres:16-alpine@sha256:<digest>"}}`, taking the digest from
-`docker image inspect --format '{{index .RepoDigests 0}}' postgres:16-alpine` after a pull. Update the
-digest yourself on every upgrade; a pinned image never gets security fixes on its own. Don't change
-the Postgres major version (16) without a dump and restore.
+Do not upgrade with a plain `docker compose up -d --build`: it never removes containers of services
+that no longer exist. Coming from the layout with separate `worker` and `beat` containers, the new
+panel container notices them, logs how to fix it and refuses to start; `./scripts/upgrade.sh run`
+(or `docker compose up -d --remove-orphans`) removes them. `docker compose pull` only fetches
+`postgres`: the panel and agent images are built on your host and are never pulled from a registry.
 
-Migrations run automatically when `panel` starts, and `worker`/`beat` wait for it. Running Minecraft
-servers are not restarted by an upgrade. Before major upgrades, back up the database (see below).
+**Coming from the 7-container layout** (`panel`, `worker`, `worker-periodic`, `beat`, `agent`,
+`postgres`, `redis`): the same commands. If you want to take it in two steps, put the two lines from
+"Redis as its own container" into `.env` before the first `run` (4 containers: `redis` stays), and
+remove them a week or so later and run `./scripts/upgrade.sh run --no-build` (3 containers).
+`./scripts/upgrade.sh rollback` still leads back to the 7 containers after that, because
+`--no-build` keeps the rollback point. The old Redis volume (`mcpanel_redis_data`) is kept; remove
+it when you are sure you will not roll back: `docker volume rm mcpanel_redis_data`.
+
+The compose file uses a tag for the database (`postgres:16-alpine`), which moves to new patch
+releases when it is pulled. To pin an exact build instead, put a digest in a
+`docker-compose.override.yml`, e.g. `services: {postgres: {image: "postgres:16-alpine@sha256:<digest>"}}`,
+taking the digest from `docker image inspect --format '{{index .RepoDigests 0}}' postgres:16-alpine`
+after a pull. Update the digest yourself on every upgrade; a pinned image never gets security fixes
+on its own. Don't change the Postgres major version (16) without a dump and restore. The panel image
+is built from `python:3.13-slim-trixie` and `redis:7.4`: a rebuild brings their fixes, never a new
+Debian release or Redis major by surprise.
+
+Migrations run automatically when `panel` starts, before its processes do.
 
 ## Backing up the panel itself
 
@@ -202,7 +303,9 @@ servers are not restarted by an upgrade. Before major upgrades, back up the data
 | Server "Failed: crash loop" | Overview → Diagnostics lists the cause (missing mods, Java version, memory…). |
 | Port conflict on start | Another container or program uses the port. Change it in the server's Network tab. |
 | Files owned by the wrong user | Set `MC_UID`/`MC_GID` and restart the server (the runtime fixes ownership on start). |
-| Jobs never run | `docker compose ps worker beat`; `docker compose logs worker`. Stuck jobs can be marked failed in Activity. |
+| Jobs never run | `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status`: `worker` and `beat` must be running; `docker compose logs --tail 200 panel \| grep -F '[worker]'`. Stuck jobs can be marked failed in Activity. |
+| `panel` is "unhealthy" | `docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' mcpanel-panel-1` names the process and the reason. |
+| `panel` restarts in a loop after an upgrade, log says "containers of the previous layout are still running" | `./scripts/upgrade.sh run` (or `docker compose up -d --remove-orphans`). |
 
-Logs: `docker compose logs -f panel worker agent`. Each server's own log is in its console and in
+Logs: `docker compose logs -f panel agent`. Each server's own log is in its console and in
 `logs/` in the file manager.

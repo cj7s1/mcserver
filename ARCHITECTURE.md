@@ -5,16 +5,38 @@ MCPanel is split into a **panel** (UI + API + worker, unprivileged) and a **node
 Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 
 ```
- Browser ──HTTPS(reverse proxy, optional)──▶ panel (Django ASGI: REST + WebSockets + SPA)
-                                               │  Postgres (state)   Redis (cache, Celery broker, Channels)
-                                               │
-                                worker (Celery: jobs, reconcile loop, schedules)
+ Browser ──HTTPS(reverse proxy, optional)──▶ panel container (UID 10001, no capabilities, no Docker socket)
+                                             ├─ web       Django ASGI: REST + WebSockets + SPA
+                                             ├─ worker    Celery: jobs
+                                             ├─ periodic  Celery: reconcile loop, schedules, watchdog, metrics
+                                             ├─ beat      Celery scheduler
+                                             └─ redis     cache, Celery broker, Channels (Unix socket only)
+                                               │  Postgres container (state)
                                                │  Bearer token, internal network only
                                                ▼
-                                agent (FastAPI) ──▶ Docker Engine ──▶ itzg/minecraft-server containers
+                                agent container (FastAPI) ──▶ Docker Engine ──▶ itzg/minecraft-server containers
                                    │                                      ▲ RCON 25575 (container network only)
                                    └── instance + backup storage (bind-mounted host paths, restic repos)
 ```
+
+Three containers: `panel`, `agent`, `postgres`. The five processes of the panel container run under
+a small supervisor (`backend/container/supervise.py`, standard library only, started by the
+entrypoint's `all` mode after the migrations). They used to be five containers; they never were
+isolated from each other in any way that mattered (same image, same secrets, same network, same
+user), so one container costs no secret or network isolation. What is shared now is the file system
+and the process space of the web process, the workers and the scheduler; for that reason the
+scheduler keeps its schedule in memory (no pickle file the web process could write), Redis listens
+on a Unix socket in a directory of the runtime user only and is started without the panel's
+environment. The supervisor restarts a process that exits (capped backoff, never gives up), starts
+Redis first and stops it last, restarts the other processes after a Redis restart, prefixes every
+log line with the process name, pings both workers and writes a status file that the container
+health check and `/api/health` read. The entrypoint still has the one-role modes (`web`, `worker`,
+`beat`) for running the roles as separate containers.
+
+Redis keeps nothing on disk. Job state is in Postgres; when the job worker becomes ready it sends
+every job that is still queued again (`mcpanel/celery.py`, `apps/jobs/tasks.py`), so a restart of
+the panel container or of Redis loses no job. Lost at a restart: webhook deliveries waiting in the
+queue and the crash-loop counters kept in the cache.
 
 ## Components
 
@@ -22,7 +44,7 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 |---|---|---|
 | Frontend | `frontend/` (React, Vite, Tailwind, shadcn/ui, TanStack Query, xterm.js) | All screens. Talks only to `/api` and `/ws` on the panel. |
 | Management API | `backend/` (Django 5.2, DRF, Channels) | Auth, permission matrix, instance records, provider integrations, file/console proxying, audit log, OpenAPI at `/api/docs`. |
-| Worker | same image, `celery -A mcpanel worker` + `beat` | Executes **jobs** (install, start/stop/restart, recreate, backup, restore, clone, delete), the 10 s reconcile loop and cron schedules. |
+| Workers | same image and container: `celery -A mcpanel worker` (jobs), a second worker for the `periodic` queue, and `beat` | Execute **jobs** (install, start/stop/restart, recreate, backup, restore, clone, delete), the 10 s reconcile loop and cron schedules. |
 | Node agent | `agent/` (FastAPI, docker SDK, restic) | Narrow authenticated API: apply container spec, power, status/stats/logs, RCON, confined file ops, hash-verified downloads, restic backup/restore, storage capability detection. |
 | Runtime | `itzg/minecraft-server` | Installs Vanilla/Paper/Purpur/Fabric/Forge/NeoForge/Quilt and Modrinth/CurseForge/FTB modpacks. We do **not** implement our own installer. |
 

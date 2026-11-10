@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import time
 from typing import Any
 
 from django.conf import settings
@@ -33,8 +36,33 @@ EDITABLE = {
 SECRETS = {"curseforge_api_key"}
 
 
+def supervised_components() -> dict[str, str] | None:
+    """State of each process of the single panel container by name (redis, web, worker, periodic, beat).
+
+    Read from the status file of backend/container/supervise.py; None in the one-role-per-container
+    layout, where Docker shows each role as its own container.
+    """
+    path = os.environ.get("MCPANEL_SUPERVISOR_STATUS")
+    if not path:
+        return None
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        if time.time() - float(data["time"]) > 60:
+            return {"supervisor": "stale"}
+        return {str(name): str(child["state"]) for name, child in data["children"].items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {"supervisor": "unknown"}
+
+
 class HealthView(APIView):
-    """Unauthenticated health probe for Docker/Compose health checks."""
+    """Unauthenticated health probe for Docker/Compose health checks.
+
+    ``status`` and the HTTP code only reflect what the web process itself needs (database and
+    cache). ``tick_age_seconds`` (age of the last reconcile tick) and ``components`` (the other
+    processes of the single panel container) are for the container health check
+    (backend/container/healthcheck.py) and for showing which part is down.
+    """
 
     permission_classes = [AllowAny]
     authentication_classes: list[Any] = []
@@ -56,7 +84,18 @@ class HealthView(APIView):
         except Exception:
             checks["cache"] = "error"
         ok = all(v == "ok" for v in checks.values())
-        return Response({"status": "ok" if ok else "degraded", "checks": checks}, status=200 if ok else 503)
+        from mcpanel.celery import tick_age
+
+        age = tick_age()
+        body: dict[str, Any] = {
+            "status": "ok" if ok else "degraded",
+            "checks": checks,
+            "tick_age_seconds": None if age is None else round(age, 1),
+        }
+        components = supervised_components()
+        if components is not None:
+            body["components"] = components
+        return Response(body, status=200 if ok else 503)
 
 
 class SystemInfoView(APIView):

@@ -61,7 +61,7 @@ const CONTAINER_STATES: Record<string, string> = {
   paused: "paused",
   dead: "dead",
   removing: "removing",
-  missing: "no container",
+  missing: "none", // a stopped server has no container
 };
 
 function IconAction({ label, onClick, disabled, children }: { label: string; onClick: () => void; disabled?: boolean; children: ReactNode }) {
@@ -196,7 +196,10 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
       case "state": {
         const prev = containerStateRef.current;
         containerStateRef.current = msg.state;
-        if (prev && prev !== msg.state) append([sys(`container ${CONTAINER_STATES[msg.state] ?? msg.state}`)]);
+        if (prev && prev !== msg.state) {
+          // a stopped server has no container; the end of its last run stays in this view
+          append([sys(msg.state === "missing" ? "container removed (the server is stopped)" : `container ${CONTAINER_STATES[msg.state] ?? msg.state}`)]);
+        }
         break;
       }
       case "error":
@@ -403,7 +406,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
       const merged = mergeHistory(r.lines ?? [], entriesRef.current);
       entriesRef.current = merged.length > BUFFER_CAP ? merged.slice(-BUFFER_CAP) : merged;
       renderAll();
-      toast.success(`Loaded ${(r.lines ?? []).length.toLocaleString()} lines from the container log`);
+      toast.success(`Loaded ${(r.lines ?? []).length.toLocaleString()} lines of console history`);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -457,7 +460,9 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
                   <span className="sr-only sm:hidden">Load history</span>
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Fetch the last {HISTORY_TAIL.toLocaleString()} lines of the container log</TooltipContent>
+              <TooltipContent>
+                Fetch the last {HISTORY_TAIL.toLocaleString()} lines of console output (for a stopped server: of its last run)
+              </TooltipContent>
             </Tooltip>
             <IconAction label={filtering ? "Copy visible (filtered) lines" : "Copy visible lines"} onClick={copyVisible} disabled={empty}>
               <Copy />
@@ -568,7 +573,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
               {sock.state === "connecting"
                 ? "Connecting to the console…"
                 : sock.containerState === "missing"
-                  ? "No container yet. Output appears here once the server is installed and started."
+                  ? "No output yet. It appears here once the server is installed and started."
                   : "Waiting for output…"}
             </div>
           )}
@@ -594,9 +599,10 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
         </div>
       </div>
       <p className="px-1 text-xs text-muted-foreground">
-        The console opens with the last 300 lines of the current container&apos;s log; <strong className="font-medium">Load history</strong>{" "}
-        fetches up to {HISTORY_TAIL.toLocaleString()}. The view keeps the newest {BUFFER_CAP.toLocaleString()} lines. Older output from
-        previous runs is in the rotated log files under{" "}
+        The console opens with the last 300 lines of output; <strong className="font-medium">Load history</strong> fetches up to{" "}
+        {HISTORY_TAIL.toLocaleString()}. While the server is stopped this is the end of its last run, which also stays in front of the
+        next run&apos;s output. The view keeps the newest {BUFFER_CAP.toLocaleString()} lines. Older output is in the server&apos;s own
+        log files under{" "}
         {canFiles ? (
           <Link to={`/servers/${instance.id}/files?path=logs`} className={cn("font-mono text-primary hover:underline")}>
             Files → logs/

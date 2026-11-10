@@ -50,6 +50,8 @@ class FakeContainer:
         self.ports: dict = {"25565/tcp": [{"HostIp": "0.0.0.0", "HostPort": "25570"}], "25575/tcp": None}
         self.kill_after = 5.0
         self.killed = False
+        self.exit_code = 0  # of the last run; 137 after Docker's SIGKILL, like the real thing
+        self.reload_error: Exception | None = None
         self.removed = False
         self.stop_error: Exception | None = None
         self.stop_issued = threading.Event()
@@ -68,13 +70,14 @@ class FakeContainer:
                 "Status": self.state,
                 "Running": self.state in ("running", "paused", "restarting"),
                 "Restarting": self.state == "restarting",
-                "ExitCode": 0,
+                "ExitCode": self.exit_code,
             },
             "NetworkSettings": {"Networks": {"mcpanel_instances": {"IPAddress": IP}}, "Ports": self.ports},
         }
 
     def reload(self) -> None:
-        pass
+        if self.reload_error is not None and self.stop_issued.is_set():
+            raise self.reload_error
 
     def server_exits(self) -> None:
         """The Minecraft process ended by itself (it got ``stop``)."""
@@ -88,11 +91,13 @@ class FakeContainer:
             raise self.stop_error
         if self.state == "running" and not self.stop_may_return.wait(self.kill_after):
             self.killed = True
+            self.exit_code = 137
         self.state = "exited"
 
     def start(self) -> None:
         self.log.append("docker start")
         self.state = "running"
+        self.exit_code = 0  # Docker resets it for the new run
 
     def kill(self) -> None:
         self.log.append("docker kill")
@@ -196,7 +201,7 @@ def test_flushes_then_stops_when_rcon_answers(server, settings):
     server.container.stop_may_return.set()  # the runner's own rcon-cli stop works: Docker returns
     result = docker_ops.stop(IID, 90, settings)
     assert server.log == [("rcon", FLUSH), ("docker stop", 90)]
-    assert result.as_dict() == {"flushed": True, "stop_sent_via_rcon": False, "warnings": []}
+    assert result.as_dict() == {"flushed": True, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
     [flush] = server.rcon.calls
     assert flush.timeout == 45 and flush.connect_timeout == docker_ops.RCON_PROBE_TIMEOUT
     assert not server.container.killed
@@ -264,6 +269,41 @@ def test_no_rcon_password_is_a_warning_and_the_stop_goes_on(server, settings):
     assert result.warnings == [
         "The world was not flushed before the stop: Container has no RCON password configured"
     ]
+
+
+def test_unexpected_error_while_reading_the_rcon_address_does_not_block_the_stop(server, settings):
+    """Docker reports a published port without a host port: describe() raises ValueError, which is
+    no AgentError. The stop must still reach Docker (review 2026-11-10, exp_stop_exc.py)."""
+    server.container.ports = {"25565/tcp": [{"HostIp": "0.0.0.0", "HostPort": ""}]}
+    server.container.stop_may_return.set()
+    result = docker_ops.stop(IID, 30, settings)
+    assert server.log == [("docker stop", 30)] and server.container.state == "exited"
+    assert result.flushed is False and result.stop_sent_via_rcon is False
+    [warning] = result.warnings
+    assert warning.startswith("The world was not flushed before the stop: ValueError")
+    assert PASSWORD not in warning
+    assert server.rcon.calls == []  # no address, so nothing was tried
+
+
+@pytest.mark.parametrize("flush_error", [None, rcon.RconError("Timed out waiting for RCON response")])
+def test_no_helper_when_rcon_answered_the_flush(server, settings, flush_error):
+    """RCON accepted the login for the flush, so the runner's own `rcon-cli stop` works: the agent
+    must not send a second `stop` while `docker stop` is waiting for the server to end."""
+    server.rcon.up.set()
+    if flush_error is not None:
+        server.rcon.fail[FLUSH] = flush_error
+    server.container.kill_after = 0.3  # `docker stop` blocks for 15 retry intervals
+    started: list[str] = []
+    real_start = docker_ops._RconStopCourier.start
+    docker_ops._RconStopCourier.start = lambda self: (started.append("courier"), real_start(self))[1]
+    try:
+        result = docker_ops.stop(IID, 90, settings)
+    finally:
+        docker_ops._RconStopCourier.start = real_start
+    assert started == []
+    assert server.rcon.sent() == [FLUSH] and len(server.rcon.calls) == 1  # no `stop`, no further login
+    assert result.stop_sent_via_rcon is False
+    assert server.log == [("rcon", FLUSH), ("docker stop", 90)]
 
 
 # --- stop while the server is still starting ------------------------------------------------------
@@ -353,6 +393,40 @@ def test_retries_end_when_the_container_has_exited(server, settings):
     assert results[0].stop_sent_via_rcon is False and server.rcon.sent() == []
 
 
+def test_helper_sends_nothing_once_docker_stop_has_returned_during_its_container_check(
+    server, settings, monkeypatch
+):
+    """`docker stop` returns while the helper is asking Docker whether the container still runs.
+    A restart starts the server again right after: the answer "running" then belongs to the new
+    run, and a `stop` sent now would shut down the server that was just started."""
+    container = server.container
+    server.rcon.up.set()  # RCON would take the command at once
+    checking, answer = threading.Event(), threading.Event()
+
+    class SlowDocker(FakeDocker):
+        def inspect_container(self, container_id):
+            checking.set()
+            assert answer.wait(5)
+            return {"State": {"Running": True}}  # the restarted server
+
+    monkeypatch.setattr(docker_ops, "client", lambda: SlowDocker(container))
+    courier = docker_ops._RconStopCourier(container.id, container.name, (IP, 25575, PASSWORD))
+    result = StopResult()
+    courier.start()
+    assert checking.wait(5)  # the helper is inside its check
+    finishing = threading.Thread(target=courier.finish, args=(result,), daemon=True)
+    finishing.start()  # what graceful_stop does when `docker stop` has returned
+    deadline = time.monotonic() + 5
+    while not courier._done.is_set():
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    answer.set()
+    finishing.join(5)
+    assert not finishing.is_alive()
+    assert server.rcon.calls == [] and server.rcon.sent() == []
+    assert result.stop_sent_via_rcon is False and result.warnings == []
+
+
 def test_stop_counts_as_sent_when_the_server_drops_the_connection_while_stopping(server, settings):
     server.rcon.open_after_refusals_during_stop = 1
     server.rcon.fail["stop"] = rcon.RconError("RCON connection closed")
@@ -378,7 +452,13 @@ def test_a_stopped_container_is_left_alone(server, settings, status):
     server.rcon.up.set()
     result = docker_ops.stop(IID, 90, settings)
     assert server.log == [] and server.rcon.calls == []
-    assert result.as_dict() == {"flushed": False, "stop_sent_via_rcon": False, "warnings": []}
+    # nothing was stopped, so there is no exit code of a stopped run either
+    assert result.as_dict() == {
+        "flushed": False,
+        "stop_sent_via_rcon": False,
+        "warnings": [],
+        "exit_code": None,
+    }
 
 
 @pytest.mark.parametrize("status", ["restarting", "paused"])
@@ -387,7 +467,7 @@ def test_restarting_and_paused_containers_get_docker_stop_without_rcon(server, s
     server.rcon.up.set()
     result = docker_ops.stop(IID, 90, settings)
     assert server.log == [("docker stop", 90)] and server.rcon.calls == []
-    assert result.as_dict() == {"flushed": False, "stop_sent_via_rcon": False, "warnings": []}
+    assert result.as_dict() == {"flushed": False, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
 
 
 def test_stop_needs_a_container(monkeypatch, settings):
@@ -449,7 +529,7 @@ def test_stop_route_reports_what_the_stop_did(api, auth, server):
     assert r.status_code == 200
     body = r.json()
     assert server.log == [("rcon", FLUSH), ("docker stop", 90)]
-    assert body["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": []}
+    assert body["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
     # the answer is still the container status
     assert body["exists"] is True and body["running"] is False and body["status"] == "exited"
     assert body["name"] == "mcpanel-0123abcd0000"
@@ -473,8 +553,48 @@ def test_restart_route_uses_the_graceful_stop_then_starts(api, auth, server):
     assert r.status_code == 200
     assert server.log == [("rcon", FLUSH), ("docker stop", 40), "docker start"]
     body = r.json()
-    assert body["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": []}
+    assert body["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
     assert body["running"] is True and body["status"] == "running"
+
+
+def test_restart_route_reports_the_exit_code_of_the_run_it_stopped(api, auth, server):
+    """After a restart the container status describes the new run (exit code 0 again): a server
+    that had to be killed at the timeout is only visible in ``stop.exit_code``."""
+    server.rcon.up.set()
+    server.container.kill_after = 0.1  # never exits by itself: Docker's SIGKILL, scaled down
+    r = api.post(f"/v1/instances/{IID}/restart", json={"timeout": 40}, headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert server.container.killed and server.log[-1] == "docker start"
+    assert body["running"] is True and body["exit_code"] == 0  # the new run
+    assert body["stop"]["exit_code"] == 137  # the run that was stopped
+
+
+def test_stop_route_reports_a_kill_at_the_timeout(api, auth, server):
+    server.rcon.up.set()
+    server.container.kill_after = 0.1
+    r = api.post(f"/v1/instances/{IID}/stop", json={"timeout": 40}, headers=auth)
+    assert r.status_code == 200
+    assert r.json()["stop"]["exit_code"] == 137 and r.json()["exit_code"] == 137
+
+
+def test_exit_code_is_left_out_when_docker_does_not_say(server, settings):
+    """The stop has happened; an inspect that fails afterwards must not turn it into an error."""
+    server.rcon.up.set()
+    server.container.stop_may_return.set()
+    server.container.reload_error = docker.errors.APIError("500 Server Error", explanation="daemon busy")
+    real_reload = server.container.reload
+    reloads: list[bool] = []
+
+    def reload() -> None:
+        reloads.append(server.container.stop_issued.is_set())
+        real_reload()
+
+    server.container.reload = reload
+    result = docker_ops.stop(IID, 90, settings)
+    assert reloads == [False, True]  # before the stop (the state) and after it (the exit code)
+    assert _docker_stops(server.log) == [("docker stop", 90)]
+    assert result.exit_code is None and result.flushed is True
 
 
 def test_restart_route_delivers_stop_to_a_starting_server(api, auth, server):
@@ -714,7 +834,7 @@ def test_stop_route_with_a_real_socket_from_the_request_thread_pool(api, auth, a
     container.stop_may_return.set()
     r = api.post(f"/v1/instances/{IID}/stop", json={"timeout": 90}, headers=auth)
     assert r.status_code == 200
-    assert r.json()["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": []}
+    assert r.json()["stop"] == {"flushed": True, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
     assert p.commands == [FLUSH] and log == [("docker stop", 90)]
 
 

@@ -55,7 +55,8 @@ class Job(models.Model):
         return self.status in ACTIVE_STATUSES
 
     def append_log(self, line: str) -> None:
-        stamp = timezone.now().strftime("%H:%M:%S")
+        # the panel's time zone (TZ), like every other time the user sees; not UTC
+        stamp = timezone.localtime().strftime("%H:%M:%S")
         log = list(self.log or [])
         log.append(f"{stamp} {line}")
         self.log = log[-300:]

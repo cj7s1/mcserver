@@ -359,12 +359,32 @@ def build_spec(instance: Instance) -> dict[str, Any]:
 # is not part of the spec sent to the agent (the agent's spec schema has no such field).
 #   1  releases before the shutdown-safety fix (hash of the bare spec)
 #   2  the agent gives Docker a stop timeout (Config.StopTimeout) when it creates the container
+# The agent keeps the same list (agent/mcagent/docker_ops.py, CONTAINER_FORMAT) and reports the
+# number it applied with every container it creates. The stored hash is made with that number
+# (apply_container), not with the panel's: a container created by an agent that is older than
+# the panel keeps reading restart-required until an up-to-date agent has recreated it.
 CONTAINER_FORMAT = 2
 
 
-def spec_hash(spec: dict[str, Any]) -> str:
-    hashed = {**spec, "container_format": CONTAINER_FORMAT}
+def spec_hash(spec: dict[str, Any], container_format: int | None = None) -> str:
+    """Hash of a spec as a container of ``container_format`` holds it (default: this release's)."""
+    applied = CONTAINER_FORMAT if container_format is None else container_format
+    # format 1 is the hash of the bare spec: what releases before the number stored
+    hashed = spec if applied <= 1 else {**spec, "container_format": applied}
     return hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def applied_container_format(apply_result: dict[str, Any] | None) -> int:
+    """The container format the agent used for the container it just created (result of an apply).
+
+    Agents from before the number existed report none: format 1. An agent that is newer than
+    the panel may report a higher number than the panel knows; that counts as the panel's own,
+    or the server would read restart-required for ever.
+    """
+    reported = (apply_result or {}).get("container_format")
+    if isinstance(reported, bool) or not isinstance(reported, int) or reported < 1:
+        return 1
+    return min(reported, CONTAINER_FORMAT)
 
 
 def current_spec_hash(instance: Instance) -> str:

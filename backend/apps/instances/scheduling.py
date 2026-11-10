@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from croniter import croniter
@@ -14,12 +14,38 @@ from django.utils import timezone
 from apps.core.errors import ApiError, ConflictError
 from apps.jobs.runner import enqueue
 
-from .models import Instance, Schedule
+from .models import DesiredState, Instance, Schedule
 
 log = logging.getLogger(__name__)
 
 # Agent timeout of the resume step: it runs inside the scheduler tick and must not hold it up.
 RESUME_AGENT_TIMEOUT = 10.0
+# A mark that this same panel runtime has seen waiting for longer than this is given up: Docker
+# was not stopped after all (`manage.py host_shutdown` or the hook was run by hand). A real
+# shutdown ends the panel within a minute or two of the mark.
+RESUME_STALE_AFTER = timedelta(minutes=10)
+# A job of one of these kinds that failed says nothing about whether the server may be started:
+# it only reads the server's files (backups, snapshots, the source of a clone or of a restore
+# into a new server), or it only creates and starts the container, which the resume step's own
+# start does again. Every other kind changes the server's files (restores, world and modpack
+# operations, updates, a move to another node), and after its failure the server is left
+# stopped on purpose. A kind that is not listed counts as one of those.
+RESUME_HARMLESS_JOB_KINDS = frozenset(
+    {
+        "backup",
+        "backup_delete",
+        "backup_verify",
+        "snapshot_create",
+        "snapshot_delete",
+        "restore_new",
+        "clone",
+        "install",
+        "start",
+        "restart",
+        "recreate",
+    }
+)
+NOT_RESUMED_AUDIT = "instance.not_resumed_after_boot"
 _LOADED_AT = timezone.now()
 
 
@@ -154,6 +180,49 @@ def _live(container: dict[str, Any] | None) -> bool:
     return bool(c.get("running") or c.get("restarting") or c.get("status") == "restarting")
 
 
+def _job_that_left_it_stopped(instance: Instance, flagged_at: datetime | None) -> Any:
+    """The newest job that held this server, ended after it was marked and did not succeed
+    (failed, marked as failed by a user, interrupted, cancelled), or None.
+
+    After such a job the server is stopped on purpose: a failed restore or update may have
+    left its files half-written, an abandoned world reset its world folder moved aside. Jobs
+    that never took the server (a countdown that was cancelled) and the kinds in
+    RESUME_HARMLESS_JOB_KINDS do not count.
+    """
+    from apps.jobs.models import Job, JobStatus
+
+    if flagged_at is None:
+        return None
+    return (
+        Job.objects.filter(
+            instance=instance,
+            exclusive=True,
+            finished_at__gt=flagged_at,
+            status__in=(JobStatus.FAILED, JobStatus.CANCELLED),
+        )
+        .exclude(kind__in=RESUME_HARMLESS_JOB_KINDS)
+        .order_by("-finished_at")
+        .first()
+    )
+
+
+def _give_up(instance: Instance, result: dict[str, Any], reason: str, **details: Any) -> None:
+    """Drop the mark of a server that is not started again by the panel, and say why in the audit log."""
+    from apps.audit import service as audit
+
+    if not _clear_resume(instance):
+        return
+    flagged_at = instance.resume_flagged_at
+    audit.record(
+        NOT_RESUMED_AUDIT,
+        instance=instance,
+        target=instance,
+        details={"reason": reason, "stopped_at": flagged_at.isoformat() if flagged_at else None, **details},
+    )
+    log.info("resume after host shutdown: %s (%s) is not started again: %s", instance.name, instance.id, reason)
+    result["cleared"].append(str(instance.id))
+
+
 def resume_flagged_servers(now: datetime | None = None) -> dict[str, Any]:
     """Start servers that ``manage.py host_shutdown`` stopped before the host stopped Docker.
 
@@ -161,16 +230,24 @@ def resume_flagged_servers(now: datetime | None = None) -> dict[str, Any]:
     servers come back one after the other instead of all at once. For every marked server:
 
     * archived: the mark is dropped;
+    * no longer meant to run (``desired_state`` is not "running": something decided since the
+      mark that it stays down): the mark is dropped, the server is not started;
     * marked while this panel container was already running: nothing is done. The host is
       still shutting down (the hook has returned, Docker is not stopped yet); a server started
       now would be killed seconds later. Servers are resumed by the panel that starts after
-      Docker came back;
+      Docker came back. A mark that still waits like this after RESUME_STALE_AFTER is dropped:
+      Docker was never stopped, and the status would promise an automatic start for ever;
+    * a job that held it failed, was marked as failed or was interrupted after the mark
+      (``_job_that_left_it_stopped``): the mark is dropped, the server is not started;
     * its agent does not answer: nothing is done this run;
     * its container runs already (Docker's restart policy or someone started it): the mark is
       dropped;
     * a job holds it: it is skipped this run;
     * otherwise the normal ``start`` job is queued (it recreates a container that reads
       restart-required), the mark is dropped and ``instance.resumed_after_boot`` is audited.
+
+    A mark dropped without a start is audited as ``instance.not_resumed_after_boot`` with the
+    reason; the server then shows its normal status and stays down until someone starts it.
     """
     from apps.audit import service as audit
     from apps.jobs.models import ACTIVE_STATUSES, Job
@@ -188,10 +265,28 @@ def resume_flagged_servers(now: datetime | None = None) -> dict[str, Any]:
             if _clear_resume(inst):
                 result["cleared"].append(str(inst.id))
             continue
+        if inst.desired_state != DesiredState.RUNNING:
+            _give_up(inst, result, "not_meant_to_run", desired_state=inst.desired_state)
+            continue
         flagged_at = inst.resume_flagged_at
         # A mark dated in the future (clock trouble at shutdown) must not block the server forever.
         if flagged_at is not None and flagged_at <= now and panel_started <= flagged_at:
-            result["waiting"] += 1
+            if now - flagged_at > RESUME_STALE_AFTER:
+                _give_up(inst, result, "host_not_restarted", waited_seconds=int((now - flagged_at).total_seconds()))
+            else:
+                result["waiting"] += 1
+            continue
+        failed = _job_that_left_it_stopped(inst, flagged_at)
+        if failed is not None:
+            _give_up(
+                inst,
+                result,
+                "job_failed",
+                job=str(failed.id),
+                kind=failed.kind,
+                status=failed.status,
+                error_code=failed.error_code,
+            )
             continue
         if inst.node_id not in containers_by_node:
             try:

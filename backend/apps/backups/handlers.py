@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
-from apps.instances.handlers import apply_container, ensure_stopped
+from apps.instances.handlers import apply_container, ensure_stopped, start_server
 from apps.instances.models import Instance
 from apps.jobs.models import Job
 from apps.jobs.runner import JobContext, register
@@ -248,7 +248,7 @@ def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
     if was_running:
         ctx.progress(0.92, "Starting server")
-        client.start(instance.id)
+        start_server(instance, ctx, span=(0.92, 0.07))
     return {"restored": str(backup.id), "safety_backup": str(safety.id) if safety else None, "restarted": was_running}
 
 
@@ -324,7 +324,7 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
     if was_running:
         ctx.progress(0.92, "Starting server")
-        client.start(instance.id)
+        start_server(instance, ctx, span=(0.92, 0.07))
     return {"restored": job.params["path"], "backup": str(backup.id), "restarted": was_running}
 
 
@@ -440,7 +440,7 @@ def snapshot_restore(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.log(f"Warning: {warning}")
     if was_running:
         ctx.progress(0.9, "Starting server")
-        client.start(instance.id)
+        start_server(instance, ctx, span=(0.9, 0.09))
     return {"restored": name, "restarted": was_running, "warnings": warnings}
 
 
@@ -461,5 +461,5 @@ def snapshot_convert(job: Job, ctx: JobContext) -> dict[str, Any]:
     op = client.convert_snapshots(instance.id)
     done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
     if was_running:
-        client.start(instance.id)
+        start_server(instance, ctx, span=(0.92, 0.07))
     return done.get("result") or {}

@@ -67,11 +67,45 @@ def test_no_container_and_never_installed_is_created():
     assert compute(inst(installed_at=None, applied_revision=0), {"exists": False})[0] == Status.CREATED
 
 
-@pytest.mark.parametrize("fields", [{"installed_at": NOW}, {"installed_at": None, "applied_revision": 3}])
-def test_no_container_after_install_is_stopped(fields):
-    status, detail = compute(inst(**fields), {"exists": False})
+def test_no_container_after_install_is_stopped():
+    status, detail = compute(inst(installed_at=NOW), {"exists": False})
     assert status == Status.STOPPED
     assert "No container" in detail
+
+
+def test_no_container_and_never_installed_is_created_whatever_was_applied():
+    """A server that was created without starting it (or cloned) gets a container that is removed
+    again: it has an applied revision, but it was never installed."""
+    assert compute(inst(installed_at=None, applied_revision=3), {"exists": False}) == (Status.CREATED, "Not installed yet")
+
+
+def last_run(**fields) -> dict:
+    values = {"status": "exited", "exit_code": 0, "oom_killed": False, "restart_count": 0, "started_at": "2026-11-03T10:00:00Z"}
+    values.update(fields)
+    return {"exists": False, "last_run": values}
+
+
+@pytest.mark.parametrize("desired", ["stopped", "running"])
+@pytest.mark.parametrize("exit_code", [0, 1, 137, None])
+def test_retired_container_reads_as_a_stopped_server(desired, exit_code):
+    """The record of the last run of a server without a container: that run is over, whatever its
+    exit code was, also while a Start job is creating the next container (desired state running)."""
+    assert compute(inst(desired_state=desired), last_run(exit_code=exit_code)) == (Status.STOPPED, "")
+
+
+def test_retired_container_of_a_server_that_never_became_ready_is_stopped_not_created():
+    # it ran (and failed) during its first start: "Not installed yet" would hide that
+    assert compute(inst(installed_at=None), last_run(exit_code=1)) == (Status.STOPPED, "")
+
+
+def test_retired_out_of_memory_kill_stays_visible():
+    status, detail = compute(inst(desired_state="stopped"), last_run(exit_code=137, oom_killed=True))
+    assert status == Status.FAILED and "out of memory" in detail
+
+
+def test_job_status_and_archive_win_over_the_last_run():
+    assert compute(inst(), last_run(), "restore") == (Status.RESTORING, "")
+    assert compute(inst(archived_at=NOW), last_run(oom_killed=True))[0] == Status.ARCHIVED
 
 
 @pytest.mark.parametrize("c", [container(restarting=True), container(status="restarting", running=False)])

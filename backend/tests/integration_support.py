@@ -19,6 +19,9 @@ from typing import Any
 import pytest
 
 READY_TIMEOUT = float(os.environ.get("MCPANEL_IT_READY_TIMEOUT", "360"))
+# Host address the game ports of the test servers are published on. The model's default is
+# 0.0.0.0, which would put every test server on the LAN while the tests run.
+BIND_IP = os.environ.get("MCPANEL_IT_BIND_IP") or "127.0.0.1"
 
 
 class Timer:
@@ -137,6 +140,18 @@ def restic_available(node: Any) -> bool:
     return bool(AgentClient(node).info().get("restic"))
 
 
+def backup_repo_dir(node: Any, instance_id: uuid.UUID) -> Path:
+    """Where the agent keeps the restic repository of a server, by the agent's own account.
+
+    The backups directory is not always ``<data root>/backups`` (``AGENT_BACKUP_ROOT``), so the
+    path is read from the agent instead of being built from the data root: a check of a path
+    that never existed would pass without checking anything.
+    """
+    from apps.nodes.client import AgentClient
+
+    return Path(AgentClient(node).info()["storage"]["backups"]["path"]) / "restic" / str(instance_id)
+
+
 def runtime_owner(node: Any) -> tuple[int, int]:
     """The uid/gid the agent gives server files (the itzg runtime user)."""
     from apps.nodes.client import AgentClient
@@ -196,6 +211,7 @@ class InstanceTracker:
             "memory_mb": 1024,
             "jvm_flags_preset": "none",
             "stop_timeout": 60,
+            "host_ip": BIND_IP,
             "game_port": pick_port(node, ports),
         }
         values.update(fields)

@@ -6,8 +6,10 @@
 > yet on real Unraid hardware**. The paths and settings below follow Unraid conventions. Please
 > report anything that differs.
 
-MCPanel is a multi-container stack (panel, worker, worker-periodic, beat, agent, Postgres, Redis), so it runs through
-**Docker Compose**, not as a single Community Applications template.
+MCPanel is a stack of three containers (`panel`, `agent`, `postgres`), so it runs through
+**Docker Compose**, not as a single Community Applications template. The web server, the job
+workers, the scheduler and Redis are processes inside the `panel` container (DEPLOYMENT.md, "What
+runs"), so the Docker tab shows three rows for the platform plus one per Minecraft server.
 
 ## 1. Install Docker Compose support
 
@@ -73,6 +75,12 @@ Open `http://192.168.1.10:8080`, create the owner account, and create your first
 containers appear in Unraid's Docker tab as `mcpanel-<id>`. **Manage them from the panel, not from the
 Docker tab.** Changes made to them outside the panel are overwritten when the panel recreates the container.
 
+**Stopping or restarting the `panel` row:** Unraid's Docker tab gives a container 10 seconds to stop.
+That is enough when no job is running, and it cuts off a running install, backup or restore (the job
+is shown as failed a few minutes later). When the Activity page is not empty, use
+`cd /mnt/user/appdata/mcpanel-src/deploy && docker compose restart panel` instead: it gives jobs up to
+110 seconds to finish. The Minecraft servers keep running either way.
+
 ### First modpack server: Better MC
 
 **Create server → Modpack.** Without a CurseForge API key, choose **CurseForge page URL** and paste
@@ -116,8 +124,8 @@ snapshots when the server is deleted. What that means:
   world data on NVMe, one snapshot took about 2 seconds this way (and no measurable time with the
   override); a hard-disk pool, or a server with millions of files such as map-renderer tiles, takes much
   longer. Scheduled snapshots are pruned the same way.
-* The panel waits for a single snapshot delete only as long as it waits for any agent request
-  (`MCPANEL_AGENT_TIMEOUT`, 30 seconds by default). If a delete takes longer, the job reports that the
+* The panel waits up to 30 minutes for a single snapshot delete (other agent requests get
+  `MCPANEL_AGENT_TIMEOUT`, 30 seconds by default). If a delete takes even longer, the job reports that the
   agent did not respond in time; the agent finishes the delete anyway.
 * A snapshot being deleted leaves the list at once (its folder is renamed to `.deleting-<name>` first),
   so a half-removed snapshot can never be chosen for a rollback. If the agent is restarted in the middle,
@@ -249,10 +257,21 @@ managed from this panel over HTTPS with a pinned certificate. See DEPLOYMENT.md,
 ## 8. Updating
 
 ```bash
-cd /mnt/user/appdata/mcpanel-src && git pull && cd deploy && docker compose up -d --build
+cd /mnt/user/appdata/mcpanel-src && git pull
+cd deploy
+./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
+./scripts/upgrade.sh run
 ```
 
-Running Minecraft servers are not restarted by updates.
+The script only needs what Unraid has (bash, docker, git). It refuses while a job is running, saves
+the database and the current images first, rebuilds on fresh base images, removes containers the new
+version no longer has, waits until everything is healthy and prints what changed.
+`./scripts/upgrade.sh status` shows what is running; `./scripts/upgrade.sh rollback` takes the last
+upgrade back. Details: DEPLOYMENT.md, "Upgrading". Running Minecraft servers are not restarted by
+updates.
+
+The script keeps its files in `deploy/` (`upgrade-state.env`, `upgrade-backup-<time>.sql` and
+`.env`): keep the source folder on the cache pool or the array, not in RAM, and do not share it.
 
 ## 9. Troubleshooting on Unraid
 

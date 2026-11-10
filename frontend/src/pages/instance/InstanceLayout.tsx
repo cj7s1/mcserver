@@ -13,9 +13,11 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
+import { restartRequiredText } from "@/lib/restart-required";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ModpackUpdateBadge } from "./modpack/UpdateBadge";
+import { DISMISS_HINT, powerButtons } from "./power-controls";
 
 export interface InstanceContext {
   instance: Instance;
@@ -25,8 +27,6 @@ export interface InstanceContext {
 export function useInstanceContext(): InstanceContext {
   return useOutletContext<InstanceContext>();
 }
-
-const RUNNING_LIKE = ["running", "starting", "installing", "unhealthy", "restarting"];
 
 export function softwareLabel(i: Instance): string {
   if (i.is_modpack) return `${i.modpack_name || "Modpack"} ${i.modpack_version_name}`.trim();
@@ -39,7 +39,7 @@ function PowerControls({ instance, can }: InstanceContext) {
   const invalidate = useInvalidateInstance();
   const [confirm, setConfirm] = useState<"restart" | "stop" | null>(null);
   const power = useMutation({
-    mutationFn: (action: "start" | "kill") => api.post(`/instances/${instance.id}/power`, { action }),
+    mutationFn: (action: "start" | "stop" | "kill") => api.post(`/instances/${instance.id}/power`, { action }),
     onSuccess: (_d, action) => {
       toast.success(action === "kill" ? "Server process killed" : `${action[0].toUpperCase()}${action.slice(1)} requested`);
       invalidate(instance.id);
@@ -48,27 +48,36 @@ function PowerControls({ instance, can }: InstanceContext) {
   });
   if (!can("instance.control") || instance.archived_at) return null;
   const busy = !!instance.active_job || power.isPending;
-  const running = RUNNING_LIKE.includes(instance.status);
+  const show = powerButtons(instance);
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {!running ? (
+      {show.start && (
         <Button size="sm" onClick={() => power.mutate("start")} disabled={busy}>
           <Play /> Start
         </Button>
-      ) : (
-        <>
-          <Button size="sm" variant="outline" onClick={() => setConfirm("restart")} disabled={busy}>
-            <RotateCw /> Restart
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => setConfirm("stop")} disabled={busy}>
-            <Square /> Stop
-          </Button>
-        </>
+      )}
+      {show.dismiss && (
+        // Not running but still meant to run (it failed, or stopped by itself): the server keeps its
+        // container until someone decides, with Start or with this Stop. Nobody is online, so there
+        // is no countdown to offer.
+        <Button size="sm" variant="outline" onClick={() => power.mutate("stop")} disabled={busy} title={DISMISS_HINT}>
+          <Square /> Stop
+        </Button>
+      )}
+      {show.restart && (
+        <Button size="sm" variant="outline" onClick={() => setConfirm("restart")} disabled={busy}>
+          <RotateCw /> Restart
+        </Button>
+      )}
+      {show.stop && (
+        <Button size="sm" variant="outline" onClick={() => setConfirm("stop")} disabled={busy}>
+          <Square /> Stop
+        </Button>
       )}
       {confirm && (
         <PowerActionDialog instance={instance} action={confirm} open onOpenChange={(o) => !o && setConfirm(null)} />
       )}
-      {(running || instance.status === "stopping") && (
+      {show.kill && (
         <ConfirmDialog
           trigger={
             <Button size="sm" variant="destructive" disabled={power.isPending} aria-label="Kill server process">
@@ -156,9 +165,7 @@ export function InstanceLayout() {
         {instance.restart_required && !instance.active_job && (
           <div className="mt-3 flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
             <AlertTriangle className="size-4 shrink-0" />
-            {instance.status === "stopped" || instance.status === "failed"
-              ? "Configuration changed. It is applied the next time the server starts (the container is recreated; world data is kept)."
-              : "Configuration changed. Restart the server to apply it (the container is recreated; world data is kept)."}
+            {restartRequiredText(instance)}
           </div>
         )}
         {instance.active_job && <JobProgress job={instance.active_job} className="mt-3" />}

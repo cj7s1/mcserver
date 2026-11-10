@@ -1,18 +1,27 @@
 #!/bin/sh
 # Entrypoint of the mcpanel/panel image. One image, several process roles:
 #
+#   all     everything in one container (what deploy/docker-compose.yml runs): apply database
+#           migrations, then start the supervisor (mcpanel-supervise.py), which runs Redis
+#           (unless MCPANEL_REDIS_URL points to a server elsewhere), the web server, the job
+#           worker, the periodic worker and the scheduler as its child processes
 #   web     apply database migrations, then serve HTTP + WebSockets (uvicorn, port 8000)
 #   worker  Celery worker (jobs, reconcile loop tasks)
 #   beat    Celery beat (periodic task scheduler; run exactly ONE beat per deployment)
 #   manage  pass-through to `python manage.py ...` (e.g. `manage createsuperuser`)
+#   Used by `all` for its steps:
+#   migrate wait for the database, apply the migrations, exit
+#   serve   the web server alone: the same command as `web`, without the migration step
 #
-# Migrations run only in `web` so that worker/beat replicas never race on schema
-# changes; Compose starts worker/beat after the web container reports healthy.
+# web / worker / beat are the one-role-per-container layout (the stack before the single
+# panel container, and what a rollback returns to). There, migrations run only in `web` so
+# that worker/beat replicas never race on schema changes; Compose starts worker/beat after
+# the web container reports healthy.
 # Extra arguments after the mode are appended to the command.
 set -eu
 
 usage() {
-    echo "usage: mcpanel-entrypoint {web|worker|beat|manage} [args...]" >&2
+    echo "usage: mcpanel-entrypoint {all|web|worker|beat|manage} [args...]" >&2
     exit 64
 }
 
@@ -29,6 +38,20 @@ is_uint() {
         '' | *[!0-9]*) return 1 ;;
         *) return 0 ;;
     esac
+}
+
+# has_option SHORT LONG ARGS...: true when ARGS contain the option in any spelling
+# (-c 2, -c2, --concurrency 2, --concurrency=2).
+has_option() {
+    opt_short="$1"
+    opt_long="$2"
+    shift 2
+    for opt_arg in "$@"; do
+        case "$opt_arg" in
+            "$opt_short" | "$opt_short"[!-]* | "$opt_long" | "$opt_long"=*) return 0 ;;
+        esac
+    done
+    return 1
 }
 
 # Wait for PostgreSQL so a host reboot (where Docker restarts containers without
@@ -72,9 +95,31 @@ mode="$1"
 shift
 
 case "$mode" in
-    web)
+    all)
+        [ "$#" -eq 0 ] || usage
+        supervise="${MCPANEL_SUPERVISE:-/usr/local/bin/mcpanel-supervise.py}"
+        if [ -z "${MCPANEL_REDIS_URL:-}" ]; then
+            # No Redis configured: run it in this container, on a Unix socket only.
+            export MCPANEL_REDIS_URL="unix:///run/mcpanel/redis.sock?db=0"
+            export MCPANEL_CELERY_BROKER_URL="redis+socket:///run/mcpanel/redis.sock"
+        fi
+        # Old worker / worker-periodic / beat containers still running next to this one?
+        python "$supervise" guard
+        # Like everything the supervisor starts, the migration step has its name in front of
+        # every line it prints.
+        python "$supervise" step migrate mcpanel-entrypoint migrate
+        exec python "$supervise" run
+        ;;
+    migrate)
+        [ "$#" -eq 0 ] || usage
         wait_for_database
-        python manage.py migrate --noinput
+        exec python manage.py migrate --noinput
+        ;;
+    web | serve)
+        if [ "$mode" = web ]; then
+            wait_for_database
+            python manage.py migrate --noinput
+        fi
         set -- uvicorn mcpanel.asgi:application \
             --host 0.0.0.0 --port 8000 \
             --lifespan off --no-server-header "$@"
@@ -102,18 +147,38 @@ case "$mode" in
         exec "$@"
         ;;
     worker)
-        set -- celery -A mcpanel worker -l info "$@"
-        if [ -n "${MCPANEL_WORKER_CONCURRENCY:-}" ]; then
+        # MCPANEL_WORKER_CONCURRENCY applies only when the arguments set no concurrency
+        # themselves: the periodic worker (`worker -Q periodic -c 2 ...`) always has 2 slots.
+        # Celery takes the last value of a repeated option, so appending it would win.
+        concurrency=""
+        if ! has_option -c --concurrency "$@" && [ -n "${MCPANEL_WORKER_CONCURRENCY:-}" ]; then
             if ! is_uint "$MCPANEL_WORKER_CONCURRENCY" || [ "$MCPANEL_WORKER_CONCURRENCY" -lt 1 ]; then
                 echo "MCPANEL_WORKER_CONCURRENCY must be a positive integer" >&2
                 exit 64
             fi
-            set -- "$@" --concurrency "$MCPANEL_WORKER_CONCURRENCY"
+            concurrency="$MCPANEL_WORKER_CONCURRENCY"
+        fi
+        if has_option -l --loglevel "$@"; then
+            set -- celery -A mcpanel worker "$@"
+        else
+            set -- celery -A mcpanel worker -l info "$@"
+        fi
+        if [ -n "$concurrency" ]; then
+            set -- "$@" --concurrency "$concurrency"
         fi
         exec "$@"
         ;;
     beat)
-        exec celery -A mcpanel beat -l info --schedule /tmp/celerybeat-schedule "$@"
+        # The default scheduler keeps its state in a file (a pickle that is loaded at start).
+        # `all` passes `-S celery.beat:Scheduler` instead: the schedule stays in memory, so
+        # there is no such file next to the web process.
+        if ! has_option -S --scheduler "$@"; then
+            set -- --schedule /tmp/celerybeat-schedule "$@"
+        fi
+        if ! has_option -l --loglevel "$@"; then
+            set -- -l info "$@"
+        fi
+        exec celery -A mcpanel beat "$@"
         ;;
     manage)
         exec python manage.py "$@"

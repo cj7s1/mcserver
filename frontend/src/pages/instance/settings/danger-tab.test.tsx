@@ -99,7 +99,7 @@ describe("DangerTab: Reset world row", () => {
     expect(resetButton()).toBeEnabled();
     expect(
       screen.getByText(
-        "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. A safety backup is taken first unless you turn it off.",
+        "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. The next step lets you take a safety backup first.",
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("No actions available")).not.toBeInTheDocument();

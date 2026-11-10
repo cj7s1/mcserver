@@ -266,7 +266,7 @@ function ResetOptions({
             className="mt-0.5"
           />
           <span className="grid min-w-0 gap-0.5">
-            <span className="font-medium">Take a safety backup of the whole server folder first (recommended)</span>
+            <span className="font-medium">Take a safety backup of the server folder first (recommended)</span>
             <span id={`${uid}-backup-hint`} className="text-xs text-muted-foreground">
               If it fails or does not contain the world, nothing is deleted.
               {form.backup && (

@@ -9,9 +9,13 @@ the agent saves the world first.
 
 For every server of the node that is not archived and whose container runs:
 
-* ``resume_after_boot`` is set (``desired_state`` is left alone: the server is meant to run).
-  The scheduler tick of the panel that starts after Docker came back starts these servers
-  again, one per minute (``apps.instances.scheduling.resume_flagged_servers``);
+* ``resume_after_boot`` is set. The scheduler tick of the panel that starts after Docker came
+  back starts these servers again, one per minute
+  (``apps.instances.scheduling.resume_flagged_servers``), as long as ``desired_state`` still
+  says "running" then. ``desired_state`` is left alone here, with one exception: a server that
+  runs although the panel recorded "stopped" (started by an update with "start afterwards", or
+  outside the panel) and that no job holds is recorded as running, or it would not come back.
+  A server that a job holds keeps what the job decided (a Stop that is still in progress);
 * the agent is asked to stop it, the same graceful stop the panel's Stop button uses.
 
 All servers are stopped in parallel and the command returns within ``--timeout`` plus
@@ -20,12 +24,19 @@ job is queued, so it needs no Celery worker and no Redis, and it does not wait f
 holds a server. One line is printed and one audit entry written per server. Servers that are
 not running are left alone and are not marked.
 
+Output: the command's own lines only (one per server plus the summary), because the hook copies
+every line into the host's syslog. Log records below ERROR (the JSON line of every audit entry
+among them) are not printed while it runs; the audit entries themselves are written as usual.
+
 Exit status: 0, unless nothing could be reached at all (unknown node, or the agent does not
-answer). The hook then stops the containers with plain ``docker stop``.
+answer). The hook then leaves the servers to Docker's own stop: they were running when Docker
+went down, so Docker starts them again at boot (a plain ``docker stop`` would leave unmarked
+servers stopped for good).
 """
 
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
@@ -36,7 +47,7 @@ from django.utils import timezone
 
 from apps.audit import service as audit
 from apps.core.errors import ApiError
-from apps.instances.models import Instance
+from apps.instances.models import DesiredState, Instance
 from apps.nodes.client import AgentClient, AgentError
 from apps.nodes.models import Node
 
@@ -64,6 +75,16 @@ class Command(BaseCommand):
         parser.add_argument("--node", default="", help="Name of the node (default: the default node)")
 
     def handle(self, *args, **opts):  # type: ignore[no-untyped-def]
+        # Everything this prints ends up in the host's syslog (the hook copies it line by line):
+        # only the command's own lines belong there, not the log records of the code it calls.
+        previous = logging.root.manager.disable
+        logging.disable(max(previous, logging.WARNING))
+        try:
+            self._run(opts)
+        finally:
+            logging.disable(previous)
+
+    def _run(self, opts: dict[str, Any]) -> None:
         budget = int(opts["timeout"])
         if not 1 <= budget <= 900:
             raise CommandError("--timeout must be between 1 and 900 seconds")
@@ -92,8 +113,13 @@ class Command(BaseCommand):
 
         # Mark first, in one statement: whatever happens to this command afterwards, the
         # servers that were running come back after the next boot.
-        Instance.objects.filter(pk__in=[inst.pk for inst in targets]).update(
-            resume_after_boot=True, resume_flagged_at=timezone.now()
+        marked = Instance.objects.filter(pk__in=[inst.pk for inst in targets])
+        marked.update(resume_after_boot=True, resume_flagged_at=timezone.now())
+        # The resume step starts a marked server only while the panel still means it to run. A
+        # server that runs although "stopped" is recorded, with no job deciding about it right
+        # now, was started without the panel noting it: it is meant to run.
+        marked.filter(active_job__isnull=True).exclude(desired_state=DesiredState.RUNNING).update(
+            desired_state=DesiredState.RUNNING
         )
 
         answers: queue.Queue[tuple[Instance, float, dict[str, Any] | None, Exception | None]] = queue.Queue()

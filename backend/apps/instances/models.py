@@ -129,9 +129,13 @@ class Instance(models.Model):
     # Set by `manage.py host_shutdown` (the Unraid stopping_docker hook) on a running server it
     # stops because the host is about to stop Docker. desired_state stays "running"; after the
     # next start of the panel the scheduler tick starts these servers again, one per minute
-    # (scheduling.resume_flagged_servers). An explicit start, stop, kill, archive or delete
-    # clears it. resume_flagged_at is when it was set: nothing is resumed by a panel process
-    # that was already running then (the host is still shutting down). db_default: after a
+    # (scheduling.resume_flagged_servers), unless something decided meanwhile that the server
+    # stays down. An explicit start, stop, kill, archive or delete clears it, and so do the
+    # crash-loop stop and a job that ends with the server left stopped on purpose; the resume
+    # step itself drops it without a start when desired_state is no longer "running" or such a
+    # job failed after the mark. resume_flagged_at is when it was set: nothing is resumed by a
+    # panel process that was already running then (the host is still shutting down), and a
+    # mark that waits like that for more than ten minutes is dropped. db_default: after a
     # rollback to an older image the column is still there and must not break new rows.
     resume_after_boot = models.BooleanField(default=False, db_default=False)
     resume_flagged_at = models.DateTimeField(null=True, blank=True)

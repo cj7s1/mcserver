@@ -226,7 +226,7 @@ export function mergeHistory(history: string[], current: ConsoleEntry[]): Consol
   const histPlain = hist.map((e) => e.plain);
   const curLogIdx = current.map((e, i) => (e.kind === "log" ? i : -1)).filter((i) => i >= 0);
   const k = Math.min(5, histPlain.length, curLogIdx.length);
-  const note = makeEntry("sys", `loaded ${hist.length.toLocaleString()} lines of container log history`);
+  const note = makeEntry("sys", `loaded ${hist.length.toLocaleString()} lines of console history`);
   if (k === 0) return [note, ...hist, ...current.filter((e) => e.kind !== "log")];
 
   // 1) history's newest k lines found in the live buffer → keep live entries after that point
@@ -259,6 +259,6 @@ export function mergeHistory(history: string[], current: ConsoleEntry[]): Consol
       return [note, ...hist.slice(0, a + k), ...current.slice(lastLive + 1)];
     }
   }
-  // no overlap (the log was rotated or the container recreated): history first, then live output
+  // no overlap (the log was rotated or the server runs in a new container): history first, then live output
   return [note, ...hist, makeEntry("sys", "live output"), ...current];
 }

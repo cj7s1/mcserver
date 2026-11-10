@@ -1,24 +1,37 @@
 #!/bin/bash
 # Install, check or remove the MCPanel shutdown hook on Unraid.
 #
-#   bash install-hook.sh install   copy the hook into place (run as root)
-#   bash install-hook.sh status    show whether it is installed and up to date
-#   bash install-hook.sh remove    take it out again (run as root)
+#   bash install-hook.sh install [--project <name>]   copy the hook into place (run as root)
+#   bash install-hook.sh status                       show whether it is installed and up to date
+#   bash install-hook.sh remove                       take it out again (run as root)
 #
 # The hook is the file "stopping_docker" next to this script. Unraid runs it from
 #   /usr/local/emhttp/plugins/mcpanel/event/stopping_docker
 # right before it stops Docker. That folder is in RAM and is rebuilt at every boot, so
 # "install" has to run at every boot: from a User Scripts entry scheduled "At Startup of
 # Array" or from a line in /boot/config/go. docs/UNRAID-SHUTDOWN.md has both.
+#
+# --project <name>: the Compose project of the panel stack, if it is not "mcpanel" (the hook
+# finds the panel container by it; see "docker compose ls"). Unraid passes no environment to
+# the hook, so the name is written into the installed copy. Give it every time "install" runs.
+#
+# "install" and "status" also read Unraid's shutdown time-out and warn when it is too short
+# for the hook (see check_shutdown_timeout).
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE="${HERE}/stopping_docker"
-# MCPANEL_HOOK_ROOT is for trying this script out somewhere else; leave it unset on Unraid.
+# MCPANEL_HOOK_ROOT and MCPANEL_DISK_CFG are for trying this script out somewhere else; leave
+# them unset on Unraid.
 PLUGINS="${MCPANEL_HOOK_ROOT:-/usr/local/emhttp/plugins}"
 PLUGIN_DIR="${PLUGINS}/mcpanel"
 EVENT_DIR="${PLUGIN_DIR}/event"
 TARGET="${EVENT_DIR}/stopping_docker"
+DISK_CFG="${MCPANEL_DISK_CFG:-/boot/config/disk.cfg}"
+DEFAULT_PROJECT="mcpanel"
+# The hook may use 60 s (70 s with its watchdog) before Unraid starts to stop Docker and the
+# array, which need the time Unraid's default of 90 s was meant for.
+NEEDED_TIMEOUT=150
 
 say() {
     printf '%s\n' "$*"
@@ -27,6 +40,11 @@ say() {
 fail() {
     printf 'install-hook: %s\n' "$*" >&2
     exit 1
+}
+
+usage() {
+    say "usage: bash install-hook.sh install [--project <name>] | status | remove"
+    exit 64
 }
 
 need_source() {
@@ -42,20 +60,84 @@ need_root() {
     [ -n "${MCPANEL_HOOK_ROOT:-}" ] || [ "$(id -u)" -eq 0 ] || fail "run this as root (the Unraid terminal is root)"
 }
 
+# The hook as it is installed for a Compose project: the source with that name as the default
+# of its PROJECT line.
+render() {
+    sed "s/^PROJECT=\"\\\${MCPANEL_COMPOSE_PROJECT:-[^}]*}\"/PROJECT=\"\\\${MCPANEL_COMPOSE_PROJECT:-$1}\"/" "${SOURCE}"
+}
+
+# The Compose project an installed hook looks for (empty if its PROJECT line is not there).
+project_of() {
+    sed -n 's/^PROJECT="\${MCPANEL_COMPOSE_PROJECT:-\([^}]*\)}".*$/\1/p' "$1" | head -n 1
+}
+
+# Unraid waits this long (Settings > Disk Settings > Shutdown time-out) for a clean shutdown
+# and forces one after that; an unclean shutdown starts a parity check. The hook runs inside
+# that time. Prints a warning when the value is below NEEDED_TIMEOUT; never fails.
+check_shutdown_timeout() {
+    local value
+    if [ ! -r "${DISK_CFG}" ]; then
+        say "Note: Unraid's shutdown time-out could not be read (${DISK_CFG} is missing)."
+        say "      Check Settings > Disk Settings > Shutdown time-out: it should be at least ${NEEDED_TIMEOUT} seconds."
+        return 0
+    fi
+    value="$(tr -d '\r' <"${DISK_CFG}" | sed -n 's/^shutdownTimeout="\{0,1\}\([0-9]\{1,6\}\)"\{0,1\}[[:space:]]*$/\1/p' | tail -n 1)"
+    if [ -z "${value}" ]; then
+        say "WARNING: no shutdown time-out is set in ${DISK_CFG}, so Unraid uses its default of 90 seconds."
+    elif [ "${value}" -ge "${NEEDED_TIMEOUT}" ]; then
+        say "Unraid's shutdown time-out is ${value} seconds: enough for the hook."
+        return 0
+    else
+        say "WARNING: Unraid's shutdown time-out is ${value} seconds."
+    fi
+    say "         The hook can take 60 to 70 seconds before Unraid starts to stop Docker and the array."
+    say "         What is left may not be enough: Unraid then forces the shutdown (an unclean shutdown,"
+    say "         followed by a parity check at the next start)."
+    say "         Set Settings > Disk Settings > Shutdown time-out to at least ${NEEDED_TIMEOUT}."
+    logger -t mcpanel -- "shutdown hook: Unraid's shutdown time-out is ${value:-90 (default)} s; set it to at least ${NEEDED_TIMEOUT} s (Settings > Disk Settings)" 2>/dev/null || true
+    return 0
+}
+
 cmd_install() {
+    local project="${DEFAULT_PROJECT}"
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --project)
+                [ "$#" -ge 2 ] || fail "--project needs a name"
+                project="$2"
+                shift 2
+                ;;
+            --project=*)
+                project="${1#--project=}"
+                shift
+                ;;
+            *) usage ;;
+        esac
+    done
+    # what Docker Compose accepts as a project name; nothing else may end up in the hook
+    [[ "${project}" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] ||
+        fail "not a Compose project name: '${project}' (lowercase letters, digits, - and _; see 'docker compose ls')"
     need_source
     need_unraid
     need_root
     mkdir -p "${EVENT_DIR}" || fail "could not create ${EVENT_DIR}"
-    cp "${SOURCE}" "${TARGET}.new" || fail "could not copy the hook to ${EVENT_DIR}"
+    render "${project}" >"${TARGET}.new" || fail "could not copy the hook to ${EVENT_DIR}"
+    if [ "$(project_of "${TARGET}.new")" != "${project}" ] || ! bash -n "${TARGET}.new"; then
+        rm -f "${TARGET}.new"
+        fail "could not write the project name into the hook (its PROJECT line was not found)"
+    fi
     chmod 755 "${TARGET}.new" || fail "could not make the hook executable"
     mv -f "${TARGET}.new" "${TARGET}" || fail "could not put the hook in place"
-    logger -t mcpanel -- "shutdown hook installed at ${TARGET}" 2>/dev/null || true
+    logger -t mcpanel -- "shutdown hook installed at ${TARGET} (Compose project ${project})" 2>/dev/null || true
     say "Installed: ${TARGET}"
+    say "It looks for the panel container of the Compose project '${project}'."
     say "Unraid runs it right before it stops Docker. It is gone after a reboot until this runs again."
+    check_shutdown_timeout
 }
 
 cmd_status() {
+    local project
+    [ "$#" -eq 0 ] || usage
     need_source
     if [ ! -e "${TARGET}" ]; then
         say "Not installed: ${TARGET} does not exist."
@@ -67,19 +149,23 @@ cmd_status() {
         say "Repair it with: bash ${HERE}/install-hook.sh install"
         return 1
     fi
-    if ! cmp -s "${SOURCE}" "${TARGET}"; then
+    project="$(project_of "${TARGET}")"
+    if [ -z "${project}" ] || ! render "${project}" | cmp -s - "${TARGET}"; then
         say "Installed, but it differs from ${SOURCE} (an older version)."
-        say "Update it with: bash ${HERE}/install-hook.sh install"
+        say "Update it with: bash ${HERE}/install-hook.sh install${project:+ --project ${project}}"
         return 1
     fi
     say "Installed and up to date: ${TARGET}"
+    say "It looks for the panel container of the Compose project '${project}'."
     if [ ! -x /usr/local/sbin/emhttp_event ]; then
         say "Note: /usr/local/sbin/emhttp_event was not found, so nothing here runs the hook."
     fi
+    check_shutdown_timeout
     return 0
 }
 
 cmd_remove() {
+    [ "$#" -eq 0 ] || usage
     need_unraid
     need_root
     if [ ! -e "${TARGET}" ]; then
@@ -95,12 +181,11 @@ cmd_remove() {
     return 0
 }
 
-case "${1:-}" in
-    install) cmd_install ;;
-    status) cmd_status ;;
-    remove) cmd_remove ;;
-    *)
-        say "usage: bash install-hook.sh install | status | remove"
-        exit 64
-        ;;
+action="${1:-}"
+[ "$#" -gt 0 ] && shift
+case "${action}" in
+    install) cmd_install "$@" ;;
+    status) cmd_status "$@" ;;
+    remove) cmd_remove "$@" ;;
+    *) usage ;;
 esac

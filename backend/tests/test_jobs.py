@@ -317,3 +317,17 @@ def test_reconcile_node_counts_orphans(inst, fake_agent, node):
     assert "down" in node.last_error
     inst.refresh_from_db()
     assert inst.status == "unknown"
+
+
+def test_job_log_lines_are_stamped_in_the_panel_time_zone(monkeypatch):
+    """With TZ=America/Los_Angeles the log must not show UTC times (every other time in the panel is local)."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setattr(timezone, "now", lambda: datetime(2026, 11, 10, 1, 30, 5, tzinfo=UTC))
+    job = Job(kind="start", title="Start server")
+    with timezone.override(ZoneInfo("America/Los_Angeles")):
+        job.append_log("Starting container")
+    with timezone.override(ZoneInfo("Europe/Berlin")):
+        job.append_log("Done")
+    assert job.log == ["17:30:05 Starting container", "02:30:05 Done"]

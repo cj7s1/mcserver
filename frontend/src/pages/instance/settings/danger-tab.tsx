@@ -238,7 +238,7 @@ export function DangerTab({ instance, can }: TabProps) {
               description={
                 archived
                   ? "Not available while the server is archived: it has no container. Unarchive it first; its container is recreated on the next start."
-                  : "Removes the Docker container and creates it again from the current settings. Files and worlds are kept; a running server is restarted. Use this if the container is broken or out of sync."
+                  : "Removes the Docker container and creates it again from the current settings. Files and worlds are kept; a running server is restarted. Use this if the container is broken or out of sync. A stopped server has no container: it gets a new one at every start."
               }
               action={
                 <ConfirmDialog
@@ -251,7 +251,7 @@ export function DangerTab({ instance, can }: TabProps) {
                   description={
                     live
                       ? "The server is running: it is stopped, the container is recreated and the server starts again. Players are disconnected."
-                      : "The container is removed and created again from the current settings. Server files are not touched."
+                      : "The container is created again from the current settings. Server files are not touched. While the server stays stopped the container is removed again; the next start creates it."
                   }
                   confirmLabel="Recreate"
                   onConfirm={async () => {
@@ -351,7 +351,7 @@ export function DangerTab({ instance, can }: TabProps) {
                 description={
                   archived
                     ? "Not available while the server is archived. Unarchive it first."
-                    : "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. A safety backup is taken first unless you turn it off."
+                    : "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. The next step lets you take a safety backup first."
                 }
                 action={
                   <Button ref={resetButton} variant="destructive" size="sm" onClick={() => setResetOpen(true)} disabled={busy || archived}>

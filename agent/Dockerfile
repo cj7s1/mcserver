@@ -39,9 +39,10 @@ COPY --from=restic/restic:0.19.1 /usr/bin/restic /usr/local/bin/restic
 
 # btrfs-progs and zfsutils-linux (Debian contrib, userland only: no kernel module, no
 # zed, no DKMS) enable native snapshots when the data directory is on a btrfs or ZFS
-# pool. They are used only on that filesystem and only with the extra privileges the
-# docs/UNRAID.md override grants (CAP_SYS_ADMIN; for ZFS also /dev/zfs and a shared
-# bind mount). The default stack grants neither, so snapshots then report unavailable.
+# pool. They are used only on that filesystem. btrfs snapshots work with the default
+# stack; the docs/UNRAID.md override (CAP_SYS_ADMIN) only makes deleting them instant
+# instead of file by file. ZFS snapshots need that override (CAP_SYS_ADMIN, /dev/zfs and
+# a shared bind mount) and report unavailable without it.
 # Build behind a TLS-intercepting proxy: see backend/Dockerfile.
 RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \

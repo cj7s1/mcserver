@@ -203,7 +203,7 @@ export function summaryLines(plan: Pick<WorldResetPlan, "folders" | "delete" | "
       ? {
           id: "backup",
           parts: [
-            "A safety backup of the whole server folder is taken and checked (“Before restore”). If it fails or does not contain the world, nothing is deleted.",
+            "A safety backup of the server folder is taken and checked (“Before restore”); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
           ],
         }
       : { id: "backup", parts: ["No safety backup is taken: the world cannot be recovered afterwards."], danger: true },

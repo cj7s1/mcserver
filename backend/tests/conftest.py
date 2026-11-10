@@ -57,9 +57,12 @@ class FakeAgent:
         "info",
         "published_ports",
         "list_containers",
+        "list_state",
         "prepare",
         "apply",
         "remove_container",
+        "retire",
+        "forget_last_run",
         "status",
         "start",
         "stop",
@@ -103,6 +106,14 @@ class FakeAgent:
 
     def __init__(self) -> None:
         self.containers: dict[str, dict[str, Any]] = {}
+        # instance id -> the record the agent keeps of the last run of a server whose container was
+        # removed (agent/mcagent/lastrun.py): the container's fields plus "log" with console lines
+        self.last_runs: dict[str, dict[str, Any]] = {}
+        # What the agent offers beyond the first API version (GET /v1/info); [] = an older agent,
+        # which keeps the containers of stopped servers.
+        self.features: list[str] = ["retire"]
+        # image name -> image id of containers created from it (default: derived from the name)
+        self.image_ids: dict[str, str] = {}
         self.fs: dict[str, dict[str, Any]] = {}
         self.repos: dict[str, list[dict[str, Any]]] = {}
         self.snaps: dict[str, list[dict[str, Any]]] = {}
@@ -110,6 +121,16 @@ class FakeAgent:
         self.snapshot_delete_error: Exception | None = None
         self.snapshot_dependents: set[str] = set()  # ZFS: names other datasets are cloned from
         self.delete_data_warnings: list[str] = []
+        self.delete_data_leftovers: list[str] = []  # paths the agent could not remove
+        # What the agent reports as its container format with every apply (docker_ops.CONTAINER_FORMAT);
+        # None = an agent from before the number existed (the key is missing from the result).
+        self.container_format: int | None = self._current_container_format()
+        # Exit code of a server that is stopped (0 = it shut down by itself; 137 = killed at the timeout).
+        self.stop_exit_code = 0
+        # Extra fields of the "stop" object in the answers to stop and restart (flushed, warnings, ...).
+        self.stop_info: dict[str, Any] = {}
+        # False = an agent from before the "stop" object existed.
+        self.reports_stop = True
         self.operations: dict[str, dict[str, Any]] = {}
         self.foreign_ports: list[dict[str, Any]] = []
         self.remote_files: dict[str, bytes] = {}
@@ -130,6 +151,13 @@ class FakeAgent:
         self.backup_warnings: list[str] = []
         # world reset: deleting the old world fails after it was moved aside (a warning plus "leftover")
         self.world_reset_delete_error: str | None = None
+
+    @staticmethod
+    def _current_container_format() -> int:
+        """An agent of the same release as the panel."""
+        from apps.instances.spec import CONTAINER_FORMAT
+
+        return CONTAINER_FORMAT
 
     # -- wiring ------------------------------------------------------------------------
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,6 +233,19 @@ class FakeAgent:
 
     def set_container_state(self, instance_id: Any, **state: Any) -> None:
         self.containers[str(instance_id)].update(state)
+
+    def age_containers(self, instance_id: Any = None, seconds: float = 3600) -> None:
+        """Make containers look as if they have been in their state for ``seconds``: the retire
+        rule leaves a container alone that stopped (or was created) a moment ago."""
+        from datetime import timedelta
+
+        then = (timezone.now() - timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
+        for iid, c in self.containers.items():
+            if instance_id is not None and iid != str(instance_id):
+                continue
+            c["created_at"] = then
+            if c.get("finished_at"):
+                c["finished_at"] = then
 
     # -- internals ---------------------------------------------------------------------
     @staticmethod
@@ -370,6 +411,7 @@ class FakeAgent:
     def info(self) -> dict[str, Any]:
         return {
             "version": "fake",
+            "features": list(self.features),
             "docker": {"server_version": "fake", "cpus": 4, "memory_bytes": 16 * 1024**3},
             "restic": "restic 0.19.1 (fake)",
             "storage": {},
@@ -398,6 +440,86 @@ class FakeAgent:
     def list_containers(self) -> list[dict[str, Any]]:
         return [self._public(c) for c in self.containers.values()]
 
+    def list_state(self) -> dict[str, Any]:
+        # the same request as list_containers on the real agent (GET /v1/instances): tests that
+        # make that one fail mean "the agent cannot be asked"
+        failure = self.failures.get("list_containers")
+        if failure is not None:
+            raise failure
+        return {
+            "containers": self.list_containers(),
+            "last_runs": {iid: self._last_run_summary(iid) for iid in self.last_runs},
+        }
+
+    # -- last-run record (agent/mcagent/lastrun.py) ------------------------------------
+    LAST_RUN_MAX_LINES = 2000
+
+    def _last_run_summary(self, iid: str) -> dict[str, Any] | None:
+        record = self.last_runs.get(iid)
+        if record is None:
+            return None
+        out = {k: copy.deepcopy(v) for k, v in record.items() if k != "log"}
+        out["log_lines"] = len(record["log"]["lines"])
+        out["log_truncated"] = record["log"]["truncated"]
+        return out
+
+    def _save_last_run(self, iid: str, c: dict[str, Any]) -> bool:
+        """What the agent does before it removes a container that has run; False when it never ran."""
+        if not c.get("started_at"):
+            return False
+        lines = self.log_lines.pop(iid, [])  # the container's log goes with the container
+        self.last_runs[iid] = {
+            "retired_at": self._now(),
+            "container_id": c["id"],
+            "container_name": c["name"],
+            "image": c["image"],
+            "image_id": c.get("image_id"),
+            "status": c["status"],
+            "exit_code": c["exit_code"],
+            "oom_killed": bool(c["oom_killed"]),
+            "error": c.get("error"),
+            "restart_count": int(c.get("restart_count") or 0),
+            "created_at": c.get("created_at"),
+            "started_at": c.get("started_at"),
+            "finished_at": c.get("finished_at"),
+            "health": c.get("health"),
+            "health_output": c.get("health_output"),
+            "spec_hash": c.get("spec_hash"),
+            "log": {"lines": list(lines[-self.LAST_RUN_MAX_LINES :]), "truncated": False},
+        }
+        return True
+
+    def _last_run_console(self, iid: str) -> list[str]:
+        record = self.last_runs.get(iid)
+        if record is None or not record["log"]["lines"]:
+            return []
+        return [
+            *record["log"]["lines"],
+            f"[mcpanel] ---- end of the run that stopped (exited with code {record['exit_code']}) ----",
+        ]
+
+    def retire(self, instance_id: Any, *, settle_seconds: float = 10.0) -> dict[str, Any]:
+        """docker_ops.retire: save the last-run record, then remove the container of a stopped server."""
+        from django.utils.dateparse import parse_datetime
+
+        iid = str(instance_id)
+        c = self.containers.get(iid)
+        if c is None:
+            return {"retired": False, "reason": "no_container", "recorded": False, "last_run": self._last_run_summary(iid)}
+        if self._live(c) or c["status"] not in ("created", "exited", "dead"):
+            raise self._err(
+                "The server's container is running; only the container of a stopped server is retired", "container_running", 409
+            )
+        since = parse_datetime(str((c.get("finished_at") if c.get("started_at") else None) or c.get("created_at")))
+        if since is not None and (timezone.now() - since).total_seconds() < settle_seconds:
+            raise self._err("The container stopped a moment ago", "not_settled", 409)
+        recorded = self._save_last_run(iid, c)
+        del self.containers[iid]
+        return {"retired": True, "reason": "", "recorded": recorded, "last_run": self._last_run_summary(iid)}
+
+    def forget_last_run(self, instance_id: Any) -> bool:
+        return self.last_runs.pop(str(instance_id), None) is not None
+
     def prepare(self, instance_id: Any, files: dict[str, str] | None = None) -> dict[str, Any]:
         iid = str(instance_id)
         created = iid not in self.fs
@@ -425,6 +547,7 @@ class FakeAgent:
             "id": uuid.uuid4().hex,
             "name": f"mcpanel-{uuid.UUID(iid).hex[:12]}",
             "image": spec["image"],
+            "image_id": self.image_ids.get(spec["image"]) or "sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest(),
             "status": "created",
             "running": False,
             "restarting": False,
@@ -454,15 +577,30 @@ class FakeAgent:
         self.containers[iid] = c
         if start or was_running:
             self._set_running(c)
-        return self._op("apply", iid, {"container": self._public(c), "recreated": existing is not None})
+        result = {"container": self._public(c), "recreated": existing is not None}
+        if self.container_format is not None:
+            result["container_format"] = self.container_format
+        return self._op("apply", iid, result)
 
     def remove_container(self, instance_id: Any, timeout: int = 60) -> bool:
-        return self.containers.pop(str(instance_id), None) is not None
+        iid = str(instance_id)
+        c = self.containers.pop(iid, None)
+        if c is None:
+            return False
+        if self._live(c):
+            self._set_exited(c, self.stop_exit_code)
+        if "retire" in self.features:  # agents with the feature keep the last run of a removed container
+            self._save_last_run(iid, c)
+        return True
 
     def status(self, instance_id: Any) -> dict[str, Any]:
         c = self.containers.get(str(instance_id))
         if c is None:
-            return {"exists": False, "operation": None}
+            answer: dict[str, Any] = {"exists": False, "operation": None}
+            last_run = self._last_run_summary(str(instance_id))
+            if last_run is not None:
+                answer["last_run"] = last_run
+            return answer
         return {**self._public(c), "operation": None}
 
     def start(self, instance_id: Any) -> dict[str, Any]:
@@ -471,25 +609,48 @@ class FakeAgent:
             self._set_running(c)
         return self.status(instance_id)
 
-    def stop(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
-        c = self._container(str(instance_id))
+    def _graceful_stop(self, c: dict[str, Any]) -> dict[str, Any]:
+        """docker_ops.graceful_stop: what the stop did, with the exit code of the run it ended."""
+        info: dict[str, Any] = {"flushed": False, "stop_sent_via_rcon": False, "warnings": [], "exit_code": None}
         if self._live(c):
-            self._set_exited(c, 0)
-        return self.status(instance_id)
+            info["flushed"] = bool(c.get("running")) and c.get("health") == "healthy"
+            self._set_exited(c, self.stop_exit_code)
+            info["exit_code"] = c["exit_code"]
+            info.update(self.stop_info)
+        return info
+
+    def _with_stop(self, instance_id: Any, info: dict[str, Any]) -> dict[str, Any]:
+        answer = self.status(instance_id)
+        if self.reports_stop:
+            answer["stop"] = info
+        return answer
+
+    def stop(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
+        info = self._graceful_stop(self._container(str(instance_id)))
+        return self._with_stop(instance_id, info)
 
     def restart(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
-        self._set_running(self._container(str(instance_id)))
-        return self.status(instance_id)
+        c = self._container(str(instance_id))
+        info = self._graceful_stop(c)
+        self._set_running(c)  # the status in the answer describes the new run (exit code 0 again)
+        return self._with_stop(instance_id, info)
+
+    def _container_or_not_running(self, iid: str) -> dict[str, Any] | None:
+        """A server without a container is "not running" for kill, stats and commands. Agents
+        from before the retire feature answered 404 no_container instead."""
+        if "retire" in self.features:
+            return self.containers.get(iid)
+        return self._container(iid)
 
     def kill(self, instance_id: Any) -> dict[str, Any]:
-        c = self._container(str(instance_id))
-        if self._live(c):
+        c = self._container_or_not_running(str(instance_id))
+        if c is not None and self._live(c):
             self._set_exited(c, 137)
         return self.status(instance_id)
 
     def stats(self, instance_id: Any) -> dict[str, Any]:
-        c = self._container(str(instance_id))
-        if not c["running"]:
+        c = self._container_or_not_running(str(instance_id))
+        if c is None or not c["running"]:
             return {"running": False}
         return {
             "running": True,
@@ -515,12 +676,24 @@ class FakeAgent:
         }
 
     def logs(self, instance_id: Any, tail: int = 500) -> list[str]:
-        self._container(str(instance_id))
-        return self.log_lines.get(str(instance_id), [])[-tail:]
+        """docker_ops.console_history: the container log with the end of the previous run in front;
+        without a container the end of the last run; without either 404 no_container."""
+        iid = str(instance_id)
+        c = self.containers.get(iid)
+        if c is None:
+            if iid not in self.last_runs:
+                self._container(iid)  # raises no_container
+            return self._last_run_console(iid)[-tail:]
+        lines = self.log_lines.get(iid, [])[-tail:]
+        previous = self._last_run_console(iid)
+        if previous and self.last_runs[iid]["container_id"] != c["id"] and len(lines) < tail:
+            lines = previous[-(tail - len(lines)) :] + lines
+        return lines
 
     def command(self, instance_id: Any, command: str, timeout: float = 30) -> str:
         iid = str(instance_id)
-        if not self._container(iid)["running"]:
+        c = self._container_or_not_running(iid)
+        if c is None or not c["running"]:
             raise self._err("The server is not running", "not_running", 409)
         self.commands.append((iid, command))
         if self.command_handler is not None:
@@ -536,9 +709,19 @@ class FakeAgent:
         if failed := self._injected("delete_data", iid):
             return failed
         self.containers.pop(iid, None)
+        self.last_runs.pop(iid, None)
         self.fs.pop(iid, None)
         self.repos.pop(iid, None)
-        return self._op("delete_data", iid, {"deleted": True, "warnings": list(self.delete_data_warnings)})
+        return self._op(
+            "delete_data",
+            iid,
+            {
+                "deleted": True,
+                "snapshots_deleted": 0,
+                "warnings": list(self.delete_data_warnings),
+                "leftovers": list(self.delete_data_leftovers),
+            },
+        )
 
     def clone(self, instance_id: Any, target_id: Any, exclude_worlds: bool = False) -> dict[str, Any]:
         src, dst = str(instance_id), str(target_id)

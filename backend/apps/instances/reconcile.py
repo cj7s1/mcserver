@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
+from django.conf import settings
 from django.core.cache import cache
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -16,7 +18,7 @@ from apps.nodes.client import AgentClient
 from apps.nodes.models import Node
 
 from . import state
-from .models import Instance, Status
+from .models import DesiredState, Instance, Status
 
 log = logging.getLogger(__name__)
 
@@ -145,8 +147,12 @@ def _stop_crash_loop(instance: Instance, restarts: int) -> None:
     except ApiError as exc:
         log.warning("could not stop crash-looping %s: %s", instance.pk, exc)
         return
-    Instance.objects.filter(pk=instance.pk).update(desired_state="stopped")
+    # The server stays down until someone starts it: that also settles a pending "start again
+    # after the host restart" mark (host_shutdown), or the resume step would start it once more.
+    Instance.objects.filter(pk=instance.pk).update(desired_state="stopped", resume_after_boot=False, resume_flagged_at=None)
     instance.desired_state = "stopped"
+    instance.resume_after_boot = False
+    instance.resume_flagged_at = None
     instance.status = Status.FAILED
     instance.status_detail = (f"{AUTO_STOP_PREFIX} {restarts} crashes during startup.{summary}")[:500]
     audit.record("instance.crash_loop_stopped", instance=instance, target=instance, success=False, details={"restarts": restarts})
@@ -200,10 +206,13 @@ def apply_observation(
         elif unexpected and not job_kind and instance.desired_state == "running":
             _notify_unexpected_restart(instance, unexpected)
         c = container or {}
+        # Without a container, how the last run ended comes from the record the agent kept of it
+        # (a stopped server has no container, see maybe_retire). No record: nothing is known.
+        ended = c if c.get("exists") else (c.get("last_run") or {})
         instance.container_state = c.get("status") or ""
         instance.health = c.get("health") or ""
-        instance.last_exit_code = c.get("exit_code")
-        instance.oom_killed = bool(c.get("oom_killed"))
+        instance.last_exit_code = ended.get("exit_code")
+        instance.oom_killed = bool(ended.get("oom_killed"))
         instance.started_at = _ts(c.get("started_at")) if c.get("running") else instance.started_at
         if c.get("spec_hash") and not instance.container_spec_hash:
             adopt_spec_hash = instance.container_spec_hash = c["spec_hash"]
@@ -277,6 +286,132 @@ def _agent_problem(exc: ApiError) -> str:
     return f"Node agent error: {exc.detail}"
 
 
+# --- no container for a stopped server ----------------------------------------------------------
+# A container is only needed while a server runs. The reconciler asks the agent to "retire" the
+# container of a server that is meant to be stopped: the agent saves the last-run record (exit
+# code, out-of-memory flag, restart count, times, last health output, image id, the end of the
+# console) and then removes the container. Nothing else removes it: Stop, Kill, the crash-loop
+# stop, a stop job that was cut off and a server created without starting all end here, on the
+# next pass. A server that died while it is meant to run keeps its container as evidence until
+# someone presses Start or Stop.
+RETIRE_FEATURE = "retire"  # the agent's name for it in GET /v1/info ("features")
+# How long a container must have been stopped. A job that stops a server and starts it again
+# holds the server meanwhile; this covers what does not: the moment between a job's last
+# request and the release of its lock, and a kill sent while a stop or restart is in progress.
+# The agent checks it again against the Docker host's own clock.
+RETIRE_SETTLE_SECONDS = 10.0
+RETIRABLE_STATES = ("created", "exited", "dead")
+# Answers of the agent that mean "not now" (the next pass looks again), not a failure.
+RETIRE_NOT_NOW = frozenset({"container_running", "not_settled", "container_busy", "instance_busy"})
+# A retire that keeps failing is written to the audit log at most this often per server (seconds).
+RETIRE_FAILURE_AUDIT_INTERVAL = 3600
+
+
+def retire_enabled() -> bool:
+    return bool(getattr(settings, "MCPANEL_RETIRE_STOPPED_CONTAINERS", True))
+
+
+def retire_blocker(
+    instance: Instance, container: dict[str, Any] | None, *, now: datetime | None = None, settle: float | None = None
+) -> str | None:
+    """Why the container of this server is NOT retired now; None when it is to be retired.
+
+    The rule: the container exists and is not running, restarting or paused, it has been in that
+    state for the settle time, and the server is not archived, is meant to be stopped
+    (``desired_state``) and no job is queued or running for it. The server's row is read again
+    here: the caller's copy may be older than a job that took the server meanwhile.
+    """
+    c = container or {}
+    if not c.get("exists"):
+        return "no_container"
+    if c.get("running") or c.get("restarting") or c.get("status") not in RETIRABLE_STATES:
+        return "running"
+    settle = RETIRE_SETTLE_SECONDS if settle is None else settle
+    since = (_ts(c.get("finished_at")) if c.get("started_at") else None) or _ts(c.get("created_at"))
+    if since is not None and ((now or timezone.now()) - since).total_seconds() < settle:
+        return "not_settled"
+    fresh = Instance.objects.filter(pk=instance.pk).values("node_id", "archived_at", "desired_state", "active_job_id").first()
+    if fresh is None or fresh["node_id"] != instance.node_id:
+        return "moved"
+    if fresh["archived_at"]:
+        return "archived"
+    if fresh["desired_state"] != DesiredState.STOPPED:
+        return "meant_to_run"
+    busy = Job.objects.filter(status__in=ACTIVE_STATUSES)
+    if busy.filter(instance_id=instance.pk).exists() or (
+        fresh["active_job_id"] and busy.filter(pk=fresh["active_job_id"]).exists()
+    ):
+        return "job_active"
+    return None
+
+
+def retire_container(
+    instance: Instance, client: AgentClient | None = None, *, settle: float | None = None
+) -> dict[str, Any] | None:
+    """Ask the agent to retire the server's container. Returns the agent's answer, or None when
+    it did not happen (the agent said "not now", or it failed: logged and audited)."""
+    from apps.audit import service as audit
+
+    client = client or AgentClient(instance.node)
+    try:
+        answer = client.retire(instance.id, settle_seconds=RETIRE_SETTLE_SECONDS if settle is None else settle)
+    except ApiError as exc:
+        if exc.error_code in RETIRE_NOT_NOW:
+            log.debug("container of %s not retired now: %s", instance.pk, exc.detail)
+            return None
+        # e.g. last_run_failed: the record could not be written, so the agent kept the container
+        log.warning("could not retire the container of %s (%s): %s", instance.name, instance.pk, exc.detail)
+        if cache.add(f"retire-failed:{instance.pk}", 1, RETIRE_FAILURE_AUDIT_INTERVAL):
+            audit.record(
+                "instance.container_retire_failed",
+                instance=instance,
+                target=instance,
+                success=False,
+                details={"error": str(exc.detail)[:300], "code": exc.error_code},
+            )
+        return None
+    if answer.get("retired"):
+        last_run = answer.get("last_run") or {}
+        log.info("retired the container of stopped server %s (%s)", instance.name, instance.pk)
+        audit.record(
+            "instance.container_retired",
+            instance=instance,
+            target=instance,
+            details={
+                "recorded": bool(answer.get("recorded")),
+                "exit_code": last_run.get("exit_code") if answer.get("recorded") else None,
+                "console_lines": last_run.get("log_lines") if answer.get("recorded") else None,
+            },
+        )
+    return answer
+
+
+def maybe_retire(instance: Instance, container: dict[str, Any] | None) -> bool:
+    """The retire step of a reconcile pass. Returns True when the container is gone now.
+
+    Does nothing unless MCPANEL_RETIRE_STOPPED_CONTAINERS is on, the rule of ``retire_blocker``
+    holds and the node's agent offers the operation (an older agent keeps its containers, as
+    before). Never raises: a problem here must not stop the reconciliation of other servers.
+    """
+    try:
+        if not retire_enabled() or retire_blocker(instance, container) is not None:
+            return False
+        client = AgentClient(instance.node)
+        if not client.supports(RETIRE_FEATURE):
+            return False
+        answer = retire_container(instance, client)
+        if answer is None:
+            return False
+        observed: dict[str, Any] = {"exists": False}
+        if answer.get("last_run"):
+            observed["last_run"] = answer["last_run"]
+        apply_observation(instance, observed)
+        return True
+    except Exception:
+        log.exception("retiring the container of %s failed", instance.pk)
+        return False
+
+
 def reconcile_instance(instance_id: Any) -> Instance | None:
     instance = Instance.objects.select_related("node").filter(pk=instance_id).first()
     if instance is None:
@@ -291,13 +426,15 @@ def reconcile_instance(instance_id: Any) -> Instance | None:
         apply_observation(instance, None, agent_ok=False, agent_error=_agent_problem(exc))
         return instance
     apply_observation(instance, container)
+    maybe_retire(instance, container)
     return instance
 
 
 def reconcile_node(node: Node) -> dict[str, int]:
     instances = list(Instance.objects.filter(node=node))
     try:
-        containers = AgentClient(node).list_containers()
+        listed = AgentClient(node).list_state()
+        containers = listed["containers"]
     except ApiError as exc:
         node.last_error = str(exc)[:1000]
         node.save(update_fields=["last_error"])
@@ -309,10 +446,16 @@ def reconcile_node(node: Node) -> dict[str, int]:
     node.last_error = ""
     node.save(update_fields=["last_seen_at", "last_error"])
     by_id = {c.get("instance_id"): c for c in containers}
+    last_runs = listed["last_runs"]
     changed = 0
     for inst in instances:
         c = by_id.pop(str(inst.id), None)
-        if apply_observation(inst, c if not inst.archived_at else None):
+        if inst.archived_at:
+            c = None
+        elif c is None and last_runs.get(str(inst.id)):
+            c = {"exists": False, "last_run": last_runs[str(inst.id)]}  # stopped: its container was retired
+        was_changed = apply_observation(inst, c)
+        if maybe_retire(inst, c) or was_changed:
             changed += 1
     if by_id:
         log.info("Node %s has %d managed containers without a panel instance: %s", node.name, len(by_id), list(by_id))

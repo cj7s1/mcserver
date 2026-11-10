@@ -15,16 +15,14 @@ server that your friends can join. Budget about 30–45 minutes, most of it wait
 
 ## What you are installing
 
-MCPanel is a small stack of containers. You start it once with Docker Compose. After that, the
+MCPanel is a small stack of three containers. You start it once with Docker Compose. After that, the
 panel creates one extra container per Minecraft server for you.
 
 ```mermaid
 flowchart LR
-  B[Your browser] -->|http://UNRAID-IP:8080| P[panel<br/>web UI + API]
-  P --> W[worker, worker-periodic + beat<br/>installs, backups, schedules]
-  P --> DB[(Postgres)]
-  P --> R[(Redis)]
-  W --> A[agent<br/>only part that talks to Docker]
+  B[Your browser] -->|http://UNRAID-IP:8080| P[panel<br/>web UI + API, job workers,<br/>scheduler, Redis]
+  P --> DB[(postgres)]
+  P --> A[agent<br/>only part that talks to Docker]
   A -->|creates / starts / stops| MC1[mcpanel-… Minecraft server 1]
   A --> MC2[mcpanel-… Minecraft server 2]
   F[Players] -->|UNRAID-IP:25565…| MC1
@@ -155,9 +153,10 @@ and connection. Then check that everything is up:
 docker compose ps
 ```
 
-All seven services (`postgres`, `redis`, `agent`, `panel`, `worker`, `worker-periodic`, `beat`) should
-show **running**, and `panel` and `agent` should show **(healthy)** after a minute. They also appear in Unraid's
-**Docker** tab.
+All three services (`postgres`, `agent`, `panel`) should show **running** and **(healthy)** after a
+minute. They also appear in Unraid's **Docker** tab. The `panel` container runs the web interface,
+the job workers, the scheduler and Redis; `docker compose exec panel python
+/usr/local/bin/mcpanel-supervise.py status` lists them.
 
 ## 6. Create your owner account
 
@@ -316,13 +315,18 @@ world is kept.
 ```bash
 cd /mnt/user/appdata/mcpanel-src && git pull
 cd deploy
-docker compose pull --ignore-buildable   # newer database and Redis images
-docker compose build --pull              # rebuild the panel and agent on fresh base images
-docker compose up -d
+./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
+./scripts/upgrade.sh run
 ```
 
-Running Minecraft servers are not restarted by a panel update. Before big updates you can back up
-the panel database (run it in `deploy/`):
+`run` refuses while a job is running (wait until **Activity** is empty), saves the database and the
+current version first, downloads a newer database image, rebuilds the panel and agent on fresh base
+images (`docker compose build --pull`), switches over and waits until everything is healthy. The
+panel is away for under a minute. If the new version does not work for you,
+`./scripts/upgrade.sh rollback` brings the previous one back.
+
+Running Minecraft servers are not restarted by a panel update. `run` already saves the panel
+database into `deploy/`; to take a copy at any other time (run it in `deploy/`):
 
 ```bash
 (umask 077 && mkdir -p /mnt/user/appdata/mcpanel-db-backups && \
@@ -352,7 +356,9 @@ logged-in user.
 | Lag spikes when the world saves | Make sure `MCPANEL_DATA_DIR` is on the cache pool (`/mnt/cache/...`), not the array. |
 | Friends outside can't join | The router port forward is missing or points at the wrong IP or port. LAN players connecting is the test that the server itself works. |
 | Unraid's Docker tab says "update available" for `mcpanel-…` | Ignore it. The panel manages those containers; change their runtime in the panel instead. **Don't edit or start `mcpanel-…` containers from the Docker tab.** |
-| Panel or agent logs | `docker compose logs --tail 100 panel` (or `agent`, `worker`). They never contain passwords. |
+| Panel or agent logs | `docker compose logs --tail 100 panel` (or `agent`). Every panel line starts with the part that wrote it: `[web]`, `[worker]`, `[periodic]`, `[beat]`, `[redis]`. They never contain passwords. |
+| `panel` shows **unhealthy** | `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status` shows which part is not running; `docker compose logs --tail 100 panel` shows why. |
+| You stopped or restarted `panel` in the Docker tab and a job failed | The Docker tab gives 10 seconds. With jobs running use `docker compose restart panel` in `deploy/` (up to 110 seconds for jobs to finish). |
 
 More detail: [docs/UNRAID.md](UNRAID.md) (snapshots on btrfs and ZFS pools, extra capabilities),
 [DEPLOYMENT.md](../DEPLOYMENT.md) (HTTPS behind a reverse proxy, more Docker hosts),

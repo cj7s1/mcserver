@@ -164,3 +164,63 @@ def test_modpack_update_and_rollback(make_instance, fake_agent, owner, monkeypat
     assert inst.modpack_version_id == "V1"
     assert fake_agent.containers[str(inst.id)]["spec"]["env"]["MODRINTH_VERSION"] == "V1"
     assert Instance.objects.get(pk=inst.pk).active_job_id is None or not Job.objects.get(pk=inst.active_job_id).is_active
+
+
+@respx.mock
+def test_modpack_update_and_rollback_of_a_server_without_a_container(
+    make_instance, fake_agent, owner, monkeypatch, django_capture_on_commit_callbacks
+):
+    """A stopped server has no container (the reconciler retires it, apps.instances.reconcile):
+    update and rollback work all the same, and the next start runs the release that is pinned then."""
+    from apps.instances.tasks import reconcile_all
+    from apps.jobs import runner
+
+    capture = django_capture_on_commit_callbacks
+    _modrinth_mocks()
+    monkeypatch.setattr("apps.modpacks.mrpack.inspect_mrpack", lambda url, sha1=None: {"available": False})
+    monkeypatch.setattr(
+        "apps.modpacks.handlers.resolve_java",
+        lambda mc, st: {"java_version": 17, "required": 17, "minecraft_version": mc, "reason": "t"},
+    )
+    inst = make_instance(
+        name="Pack",
+        server_type="MODRINTH",
+        minecraft_version="1.20.1",
+        java_version=17,
+        image="itzg/minecraft-server:stable-java17",
+        modpack_provider="modrinth",
+        modpack_project_id="P1",
+        modpack_slug="pack",
+        modpack_name="Pack",
+        modpack_version_id="V1",
+        modpack_version_name="V1",
+        modpack_loader="forge",
+    )
+    fake_agent.prepare(inst.id, {"server.properties": "motd=x\n"})
+
+    def retired() -> None:
+        fake_agent.age_containers()
+        reconcile_all()
+        assert str(inst.id) not in fake_agent.containers
+
+    r = _post(owner, capture, f"/api/instances/{inst.id}/modpack/update", {"version_id": "V2"})
+    job = Job.objects.get(pk=r.json()["id"])
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    retired()  # the container the update created (nothing started it) is removed again
+    backup = Backup.objects.get(instance=inst, kind="pre_update")
+    r = _post(owner, capture, f"/api/instances/{inst.id}/modpack/rollback", {"backup_id": str(backup.id), "confirm": True})
+    job = Job.objects.get(pk=r.json()["id"])
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    retired()
+    inst.refresh_from_db()
+    assert inst.modpack_version_id == "V1"
+    r = _post(owner, capture, f"/api/instances/{inst.id}/modpack/update", {"version_id": "V2"})
+    assert Job.objects.get(pk=r.json()["id"]).status == JobStatus.SUCCEEDED
+    retired()
+
+    with capture(execute=True):
+        start = runner.enqueue("start", title="start", instance=inst)
+    start.refresh_from_db()
+    assert start.status == JobStatus.SUCCEEDED, start.error
+    container = fake_agent.containers[str(inst.id)]
+    assert container["running"] is True and container["spec"]["env"]["MODRINTH_VERSION"] == "V2"

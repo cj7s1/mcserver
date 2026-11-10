@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import threading
 import time
 from datetime import timedelta
@@ -15,7 +16,8 @@ from django.core.management.base import CommandError
 from django.utils import timezone
 
 from apps.audit.models import AuditEvent
-from apps.instances import scheduling, services, state, tasks
+from apps.backups.models import Backup, BackupStatus
+from apps.instances import reconcile, scheduling, services, state, tasks
 from apps.instances.management.commands import host_shutdown
 from apps.instances.models import Instance, Status
 from apps.instances.spec import build_spec, current_spec_hash
@@ -28,16 +30,36 @@ pytestmark = pytest.mark.django_db
 
 STOP_AUDIT = "instance.stopped_for_host_shutdown"
 RESUME_AUDIT = "instance.resumed_after_boot"
+NOT_RESUMED_AUDIT = "instance.not_resumed_after_boot"
 
 
 @pytest.fixture
 def server(make_instance, fake_agent):
-    """Create a server with a container: ``server("A", running=True)``."""
+    """Create a server with a container: ``server("A", running=True)``.
+
+    ``running=False`` is a server the user stopped (``desired_state`` "stopped"); a server that
+    the hook stopped is ``server("A", running=False, desired_state="running")`` plus ``flag``.
+    """
 
     def _make(name: str, *, running: bool, **fields):
-        inst = make_instance(name=name, desired_state="running" if running else "stopped", **fields)
+        fields.setdefault("desired_state", "running" if running else "stopped")
+        inst = make_instance(name=name, **fields)
         fake_agent.apply(inst.id, build_spec(inst), start=running)
         Instance.objects.filter(pk=inst.pk).update(container_spec_hash=current_spec_hash(inst), installed_at=timezone.now())
+        inst.refresh_from_db()
+        return inst
+
+    return _make
+
+
+@pytest.fixture
+def marked(server, fake_agent):
+    """A server the hook stopped before Docker went down: meant to run, container exited, marked."""
+
+    def _make(name: str, *, minutes_ago: float = 5, **fields):
+        inst = server(name, running=True, **fields)
+        fake_agent.stop(inst.id)  # the hook's stop: the container has exited with code 0
+        flag(inst, minutes_ago=minutes_ago)
         inst.refresh_from_db()
         return inst
 
@@ -142,7 +164,8 @@ def test_unreachable_agent_fails_without_marking_anything(server, fake_agent):
 
 
 def test_agent_that_stops_answering_fails_but_keeps_the_marks(server, fake_agent):
-    """The hook then stops the containers with docker stop; the marks bring them back after boot."""
+    """The hook then leaves the servers to Docker's own stop. Docker starts them again at boot; a
+    server Docker does not start (restart policy "no") is started by the panel, because of the mark."""
     a, b = server("Alpha", running=True), server("Bravo", running=True)
     fake_agent.failures["stop"] = AgentUnavailable("Cannot reach the node agent")
     with pytest.raises(CommandError, match="stopped answering"):
@@ -306,8 +329,8 @@ def test_nothing_is_started_while_the_host_is_still_shutting_down(server, fake_a
     assert not Job.objects.exists() and not fake_agent.called("start")
 
 
-def test_a_mark_dated_in_the_future_does_not_block_forever(server, fake_agent, monkeypatch, django_capture_on_commit_callbacks):
-    inst = server("Alpha", running=False)
+def test_a_mark_dated_in_the_future_does_not_block_forever(marked, fake_agent, monkeypatch, django_capture_on_commit_callbacks):
+    inst = marked("Alpha")
     Instance.objects.filter(pk=inst.pk).update(resume_after_boot=True, resume_flagged_at=timezone.now() + timedelta(days=2))
     monkeypatch.setattr(scheduling, "runtime_started_at", lambda: timezone.now() - timedelta(days=30))
     with django_capture_on_commit_callbacks(execute=True):
@@ -343,10 +366,8 @@ def test_archived_server_is_not_started(server, fake_agent, after_boot, django_c
     assert not fake_agent.called("list_containers")  # no agent needed to drop the mark
 
 
-def test_nothing_happens_while_the_agent_is_unreachable(server, fake_agent, after_boot, django_capture_on_commit_callbacks):
-    a, b = server("Alpha", running=False), server("Bravo", running=False)
-    flag(a)
-    flag(b)
+def test_nothing_happens_while_the_agent_is_unreachable(marked, fake_agent, after_boot, django_capture_on_commit_callbacks):
+    a, b = marked("Alpha"), marked("Bravo")
     fake_agent.failures["list_containers"] = AgentUnavailable("Cannot reach the node agent")
     with django_capture_on_commit_callbacks(execute=True):
         result = scheduling.resume_flagged_servers()
@@ -361,11 +382,9 @@ def test_nothing_happens_while_the_agent_is_unreachable(server, fake_agent, afte
 
 
 def test_a_server_held_by_a_job_waits_and_the_next_one_is_started(
-    server, fake_agent, after_boot, django_capture_on_commit_callbacks
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
 ):
-    busy, free = server("Alpha", running=False), server("Bravo", running=False)
-    flag(busy)
-    flag(free)
+    busy, free = marked("Alpha"), marked("Bravo")
     job = Job.objects.create(kind="backup", title="Backup", instance=busy, status=JobStatus.RUNNING, heartbeat_at=timezone.now())
     Instance.objects.filter(pk=busy.pk).update(active_job=job)
     with django_capture_on_commit_callbacks(execute=True):
@@ -373,21 +392,21 @@ def test_a_server_held_by_a_job_waits_and_the_next_one_is_started(
     assert result["started"] == str(free.id) and result["waiting"] == 1
     assert flags(busy) == (True, True) and not is_running(fake_agent, busy)
     assert flags(free) == (False, False) and is_running(fake_agent, free)
-    # once the job is over it gets its turn
-    job.status = JobStatus.FAILED
-    job.save(update_fields=["status"])
+    # Once the job is over it gets its turn. The backup failed, but a backup only reads the
+    # server's files: its failure is no reason to keep the server down.
+    runner.finish(job, JobStatus.FAILED, error="restic: repository is locked", error_code="backup_failed")
     with django_capture_on_commit_callbacks(execute=True):
         assert scheduling.resume_flagged_servers()["started"] == str(busy.id)
     assert is_running(fake_agent, busy)
+    assert not AuditEvent.objects.filter(action=NOT_RESUMED_AUDIT).exists()
 
 
 def test_resume_recreates_a_container_from_before_this_release(
-    server, fake_agent, after_boot, django_capture_on_commit_callbacks
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
 ):
-    inst = server("Alpha", running=False)
+    inst = marked("Alpha")
     legacy = hashlib.sha256(json.dumps(build_spec(inst), sort_keys=True).encode()).hexdigest()[:16]
     Instance.objects.filter(pk=inst.pk).update(container_spec_hash=legacy)
-    flag(inst)
     old_container = fake_agent.containers[str(inst.id)]["id"]
     applied_before = len(fake_agent.called("apply"))
     with django_capture_on_commit_callbacks(execute=True):
@@ -458,6 +477,244 @@ def test_status_says_why_the_server_is_down(server, fake_agent):
     container["exit_code"] = 137
     status, detail = state.compute(inst, container, None)
     assert status == Status.STOPPED and "exit code 137: not a clean stop" in detail
+    # a server that is no longer meant to run is not promised a start (the resume step drops such a mark)
+    inst.desired_state = "stopped"
+    assert state.compute(inst, container, None) == (Status.STOPPED, "")
+    inst.desired_state = "running"
     # without the mark the usual texts apply
     inst.resume_after_boot = False
     assert state.compute(inst, container, None)[0] == Status.FAILED
+
+
+def test_host_shutdown_prints_only_its_own_lines(server, fake_agent, caplog):
+    """The hook copies every line of the command's output into the host's syslog: the JSON log
+    line of each audit entry does not belong there. The entries themselves are still written."""
+    a, b = server("Alpha", running=True), server("Bravo", running=True)
+    before = logging.root.manager.disable
+    with caplog.at_level(logging.INFO):
+        out = shutdown()
+        assert [r for r in caplog.records if r.levelno < logging.ERROR] == []
+        assert AuditEvent.objects.filter(action=STOP_AUDIT).count() == 2
+        # afterwards (and after a failure) logging is as it was
+        assert logging.root.manager.disable == before
+        with pytest.raises(CommandError):
+            shutdown(node="nope")
+        assert logging.root.manager.disable == before
+        logging.getLogger("mcpanel.audit").info("audit something else")
+        assert [r.getMessage() for r in caplog.records] == ["audit something else"]
+    lines = out.splitlines()
+    assert len(lines) == 3  # one per server and the summary
+    assert lines[0].startswith(f"stopped   {a.name} in") and lines[1].startswith(f"stopped   {b.name} in")
+    assert lines[2].startswith("host_shutdown: node ")
+
+
+# =====================================================================================
+# Marks that must not start a server (review 2026-11-10)
+# =====================================================================================
+def resume(capture) -> dict:
+    with capture(execute=True):
+        return scheduling.resume_flagged_servers()
+
+
+def not_resumed(inst) -> AuditEvent:
+    return AuditEvent.objects.get(action=NOT_RESUMED_AUDIT, instance=inst)
+
+
+def test_a_server_that_is_no_longer_meant_to_run_is_not_started(
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """Something decided after the mark that the server stays down, and left the mark: no start."""
+    inst = marked("Alpha")
+    Instance.objects.filter(pk=inst.pk).update(desired_state="stopped")
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": None, "cleared": [str(inst.id)], "waiting": 0}
+    assert flags(inst) == (False, False) and not is_running(fake_agent, inst)
+    assert not Job.objects.exists() and not fake_agent.called("list_containers")  # decided without the agent
+    event = not_resumed(inst)
+    assert event.actor is None and event.details["reason"] == "not_meant_to_run" and event.details["stopped_at"]
+    # and it stays that way
+    assert resume(django_capture_on_commit_callbacks) == {"started": None, "cleared": [], "waiting": 0}
+
+
+def test_crash_loop_stop_settles_the_mark(marked, fake_agent, after_boot, django_capture_on_commit_callbacks):
+    """Docker restarted the server after boot and it crash-looped: the panel stopped it for good."""
+    inst = marked("Alpha")
+    fake_agent.set_container_state(inst.id, running=True, status="running", health="starting")
+    reconcile._stop_crash_loop(inst, 5)
+    assert flags(inst) == (False, False)
+    assert inst.desired_state == "stopped" and not is_running(fake_agent, inst)
+    assert resume(django_capture_on_commit_callbacks) == {"started": None, "cleared": [], "waiting": 0}
+    assert not Job.objects.filter(kind="start").exists() and not is_running(fake_agent, inst)
+
+
+def test_a_crash_loop_stop_that_did_not_work_keeps_the_mark(marked, fake_agent):
+    inst = marked("Alpha")
+    fake_agent.failures["stop"] = AgentUnavailable("Cannot reach the node agent")
+    reconcile._stop_crash_loop(inst, 5)
+    assert flags(inst) == (True, True) and inst.desired_state == "running"  # nothing was decided
+
+
+def test_failed_restore_is_not_followed_by_an_automatic_start(marked, fake_agent, after_boot, django_capture_on_commit_callbacks):
+    """The restore failed half-way: its files may be incomplete, and the server was left stopped."""
+    inst = marked("Alpha")
+    backup = Backup.objects.create(instance=inst, name="b", kind="manual", status=BackupStatus.SUCCEEDED, snapshot_id="abc123")
+    fake_agent.failed_operations["restore"] = ("restic: unexpected EOF", "restic_failed")
+    with django_capture_on_commit_callbacks(execute=True):
+        job = runner.enqueue(
+            "restore", title="Restore", instance=inst, params={"backup_id": str(backup.id), "pre_restore_backup": False}
+        )
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED and job.error_code == "restic_failed"
+    assert flags(inst) == (True, True) and inst.desired_state == "running"  # the job itself decided nothing
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": None, "cleared": [str(inst.id)], "waiting": 0}
+    assert flags(inst) == (False, False) and not is_running(fake_agent, inst)
+    assert not Job.objects.filter(kind="start").exists()
+    details = not_resumed(inst).details
+    assert (details["reason"], details["job"], details["kind"], details["error_code"]) == (
+        "job_failed",
+        str(job.id),
+        "restore",
+        "restic_failed",
+    )
+    # the status no longer promises an automatic start
+    inst.refresh_from_db()
+    assert "started again automatically" not in state.compute(inst, fake_agent.status(inst.id), None)[1]
+
+
+def finished_job(inst, kind, status, *, minutes_ago: float, exclusive: bool = True, error_code: str = "") -> Job:
+    job = Job.objects.create(kind=kind, title=kind, instance=inst, status=status, exclusive=exclusive, error_code=error_code)
+    Job.objects.filter(pk=job.pk).update(finished_at=timezone.now() - timedelta(minutes=minutes_ago))
+    return job
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "error_code"),
+    [
+        ("restore", JobStatus.FAILED, "restic_failed"),
+        ("world_reset", JobStatus.FAILED, "abandoned"),  # marked as failed by a user
+        ("software_update", JobStatus.FAILED, "interrupted"),  # the worker died half-way
+        ("modpack_update", JobStatus.CANCELLED, ""),
+        ("some_future_kind", JobStatus.FAILED, "internal_error"),  # unknown kinds count: the safe side
+    ],
+)
+def test_a_job_that_did_not_succeed_after_the_mark_keeps_the_server_down(
+    kind, status, error_code, marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    inst = marked("Alpha", minutes_ago=5)
+    job = finished_job(inst, kind, status, minutes_ago=2, error_code=error_code)
+    result = resume(django_capture_on_commit_callbacks)
+    assert result["started"] is None and result["cleared"] == [str(inst.id)]
+    assert flags(inst) == (False, False) and not is_running(fake_agent, inst)
+    assert not Job.objects.filter(kind="start").exists()
+    details = not_resumed(inst).details
+    assert (details["reason"], details["job"], details["status"]) == ("job_failed", str(job.id), status)
+
+
+@pytest.mark.parametrize(
+    ("kind", "status", "minutes_ago", "exclusive"),
+    [
+        ("restore", JobStatus.SUCCEEDED, 2, True),  # it worked: the server is fine
+        ("restore", JobStatus.FAILED, 9, True),  # before the mark: the server ran again after it
+        ("backup", JobStatus.FAILED, 2, True),  # only reads the server's files
+        ("snapshot_create", JobStatus.FAILED, 2, True),
+        ("restart", JobStatus.FAILED, 2, True),  # interrupted by the shutdown itself: it was meant to run
+        ("recreate", JobStatus.FAILED, 2, True),  # only the container; the start makes it again
+        ("stop", JobStatus.CANCELLED, 2, False),  # a countdown that was cancelled never took the server
+    ],
+)
+def test_other_jobs_do_not_keep_a_marked_server_down(
+    kind, status, minutes_ago, exclusive, marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    inst = marked("Alpha", minutes_ago=5)
+    finished_job(inst, kind, status, minutes_ago=minutes_ago, exclusive=exclusive)
+    assert resume(django_capture_on_commit_callbacks)["started"] == str(inst.id)
+    assert is_running(fake_agent, inst) and not AuditEvent.objects.filter(action=NOT_RESUMED_AUDIT).exists()
+
+
+def test_a_failed_job_on_one_server_does_not_touch_the_next(marked, fake_agent, after_boot, django_capture_on_commit_callbacks):
+    broken, fine = marked("Alpha"), marked("Bravo")
+    finished_job(broken, "restore", JobStatus.FAILED, minutes_ago=1)
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": str(fine.id), "cleared": [str(broken.id)], "waiting": 0}
+    assert is_running(fake_agent, fine) and not is_running(fake_agent, broken)
+
+
+def test_no_start_when_the_mark_was_settled_between_the_read_and_the_start(
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """A kill (or a stop) lands while the resume step is asking the agent: its decision wins."""
+    inst = marked("Alpha")
+
+    def kill_meanwhile() -> None:
+        Instance.objects.filter(pk=inst.pk).update(desired_state="stopped", resume_after_boot=False, resume_flagged_at=None)
+
+    fake_agent.hooks["list_containers"] = kill_meanwhile
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": None, "cleared": [], "waiting": 0}
+    assert not Job.objects.exists() and not fake_agent.called("start") and not is_running(fake_agent, inst)
+    assert not AuditEvent.objects.filter(action=RESUME_AUDIT).exists()
+    assert flags(inst) == (False, False) and inst.desired_state == "stopped"
+
+
+# --- a mark that waits although Docker was never stopped ---------------------------------------------
+def test_a_mark_that_waits_in_the_same_panel_runtime_is_given_up_after_ten_minutes(
+    marked, fake_agent, monkeypatch, django_capture_on_commit_callbacks
+):
+    """host_shutdown was run by hand and Docker was not stopped: the panel that would resume the
+    servers is this one, which never does. The status must not promise a start for ever."""
+    monkeypatch.setattr(scheduling, "runtime_started_at", lambda: timezone.now() - timedelta(days=3))
+    recent, old = marked("Alpha", minutes_ago=9), marked("Bravo", minutes_ago=11)
+    assert "started again automatically" in state.compute(old, fake_agent.status(old.id), None)[1]
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": None, "cleared": [str(old.id)], "waiting": 1}
+    assert flags(recent) == (True, True)  # a real shutdown may still be under way
+    assert flags(old) == (False, False) and old.desired_state == "running"
+    assert not Job.objects.exists() and not is_running(fake_agent, old)
+    assert not fake_agent.called("list_containers")
+    details = not_resumed(old).details
+    assert details["reason"] == "host_not_restarted" and details["waited_seconds"] >= 660
+    # the usual text for a server that is down although it is meant to run
+    assert state.compute(old, fake_agent.status(old.id), None) == (Status.STOPPED, "Server stopped itself")
+    assert scheduling.RESUME_STALE_AFTER == timedelta(minutes=10)
+
+
+def test_an_old_mark_is_still_resumed_by_the_panel_that_starts_after_it(
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """The host was off for days: that is no stale mark, the panel started after it was written."""
+    inst = marked("Alpha", minutes_ago=3 * 24 * 60)
+    assert resume(django_capture_on_commit_callbacks)["started"] == str(inst.id)
+    assert is_running(fake_agent, inst)
+
+
+# --- what host_shutdown records about servers the panel thought were stopped ------------------------
+def test_a_server_that_ran_without_the_panel_noting_it_comes_back(
+    server, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """Started by an update with "start afterwards" or outside the panel: desired_state said "stopped"."""
+    inst = server("Alpha", running=True, desired_state="stopped")
+    shutdown()
+    assert flags(inst) == (True, True) and inst.desired_state == "running"
+    flag(inst)
+    assert resume(django_capture_on_commit_callbacks)["started"] == str(inst.id)
+    assert is_running(fake_agent, inst)
+
+
+def test_a_stop_that_was_still_in_progress_is_not_undone_after_boot(
+    server, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """The user pressed Stop and shut the host down while the server was still stopping."""
+    inst = server("Alpha", running=True, desired_state="stopped")  # the stop job has recorded its decision
+    job = Job.objects.create(
+        kind="stop", title="Stop server", instance=inst, status=JobStatus.RUNNING, heartbeat_at=timezone.now()
+    )
+    Instance.objects.filter(pk=inst.pk).update(active_job=job)
+    shutdown()
+    assert flags(inst) == (True, True) and inst.desired_state == "stopped"
+    flag(inst)
+    runner.finish(job, JobStatus.FAILED, error=runner.INTERRUPTED_ERROR, error_code="interrupted")  # the watchdog after boot
+    result = resume(django_capture_on_commit_callbacks)
+    assert result == {"started": None, "cleared": [str(inst.id)], "waiting": 0}
+    assert not is_running(fake_agent, inst) and not Job.objects.filter(kind="start").exists()
+    assert not_resumed(inst).details["reason"] == "not_meant_to_run"

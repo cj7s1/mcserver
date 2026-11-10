@@ -312,7 +312,7 @@ def test_reset_world_of_a_running_vanilla_server(it_node, tracker, owner_api):
         _place(inst, "diamond_block")  # recognisable content of the second world
         run_job("stop", inst)
         inst = wait_status(inst, "stopped", 120)
-        assert client.status(iid)["running"] is False
+        assert not client.status(iid).get("running")  # its container may already be gone (a stopped server has none)
         timer.mark("stop")
         properties_text = client.read_text(iid, "server.properties")["content"]
         backups = Backup.objects.filter(instance=inst).count()
@@ -327,7 +327,7 @@ def test_reset_world_of_a_running_vanilla_server(it_node, tracker, owner_api):
         assert result["deleted"] == ["world"] and result["leftover"] is None and result["warnings"] == []
         assert result["seed_mode"] == "keep" and result["seed_changed"] is False
         assert result["restarted"] is False and result["safety_backup"] is None
-        assert client.status(iid)["running"] is False  # a stopped server stays stopped
+        assert not client.status(iid).get("running")  # a stopped server stays stopped
         assert _states(client, iid, "world", "vanilla") == {"world": "missing"}
         assert _staging_folders(client, iid) == []
         assert client.read_text(iid, "server.properties")["content"] == properties_text  # keep: not touched at all

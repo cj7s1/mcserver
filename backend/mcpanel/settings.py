@@ -322,6 +322,10 @@ MCPANEL_AGENT_TLS_FINGERPRINT = re.sub(r"[\s:]", "", env("MCPANEL_AGENT_TLS_FING
 if MCPANEL_AGENT_TLS_FINGERPRINT and not re.fullmatch(r"[0-9a-f]{64}", MCPANEL_AGENT_TLS_FINGERPRINT):
     raise ImproperlyConfigured("MCPANEL_AGENT_TLS_FINGERPRINT must be a SHA-256 fingerprint (64 hex digits)")
 MCPANEL_AGENT_CA_BUNDLE = env("MCPANEL_AGENT_CA_BUNDLE", "") or ""
+# A stopped server has no container: the reconciler asks the agent to remove ("retire") the
+# container of a server that is meant to be stopped, after the agent saved the record of its last
+# run (apps/instances/reconcile.py, maybe_retire). false = keep them, as releases before did.
+MCPANEL_RETIRE_STOPPED_CONTAINERS = env_bool("MCPANEL_RETIRE_STOPPED_CONTAINERS", True)
 
 # Host addresses shown to users for connecting (purely informational).
 MCPANEL_PUBLIC_HOSTNAME = env("MCPANEL_PUBLIC_HOSTNAME", "")
