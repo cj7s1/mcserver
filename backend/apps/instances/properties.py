@@ -1,5 +1,12 @@
 """server.properties parsing/serialisation that preserves comments and ordering,
-plus a typed schema for the specialised editor."""
+plus a typed schema for the specialised editor.
+
+Encoding: Minecraft before 1.20 reads server.properties as ISO-8859-1, 1.20 and later as UTF-8;
+both decode ``\\uXXXX`` escapes. Text the panel writes is therefore pure ASCII: every character
+above U+007E is written as ``\\uXXXX`` (a UTF-16 surrogate pair above U+FFFF), as
+java.util.Properties.store does, and reads the same on every version. A file that is not valid
+UTF-8 is read as ISO-8859-1 (:func:`decode_text`), which is what an older server wrote.
+"""
 
 from __future__ import annotations
 
@@ -20,6 +27,23 @@ _WS = " \t\f"
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def _join_surrogates(text: str) -> str:
+    """Java strings are UTF-16: ``\\ud83d\\ude00`` is one character, not two halves."""
+    if not any(0xD800 <= ord(c) <= 0xDFFF for c in text):
+        return text
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        high, low = ord(text[i]), ord(text[i + 1]) if i + 1 < len(text) else 0
+        if 0xD800 <= high <= 0xDBFF and 0xDC00 <= low <= 0xDFFF:
+            out.append(chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00)))
+            i += 2
+            continue
+        out.append(text[i])  # a lone surrogate stays what Java reads: one char
+        i += 1
+    return "".join(out)
+
+
 def _unescape(value: str) -> str:
     out, i = [], 0
     while i < len(value):
@@ -38,18 +62,86 @@ def _unescape(value: str) -> str:
             continue
         out.append(ch)
         i += 1
-    return "".join(out)
+    return _join_surrogates("".join(out))
+
+
+def _u_escape(ch: str) -> str:
+    code = ord(ch)
+    if code > 0xFFFF:  # a surrogate pair, as Java writes it
+        code -= 0x10000
+        return f"\\u{0xD800 + (code >> 10):04x}\\u{0xDC00 + (code & 0x3FF):04x}"
+    return f"\\u{code:04x}"
 
 
 def _escape_char(ch: str) -> str:
     special = {"\\": "\\\\", "\n": "\\n", "\r": "\\r", "\t": "\\t", "\f": "\\f"}
     if ch in special:
         return special[ch]
-    # other control characters and Unicode line/paragraph separators (U+0085, U+2028, U+2029):
-    # Java does not treat them as line ends, but editors and other tools do
-    if unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
-        return f"\\u{ord(ch):04x}"
+    # Everything outside printable ASCII: other control characters, Unicode line/paragraph
+    # separators (U+0085, U+2028, U+2029; Java does not treat them as line ends, but editors
+    # and other tools do) and every non-ASCII character (see the module docstring)
+    if ord(ch) > 0x7E or unicodedata.category(ch) in ("Cc", "Zl", "Zp"):
+        return _u_escape(ch)
     return ch
+
+
+def ascii_text(text: str, above: int = 0x7E) -> str:
+    """``text`` with every character above ``above`` (default U+007E) written as ``\\uXXXX``, keys,
+    values and comments alike; what Java reads from it does not change. A character escaped with a
+    single backslash (``\\é``, which Java reads as ``é``) loses that backslash.
+
+    ``above=0xFF`` keeps ISO-8859-1 characters as they are and escapes only what that encoding
+    cannot store (for a ``*.properties`` file the agent keeps in ISO-8859-1)."""
+    if text.isascii() or all(ord(ch) <= above for ch in text):
+        return text
+    out: list[str] = []
+    backslash = False  # the previous character is an unescaped backslash
+    for ch in text:
+        if ord(ch) > above:
+            if backslash:
+                out.pop()
+            out.append(_u_escape(ch))
+            backslash = False
+            continue
+        backslash = ch == "\\" and not backslash
+        out.append(ch)
+    return "".join(out)
+
+
+def decode_text(data: bytes) -> tuple[str, str]:
+    """(text, encoding) of a properties file: UTF-8 when the bytes are valid UTF-8, else ISO-8859-1."""
+    try:
+        return data.decode("utf-8").lstrip("\ufeff"), "utf-8"
+    except UnicodeDecodeError:
+        return data.decode("latin-1"), "iso-8859-1"
+
+
+PROPERTIES_READ_LIMIT = 1024 * 1024
+
+
+def read_file(client: Any, instance_id: Any, path: str = "server.properties") -> str | None:
+    """The text of ``path`` (server.properties) decoded as Minecraft would; None when it does not exist.
+
+    The agent's text read decodes bytes that are not UTF-8 as U+FFFD; for such a file (an older
+    server's ISO-8859-1 file) the bytes are fetched again and decoded as ISO-8859-1, so the
+    characters survive the next save.
+    """
+    from apps.core.errors import ApiError
+
+    try:
+        text = str(client.read_text(instance_id, path)["content"])
+    except ApiError as exc:
+        if exc.error_code in ("not_found", "not_a_directory"):
+            return None
+        raise
+    if "\ufffd" not in text:
+        return text
+    from apps.core.streaming import read_bytes
+
+    try:
+        return decode_text(read_bytes(client, instance_id, path, PROPERTIES_READ_LIMIT))[0]
+    except ApiError:
+        return text
 
 
 def _escape_value(value: str) -> str:
@@ -170,7 +262,7 @@ def update(text: str, changes: dict[str, str | None]) -> str:
     for key, value in changes.items():
         if value is not None and key not in seen:
             out.append(_format(key, str(value)))
-    return "\n".join(out) + "\n"
+    return ascii_text("\n".join(out) + "\n")
 
 
 def render(values: dict[str, Any]) -> str:

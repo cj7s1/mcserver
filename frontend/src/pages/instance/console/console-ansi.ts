@@ -149,7 +149,8 @@ export function colorizeLog(clean: string, level: LogLevel): string {
   return color ? `${color}${text}${SGR.reset}` : text;
 }
 
-export type EntryKind = "log" | "cmd" | "out" | "err" | "sys";
+/** `notice`: a message from the panel itself (e.g. a typed `stop` turned into a Stop of the server). */
+export type EntryKind = "log" | "cmd" | "out" | "err" | "sys" | "notice";
 
 export interface ConsoleEntry {
   kind: EntryKind;
@@ -183,6 +184,11 @@ export function makeEntry(kind: EntryKind, raw: string): ConsoleEntry {
       level = "error";
       rendered = `${SGR.red}✗ ${plain}${SGR.reset}`;
       break;
+    case "notice":
+      // warn level, so it stays visible under the "Warnings" filter
+      level = "warn";
+      rendered = `${SGR.cyan}ⓘ panel: ${plain}${SGR.reset}`;
+      break;
     default:
       level = "info";
       rendered = `${SGR.dimItalic}── ${plain} ──${SGR.reset}`;
@@ -214,6 +220,7 @@ export function entryText(e: ConsoleEntry): string {
   if (e.kind === "cmd") return `> ${e.plain}`;
   if (e.kind === "err") return `! ${e.plain}`;
   if (e.kind === "sys") return `-- ${e.plain} --`;
+  if (e.kind === "notice") return `[panel] ${e.plain}`;
   return e.plain;
 }
 

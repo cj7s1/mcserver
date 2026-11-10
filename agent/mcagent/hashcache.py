@@ -58,8 +58,23 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 READ_CHUNK = 1024 * 1024
 SAVE_INTERVAL = 1.0  # seconds between intermediate saves during a long pass
 RACY_WINDOW_NS = 2_000_000_000  # files modified this recently are not cached
+# Files above this size are never read (``too_large``): no mod or plugin is that big, and a
+# (sparse) file of any size costs a mod nothing to create but would keep a hashing thread busy
+# for minutes per TiB.
+HASH_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+# A blocking request (no ``wait``) waits at most this long for the folder's pass (below the
+# panel's 300 s timeout); the pass itself goes on in the background and is cached.
+BLOCKING_DEADLINE = 240.0
 STALE_TEMP_SECONDS = 3600
 _HEX = re.compile(r"^[0-9a-f]+$")
+
+
+class HashingBusy(Exception):
+    """A blocking request gave up waiting for the folder's hashing pass (it goes on)."""
+
+
+class _TooLarge(Exception):
+    pass
 
 
 class HashingCancelled(Exception):
@@ -313,9 +328,13 @@ def _hash_file(
         with root.open_read(path) as (fh, _size):
             before = os.fstat(fh.fileno())
             h = hashlib.new(algorithm)
+            read = 0
             while chunk := fh.read(READ_CHUNK):
                 if stop is not None and stop.is_set():
                     raise HashingCancelled
+                read += len(chunk)
+                if read > HASH_MAX_FILE_BYTES:  # grew past the limit while it was read
+                    raise _TooLarge
                 h.update(chunk)
             after = os.fstat(fh.fileno())
     except PathError as exc:
@@ -334,6 +353,17 @@ def _folder(rel: str) -> str:
     return "/".join(split_path(rel))
 
 
+def _files(root: SafeRoot, folder: str, suffixes: tuple[str, ...]) -> list[Entry]:
+    entries = [e for e in root.list(folder) if e.type == "file"]
+    if suffixes:
+        entries = [e for e in entries if e.name.endswith(suffixes)]
+    return entries
+
+
+def _too_large(item: dict[str, Any]) -> dict[str, Any]:
+    return {**item, "hash": None, "too_large": True}
+
+
 def hash_folder(
     root: SafeRoot,
     cache: HashCache,
@@ -342,20 +372,32 @@ def hash_folder(
     algorithm: str,
     *,
     stop: threading.Event | None = None,
+    suffixes: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
-    """Every regular file directly inside ``rel`` with its digest; only uncached files are read."""
+    """Every regular file directly inside ``rel`` with its digest; only uncached files are read.
+
+    Files above HASH_MAX_FILE_BYTES are listed with ``hash: null, too_large: true`` unread.
+    """
     folder = _folder(rel)
     with _folder_lock((str(instance_id), folder)):
-        entries = [e for e in root.list(folder) if e.type == "file"]
+        entries = _files(root, folder, suffixes)
         fc = cache.load(instance_id, folder)
-        fc.retain({e.name for e in entries})
+        if not suffixes:  # a filtered pass does not see the other files: keep their entries
+            fc.retain({e.name for e in entries})
         out: list[dict[str, Any]] = []
         last_save = time.monotonic()
         for entry in entries:
             item = entry.as_dict()
+            if entry.size > HASH_MAX_FILE_BYTES:
+                out.append(_too_large(item))
+                continue
             digest = fc.get(entry.name, Signature.of_entry(entry), algorithm)
             if digest is None:
-                result = _hash_file(root, entry.path, algorithm, stop)
+                try:
+                    result = _hash_file(root, entry.path, algorithm, stop)
+                except _TooLarge:
+                    out.append(_too_large(item))
+                    continue
                 if result is None:
                     continue
                 digest, st, cacheable = result
@@ -372,15 +414,23 @@ def hash_folder(
 
 
 def cached_listing(
-    root: SafeRoot, cache: HashCache, instance_id: UUID, rel: str, algorithm: str
+    root: SafeRoot,
+    cache: HashCache,
+    instance_id: UUID,
+    rel: str,
+    algorithm: str,
+    suffixes: tuple[str, ...] = (),
 ) -> tuple[list[dict[str, Any]], int]:
     """The folder's regular files with cached digests (``None`` where unknown); reads no file."""
     folder = _folder(rel)
-    entries = [e for e in root.list(folder) if e.type == "file"]
+    entries = _files(root, folder, suffixes)
     fc = cache.load(instance_id, folder)
     out = []
     pending = 0
     for e in entries:
+        if e.size > HASH_MAX_FILE_BYTES:
+            out.append(_too_large(e.as_dict()))  # never hashed, so never pending
+            continue
         digest = fc.get(e.name, Signature.of_entry(e), algorithm)
         pending += digest is None
         out.append({**e.as_dict(), "hash": digest})
@@ -392,12 +442,12 @@ class HashJobs:
 
     def __init__(self, workers: int = 2) -> None:
         self._executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="mcagent-hash")
-        self._jobs: dict[tuple[str, str, str], Future[list[dict[str, Any]]]] = {}
+        self._jobs: dict[tuple[str, ...], Future[list[dict[str, Any]]]] = {}
         self._lock = threading.RLock()
         self.stop = threading.Event()
 
     def ensure(
-        self, key: tuple[str, str, str], fn: Callable[[], list[dict[str, Any]]]
+        self, key: tuple[str, ...], fn: Callable[[], list[dict[str, Any]]]
     ) -> Future[list[dict[str, Any]]]:
         with self._lock:
             fut = self._jobs.get(key)
@@ -407,7 +457,7 @@ class HashJobs:
                 fut.add_done_callback(lambda f, k=key: self._done(k, f))
             return fut
 
-    def _done(self, key: tuple[str, str, str], fut: Future[list[dict[str, Any]]]) -> None:
+    def _done(self, key: tuple[str, ...], fut: Future[list[dict[str, Any]]]) -> None:
         with self._lock:
             if self._jobs.get(key) is fut:
                 del self._jobs[key]
@@ -441,34 +491,45 @@ def hash_directory(
     algorithm: str,
     *,
     wait: float | None = None,
+    suffixes: tuple[str, ...] = (),
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """Digests of the folder's files: all of them, or (with ``wait``) what is known by then.
 
     With ``wait`` the result may be partial (``complete`` false, ``hash`` null for files
     not read yet) while a background pass keeps hashing into the cache, so the next call
-    returns more. Without it, the call returns when every file is hashed.
+    returns more. Without it, the call returns when every file is hashed; the hashing is the
+    folder's one background pass, which every caller shares, and a caller waits for it at most
+    ``deadline`` seconds (default BLOCKING_DEADLINE), then gets :class:`HashingBusy`.
     """
     if algorithm not in DIGEST_LENGTHS:
         raise ValueError(f"unsupported algorithm {algorithm}")
     folder = _folder(rel)
+    key = (str(instance_id), folder, algorithm, *suffixes)
+
+    def run_pass() -> list[dict[str, Any]]:
+        return hash_folder(root, cache, instance_id, folder, algorithm, stop=jobs.stop, suffixes=suffixes)
+
     if wait is not None:
-        files, pending = cached_listing(root, cache, instance_id, folder, algorithm)
+        files, pending = cached_listing(root, cache, instance_id, folder, algorithm, suffixes)
         if pending == 0:
             return {"files": files, "complete": True, "pending": 0}
         if len(files) <= cache.max_entries:  # otherwise progress could never be cached
-            fut = jobs.ensure(
-                (str(instance_id), folder, algorithm),
-                lambda: hash_folder(root, cache, instance_id, folder, algorithm, stop=jobs.stop),
-            )
+            fut = jobs.ensure(key, run_pass)
             try:
                 return {"files": fut.result(timeout=wait), "complete": True, "pending": 0}
             except FutureTimeout:
-                files, pending = cached_listing(root, cache, instance_id, folder, algorithm)
+                files, pending = cached_listing(root, cache, instance_id, folder, algorithm, suffixes)
                 return {"files": files, "complete": pending == 0, "pending": pending}
             except CancelledError as exc:  # the executor was shut down
                 raise HashingCancelled from exc
-    return {
-        "files": hash_folder(root, cache, instance_id, folder, algorithm, stop=jobs.stop),
-        "complete": True,
-        "pending": 0,
-    }
+    if jobs.stop.is_set():
+        raise HashingCancelled
+    fut = jobs.ensure(key, run_pass)
+    try:
+        files = fut.result(timeout=BLOCKING_DEADLINE if deadline is None else deadline)
+    except FutureTimeout as exc:
+        raise HashingBusy(folder) from exc
+    except CancelledError as exc:
+        raise HashingCancelled from exc
+    return {"files": files, "complete": True, "pending": 0}

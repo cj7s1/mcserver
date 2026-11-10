@@ -46,6 +46,11 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Backup safeguards: "No backup yet" / "Last backup N days ago" notice, "Nightly backup" on by default in the
       create wizard, `manage.py ensure_backup_schedules` for servers that have no schedule
 - [ ] restic on an Unraid array share (the owner's backup folder was still empty on 2026-11-09)
+- [x] Panel database off the cache drive: `deploy/unraid/backup-db.sh` (daily dump + `.env` copy, User Scripts),
+      `manage.py adopt_backups` (take over snapshots the database does not know), recovery steps in docs/UNRAID.md
+      section 10 — unit-tested only; [ ] run the recovery once on a test stack
+- [x] Stale restic locks removed at agent start and on a locked repository; `save-on` after an agent that died
+      during a backup — unit-tested only
 - [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules); works without `CAP_SYS_ADMIN`
       (file-by-file delete when the kernel refuses `btrfs subvolume delete`) — verified on a real btrfs
       filesystem in a QEMU guest, [ ] not yet on an Unraid pool
@@ -74,6 +79,11 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Modpack update with pre-update backup, history, rollback to pre-update backup
 - [x] Modpack "update available" check (every 6 h, compatible MC/loader only, notify once per release, header badge → update plan) — unit-tested only
 - [x] Cron schedules: restart/start/stop/backup/command
+- [x] Robust schedules: a busy server puts a run off (up to an hour, then notified), impossible dates refused, one
+      broken schedule cannot stop the others, no late power actions after downtime, missed backups once the server
+      settled, daylight saving time, beat in UTC — unit-tested only
+- [x] Failed jobs no longer leave a running server stopped when nothing was changed; "Mark as failed" stops the
+      handler; restoring a "Before update" backup puts the old software back — unit-tested only
 - [x] In-game countdown warnings before restart/stop (manual + scheduled, cancellable, lock only for the last 10 s) — unit-tested only
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
 - [x] World import / export (replace from an archive with safety backup + rollback; zip export incl. Bukkit dimension folders)
@@ -93,8 +103,14 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [~] Validated on real Unraid: an earlier version (seven containers) has run on the owner's Unraid 7.3.4 server
       since 2026-11-07. [ ] The five items above have only run on a Linux desktop with real Docker: upgrade the
       server, then do the check in docs/UNRAID-SHUTDOWN.md
-- [ ] Memory check at start (the dashboard shows "Memory reserved", but a start is never refused or warned
-      about when the running servers plus the new one exceed the host's RAM)
+- [x] Memory check at start: running servers plus the new one vs. the host's RAM minus a reserve (System settings,
+      default 4096 MB), "Start anyway"; scheduled starts and the resume after boot wait — unit-tested only.
+      [ ] The same check when a server is created or resized; the wizard's bar does not count the reserve
+- [x] Platform containers with `restart: always` (back after a Docker-tab or backup-plugin stop and a reboot)
+- [x] Runtime images refreshed at every start that creates a container (bounded pull, offline falls back to the local
+      image); the image channel reaches existing servers — unit-tested only. [ ] An explicit "update images" action
+- [x] Request size limits before Django, uploads of any number of files with per-file results, streamed downloads,
+      no leaked database connections — unit-tested only
 - [ ] Unraid Community Applications template (XML)
 
 ## Multi-node
@@ -117,6 +133,8 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
       with real containers, and by hand with real Minecraft servers. Both were run on a desktop
       (2026-11-10); the CI job "upgrade" that calls the script had not run on GitHub then
 - [ ] Load test of console fan-out
+- [~] Audit round of 2026-11-09 (open findings of four work lists): fixed and unit-tested on branch
+      `fix/audit-remaining`; remaining points in DEVELOPMENT_STATUS.md "Audit of 2026-11-09"
 
 ## Dependencies
 - Modpack update/rollback depends on backups (done) and provider adapters (done).

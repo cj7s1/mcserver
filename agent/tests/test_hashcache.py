@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -471,3 +472,113 @@ def test_delete_data_forgets_cached_digests(api, auth, agent_settings, monkeypat
         time.sleep(0.02)
     assert op["status"] == "succeeded", op
     assert not list(agent_settings.hash_cache_dir.glob(f"{iid}-*.json"))
+
+
+# --- audit backend-content#3: one huge (sparse) file cannot tie up the agent ----------------------
+def _sparse(path: Path, size: int) -> Path:
+    with open(path, "wb") as fh:
+        fh.truncate(size)  # costs no disk space
+    when = time.time_ns() - int(60e9)
+    os.utime(path, ns=(when, when))
+    return path
+
+
+def test_files_above_the_size_cap_are_listed_unread(setup, reads):
+    iid, root, mods, cache = setup
+    _write(mods / "ok.jar", b"jar")
+    _sparse(mods / "huge.jar", hashcache.HASH_MAX_FILE_BYTES + 1)
+    files = {f["name"]: f for f in hash_folder(root, cache, iid, "mods", "sha1")}
+    assert files["huge.jar"]["hash"] is None and files["huge.jar"]["too_large"] is True
+    assert files["ok.jar"]["hash"] == hashlib.sha1(b"jar").hexdigest() and "too_large" not in files["ok.jar"]
+    assert reads == ["mods/ok.jar"]
+    listing, pending = hashcache.cached_listing(root, cache, iid, "mods", "sha1")
+    assert pending == 0 and {f["name"]: f.get("too_large") for f in listing} == {
+        "ok.jar": None,
+        "huge.jar": True,
+    }
+
+
+def test_a_file_that_grows_past_the_cap_while_it_is_read_is_given_up(setup, monkeypatch):
+    iid, root, mods, cache = setup
+    _write(mods / "growing.jar", b"x" * (3 * hashcache.READ_CHUNK))
+    monkeypatch.setattr(hashcache, "HASH_MAX_FILE_BYTES", 2 * hashcache.READ_CHUNK)
+    real_files = hashcache._files
+
+    def listed_while_small(*args):  # type: ignore[no-untyped-def]
+        return [dataclasses.replace(e, size=10) for e in real_files(*args)]
+
+    monkeypatch.setattr(hashcache, "_files", listed_while_small)
+    (item,) = hash_folder(root, cache, iid, "mods", "sha1")
+    assert item["hash"] is None and item["too_large"] is True
+
+
+def test_the_suffix_filter_only_reads_and_lists_matching_files(api, auth, agent_settings):
+    iid = uuid.uuid4()
+    mods = agent_settings.instances_dir / str(iid) / "mods"
+    mods.mkdir(parents=True)
+    _write(mods / "a.jar", b"a")
+    _write(mods / "b.jar.disabled", b"b")
+    _write(mods / "notes.txt", b"n")
+    r = api.get(
+        f"/v1/instances/{iid}/files/hashes",
+        params={"path": "mods", "suffix": [".jar", ".jar.disabled"]},
+        headers=auth,
+    )
+    assert r.status_code == 200, r.text
+    assert sorted(f["name"] for f in r.json()["files"]) == ["a.jar", "b.jar.disabled"]
+    r = api.get(f"/v1/instances/{iid}/files/hashes", params={"path": "mods", "suffix": "a/b"}, headers=auth)
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_suffix"
+
+
+def test_blocking_callers_share_one_pass_and_give_up_after_the_deadline(setup, monkeypatch):
+    iid, root, mods, cache = setup
+    _write(mods / "slow.jar", b"s")
+    started = threading.Event()
+    release = threading.Event()
+    passes: list[int] = []
+    real = hashcache.hash_folder
+
+    def slow_pass(*args, **kwargs):  # type: ignore[no-untyped-def]
+        passes.append(1)
+        started.set()
+        release.wait(10)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(hashcache, "hash_folder", slow_pass)
+    jobs = HashJobs(workers=2)
+    try:
+        results: list = []
+
+        def caller() -> None:
+            try:
+                results.append(hash_directory(root, cache, jobs, iid, "mods", "sha1", deadline=0.3))
+            except hashcache.HashingBusy as exc:
+                results.append(exc)
+
+        callers = [threading.Thread(target=caller) for _ in range(5)]
+        t0 = time.monotonic()
+        for t in callers:
+            t.start()
+        for t in callers:
+            t.join(5)
+        assert time.monotonic() - t0 < 3  # nobody waits for the pass beyond the deadline
+        assert len(results) == 5 and all(isinstance(r, hashcache.HashingBusy) for r in results)
+        assert passes == [1]  # one pass for the folder, however many callers
+        release.set()
+        done = hash_directory(root, cache, jobs, iid, "mods", "sha1", deadline=5)
+        assert done["complete"] and done["files"][0]["hash"] == hashlib.sha1(b"s").hexdigest()
+    finally:
+        release.set()
+        jobs.shutdown()
+
+
+def test_the_api_answers_hashing_busy_instead_of_holding_a_thread(api, auth, agent_settings, monkeypatch):
+    iid = uuid.uuid4()
+    (agent_settings.instances_dir / str(iid) / "mods").mkdir(parents=True)
+
+    def busy(*_a, **_k):
+        raise hashcache.HashingBusy("mods")
+
+    monkeypatch.setattr(hashcache, "hash_directory", busy)
+    r = api.get(f"/v1/instances/{iid}/files/hashes?path=mods", headers=auth)
+    assert r.status_code == 503 and r.json()["error"]["code"] == "hashing_busy"

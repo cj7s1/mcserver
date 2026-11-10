@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import hashlib
 import ipaddress
 import json
@@ -35,7 +36,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
-from . import __version__, docker_ops, hashcache, lastrun, storage, tls
+from . import __version__, backups, docker_ops, hashcache, lastrun, maintenance, netguard, slp, storage, tls
 from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
@@ -70,15 +71,41 @@ logging.basicConfig(
 )
 log = logging.getLogger("mcagent")
 
+
+class SafeJSONResponse(JSONResponse):
+    """JSON that cannot fail on a file name that is not valid UTF-8.
+
+    Python hands such names over with lone surrogates, which UTF-8 cannot encode: one odd file
+    name would turn a whole folder listing into a 500. They become U+FFFD here (the listings
+    also flag such entries, see ``safefs.Entry.as_dict``).
+    """
+
+    def render(self, content: Any) -> bytes:
+        text = json.dumps(content, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":"))
+        try:
+            return text.encode("utf-8")
+        except UnicodeEncodeError:
+            return text.encode("utf-8", "surrogateescape").decode("utf-8", "replace").encode("utf-8")
+
+
 app = FastAPI(
-    title="MCPanel Agent", version=__version__, docs_url=None, redoc_url=None, openapi_url="/v1/openapi.json"
+    title="MCPanel Agent",
+    version=__version__,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url="/v1/openapi.json",
+    default_response_class=SafeJSONResponse,
 )
 TEXT_LIMIT = 5 * 1024 * 1024
 # What this agent can do beyond the first API version, for panels that must work with older
 # agents too (GET /v1/info, "features"):
-#   retire  POST /instances/{id}/retire and DELETE /instances/{id}/last-run exist, and the status,
-#           list, logs and log-stream answers carry the last-run record of a server without a container
-FEATURES = ["retire"]
+#   retire      POST /instances/{id}/retire and DELETE /instances/{id}/last-run exist, and the status,
+#               list, logs and log-stream answers carry the last-run record of a server without a container
+#   pull_newer  apply accepts pull="newer" and reports image_id_before, image_id, pulled, warnings
+#               and images_removed (superseded runtime images it removed)
+#   ping        GET /instances/{id}/ping: server list ping (players online, max, sample, version, motd)
+#   clone_level_name  clone takes level_name and layout and leaves out exactly that world
+FEATURES = ["retire", "pull_newer", "ping", "clone_level_name"]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
 LIFECYCLE_LOCK_WAIT = 60.0
@@ -87,47 +114,109 @@ RETIRE_LOCK_WAIT = 3.0
 UPLOAD_LIMIT = int(os.environ.get("AGENT_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 * 1024)))
 
 
-_blocked_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+# Subnets of the Minecraft instance network(s); None until they could be read from Docker.
+_blocked_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
+# Until then: what the guard saw the last time Docker answered, and the subnets this process is
+# attached to now (netguard.provisional_verdict). Set at start-up and by the guard loop.
+_remembered_networks: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]] | None = None
+_attached_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+GUARD_RETRY_SECONDS = 2.0  # while the subnets are unknown (Docker not reachable)
+GUARD_REFRESH_SECONDS = 60.0  # afterwards (a network that is recreated can get another subnet)
+# Answered while the subnets are unknown, from any address: it reveals nothing.
+_GUARD_EXEMPT_PATHS = frozenset({"/v1/health"})
 
 
-def _load_blocked_networks(settings: Settings) -> None:
-    """Subnets of the Minecraft instance network(s): requests from there are refused.
+def _load_blocked_networks(settings: Settings) -> bool:
+    """Read the subnets of the Minecraft instance network(s): requests from there are refused.
 
     Minecraft containers run third-party code and share a network with the agent (needed
-    for RCON); they must never be able to talk to the agent API, token or not.
+    for RCON); they must never be able to talk to the agent API, token or not. A network
+    that does not exist has no members and blocks nothing; any other Docker error leaves
+    the previous list in place and returns False (the caller tries again). What was read is
+    stored (``netguard.remember``) for a later start at which Docker does not answer.
     """
+    global _blocked_networks
     nets = []
-    for name in {settings.instance_network, *settings.allowed_networks} - {"host"}:
+    for name in sorted({settings.instance_network, *settings.allowed_networks} - {"host"}):
         try:
             net = docker_ops.client().networks.get(name)
-        except Exception as exc:  # network may not exist yet
-            log.debug("cannot inspect network %s: %s", name, exc)
+        except docker.errors.NotFound:
             continue
+        except Exception as exc:  # Docker not reachable (yet)
+            log.debug("cannot inspect network %s: %s", name, exc)
+            return False
         for cfg in (net.attrs.get("IPAM") or {}).get("Config") or []:
             with contextlib.suppress(ValueError, TypeError):
                 nets.append(ipaddress.ip_network(cfg.get("Subnet"), strict=False))
-    _blocked_networks[:] = nets
-    if nets:
-        log.info("Refusing agent API requests from instance networks: %s", ", ".join(map(str, nets)))
+    if _blocked_networks is None or set(nets) != set(_blocked_networks):
+        log.info(
+            "Refusing agent API requests from instance networks: %s",
+            ", ".join(map(str, nets)) or "(none yet)",
+        )
+    _blocked_networks = nets
+    netguard.remember(settings.state_dir, nets, netguard.attached_subnets())
+    return True
 
 
-def _source_blocked(client: Any) -> str | None:
-    """The client address if it is on an instance network, else None."""
+def _prepare_guard(settings: Settings) -> None:
+    """Start-up, before the first request: what the guard goes by until Docker answers."""
+    global _blocked_networks, _remembered_networks, _attached_networks
+    _blocked_networks = None
+    _remembered_networks = netguard.recall(settings.state_dir)
+    _attached_networks = netguard.attached_subnets()
+
+
+def _guard_loop(settings: Settings, stop: threading.Event) -> None:
+    """Load the instance-network subnets, retrying until Docker answers, then keep them current."""
+    global _attached_networks
+    warned = False
+    while not stop.is_set():
+        try:
+            docker_ops.ensure_network(settings)
+        except Exception as exc:
+            log.debug("Could not ensure instance network: %s", exc)
+        loaded = _load_blocked_networks(settings)
+        if not loaded and _blocked_networks is None:
+            _attached_networks = netguard.attached_subnets()
+        if not loaded and not warned:
+            log.warning(
+                "Docker is not reachable: until it is, the agent refuses API requests from networks it "
+                "cannot tell apart from the instance networks (retrying every %.0f s)",
+                GUARD_RETRY_SECONDS,
+            )
+            warned = True
+        if loaded and warned:
+            log.info("Docker is reachable again; the instance-network guard is up to date")
+            warned = False
+        stop.wait(GUARD_REFRESH_SECONDS if _blocked_networks is not None else GUARD_RETRY_SECONDS)
+
+
+def _source_verdict(client: Any, path: str = "") -> str | None:
+    """None when the request may pass; "blocked" for an address on an instance network;
+    "pending" while those networks are not known yet and the address cannot be told apart
+    from one (see ``netguard``: loopback, the health probe and the panel's own network pass)."""
     client_ip = client[0] if client else None
-    if not client_ip or not _blocked_networks:
-        return None
     try:
-        ip = ipaddress.ip_address(client_ip)
+        ip = ipaddress.ip_address(client_ip) if client_ip else None
     except ValueError:
+        ip = None
+    if ip is None:  # a Unix socket or an in-process client: not from a container network
         return None
-    return client_ip if any(ip in net for net in _blocked_networks) else None
+    nets = _blocked_networks
+    if nets is None:
+        if ip.is_loopback or path in _GUARD_EXEMPT_PATHS:
+            return None
+        return netguard.provisional_verdict(ip, _remembered_networks, _attached_networks)
+    return "blocked" if any(ip in net for net in nets) else None
 
 
 class _RefuseInstanceNetworks:
     """Refuse HTTP requests *and* WebSocket handshakes from instance networks (pure ASGI).
 
     A ``@app.middleware("http")`` function never sees WebSocket connections, so the
-    log stream would otherwise be reachable from a Minecraft container.
+    log stream would otherwise be reachable from a Minecraft container. While the instance
+    networks are not known (Docker was not reachable yet), a request from an address that
+    cannot be told apart from them is refused with 503 ``agent_starting`` (``netguard``).
     """
 
     def __init__(self, asgi_app: Any) -> None:
@@ -135,16 +224,26 @@ class _RefuseInstanceNetworks:
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] in ("http", "websocket"):
-            blocked = _source_blocked(scope.get("client"))
-            if blocked:
-                log.warning("Refused agent API %s from instance network address %s", scope["type"], blocked)
-                if scope["type"] == "http":
-                    response = JSONResponse(
-                        {"error": {"code": "forbidden_source", "message": "Forbidden"}}, status_code=403
+            verdict = _source_verdict(scope.get("client"), scope.get("path", ""))
+            if verdict:
+                client = (scope.get("client") or ["?"])[0]
+                if verdict == "blocked":
+                    log.warning(
+                        "Refused agent API %s from instance network address %s", scope["type"], client
                     )
+                    body, status, ws_code = {"code": "forbidden_source", "message": "Forbidden"}, 403, 4403
+                else:
+                    body = {
+                        "code": "agent_starting",
+                        "message": "The node agent cannot reach Docker yet, so it cannot tell which "
+                        "networks may use it; try again shortly",
+                    }
+                    status, ws_code = 503, 1013
+                if scope["type"] == "http":
+                    response = JSONResponse({"error": body}, status_code=status)
                     await response(scope, receive, send)
                 else:  # closing before accept: the handshake is answered with HTTP 403
-                    await WebSocket(scope, receive, send).close(code=4403)
+                    await WebSocket(scope, receive, send).close(code=ws_code)
                 return
         await self.app(scope, receive, send)
 
@@ -154,7 +253,7 @@ app.add_middleware(_RefuseInstanceNetworks)
 
 @app.exception_handler(AgentError)
 async def _agent_error(_request: Request, exc: AgentError) -> JSONResponse:
-    return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
+    return SafeJSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
 
 
 @app.exception_handler(requests.exceptions.ConnectionError)
@@ -191,12 +290,29 @@ async def _docker_error(_request: Request, exc: docker.errors.DockerException) -
 
 @app.exception_handler(PathError)
 async def _path_error(_request: Request, exc: PathError) -> JSONResponse:
-    return JSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
+    return SafeJSONResponse({"error": {"code": exc.code, "message": str(exc)}}, status_code=exc.status)
+
+
+# Background work of this process (source guard, start-up maintenance); stopped at shutdown.
+_background_stop = threading.Event()
+SHUTDOWN_RESTIC_GRACE = 4.0  # seconds restic children get to exit (and drop their locks) at shutdown
+SHUTDOWN_SAVE_ON_TIMEOUT = 3.0  # per server, all at once
+
+
+def _spawn(name: str, target: Any, *args: Any) -> threading.Thread:
+    t = threading.Thread(target=target, args=args, name=name, daemon=True)
+    t.start()
+    return t
+
+
+def _busy(instance_id: UUID) -> bool:
+    return registry.active_for(instance_id) is not None
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     settings = get_settings()
+    started_at = time.time()
     for d in (
         settings.instances_dir,
         settings.backups_dir,
@@ -205,24 +321,41 @@ async def _startup() -> None:
         settings.state_dir,
     ):
         d.mkdir(parents=True, exist_ok=True)
+    # nobody but root traverses the data root (server folders hold RCON passwords)
+    await run_in_threadpool(maintenance.restrict_data_root, settings)
     if not settings.resolve_token():
         log.error("AGENT_TOKEN is not configured; all requests will be rejected")
+    # Before the first request: restic commands wait until their repository has been unlocked.
+    repos = await run_in_threadpool(backups.prepare_startup_unlock, settings)
+    _background_stop.clear()
+    await run_in_threadpool(_prepare_guard, settings)
     try:
         await run_in_threadpool(docker_ops.ensure_network, settings)
         await run_in_threadpool(_load_blocked_networks, settings)
-    except Exception as exc:  # docker not reachable yet; health endpoint will report it
+    except Exception as exc:  # docker not reachable yet; the guard loop keeps trying
         log.warning("Could not ensure instance network: %s", exc)
+    _spawn("agent-source-guard", _guard_loop, settings, _background_stop)
+    _spawn("restic-startup-unlock", backups.startup_unlock, settings, repos)
+    _spawn("leftover-sweep", maintenance.sweep_leftovers, settings, started_at, _busy)
+    _spawn("saving-recovery", _saving_recovery_loop, settings, _background_stop)
 
 
-# At most one background pass per folder (two at a time) for progressive /files/hashes calls.
-_hash_jobs = hashcache.HashJobs(workers=2)
+# At most one background pass per folder (four at a time) for /files/hashes calls.
+_hash_jobs = hashcache.HashJobs(workers=4)
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     global _hash_jobs
+    _background_stop.set()
     _hash_jobs.shutdown()  # stop background hashing so the process can exit promptly
-    _hash_jobs = hashcache.HashJobs(workers=2)
+    _hash_jobs = hashcache.HashJobs(workers=4)
+    settings = get_settings()
+    # World saving first (in parallel threads), while restic children get SIGINT and so remove
+    # their locks: the operation threads that started them die with this process.
+    saving = _spawn("shutdown-save-on", _resume_all_saving, settings, SHUTDOWN_SAVE_ON_TIMEOUT)
+    await run_in_threadpool(backups.stop_children, SHUTDOWN_RESTIC_GRACE)
+    await run_in_threadpool(saving.join, SHUTDOWN_SAVE_ON_TIMEOUT + 2)
 
 
 def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
@@ -323,21 +456,82 @@ async def prepare_instance(
     return await run_in_threadpool(_do)
 
 
+PULL_NEWER_TIMEOUT = 180.0  # pull="newer": how long the check for a newer image may take
+
+
+def _pull_for_apply(
+    op: Operation, image: str, pull: str, warnings: list[str], settings: Settings | None = None
+) -> bool:
+    """Make the image available as ``pull`` asks; returns whether a pull succeeded.
+
+    ``newer`` asks the registry at most once per tag per ``docker_ops.PULL_CHECK_INTERVAL``
+    (24 h): every successful pull of the tag is remembered in the state folder, a failed check
+    is not (the next start tries again)."""
+    settings = settings or get_settings()
+    present = docker_ops.local_image_id(image) is not None
+
+    def progress(p: float, m: str) -> None:
+        op.update(0.05 + p * 0.8, m)
+
+    if pull == "never":
+        if not present:
+            raise AgentError(f"Image {image} is not present and pulling is disabled", "image_missing", 409)
+        return False
+    if pull == "always" or not present:
+        op.update(0.05, f"Pulling image {image}")
+        docker_ops.pull_image(image, progress)
+        docker_ops.remember_pull(settings, image)
+        return True
+    if pull == "newer":
+        checked = docker_ops.recently_checked(settings, image)
+        if checked is not None:
+            log.info(
+                "Apply: %s was checked for a newer build %d minutes ago; the image on this host is used",
+                image,
+                (time.time() - checked) // 60,
+            )
+            return False
+        op.update(0.05, f"Checking for a newer {image}")
+        try:
+            docker_ops.pull_image_bounded(image, PULL_NEWER_TIMEOUT, progress)
+            docker_ops.remember_pull(settings, image)
+            return True
+        except Exception as exc:  # no internet, registry error, timeout: the local image will do
+            text = str(exc) or type(exc).__name__
+            warnings.append(f"Could not check for a newer {image} ({text}); the image on this host is used")
+            log.warning("Apply: %s", warnings[-1])
+    return False
+
+
 @app.put("/v1/instances/{instance_id}/container", dependencies=[Depends(require_token)])
 async def apply_spec(
     instance_id: UUID, body: ApplySpecRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    """(Re)create the container from a spec as an operation. World data is never touched."""
+    """(Re)create the container from a spec as an operation. World data is never touched.
+
+    A container that exists is replaced only once its successor has been created (under a
+    temporary name, renamed afterwards): a spec Docker refuses leaves the old container as it was.
+    The result says which image the server ran before (``image_id_before``: the old container's,
+    else the one of its last run, else what the tag pointed to before a pull) and runs now
+    (``image_id``), whether a pull succeeded (``pulled``), and lists superseded runtime images it
+    removed (``images_removed``) and ``warnings``.
+    """
     image = docker_ops.validate_image(settings, body.spec.image)
     docker_ops.build_create_kwargs(settings, instance_id, body.spec, "validate")  # validate before queuing
     registry.assert_lifecycle_allowed(instance_id)
 
     def _apply(op: Operation) -> dict[str, Any]:
-        if body.pull == "always" or (body.pull == "missing" and not docker_ops.image_present(image)):
-            op.update(0.05, f"Pulling image {image}")
-            docker_ops.pull_image(image, lambda p, m: op.update(0.05 + p * 0.8, m))
-        elif body.pull == "never" and not docker_ops.image_present(image):
-            raise AgentError(f"Image {image} is not present and pulling is disabled", "image_missing", 409)
+        warnings: list[str] = []
+        tag_before = docker_ops.local_image_id(image)
+        pulled = _pull_for_apply(op, image, body.pull, warnings, settings)
+        if body.spec.cpu_limit:
+            cpus = docker_ops.host_cpus()
+            if cpus is not None and body.spec.cpu_limit > cpus:
+                raise AgentError(
+                    f"The CPU limit {body.spec.cpu_limit:g} is more than the {cpus} CPUs of this host",
+                    "cpu_limit",
+                    400,
+                )
         from .snapshots import ensure_instance_dir
 
         path = docker_ops.instance_dir(settings, instance_id)
@@ -353,22 +547,63 @@ async def apply_spec(
                     existing.reload()
                 except docker.errors.NotFound:
                     existing = None  # removed from outside the agent between the two requests
+            previous_image = (existing.attrs.get("Image") or None) if existing is not None else None
+            previous_ref = (
+                ((existing.attrs.get("Config") or {}).get("Image")) if existing is not None else None
+            )
+            if previous_image is None:
+                last = lastrun.summary(settings, instance_id) or {}
+                previous_image, previous_ref = last.get("image_id"), last.get("image")
+            docker_ops.remove_stale_replacement(instance_id)
             if existing is not None:
                 was_running = existing.status in ("running", "restarting")
-                op.update(0.88, "Stopping and removing previous container (data is kept)")
-                docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout, settings=settings)
-            op.update(0.92, "Creating container")
-            c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
+                op.update(0.88, "Creating the new container")
+                c = docker_ops.create_container(
+                    settings,
+                    instance_id,
+                    body.spec,
+                    _spec_hash(body.spec),
+                    name=docker_ops.replacement_name(instance_id),
+                )
+                try:
+                    op.update(0.9, "Stopping and removing previous container (data is kept)")
+                    docker_ops.remove_container(
+                        instance_id, timeout=body.spec.stop_timeout, settings=settings
+                    )
+                    docker_ops.rename_container(c, docker_ops.container_name(instance_id))
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        c.remove(v=False, force=True)
+                    raise
+            else:
+                op.update(0.92, "Creating container")
+                c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
             if body.start or was_running:
                 op.update(0.96, "Starting container")
                 docker_ops.start(instance_id)
             c.reload()
-            return {
-                "container": docker_ops.describe(c),
-                "recreated": existing is not None,
-                # how this container was created; the panel stores it with the spec hash
-                "container_format": docker_ops.CONTAINER_FORMAT,
-            }
+            described = docker_ops.describe(c)
+        image_id = described.get("image_id")
+        removed: list[str] = []
+        try:
+            # each with the reference it was known by (see remove_superseded_images)
+            candidates = {previous_image: previous_ref, tag_before: image}
+            candidates = {k: v for k, v in candidates.items() if k and k != image_id}
+            if candidates:
+                removed = docker_ops.remove_superseded_images(settings, candidates)
+        except Exception as exc:  # tidying up never fails the apply
+            log.warning("Removing superseded runtime images failed: %s", exc)
+        return {
+            "container": described,
+            "recreated": existing is not None,
+            # how this container was created; the panel stores it with the spec hash
+            "container_format": docker_ops.CONTAINER_FORMAT,
+            "image_id_before": previous_image or tag_before,
+            "image_id": image_id,
+            "pulled": pulled,
+            "images_removed": removed,
+            "warnings": warnings,
+        }
 
     op = registry.start("apply", [instance_id], _apply)
     return {"operation": op.as_dict()}
@@ -379,11 +614,14 @@ async def remove_container(
     instance_id: UUID, timeout: int = Query(60, ge=1, le=900), settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     """Stop and remove the container (archive, migration). The last-run record of a container
-    that has run is saved first, best effort (``docker_ops.remove_container``)."""
+    that has run is saved first, best effort (``docker_ops.remove_container``). A replacement
+    container an interrupted apply left (``<name>-replacement``) goes too: nothing of the server
+    stays behind, and an older agent after a rollback never finds it."""
     registry.assert_lifecycle_allowed(instance_id)
 
     def _remove() -> bool:
         with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            docker_ops.remove_stale_replacement(instance_id)
             return docker_ops.remove_container(instance_id, timeout=timeout, settings=settings)
 
     return {"removed": await run_in_threadpool(_remove)}
@@ -500,6 +738,29 @@ async def stats(instance_id: UUID) -> dict[str, Any]:
     return await run_in_threadpool(docker_ops.stats, instance_id)
 
 
+PING_TIMEOUT = 5.0
+
+
+@app.get("/v1/instances/{instance_id}/ping", dependencies=[Depends(require_token)])
+async def ping(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Server list ping of the running server (what the game's server list shows; no RCON login,
+    so nothing appears in the server's console): ``online``, ``max``, ``sample`` (player names),
+    ``version``, ``motd`` (plain text) and ``latency_ms``. 409 ``not_running`` without a running
+    container, 504 ``ping_timeout`` after 5 s, 502 ``ping_failed`` when it does not answer the
+    protocol (still starting)."""
+    host, port = await run_in_threadpool(docker_ops.game_endpoint, settings, instance_id)
+    try:
+        return await asyncio.wait_for(slp.ping(host, port, timeout=PING_TIMEOUT), PING_TIMEOUT)
+    except TimeoutError as exc:
+        raise AgentError(
+            "The server did not answer the server list ping in time", "ping_timeout", 504
+        ) from exc
+    except (OSError, slp.SlpError, asyncio.IncompleteReadError) as exc:
+        raise AgentError(
+            f"The server did not answer the server list ping: {exc}", "ping_failed", 502
+        ) from exc
+
+
 @app.get("/v1/instances/{instance_id}/disk", dependencies=[Depends(require_token)])
 async def disk(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     return await run_in_threadpool(storage.instance_usage, settings, instance_id)
@@ -530,6 +791,7 @@ async def delete_data(
     def _delete(op: Operation) -> dict[str, Any]:
         op.update(0.1, "Removing container")
         with docker_ops.instance_lock(instance_id, wait=OPERATION_LOCK_WAIT):
+            docker_ops.remove_stale_replacement(instance_id)  # left by an interrupted apply
             docker_ops.remove_container(instance_id, timeout=30, settings=settings, save_last_run=False)
         record_warning = None
         try:
@@ -587,12 +849,66 @@ async def delete_data(
     return {"operation": op.as_dict()}
 
 
+def _chown_tree(root: Path, uid: int, gid: int) -> None:
+    """Give ``root`` and everything below it to ``uid:gid`` (links themselves, never followed).
+
+    A copy made by the agent (root) belongs to root; the server runs as the runtime user and
+    could not write into it. The itzg entrypoint only fixes ownership when the top folder's
+    owner differs, which apply_spec sets, so the copy must be right by itself.
+    """
+    try:
+        os.chown(root, uid, gid, follow_symlinks=False)
+        for _dirpath, dirnames, filenames, dir_fd in os.fwalk(root, follow_symlinks=False):
+            for name in (*dirnames, *filenames):
+                with contextlib.suppress(FileNotFoundError):
+                    os.chown(name, uid, gid, dir_fd=dir_fd, follow_symlinks=False)
+    except PermissionError as exc:  # an agent that does not run as root (development)
+        log.warning("Could not give the copied files to %s:%s: %s", uid, gid, exc)
+
+
+_LEGACY_WORLD_FOLDERS = frozenset({"world", "world_nether", "world_the_end"})
+
+
+def _holds_a_world(path: str, name: str) -> bool:
+    """A top-level entry a clone without worlds leaves out besides the current world's folders:
+    the agent's world staging folders (``.mcpanel-world-*``: the world a failed reset or replace
+    moved aside, an import being extracted) and every folder that directly holds a ``level.dat``
+    (an older world, a world kept under another name). Links are never followed."""
+    if name.startswith(".mcpanel-world-"):
+        return True
+    try:
+        if not stat.S_ISDIR(os.lstat(path).st_mode):
+            return False
+        return stat.S_ISREG(os.lstat(os.path.join(path, "level.dat")).st_mode)
+    except OSError:
+        return False
+
+
 @app.post("/v1/instances/{instance_id}/clone", dependencies=[Depends(require_token)])
 async def clone(
     instance_id: UUID, body: CloneRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
+    """Copy a stopped server's folder into a new server's folder (an operation).
+
+    With ``exclude_worlds`` the world is left out: with ``level_name`` (and ``layout``) exactly
+    the folders of that world at the top of the server folder (``world.world_paths``), without
+    it the folders world, world_nether and world_the_end wherever they are (older panels); in
+    both cases also every top-level folder that directly holds a ``level.dat`` and the agent's
+    ``.mcpanel-world-*`` folders (:func:`_holds_a_world`). The
+    copy belongs to the runtime user like every other server file; FIFOs, sockets and devices
+    are never copied. The result lists the left-out folders as ``skipped_worlds``.
+    """
+    from . import world
+
     src = docker_ops.instance_dir(settings, instance_id)
     dst = docker_ops.instance_dir(settings, body.target_instance_id)
+    level_skips: dict[str, set[str]] | None = None
+    if body.exclude_worlds and body.level_name is not None:
+        parts = world.level_parts(body.level_name)  # refuse bad names before starting an operation
+        level_skips = {}
+        for _role, rel in world.world_paths(parts, body.layout or "vanilla"):
+            *parent, name = rel.split("/")
+            level_skips.setdefault("/".join(parent), set()).add(name)
     if not src.exists():
         raise AgentError("Source instance has no data directory", "not_found", 404)
     if dst.exists() and any(dst.iterdir()):
@@ -604,10 +920,22 @@ async def clone(
     def _clone(op: Operation) -> dict[str, Any]:
         from .snapshots import create_empty_dir, prepare_replacement, remove_tree
 
-        worlds = {"world", "world_nether", "world_the_end"} if body.exclude_worlds else set()
+        skipped_worlds: list[str] = []
+        src_text = str(src)
 
         def ignore(directory: str, names: list[str]) -> set[str]:
-            skipped = worlds & set(names)
+            rel = os.path.relpath(directory, src_text)
+            rel = "" if rel == "." else rel.replace(os.sep, "/")
+            if level_skips is not None:
+                worlds = level_skips.get(rel, set()) & set(names)
+            elif body.exclude_worlds:
+                worlds = _LEGACY_WORLD_FOLDERS & set(names)
+            else:
+                worlds = set()
+            if body.exclude_worlds and rel == "":
+                worlds |= {n for n in names if _holds_a_world(os.path.join(directory, n), n)}
+            skipped_worlds.extend(sorted("/".join(p for p in (rel, n) if p) for n in worlds))
+            skipped = set(worlds)
             for name in names:  # FIFOs, sockets and devices (a mod can mkfifo) are never copied
                 try:
                     mode = os.lstat(os.path.join(directory, name)).st_mode
@@ -617,15 +945,24 @@ async def clone(
                     skipped.add(name)
             return skipped
 
+        def result(extra: dict[str, Any]) -> dict[str, Any]:
+            out: dict[str, Any] = {"bytes": storage.dir_size(dst), **extra}
+            if body.exclude_worlds:
+                out["skipped_worlds"] = skipped_worlds
+            return out
+
         op.update(0.05, "Copying files")
         # The clone gets the same kind of folder a new server would: subvolume / dataset / plain.
         strategy = prepare_replacement(settings, dst)
         if strategy == "in_place":  # the target's own ZFS dataset: copy inside it, swap entries
             with _staging_inside(dst, "clone") as (root_fd, stage_fd, stage_name):
                 # through the descriptor: renaming the staging folder cannot redirect the copy
-                shutil.copytree(src, f"/proc/self/fd/{stage_fd}/c", symlinks=True, ignore=ignore)
+                copy = f"/proc/self/fd/{stage_fd}/c"
+                shutil.copytree(src, copy, symlinks=True, ignore=ignore)
+                op.update(0.9, "Setting the owner of the copied files")
+                _chown_tree(Path(copy), settings.runtime_uid, settings.runtime_gid)
                 _swap_in_staged(root_fd, stage_fd, "c", stage_name)
-            return {"bytes": storage.dir_size(dst)}
+            return result({})
         warnings: list[str] = []
         if strategy == "subvolume":  # a new subvolume next to the target, renamed into place
             staging = dst.with_name(f"{body.target_instance_id}.mcpanel-clone-{secrets.token_hex(6)}")
@@ -639,6 +976,8 @@ async def clone(
                     "(convert it to enable snapshots)"
                 )
             shutil.copytree(src, staging, symlinks=True, ignore=ignore, dirs_exist_ok=True)
+            op.update(0.9, "Setting the owner of the copied files")
+            _chown_tree(staging, settings.runtime_uid, settings.runtime_gid)
             if dst.exists():
                 if any(dst.iterdir()):
                     raise AgentError("Target instance directory is not empty", "target_not_empty", 409)
@@ -647,10 +986,7 @@ async def clone(
         except BaseException:
             remove_tree(staging)
             raise
-        result: dict[str, Any] = {"bytes": storage.dir_size(dst)}
-        if warnings:
-            result["warnings"] = warnings
-        return result
+        return result({"warnings": warnings} if warnings else {})
 
     op = registry.start("clone_target", [instance_id, body.target_instance_id], _clone)
     return {"operation": op.as_dict()}
@@ -684,6 +1020,8 @@ LOG_BUFFER_MAX_BYTES = 4 * 1024 * 1024
 LOG_BATCH_MAX_LINES = 500
 LOG_BATCH_MAX_BYTES = 512 * 1024  # keeps one WebSocket message far below the panel's 8 MiB limit
 LOG_TRUNCATED_SUFFIX = " [mcpanel: line truncated]"
+LOG_PING_SECONDS = 15.0  # a ping goes out when nothing else did for this long
+LOG_RETRY_SECONDS = 2.0  # after a Docker error, before the pump tries again
 
 
 class _LineSplitter:
@@ -858,13 +1196,24 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
         last_state = None
         since: int | None = None
         attached_id: str | None = None  # the container whose log was read last
+        failing: str | None = None  # the Docker error reported last (each streak once)
+
+        def docker_failed(exc: Exception) -> None:
+            nonlocal failing
+            text = str(exc) or type(exc).__name__
+            if text != failing:
+                emit({"type": "error", "message": text})
+                failing = text
+            stop_event.wait(LOG_RETRY_SECONDS)
+
         while not stop_event.is_set():
             try:
                 c = docker_ops.get_container(instance_id)
-            except Exception as exc:
-                emit({"type": "error", "message": str(exc)})
-                return
+            except Exception as exc:  # Docker unreachable for a moment: keep trying, the console stays
+                docker_failed(exc)
+                continue
             if c is None:
+                failing = None
                 if last_state != "missing":
                     emit({"type": "state", "state": "missing"})
                     last_state = "missing"
@@ -881,6 +1230,10 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
             except docker.errors.NotFound:  # removed between the two calls
                 stop_event.wait(1)
                 continue
+            except Exception as exc:
+                docker_failed(exc)
+                continue
+            failing = None
             state = c.status
             container_id = getattr(c, "id", None)
             if state != last_state:
@@ -954,9 +1307,12 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
 
     recv_task = asyncio.create_task(receiver())
     try:
-        while not recv_task.done():
-            batch = await buffer.get_batch(timeout=15)
+        pump_ended = False
+        while not recv_task.done() and not pump_ended:
+            batch = await buffer.get_batch(timeout=LOG_PING_SECONDS)
             if batch is None:
+                if not thread.is_alive():  # the pump is gone without a word: let the relay reconnect
+                    break
                 await websocket.send_json({"type": "ping"})
                 continue
             lines: list[str] = []
@@ -968,6 +1324,8 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                     await websocket.send_json({"type": "logs", "lines": lines})
                     lines = []
                 await websocket.send_json(m)
+                # the pump has ended: close the socket, so the panel's relay connects again
+                pump_ended = pump_ended or m.get("type") == "closed"
             if lines:
                 await websocket.send_json({"type": "logs", "lines": lines})
     except (WebSocketDisconnect, RuntimeError):
@@ -1001,21 +1359,65 @@ async def files_stat(
     return (await run_in_threadpool(_root(settings, instance_id).stat, path)).as_dict()
 
 
+LATIN1_FALLBACK_SUFFIXES = (".properties",)  # Java reads these as ISO-8859-1 when they are not UTF-8
+
+
+def _decode_text(path: str, data: bytes) -> tuple[str, str]:
+    """(text, encoding) of a file for the editor; never lossy.
+
+    A file that is not valid UTF-8 would be damaged by an editor that saves UTF-8 (every odd
+    byte becomes U+FFFD for good), so it is refused with 415 ``not_utf8``, except ``*.properties``
+    files, which are read (and written back) as ISO-8859-1 like Java does.
+    """
+    try:
+        return data.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError as exc:
+        if path.lower().endswith(LATIN1_FALLBACK_SUFFIXES):
+            return data.decode("iso-8859-1"), "iso-8859-1"
+        raise AgentError(
+            "This file is not UTF-8 text; editing it here would damage it. Download it and use an "
+            "editor that knows its encoding",
+            "not_utf8",
+            415,
+        ) from exc
+
+
 @app.get("/v1/instances/{instance_id}/files/text", dependencies=[Depends(require_token)])
 async def files_read_text(
     instance_id: UUID, path: str, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
+    """The text of a file and its ``encoding`` (``utf-8``, or ``iso-8859-1`` for a
+    ``*.properties`` file that is not UTF-8). Other non-UTF-8 files: 415 ``not_utf8``."""
     root = _root(settings, instance_id)
     data = await run_in_threadpool(root.read_bytes, path, TEXT_LIMIT)
     if b"\x00" in data[:8192]:
         raise AgentError("This looks like a binary file and cannot be edited as text", "binary_file", 415)
+    content, encoding = _decode_text(path, data)
     entry = await run_in_threadpool(root.stat, path)
     return {
         "path": entry.path,
-        "content": data.decode("utf-8", errors="replace"),
+        "content": content,
+        "encoding": encoding,
         "size": entry.size,
         "modified": entry.modified,
     }
+
+
+def _write_encoding(root: SafeRoot, path: str, requested: str | None) -> str:
+    """The encoding a save uses: the requested one, else the one :func:`_decode_text` read."""
+    if requested is not None:
+        return requested
+    if not path.lower().endswith(LATIN1_FALLBACK_SUFFIXES):
+        return "utf-8"
+    try:
+        current = root.read_bytes(path, TEXT_LIMIT)
+    except PathError:
+        return "utf-8"  # a new file (or one that cannot be read): UTF-8
+    try:
+        current.decode("utf-8")
+    except UnicodeDecodeError:
+        return "iso-8859-1"
+    return "utf-8"
 
 
 @app.put("/v1/instances/{instance_id}/files/text", dependencies=[Depends(require_token)])
@@ -1023,28 +1425,101 @@ async def files_write_text(
     instance_id: UUID, body: WriteTextRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     root = _root(settings, instance_id)
-    size = await run_in_threadpool(
-        root.write_bytes, body.path, body.content.encode("utf-8"), overwrite=not body.create_only
-    )
-    return {"path": body.path, "size": size}
+    encoding = await run_in_threadpool(_write_encoding, root, body.path, body.encoding)
+    try:
+        data = body.content.encode(encoding)
+    except UnicodeEncodeError:
+        if body.encoding is not None:
+            raise AgentError(
+                f"The text contains characters that {encoding} cannot store", "not_encodable", 400
+            ) from None
+        encoding, data = "utf-8", body.content.encode("utf-8")  # Java reads a UTF-8 .properties too
+    size = await run_in_threadpool(root.write_bytes, body.path, data, overwrite=not body.create_only)
+    return {"path": body.path, "size": size, "encoding": encoding}
+
+
+DOWNLOAD_CHUNK = 256 * 1024
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """A streamed answer whose source is closed as soon as the answer ends, also when the client
+    goes away part-way (Starlette leaves a sync iterator it was reading suspended: its
+    ``finally`` would only run when the garbage collector gets to it, minutes later, keeping the
+    file open or restic running).
+
+    ``content`` is a sync generator; ``on_close`` runs after it was closed (for what was opened
+    before the generator started, which closing a generator that never ran does not reach). By
+    then no thread is running the generator: Starlette awaits each step it hands to a thread.
+    """
+
+    def __init__(self, content: Any, *, on_close: Any = None, **kwargs: Any) -> None:
+        super().__init__(content, **kwargs)
+        self._source = content
+        self._on_close = on_close
+
+    def _close_source(self) -> None:
+        try:
+            close = getattr(self._source, "close", None)
+            if close is not None:
+                close()
+        finally:
+            if self._on_close is not None:
+                self._on_close()
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                await run_in_threadpool(self._close_source)
+            except Exception as exc:  # never hides why the answer ended
+                log.warning("Closing a streamed download failed: %s", exc)
+
+
+def _once(fn: Any) -> Any:
+    lock = threading.Lock()
+    done = False
+
+    def run() -> None:
+        nonlocal done
+        with lock:
+            if done:
+                return
+            done = True
+        fn()
+
+    return run
 
 
 @app.get("/v1/instances/{instance_id}/files/download", dependencies=[Depends(require_token)])
 async def files_download(
     instance_id: UUID, path: str, settings: Settings = Depends(get_settings)
 ) -> StreamingResponse:
+    """The file as it was when it was opened: exactly ``Content-Length`` bytes, also when the
+    server is still writing to it (latest.log)."""
     root = _root(settings, instance_id)
     entry = await run_in_threadpool(root.stat, path)
     if entry.type != "file":
         raise AgentError("Only regular files can be downloaded", "not_a_file", 400)
+    opened = root.open_read(path)
+    fh, size = await run_in_threadpool(opened.__enter__)  # size: fstat of the open file
+    close = _once(lambda: opened.__exit__(None, None, None))
 
     def _iter() -> Any:
-        with root.open_read(path) as (fh, _size):
-            while chunk := fh.read(256 * 1024):
+        try:
+            remaining = size
+            while remaining > 0:
+                chunk = fh.read(min(DOWNLOAD_CHUNK, remaining))
+                if not chunk:
+                    break  # shrank meanwhile: the client sees a short body and fails the download
+                remaining -= len(chunk)
                 yield chunk
+        finally:
+            close()
 
-    return StreamingResponse(
-        _iter(), media_type="application/octet-stream", headers={"Content-Length": str(entry.size)}
+    # closed when the answer ends, also when the client goes away (not when the GC gets to it)
+    return ClosingStreamingResponse(
+        _iter(), on_close=close, media_type="application/octet-stream", headers={"Content-Length": str(size)}
     )
 
 
@@ -1065,7 +1540,7 @@ async def files_archive(
         if entry.type != "directory":
             raise AgentError("Only folders can be downloaded as a zip", "not_a_directory", 400)
     gen = await run_in_threadpool(lambda: stream_zip(root, path[0] if len(path) == 1 else path))
-    return StreamingResponse(gen, media_type="application/zip")
+    return ClosingStreamingResponse(gen, media_type="application/zip")  # stops the zip producer
 
 
 @app.put("/v1/instances/{instance_id}/files/upload", dependencies=[Depends(require_token)])
@@ -1143,20 +1618,38 @@ async def files_hashes(
     path: str,
     algorithm: str = Query("sha1", pattern="^(sha1|sha512)$"),
     wait: float | None = Query(None, ge=0, le=60),
+    suffix: list[str] = Query(default=[], max_length=8),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """Hash every regular file directly inside ``path`` (used to identify mods/plugins).
 
     Digests are cached on disk per file (name, size, mtime, ctime, inode), so only new or changed
-    files are read. Without ``wait`` the call returns once every file is hashed. With
-    ``wait`` it returns after at most about that many seconds; files not read yet then
-    have ``hash: null``, ``complete`` is false, and hashing continues in the background.
+    files are read. Without ``wait`` the call returns once every file is hashed, or fails with
+    503 ``hashing_busy`` after ``hashcache.BLOCKING_DEADLINE`` seconds (one pass per folder runs in
+    the background however many callers wait for it). With ``wait`` it returns after at most
+    about that many seconds; files not read yet then have ``hash: null``, ``complete`` is false,
+    and hashing continues in the background. Files larger than ``hashcache.HASH_MAX_FILE_BYTES`` are
+    never read: ``hash: null``, ``too_large: true``. ``suffix`` (repeatable, e.g. ``.jar``)
+    limits the answer to names ending in one of them.
     """
+    for s in suffix:
+        if not s or len(s) > 32 or "/" in s:
+            raise AgentError("Invalid suffix", "invalid_suffix", 400)
     root = _root(settings, instance_id)
     cache = hashcache.HashCache(settings.hash_cache_dir)
     try:
         result = await run_in_threadpool(
-            hashcache.hash_directory, root, cache, _hash_jobs, instance_id, path, algorithm, wait=wait
+            functools.partial(
+                hashcache.hash_directory,
+                root,
+                cache,
+                _hash_jobs,
+                instance_id,
+                path,
+                algorithm,
+                wait=wait,
+                suffixes=tuple(suffix),
+            )
         )
     except PathError as exc:
         if exc.code != "not_found":
@@ -1164,6 +1657,13 @@ async def files_hashes(
         result = {"files": [], "complete": True, "pending": 0}
     except hashcache.HashingCancelled as exc:
         raise AgentError("The agent is shutting down", "shutting_down", 503) from exc
+    except hashcache.HashingBusy as exc:
+        raise AgentError(
+            f"Reading the files in {path or 'the server folder'} takes longer than "
+            f"{int(hashcache.BLOCKING_DEADLINE)} seconds; it goes on in the background, try again later",
+            "hashing_busy",
+            503,
+        ) from exc
     return {"algorithm": algorithm, **result}
 
 
@@ -1195,17 +1695,21 @@ async def files_extract(
 
     def _do(op: Operation) -> dict[str, Any]:
         op.update(0.01, f"Extracting {body.path}")
-        result = extract(
-            root,
-            body.path,
-            body.destination,
-            strip=body.strip,
-            overwrite=body.overwrite,
-            progress=lambda p, m: op.update(p * 0.98, m),
-        )
-        if body.delete_archive:
-            root.delete(body.path)
-        return result
+        try:
+            return extract(
+                root,
+                body.path,
+                body.destination,
+                strip=body.strip,
+                overwrite=body.overwrite,
+                progress=lambda p, m: op.update(p * 0.98, m),
+            )
+        finally:
+            # also when the extraction failed: an uploaded archive must not stay in the folder
+            # (and in every later backup)
+            if body.delete_archive:
+                with contextlib.suppress(PathError, OSError):
+                    root.delete(body.path)
 
     op = registry.start("import", [instance_id], _do)
     return {"operation": op.as_dict()}
@@ -1489,18 +1993,32 @@ async def backup_download(
     parts = split_path(path)
     if not parts:
         raise AgentError("Choose a file", "invalid_path", 400)
-    proc = await run_in_threadpool(Restic(settings, instance_id).dump, snapshot_id, parts)
+    restic = Restic(settings, instance_id)
+    # A failure before the first byte (a lock, a missing path, a folder) is a proper error answer.
+    stream, first = await run_in_threadpool(restic.open_dump, snapshot_id, parts, DOWNLOAD_CHUNK)
 
     def _iter() -> Any:
-        assert proc.stdout is not None
+        done = False
         try:
-            while chunk := proc.stdout.read(256 * 1024):
+            if first:
+                yield first
+            while chunk := stream.read(DOWNLOAD_CHUNK):
                 yield chunk
+            code = stream.finish()
+            done = True
+            if code != 0:
+                # restic failed part-way: abort the chunked response, so the download fails
+                # instead of ending as a complete-looking, truncated file
+                log.warning(
+                    "restic dump of %s failed after streaming: exit %s %s", path, code, stream.stderr[-300:]
+                )
+                raise AgentError(f"restic dump failed (exit code {code})", "restic_failed", 500)
         finally:
-            proc.stdout.close()
-            proc.wait(timeout=30)
+            if not done:  # the client went away: stop restic so that it removes its lock
+                stream.abort()
 
-    return StreamingResponse(_iter(), media_type="application/octet-stream")
+    # stream.abort only stops a restic that has not finished (also when _iter never started)
+    return ClosingStreamingResponse(_iter(), on_close=stream.abort, media_type="application/octet-stream")
 
 
 @app.post(
@@ -1661,6 +2179,7 @@ def _swap_in_staged(root_fd: int, stage_fd: int, name: str, stage_name: str) -> 
 SAVE_SETTLE_SECONDS = 1.0  # after save-all flush, before reading the world
 SAVE_ON_ATTEMPTS = 5
 SAVE_ON_RETRY_SECONDS = 2.0
+SAVING_RECOVERY_SECONDS = 30.0  # how often paused servers left by an earlier run are retried
 
 
 @dataclass
@@ -1679,6 +2198,45 @@ def _rcon(settings: Settings, instance_id: UUID, command: str, timeout: float) -
     asyncio.run(run_command(host, port, password, command, timeout=timeout))
 
 
+# World saving that this agent switched off is recorded on disk (<state dir>/saving-paused/<id>)
+# from just before save-off until save-on succeeded. The pause itself lives in the operation
+# thread, which dies with the process (upgrade, restart, crash): the marker lets the shutdown
+# hook, the next start and a periodic retry send save-on to a server that would otherwise keep
+# running with autosave off until its next backup or restart.
+_saving_guard = threading.Lock()
+_saving_locks: dict[UUID, threading.Lock] = {}
+_paused_here: set[UUID] = set()  # pauses of this process that are still in their block
+
+
+def _saving_lock(instance_id: UUID) -> threading.Lock:
+    with _saving_guard:
+        return _saving_locks.setdefault(instance_id, threading.Lock())
+
+
+def _saving_marker_dir(settings: Settings) -> Path:
+    return settings.state_dir / "saving-paused"
+
+
+def _saving_marker(settings: Settings, instance_id: UUID) -> Path:
+    return _saving_marker_dir(settings) / str(instance_id)
+
+
+def _mark_saving_paused(settings: Settings, instance_id: UUID) -> None:
+    marker = _saving_marker(settings, instance_id)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_name(f".{marker.name}.tmp")
+        tmp.write_text(f"{int(time.time())}\n")
+        os.replace(tmp, marker)
+    except OSError as exc:  # the pause goes on; only the recovery after a crash is lost
+        log.warning("Could not record that world saving of %s is paused: %s", instance_id, exc)
+
+
+def _clear_saving_marker(settings: Settings, instance_id: UUID) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        _saving_marker(settings, instance_id).unlink()
+
+
 @contextlib.contextmanager
 def _world_saving_paused(
     settings: Settings, instance_id: UUID, consistency: str, op: Operation, what: str, progress: float
@@ -1688,7 +2246,8 @@ def _world_saving_paused(
     Once ``save-off`` has been sent (even if its reply was lost), ``save-on`` is sent when the
     block ends, whatever happens: a failed flush, ``consistency=require`` refusing to go on,
     an exception or timeout in the block. With ``require`` a failed pause raises
-    ``consistency_failed``; with ``auto`` it only adds a warning.
+    ``consistency_failed``; with ``auto`` it only adds a warning. If the process ends inside the
+    block, the marker file makes the next agent (or this one's shutdown hook) send ``save-on``.
     """
     state = _SavingState(running=bool(docker_ops.status(instance_id).get("running")))
     save_off_sent = False
@@ -1696,6 +2255,9 @@ def _world_saving_paused(
         if state.running and consistency != "none":
             try:
                 op.update(progress, "Pausing world saving (save-off)")
+                with _saving_lock(instance_id):
+                    _paused_here.add(instance_id)
+                    _mark_saving_paused(settings, instance_id)
                 save_off_sent = True
                 _rcon(settings, instance_id, "save-off", 30)
                 op.update(progress + 0.02, "Flushing world to disk (save-all flush)")
@@ -1711,14 +2273,22 @@ def _world_saving_paused(
         yield state
     finally:
         if save_off_sent:
-            _resume_saving(settings, instance_id, state.warnings)
+            try:
+                _resume_saving(settings, instance_id, state.warnings)
+            finally:
+                with _saving_lock(instance_id):
+                    _paused_here.discard(instance_id)
 
 
 def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -> None:
-    """Send save-on (retrying); never raises, so it cannot mask the block's own error."""
+    """Send save-on (retrying); never raises, so it cannot mask the block's own error.
+
+    The marker is removed once it worked; after a failure it stays, and the periodic recovery
+    (:func:`_recover_saving`) keeps trying."""
     for attempt in range(SAVE_ON_ATTEMPTS):
         try:
             _rcon(settings, instance_id, "save-on", 30)
+            _clear_saving_marker(settings, instance_id)
             return
         except Exception as exc:
             if attempt == SAVE_ON_ATTEMPTS - 1:
@@ -1726,6 +2296,84 @@ def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -
                 warnings.append(f"FAILED to re-enable world saving (save-on): {exc}")
                 return
             time.sleep(SAVE_ON_RETRY_SECONDS)
+
+
+def _marked_instances(settings: Settings) -> list[UUID]:
+    out = []
+    try:
+        names = sorted(os.listdir(_saving_marker_dir(settings)))
+    except OSError:
+        return []
+    for name in names:
+        try:
+            out.append(UUID(name))
+        except ValueError:
+            continue  # a temp file of a write in progress, or not ours
+    return out
+
+
+def _recover_saving(settings: Settings, *, timeout: float = 30.0) -> int:
+    """Send ``save-on`` to every server with a saving-paused marker; returns how many are left.
+
+    Skipped (still left): a pause of this process that is still in its block, and servers that
+    cannot be reached yet. A server without a running container needs nothing: saving is on when
+    it starts again, so its marker is removed.
+    """
+    left = 0
+    for instance_id in _marked_instances(settings):
+        with _saving_lock(instance_id):
+            if instance_id in _paused_here:
+                continue
+            try:
+                running = bool(docker_ops.status(instance_id).get("running"))
+            except Exception as exc:  # Docker not reachable (yet)
+                log.debug("Saving recovery of %s: cannot read the container state: %s", instance_id, exc)
+                left += 1
+                continue
+            if not running:
+                _clear_saving_marker(settings, instance_id)
+                continue
+            try:
+                _rcon(settings, instance_id, "save-on", timeout)
+            except Exception as exc:
+                log.warning("World saving of %s is still paused; save-on failed: %s", instance_id, exc)
+                left += 1
+                continue
+            _clear_saving_marker(settings, instance_id)
+            log.warning(
+                "Re-enabled world saving (save-on) on %s: a backup or snapshot was interrupted while it was paused",
+                instance_id,
+            )
+    return left
+
+
+def _saving_recovery_loop(settings: Settings, stop: threading.Event) -> None:
+    while not stop.is_set():
+        try:
+            _recover_saving(settings)
+        except Exception:
+            log.exception("Saving recovery failed")
+        stop.wait(SAVING_RECOVERY_SECONDS)
+
+
+def _resume_all_saving(settings: Settings, timeout: float) -> None:
+    """Shutdown: save-on for every marked server, this process's own pauses included, all at once."""
+    threads = []
+    for instance_id in _marked_instances(settings):
+
+        def one(iid: UUID = instance_id) -> None:
+            try:
+                running = bool(docker_ops.status(iid).get("running"))
+                if running:
+                    _rcon(settings, iid, "save-on", timeout)
+                    log.warning("Re-enabled world saving (save-on) on %s before the agent exits", iid)
+                _clear_saving_marker(settings, iid)
+            except Exception as exc:
+                log.warning("Could not re-enable world saving on %s before the agent exits: %s", iid, exc)
+
+        threads.append(_spawn(f"save-on-{instance_id.hex[:8]}", one))
+    for t in threads:
+        t.join(timeout + 1)
 
 
 @app.get("/v1/instances/{instance_id}/snapshots", dependencies=[Depends(require_token)])

@@ -99,9 +99,11 @@ class JobAbandonView(APIView):
                 require(request.user, "system.settings")
             for code in ABANDON_PERMISSIONS.get(job.kind, ("system.settings",)):
                 require(request.user, code, job.instance)
-        if job.status not in ACTIVE_STATUSES:
+        if job.status not in ACTIVE_STATUSES or not finish(
+            job, JobStatus.FAILED, error=f"Marked as failed by {request.user.username}", error_code="abandoned"
+        ):
+            # (finish only ends a job that is still active: it may have ended since it was read)
             raise ApiError("Only queued or running jobs can be abandoned", code="not_active", status_code=409)
-        finish(job, JobStatus.FAILED, error=f"Marked as failed by {request.user.username}", error_code="abandoned")
         audit.record(
             "job.abandoned",
             request=request,

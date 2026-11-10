@@ -189,18 +189,23 @@ def apply_observation(
 ) -> bool:
     """Update an instance from an agent container description. Returns True if changed.
 
-    Only the reconciler's own columns (OBSERVED_FIELDS) are written, and only while the
-    instance still is on the node and in the archive state the observation was made for, so
-    a slow reconcile never writes stale values over what a job changed meanwhile.
-    installed_at and container_spec_hash are only ever filled in when still empty.
+    Only the reconciler's own columns (OBSERVED_FIELDS) are written, only when one of them
+    changed (the loop runs every 10 seconds for every server: an unchanged row is not written
+    again), and only while the instance still is on the node and in the archive state the
+    observation was made for, so a slow reconcile never writes stale values over what a job
+    changed meanwhile. installed_at is only ever filled in when still empty.
+    ``status_updated_at`` is when the observed state last changed.
+
+    The container's ``spec_hash`` label is not taken over: the agent computes it from its own
+    form of the spec, which never matches the panel's hash (``spec.spec_hash``).
     """
     job_kind = None
     if instance.active_job_id:
         job = Job.objects.filter(pk=instance.active_job_id, status__in=ACTIVE_STATUSES).only("kind").first()
         job_kind = job.kind if job else None
     before = (instance.status, instance.status_detail, instance.container_state, instance.health)
+    observed_before = {f: getattr(instance, f) for f in OBSERVED_FIELDS if f != "status_updated_at"}
     newly_installed = False
-    adopt_spec_hash = ""
     if not agent_ok:
         instance.status, instance.status_detail = Status.UNKNOWN, (agent_error or "Node agent unreachable")[:500]
     else:
@@ -233,8 +238,6 @@ def apply_observation(
         instance.last_exit_code = ended.get("exit_code")
         instance.oom_killed = bool(ended.get("oom_killed"))
         instance.started_at = _ts(c.get("started_at")) if c.get("running") else instance.started_at
-        if c.get("spec_hash") and not instance.container_spec_hash:
-            adopt_spec_hash = instance.container_spec_hash = c["spec_hash"]
         if status == Status.RUNNING:
             now = timezone.now()
             if instance.ready_at is None or (instance.started_at and instance.ready_at < instance.started_at):
@@ -247,12 +250,14 @@ def apply_observation(
                 None if status in (Status.STOPPED, Status.FAILED, Status.STARTING, Status.INSTALLING) else instance.ready_at
             )
     after = (instance.status, instance.status_detail, instance.container_state, instance.health)
+    if not newly_installed and instance.status == Status.RUNNING and instance.installed_at is not None:
+        _retry_pin(instance)
+    if not newly_installed and all(getattr(instance, f) == v for f, v in observed_before.items()):
+        return False  # nothing new: no write
     instance.status_updated_at = timezone.now()
     same = Instance.objects.filter(pk=instance.pk, node_id=instance.node_id, archived_at__isnull=instance.archived_at is None)
     if not same.update(**{f: getattr(instance, f) for f in OBSERVED_FIELDS}):
         return False  # moved, archived or deleted meanwhile: this observation is stale
-    if adopt_spec_hash:
-        same.filter(container_spec_hash="").update(container_spec_hash=adopt_spec_hash)
     if newly_installed and same.filter(installed_at__isnull=True).update(installed_at=instance.installed_at):
         try:
             from apps.modpacks.pinning import pin_installed_release
@@ -265,6 +270,20 @@ def apply_observation(
         _notify_transition(instance, before[0], after[0])
         return True
     return False
+
+
+def _retry_pin(instance: Instance) -> None:
+    """A keyless CurseForge pack whose project, release or loader is still unknown (the manifest
+    was not there yet when the server first came up): read the install manifest again, at most
+    every ``pinning.RETRY_SECONDS`` per server (``pinning.retry_pin``)."""
+    from apps.modpacks import pinning
+
+    if not pinning.needs_pin(instance):
+        return
+    try:
+        pinning.retry_pin(instance)
+    except Exception as exc:  # pinning is best effort; never break reconciliation
+        log.warning("pinning failed for %s: %s", instance.pk, exc)
 
 
 def _notify_transition(instance: Instance, old: str, new: str) -> None:

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowRight, Loader2, Lock, Rocket, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
@@ -8,9 +8,10 @@ import { EmptyState } from "@/components/States";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError, api, errorMessage } from "@/lib/api";
+import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { formatMemoryMb } from "@/lib/format";
 import { qk } from "@/lib/queries";
-import type { Provider, ServerType } from "@/lib/types";
+import type { Provider, ServerType, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { StepGameplay } from "./create-server/StepGameplay";
 import { StepResources } from "./create-server/StepResources";
@@ -111,13 +112,14 @@ function stateFromParams(sp: URLSearchParams): {
   }
   if (sp.get("mode") === "import") {
     s.category = "import";
-    s.serverType = "VANILLA";
+    // nothing preselected: an unchanged default could upgrade the imported world on first start
+    s.serverType = null;
     return { state: s, step: "software" };
   }
   return { state: s, step: "type" };
 }
 
-function useDerived(state: WizardState, backupAllowed: boolean): Derived {
+function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemoryMb: number | null): Derived {
   const isModpack = state.category === "modpack";
   const isImport = state.category === "import";
   const types = isImport
@@ -125,11 +127,16 @@ function useDerived(state: WizardState, backupAllowed: boolean): Derived {
     : state.category && state.category in CATEGORY_TYPES
       ? CATEGORY_TYPES[state.category as StandardCategory]
       : [];
+  // Import: no fallback software or version. The panel installs exactly what is chosen and does not
+  // read it from the archive, so a silent "Vanilla, newest release" could upgrade an older or modded
+  // world irreversibly on its first start; the software step stays invalid until both are picked.
   const serverType: ServerType | null = isModpack
     ? null
     : state.serverType && types.includes(state.serverType)
       ? state.serverType
-      : (types[0] ?? null);
+      : isImport
+        ? null
+        : (types[0] ?? null);
 
   const serverTypes = useServerTypes();
   const versions = useGameVersions(serverType, state.showSnapshots);
@@ -139,7 +146,9 @@ function useDerived(state: WizardState, backupAllowed: boolean): Derived {
     : state.minecraftVersion &&
         (!listed || listed.some((v) => v.version === state.minecraftVersion))
       ? state.minecraftVersion
-      : defaultMinecraftVersion(versions.data);
+      : isImport
+        ? ""
+        : defaultMinecraftVersion(versions.data);
   const hasLoader = !!serverType && serverType !== "VANILLA";
   const loaders = useLoaderVersions(
     hasLoader ? serverType : null,
@@ -188,9 +197,12 @@ function useDerived(state: WizardState, backupAllowed: boolean): Derived {
             ? `${TYPE_LABELS[serverType]} ${minecraftVersion}`
             : ""
     ).slice(0, 80);
+    // Standard servers: the panel's "Default memory" setting when this user may read it; otherwise
+    // the wizard leaves memory_mb out while the heap is untouched and the backend applies it.
     const defaultMemoryMb = isModpack
       ? (resolved?.recommended_memory_mb ?? DEFAULT_MEMORY_MODPACK)
-      : DEFAULT_MEMORY_STANDARD;
+      : (panelDefaultMemoryMb ?? DEFAULT_MEMORY_STANDARD);
+    const memoryIsPanelDefault = !isModpack && state.memoryMb === null && panelDefaultMemoryMb === null;
     const softwareSummary = byUrl
       ? `CurseForge ${cfSlug || "modpack"}${state.cfMinecraftVersion.trim() ? ` · Minecraft ${state.cfMinecraftVersion.trim()}` : ""}`
       : isModpack
@@ -221,6 +233,7 @@ function useDerived(state: WizardState, backupAllowed: boolean): Derived {
       suggestedName,
       memoryMb: state.memoryMb ?? defaultMemoryMb,
       defaultMemoryMb,
+      memoryIsPanelDefault,
       gamePort:
         state.gamePort ??
         (ports.data?.suggested ? String(ports.data.suggested) : ""),
@@ -250,6 +263,7 @@ function useDerived(state: WizardState, backupAllowed: boolean): Derived {
     state.javaOverride,
     state.name,
     state.memoryMb,
+    panelDefaultMemoryMb,
     state.gamePort,
     serverType,
     minecraftVersion,
@@ -294,7 +308,15 @@ export default function CreateServer() {
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
-  const d = useDerived(state, nightlyBackupAllowed(user));
+  const panelSettings = useQuery({
+    queryKey: qk.settings,
+    queryFn: () => api.get<SystemSettings>("/system/settings"),
+    enabled: can("system.settings"),
+    staleTime: 60_000,
+    retry: false,
+  });
+  const panelDefaultMb = Number(panelSettings.data?.values.default_memory_mb) || null;
+  const d = useDerived(state, nightlyBackupAllowed(user), panelDefaultMb);
   const nodes = useWizardNodes();
   const importer = useImportDeploy();
 
@@ -352,8 +374,9 @@ export default function CreateServer() {
   };
 
   const create = useMutation({
+    // a server that starts right away must fit into the node's memory: "Start anyway?" like a power start
     mutationFn: ({ payload }: { payload: CreatePayload; importFile?: File; overwrite?: boolean }) =>
-      api.post<CreateResponse>("/instances/", payload),
+      postOrDecline<CreateResponse>("/instances/", { id: "", name: payload.name }, { ...payload }),
     onSuccess: (res, vars) => {
       // which minute the nightly backup got (it differs per server), in the words of the Schedules page
       const backupNote = res.backup_schedule
@@ -385,6 +408,7 @@ export default function CreateServer() {
       navigate(`/servers/${res.instance.id}`);
     },
     onError: (err) => {
+      if (err instanceof OvercommitDeclined) return; // nothing was created
       toast.error(errorMessage(err));
       const errs = serverErrorsFrom(err);
       if (
@@ -429,9 +453,7 @@ export default function CreateServer() {
       serverType:
         c in CATEGORY_TYPES
           ? CATEGORY_TYPES[c as StandardCategory][0]
-          : c === "import"
-            ? "VANILLA"
-            : null,
+          : null, // import: nothing preselected (see useDerived)
       minecraftVersion: null,
       loaderVersion: null,
       javaOverride: "",

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPayload, CF_REF, type Derived, initialState, validateStep } from "./wizardModel";
+import { buildPayload, CF_REF, type Derived, initialState, SERVER_FIELD_MAP, stepForField, validateStep } from "./wizardModel";
 
 const d = { isModpack: true, name: "Better MC", memoryMb: 8192, gamePort: "25565", resolveOk: false, resolvePending: false } as unknown as Derived;
 
@@ -13,12 +13,13 @@ describe("CurseForge by page URL (no API key)", () => {
 
   it("validates the URL form and builds the keyless payload", () => {
     const state = { ...initialState(), category: "modpack" as const, modpackSource: "url" as const, acceptEula: true };
-    expect(Object.keys(validateStep("software", state, d))).toEqual(expect.arrayContaining(["cfRef", "cfMinecraftVersion"]));
+    expect(Object.keys(validateStep("software", state, d))).toEqual(expect.arrayContaining(["cfRef", "cfMinecraftVersion", "cfLoader"]));
     const filled = {
       ...state,
       cfRef: "https://www.curseforge.com/minecraft/modpacks/better-mc-forge-bmc4",
       cfMinecraftVersion: "1.20.1",
       cfFileId: "9104992",
+      cfLoader: "forge" as const,
     };
     expect(validateStep("software", filled, d)).toEqual({});
     const payload = buildPayload(filled, d);
@@ -28,7 +29,22 @@ describe("CurseForge by page URL (no API key)", () => {
       modpack_project_id: filled.cfRef,
       modpack_version_id: "9104992",
       minecraft_version: "1.20.1",
+      // without it the server is stored with an unknown loader and its Mods tab is refused
+      modpack_loader: "forge",
     });
+  });
+
+  it("requires the mod loader (the Mods tab needs it)", () => {
+    const state = {
+      ...initialState(),
+      category: "modpack" as const,
+      modpackSource: "url" as const,
+      cfRef: "better-mc-forge-bmc4",
+      cfMinecraftVersion: "1.20.1",
+    };
+    expect(validateStep("software", state, d)).toEqual({ cfLoader: expect.stringMatching(/mod loader/) });
+    expect(stepForField("cfLoader")).toBe("software");
+    expect(SERVER_FIELD_MAP.modpack_loader).toBe("cfLoader");
   });
 });
 
@@ -107,5 +123,39 @@ describe("environment variable errors", () => {
     expect(MANAGED_ENV.has("MODS")).toBe(false);
     expect(SERVER_FIELD_MAP.env).toBe("env");
     expect(stepForField(SERVER_FIELD_MAP.env)).toBe("gameplay");
+  });
+});
+
+describe("import: nothing preselected", () => {
+  it("blocks the software step until both software and Minecraft version are chosen", () => {
+    const state = { ...initialState(), category: "import" as const };
+    const none = { isModpack: false, serverType: null, minecraftVersion: "" } as unknown as Derived;
+    expect(Object.keys(validateStep("software", state, none))).toEqual(
+      expect.arrayContaining(["serverType", "minecraftVersion", "importFile"]),
+    );
+    expect(initialState().serverType).toBeNull();
+  });
+});
+
+describe("default memory", () => {
+  const standard = {
+    isModpack: false,
+    serverType: "PAPER",
+    minecraftVersion: "1.21.1",
+    loaderVersion: "",
+    name: "Lobby",
+    memoryMb: 4096,
+    gamePort: "25570",
+    nightlyBackupAllowed: false,
+  } as unknown as Derived;
+  const state = { ...initialState(), category: "plugins" as const, acceptEula: true };
+
+  it("leaves memory_mb out when the heap was not touched and the panel default is unknown", () => {
+    expect(buildPayload(state, { ...standard, memoryIsPanelDefault: true })).not.toHaveProperty("memory_mb");
+  });
+
+  it("sends the heap otherwise", () => {
+    expect(buildPayload(state, { ...standard, memoryIsPanelDefault: false })).toMatchObject({ memory_mb: 4096 });
+    expect(buildPayload(state, { ...standard, memoryMb: 8192 })).toMatchObject({ memory_mb: 8192 });
   });
 });

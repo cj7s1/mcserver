@@ -543,3 +543,16 @@ def test_foreign_container_with_our_name_is_refused(monkeypatch):
     with pytest.raises(AgentError) as exc:
         docker_ops.get_container(IID)
     assert exc.value.code == "foreign_container"
+
+
+def test_a_failed_rename_has_its_own_code():
+    """The rename comes after the old container was removed: the panel must not take it for a
+    create Docker refused (``create_failed``, old container kept) and start the server again."""
+
+    class Refusing:
+        def rename(self, _name):
+            raise docker.errors.APIError("409 Conflict", explanation="name in use")
+
+    with pytest.raises(AgentError) as exc:
+        docker_ops.rename_container(Refusing(), "mcpanel-x")
+    assert exc.value.code == "rename_failed" and exc.value.status == 502

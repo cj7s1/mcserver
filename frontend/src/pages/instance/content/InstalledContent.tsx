@@ -25,6 +25,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
+import { batchLabel, type BatchProgress } from "@/lib/batches";
 import { formatBytes, formatDateTime, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import {
@@ -41,9 +42,9 @@ import {
   type ContentUpdate,
   type DeleteResponse,
   type ToggleResponse,
-  type UpdateResponse,
+  updateInBatches,
 } from "./content-api";
-import { reportFromUpdate } from "./content-report";
+import { reportFromBatchedUpdate } from "./content-report";
 import { Notice, ProjectIcon, type ContentEnv } from "./content-ui";
 
 type StatusFilter = "all" | "enabled" | "disabled" | "updates" | "manual";
@@ -54,20 +55,28 @@ const PAGE_SIZE = 50;
 
 function useUpdateFiles(env: ContentEnv, onDone?: () => void) {
   const invalidate = useInvalidateContent(env.instance.id);
-  return useMutation({
-    mutationFn: (files: string[]) => api.post<UpdateResponse>(contentPath(env.instance.id, "update"), { files }),
-    onSuccess: (res) => {
+  const [progress, setProgress] = useState<BatchProgress | null>(null);
+  const mutation = useMutation({
+    // The endpoint takes at most 100 names per request: larger selections go in batches.
+    mutationFn: (files: string[]) => updateInBatches(env.instance.id, files, setProgress),
+    onSuccess: (run) => {
       invalidate();
       onDone?.();
-      const report = reportFromUpdate(res);
-      if (res.updated > 0) env.notify(report.title, res.restart_required);
+      const res = run.response;
+      const report = reportFromBatchedUpdate(run);
+      if (run.error) toast.error(report.title);
+      else if (res.updated > 0) env.notify(report.title, res.restart_required);
       else if (res.failed > 0) toast.error(report.title);
       else toast.success(report.title);
-      const interesting = res.failed > 0 || res.missing_dependencies.length > 0 || report.warnings.length > 0 || res.results.length > 1;
+      if (run.error && res.updated > 0) env.notify(`${res.updated} updated before the run stopped`, res.restart_required);
+      const interesting =
+        !!run.error || res.failed > 0 || res.missing_dependencies.length > 0 || report.warnings.length > 0 || res.results.length > 1;
       env.showReport(interesting ? report : null);
     },
     onError: (err) => toast.error(errorMessage(err)),
+    onSettled: () => setProgress(null),
   });
+  return { ...mutation, progress };
 }
 
 function BulkUpdateConfirm({
@@ -125,6 +134,18 @@ function SourceBadges({ file, env }: { file: ContentFile; env: ContentEnv }) {
       label: "Manual",
       tip: `Not found on Modrinth (added by hand or downloaded elsewhere). The panel cannot check it for updates or compatibility.`,
       className: "bg-muted text-muted-foreground",
+    });
+  if (file.source === "too_large")
+    badges.push({
+      label: "Unidentified",
+      tip: "Larger than the server node reads to identify files (2 GiB), so the panel cannot look it up on Modrinth or check it for updates.",
+      className: "bg-muted text-muted-foreground",
+    });
+  if (file.pack_managed)
+    badges.push({
+      label: "From the modpack",
+      tip: "Installed by this server's modpack. Disabling, removing or updating it is remembered: the panel keeps the modpack from putting it back on the next start (until the modpack itself is updated).",
+      className: "bg-violet-500/10 text-violet-700 dark:text-violet-300",
     });
   if (file.source === "unknown")
     badges.push({
@@ -197,7 +218,13 @@ function InstalledRow({
       api.post<ToggleResponse>(contentPath(env.instance.id, "toggle"), { filename: file.filename, enabled }),
     onSuccess: (res) => {
       invalidate();
-      if (res.changed) env.notify(`${res.enabled ? "Enabled" : "Disabled"} ${title}`, res.restart_required);
+      if (res.changed)
+        env.notify(
+          `${res.enabled ? "Enabled" : "Disabled"} ${title}${
+            !res.enabled && res.pack_managed ? " (remembered: the modpack will not put it back on the next start)" : ""
+          }`,
+          res.restart_required,
+        );
     },
     onError: (err) => toast.error(errorMessage(err)),
   });
@@ -205,7 +232,10 @@ function InstalledRow({
     mutationFn: () => api.delete<DeleteResponse>(contentPath(env.instance.id, "files"), undefined, { filename: file.filename }),
     onSuccess: (res) => {
       invalidate();
-      env.notify(`Removed ${res.deleted}`, res.restart_required);
+      env.notify(
+        `Removed ${res.deleted}${res.pack_managed ? " (remembered: the modpack will not reinstall it on the next start)" : ""}`,
+        res.restart_required,
+      );
     },
     onError: (err) => toast.error(errorMessage(err)),
   });
@@ -578,7 +608,10 @@ export function InstalledContent({
         </div>
       )}
       {bulk.isPending && (
-        <Notice tone="info">Downloading and verifying new versions from Modrinth. This can take a while for many files.</Notice>
+        <Notice tone="info">
+          Downloading and verifying new versions from Modrinth. This can take a while for many files.
+          {batchLabel(bulk.progress) && <> Sending {batchLabel(bulk.progress, env.noun.many)}.</>}
+        </Notice>
       )}
 
       {visible.length === 0 ? (

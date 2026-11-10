@@ -48,8 +48,10 @@ NOTES = [
     "Restart the server to load the plugin.",
     "Plugins are third-party code that runs with the server's full permissions.",
 ]
-_NAME_KEY = re.compile(r"^name:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
-_VERSION_KEY = re.compile(r"^version:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+# plugin.yml is read line by line (no regular expression over the whole file: a crafted file with a
+# long run of blanks made one backtrack for minutes while holding the GIL, freezing the panel).
+DESCRIPTOR_MAX_LINES = 2000
+DESCRIPTOR_MAX_LINE = 1000
 _UNSAFE_FILENAME = re.compile(r"[^A-Za-z0-9._+-]+")
 
 
@@ -257,7 +259,8 @@ def _descriptor(fileobj: IO[bytes]) -> dict[str, Any]:
                 if info.file_size > 256 * 1024:
                     continue
                 text = zf.read(info).decode("utf-8", errors="replace").lstrip("﻿")
-                return {"name": _yaml_scalar(_NAME_KEY, text), "version": _yaml_scalar(_VERSION_KEY, text), "proxy": False}
+                keys = _top_level_scalars(text, ("name", "version"))
+                return {"name": _yaml_scalar(keys.get("name")), "version": _yaml_scalar(keys.get("version")), "proxy": False}
             return {"name": None, "version": None, "proxy": proxy}
     except (
         zipfile.BadZipFile,
@@ -274,11 +277,28 @@ def _descriptor(fileobj: IO[bytes]) -> dict[str, Any]:
         fileobj.seek(0)
 
 
-def _yaml_scalar(pattern: re.Pattern[str], text: str) -> str | None:
-    match = pattern.search(text)
-    if not match:
+def _top_level_scalars(text: str, keys: tuple[str, ...]) -> dict[str, str]:
+    """The first value of each of ``keys`` written at the start of a line (``key: value``).
+
+    Linear in the size of the text: at most DESCRIPTOR_MAX_LINES lines are looked at and lines
+    longer than DESCRIPTOR_MAX_LINE are skipped.
+    """
+    found: dict[str, str] = {}
+    for count, line in enumerate(text.splitlines()):
+        if count >= DESCRIPTOR_MAX_LINES or len(found) == len(keys):
+            break
+        if len(line) > DESCRIPTOR_MAX_LINE or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        value = value.strip(" \t")
+        if key in keys and key not in found and value:
+            found[key] = value
+    return found
+
+
+def _yaml_scalar(value: str | None) -> str | None:
+    if not value:
         return None
-    value = match.group(1)
     if value[:1] in ("'", '"'):
         quote = value[0]
         end = value.find(quote, 1)

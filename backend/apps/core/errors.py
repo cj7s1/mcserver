@@ -13,6 +13,7 @@ import logging
 from typing import Any
 
 from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+from django.core.exceptions import RequestDataTooBig, TooManyFieldsSent, TooManyFilesSent
 from django.http import Http404
 from rest_framework import exceptions, status
 from rest_framework.response import Response
@@ -62,6 +63,40 @@ class ServiceUnavailable(ApiError):
     default_detail = "A required service is unavailable."
 
 
+# Django refuses a request body with too many files or fields, or a non-file body above
+# DATA_UPLOAD_MAX_MEMORY_SIZE, while it is parsed (in the view, when request.FILES / request.data
+# is read). Without a mapping they surfaced as HTTP 500 "unexpected server error".
+TOO_MUCH_DATA = (TooManyFilesSent, TooManyFieldsSent, RequestDataTooBig)
+
+
+def _too_much_data(exc: Exception) -> ApiError:
+    from django.conf import settings
+
+    if isinstance(exc, TooManyFilesSent):
+        limit = settings.DATA_UPLOAD_MAX_NUMBER_FILES
+        return ApiError(
+            f"Too many files in one upload (at most {limit}); upload them in smaller groups.",
+            code="too_many_files",
+            status_code=413,
+            details={"max_files": limit},
+        )
+    if isinstance(exc, TooManyFieldsSent):
+        limit = settings.DATA_UPLOAD_MAX_NUMBER_FIELDS
+        return ApiError(
+            f"Too many form fields in one request (at most {limit}).",
+            code="too_many_fields",
+            status_code=413,
+            details={"max_fields": limit},
+        )
+    limit = settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+    return ApiError(
+        f"The request is too large (at most {limit // (1024 * 1024)} MB of data besides uploaded files).",
+        code="request_too_large",
+        status_code=413,
+        details={"max_bytes": limit},
+    )
+
+
 def _code_for(exc: exceptions.APIException) -> str:
     if isinstance(exc, ApiError):
         return exc.error_code
@@ -82,6 +117,8 @@ def exception_handler(exc: Exception, context: dict[str, Any]) -> Response | Non
         exc = exceptions.NotFound()
     elif isinstance(exc, DjangoPermissionDenied):
         exc = exceptions.PermissionDenied()
+    elif isinstance(exc, TOO_MUCH_DATA):
+        exc = _too_much_data(exc)
 
     response = drf_exception_handler(exc, context)
     if response is None:

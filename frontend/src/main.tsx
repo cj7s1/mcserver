@@ -6,6 +6,7 @@ import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider, useTheme } from "@/hooks/use-theme";
 import { ApiError } from "@/lib/api";
+import { installChunkErrorReload } from "@/lib/chunk-reload";
 import { router } from "@/router";
 import "./index.css";
 
@@ -21,6 +22,8 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+installChunkErrorReload();
 
 function ThemedToaster() {
   const { resolved } = useTheme();

@@ -134,3 +134,20 @@ def _resend_queued_jobs(sender=None, **_kwargs):  # type: ignore[no-untyped-def]
                     connection.close()
     except Exception as exc:
         log.warning("Could not send the queued jobs again (the watchdog does it after 15 minutes): %s", exc)
+
+
+@signals.worker_init.connect
+def _clear_stop_flag(**_kwargs):  # type: ignore[no-untyped-def]
+    """A new worker main process: no flag of an earlier process with the same id may count."""
+    from apps.jobs import shutdown
+
+    shutdown.clear()
+
+
+@signals.worker_shutting_down.connect
+def _flag_stop(**_kwargs):  # type: ignore[no-untyped-def]
+    """The worker's main process got its stop signal: the jobs its pool runs end their waits
+    (apps/jobs/shutdown.py), so the worker does not hold the container's stop for minutes."""
+    from apps.jobs import shutdown
+
+    shutdown.request_stop()

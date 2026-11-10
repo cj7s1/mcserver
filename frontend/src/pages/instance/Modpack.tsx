@@ -35,6 +35,7 @@ import {
   type UpdatePlan,
 } from "./modpack/modpack-api";
 import { ReleaseList } from "./modpack/ReleaseList";
+import { RemovedPackFiles } from "./modpack/RemovedPackFiles";
 import { UpdateDialog } from "./modpack/UpdateDialog";
 import { Notice } from "./settings/settings-ui";
 
@@ -223,6 +224,23 @@ function ReleasesError({ error, onRetry }: { error: unknown; onRetry: () => void
     );
   }
   if (code === "not_modpack") return <ErrorState error={error} title="Not a modpack server" />;
+  if (code === "project_not_recorded") {
+    // A CurseForge pack deployed by URL without an API key: the panel learns which project it is
+    // from the server's install manifest, i.e. only after the first start installed the pack.
+    return (
+      <div className="grid gap-3">
+        <EmptyState
+          icon={<Package className="size-5" />}
+          title="The modpack is not known to the panel yet"
+          description="Start the server once and let it install the pack. The panel then reads which CurseForge project and release it runs from the server's install manifest, and the releases, updates and rollback points appear here."
+          className="py-8"
+        />
+        <Button size="sm" variant="outline" className="justify-self-start" onClick={onRetry}>
+          <RefreshCw aria-hidden /> Check again
+        </Button>
+      </div>
+    );
+  }
   return <ErrorState error={error} title="Could not load the modpack releases" onRetry={onRetry} />;
 }
 
@@ -433,12 +451,15 @@ export default function Modpack() {
         </div>
       )}
 
+      {/* independent of the provider: the record can always be undone */}
+      <RemovedPackFiles instance={instance} canManage={canUpdate} locked={!!lock} />
+
       <section className="grid gap-1.5 rounded-xl border bg-muted/30 p-4 text-xs text-muted-foreground">
         <p className="flex items-center gap-1.5 font-medium text-foreground">
           <Info className="size-3.5" aria-hidden /> How modpack updates work
         </p>
         <p>
-          Updating stops the server, takes a “Before update” backup (unless you turn it off), pins the new release and recreates the
+          Updating stops the server, takes a “Before update” backup when “Create a backup first” is ticked in the update dialog, pins the new release and recreates the
           container. On the next start the installer downloads the new release and removes the files that belonged to the old one;
           worlds are kept. If the new release uses another Minecraft version, the world is upgraded on first start and cannot be opened
           by the old version afterwards.

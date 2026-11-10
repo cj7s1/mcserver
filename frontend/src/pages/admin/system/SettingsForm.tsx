@@ -10,13 +10,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Switch } from "@/components/ui/switch";
-import { api, errorMessage } from "@/lib/api";
+import { api, ApiError, errorMessage } from "@/lib/api";
 import { formatMemoryMb } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import type { SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { AdminCallout, AdminFieldError, AdminHint } from "../admin-shared";
-import { unreadableSecrets, type AgentPolicy } from "./system-types";
+import { isIpAddress, unreadableSecrets, type AgentPolicy } from "./system-types";
 
 type Values = SystemSettings["values"];
 type Channel = "stable" | "latest" | "pinned";
@@ -25,6 +25,7 @@ interface FormState {
   channel: Channel;
   pinned: string;
   default_memory_mb: string;
+  memory_reserve_mb: string;
   port_range_start: string;
   port_range_end: string;
   default_bind_ip: string;
@@ -59,6 +60,7 @@ function toForm(v: Values): FormState {
     channel,
     pinned: channel === "pinned" ? ch.slice("pinned:".length) : "",
     default_memory_mb: String(v.default_memory_mb ?? 4096),
+    memory_reserve_mb: String(v.memory_reserve_mb ?? DEFAULT_RESERVE_MB),
     port_range_start: v.port_range_start == null ? "" : String(v.port_range_start),
     port_range_end: v.port_range_end == null ? "" : String(v.port_range_end),
     default_bind_ip: v.default_bind_ip ?? "0.0.0.0",
@@ -74,8 +76,10 @@ function toForm(v: Values): FormState {
   };
 }
 
-const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
-const isIp = (s: string) => IPV4.test(s) || (s.includes(":") && /^[0-9a-fA-F:.]+$/.test(s));
+const isIp = isIpAddress;
+/** backend apps/instances/capacity.py DEFAULT_RESERVE_MB and the allowed range of the setting */
+const DEFAULT_RESERVE_MB = 4096;
+const MAX_RESERVE_MB = 65536;
 const HOST_RE = /^[A-Za-z0-9.-]+$/;
 const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
 
@@ -115,6 +119,11 @@ function buildValues(f: FormState, envRange: [number, number], policy?: AgentPol
   else if (mem > maxMem) errors.default_memory_mb = `At most ${formatMemoryMb(maxMem)} (agent limit)`;
   else values.default_memory_mb = mem;
 
+  const reserve = parseIntStrict(f.memory_reserve_mb);
+  if (reserve === null) errors.memory_reserve_mb = "Enter a whole number of MB (0 for none)";
+  else if (reserve > MAX_RESERVE_MB) errors.memory_reserve_mb = `At most ${formatMemoryMb(MAX_RESERVE_MB)}`;
+  else values.memory_reserve_mb = reserve;
+
   const port = (key: "port_range_start" | "port_range_end") => {
     if (!f[key].trim()) return null;
     const n = parseIntStrict(f[key]);
@@ -136,7 +145,7 @@ function buildValues(f: FormState, envRange: [number, number], policy?: AgentPol
 
   const bind = f.default_bind_ip.trim();
   if (!bind) errors.default_bind_ip = "Required. Use 0.0.0.0 for all interfaces";
-  else if (!isIp(bind)) errors.default_bind_ip = "Enter an IPv4 or IPv6 address";
+  else if (!isIp(bind)) errors.default_bind_ip = "Enter an IPv4 or IPv6 address, without a port (e.g. 0.0.0.0 or 192.168.1.10)";
   else values.default_bind_ip = bind;
 
   for (const key of ["public_address", "lan_address"] as const) {
@@ -237,12 +246,18 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
     mutationFn: (body: { values: Partial<Values>; secrets?: Record<string, string> }) =>
       api.patch<SystemSettings>("/system/settings", body),
     onSuccess: (data) => {
-      qc.setQueryData(qk.settings, data);
+      const { warnings, ...stored } = data;
+      qc.setQueryData(qk.settings, stored);
       qc.invalidateQueries({ queryKey: [...qk.system, "ports"] });
       setCfKey("");
       toast.success("Settings saved");
+      for (const w of warnings ?? []) toast.warning(w, { duration: 10_000 });
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: (err) => {
+      // CurseForge refused the key: nothing was saved; the message belongs to the key field
+      if (err instanceof ApiError && err.code === "invalid_curseforge_key") setErrors((e) => ({ ...e, cf_key: err.message }));
+      toast.error(errorMessage(err));
+    },
   });
 
   const clearKey = useMutation({
@@ -313,6 +328,24 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
                 </span>
               </AdminHint>
               <AdminFieldError id="set-mem-err" message={err("default_memory_mb")} />
+            </div>
+            <div className="grid content-start gap-1.5">
+              <Label htmlFor="set-reserve">Memory kept free for the host (MB)</Label>
+              <Input
+                id="set-reserve"
+                inputMode="numeric"
+                value={form.memory_reserve_mb}
+                onChange={(e) => set("memory_reserve_mb", e.target.value)}
+                aria-invalid={!!err("memory_reserve_mb")}
+                aria-describedby="set-reserve-hint set-reserve-err"
+              />
+              <AdminHint>
+                <span id="set-reserve-hint">
+                  A server start is refused (unless confirmed) when the memory of the running servers plus this reserve would exceed
+                  the host's RAM. Default {formatMemoryMb(DEFAULT_RESERVE_MB)}.
+                </span>
+              </AdminHint>
+              <AdminFieldError id="set-reserve-err" message={err("memory_reserve_mb")} />
             </div>
             <div className="grid content-start gap-1.5">
               <Label htmlFor="set-tz">Time zone</Label>
@@ -491,10 +524,14 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
                       ? "Paste the key again to replace the unreadable one"
                       : "Paste your API key"
                 }
-                onChange={(e) => setCfKey(e.target.value)}
+                onChange={(e) => {
+                  setCfKey(e.target.value);
+                  if (errors.cf_key) setErrors((x) => ({ ...x, cf_key: "" }));
+                }}
                 maxLength={500}
                 className="font-mono"
-                aria-describedby="set-cf-hint"
+                aria-invalid={!!err("cf_key")}
+                aria-describedby="set-cf-hint set-cf-err"
               />
               {(cfConfigured || cfUnreadable) && (
                 <Button
@@ -510,8 +547,11 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
               )}
             </div>
             <AdminHint>
-              <span id="set-cf-hint">Stored encrypted. The key is never shown again after saving.</span>
+              <span id="set-cf-hint">
+                Checked with CurseForge before it is saved. Stored encrypted; the key is never shown again after saving.
+              </span>
             </AdminHint>
+            <AdminFieldError id="set-cf-err" message={err("cf_key")} />
           </div>
         </FieldGroup>
 
@@ -591,8 +631,9 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
                 </div>
               )}
               <AdminHint>
-                The Java version in the tag follows each server's Minecraft version. Takes effect when a server's container
-                is next recreated.
+                The Java version in the tag follows each server's Minecraft version. Applies to existing servers too: a
+                running server shows "restart required", a stopped one gets it at its next start, and each start looks for a
+                newer build of the tag.
               </AdminHint>
             </div>
 

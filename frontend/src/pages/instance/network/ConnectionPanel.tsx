@@ -4,35 +4,10 @@ import { useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/clipboard";
 import type { ConnectionInfo, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall back below */
-  }
-  // plain-HTTP LAN deployments have no async clipboard API
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch {
-    ok = false;
-  }
-  ta.remove();
-  return ok;
-}
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
   const [done, setDone] = useState(false);

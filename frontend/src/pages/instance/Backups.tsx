@@ -135,7 +135,7 @@ export default function Backups() {
 
       <Section
         title="Backups"
-        description="Incremental, deduplicated and encrypted snapshots of the whole server folder."
+        description="Incremental, deduplicated and encrypted snapshots of the server folder. Built-in exclusions (compressed old logs, crash reports, caches, temporary files) and the patterns of the backup policy are left out."
         actions={
           <>
             <Button size="sm" variant="outline" onClick={() => open("verify")} disabled={busy || restorable === 0}>

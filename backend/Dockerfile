@@ -84,11 +84,13 @@ COPY --chmod=0644 backend/container/healthcheck.py /usr/local/bin/mcpanel-health
 COPY --chmod=0644 backend/container/supervise.py /usr/local/bin/mcpanel-supervise.py
 
 # collectstatic only imports settings; the dummy values exist for this build step
-# only and are not part of the image environment.
+# only and are not part of the image environment. It runs as root, so it must leave nothing in
+# /tmp: the upload spool folder is made at start by the runtime user (entrypoint.sh, asgi.py).
 RUN MCPANEL_SECRET_KEY=build-time-only-not-a-secret \
     MCPANEL_AGENT_TOKEN=build-time-only-not-a-secret \
     python manage.py collectstatic --noinput -v 0 \
-    && python -m compileall -q mcpanel apps
+    && python -m compileall -q mcpanel apps \
+    && if [ -e /tmp/mcpanel-uploads ]; then echo "the build created /tmp/mcpanel-uploads as root" >&2; exit 1; fi
 
 # Git revision the image was built from (deploy/scripts/upgrade.sh passes it and reads it back
 # to know what is deployed). Last on purpose: a new revision does not invalidate any layer above.

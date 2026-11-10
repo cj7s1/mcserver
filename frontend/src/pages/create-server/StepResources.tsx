@@ -8,7 +8,9 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { formatBytes, formatMemoryMb } from "@/lib/format";
-import { useSystemInfo } from "@/lib/queries";
+import { MemoryCommitBar } from "@/components/MemoryCommitBar";
+import { useInstances, useSystemInfo } from "@/lib/queries";
+import { memoryCommitment } from "@/pages/library/server-utils";
 import { useNodePorts } from "./import/nodes";
 import { Advanced, describedBy, Field } from "./WizardBits";
 import {
@@ -65,6 +67,10 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
   const limit = Number.isFinite(mem) ? containerLimitMb(mem, isModded(state, d)) : null;
   const overHost = limit !== null && hostMb !== null && limit > hostMb;
   const overPolicy = limit !== null && policyMax !== null && limit > policyMax;
+  // Memory already promised to running servers on the same host (same figure as the Dashboard).
+  const instances = useInstances();
+  const committed =
+    defaultNode && instances.data ? memoryCommitment(instances.data, { nodeId: system.data?.node.id }) : null;
 
   const range = ports.data?.range;
   const portNum = Number(d.gamePort);
@@ -91,7 +97,9 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
     ? d.resolved?.recommended_memory_mb
       ? `The pack recommends ${formatMemoryMb(d.resolved.recommended_memory_mb)}.`
       : "Modpacks usually need 6 GB or more; check the pack page for its recommendation."
-    : "4 GB suits a small vanilla or plugin server; add more for many players or mods.";
+    : d.memoryIsPanelDefault
+      ? "4 GB suits a small vanilla or plugin server; add more for many players or mods. Left unchanged, the panel's “Default memory” setting applies, which an administrator may have set differently."
+      : "4 GB suits a small vanilla or plugin server; add more for many players or mods.";
   const hostIpHint = "Bind the game port to one host address (e.g. a LAN IP). Leave empty for the panel default.";
 
   return (
@@ -190,6 +198,9 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
                 </div>
               )}
             </div>
+          )}
+          {limit !== null && hostMb !== null && committed && !overHost && (
+            <MemoryCommitBar otherRunningMb={committed.runningMb} addMb={limit} hostMb={hostMb} subject="the new server" />
           )}
           {(overHost || overPolicy) && (
             <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-300" role="alert">

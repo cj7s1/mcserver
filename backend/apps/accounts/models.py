@@ -49,10 +49,20 @@ class User(AbstractUser):
         ]
 
     # -- permission evaluation -------------------------------------------------
+    @property
+    def is_root(self) -> bool:
+        """The owner, or a Django superuser (``manage.py createsuperuser``): every permission.
+
+        The user-management guards already treated superusers as root (apps/accounts/views.py
+        ``_is_root``); evaluating their permissions like any other account gave them an empty panel
+        that no administrator could manage. Superusers can only be made on the command line.
+        """
+        return bool(self.is_owner or self.is_superuser)
+
     def global_permissions(self) -> frozenset[str]:
         if not self.is_active:
             return frozenset()
-        if self.is_owner:
+        if self.is_root:
             return ALL_CODES
         return self.role.permission_set if self.role_id else frozenset()
 
@@ -62,7 +72,7 @@ class User(AbstractUser):
         if not self.is_active:
             return frozenset()
         perms = set(self.global_permissions() & INSTANCE_CODES)
-        if self.is_owner:
+        if self.is_root:
             return INSTANCE_CODES
         if grants is None:
             grants = InstanceAccess.objects.filter(user=self, instance_id=instance_id).select_related("role")

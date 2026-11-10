@@ -317,6 +317,56 @@ def curseforge_key() -> str:
     return SystemSetting.get_secret("curseforge_api_key") or settings.CURSEFORGE_API_KEY or ""
 
 
+# File lists of a pack are read page by page (CurseForge's page size is 50) up to this many files.
+CF_FILES_PAGE = 50
+CF_FILES_MAX = 500
+
+
+def _numeric_id(value: Any, provider: str) -> int:
+    """A CurseForge/FTB id (digits only); anything else cannot exist there: 404, not a 500 from int()."""
+    text = str(value or "").strip()
+    if not text.isdigit() or len(text) > 12:
+        raise ApiError(f"Not found on {provider}", code="provider_not_found", status_code=404)
+    return int(text)
+
+
+def _header_safe(key: str) -> bool:
+    """Visible ASCII only (what a CurseForge key consists of, and what an ``x-api-key`` header can carry)."""
+    return bool(key) and all("!" <= ch <= "~" for ch in key)
+
+
+def check_curseforge_key(key: str) -> str | None:
+    """Ask CurseForge whether ``key`` works (one cheap authenticated call: ``GET /v1/games/432``).
+
+    Raises ApiError ``invalid_curseforge_key`` (400) when CurseForge refuses the key, and without
+    asking CurseForge when the key holds a character an HTTP header cannot carry (a pasted "…",
+    a line break: httpx would fail with a 500); returns a warning instead when CurseForge could not
+    be asked (the key is then saved unverified).
+    """
+    if not _header_safe(key):
+        raise ApiError(
+            "This is not a CurseForge API key: it contains spaces, line breaks or characters other than letters, digits "
+            "and punctuation. Copy the key from console.curseforge.com again (it starts with $2a$10$).",
+            code="invalid_curseforge_key",
+        )
+    try:
+        data = _request(
+            "GET", f"{CURSEFORGE_API}/v1/games/{CF_GAME_MINECRAFT}", headers={"x-api-key": key}, provider="CurseForge"
+        )
+    except UpstreamError as exc:
+        if exc.error_code == "provider_auth":
+            raise ApiError(
+                "CurseForge rejected this API key. Copy the key from console.curseforge.com again (it starts with $2a$10$).",
+                code="invalid_curseforge_key",
+            ) from exc
+        return f"The key was saved, but CurseForge could not be asked whether it is valid: {exc.detail}"
+    except ApiError as exc:  # 404 and the like: the endpoint answered, but not as expected
+        return f"The key was saved, but CurseForge gave an unexpected answer: {exc.detail}"
+    if not isinstance(data, dict) or "data" not in data:
+        return "The key was saved, but CurseForge gave an unexpected answer."
+    return None
+
+
 class CurseForge:
     name = "curseforge"
     label = "CurseForge"
@@ -327,6 +377,12 @@ class CurseForge:
             raise ServiceUnavailable(
                 "Browsing CurseForge needs an API key. Add one in System settings, or deploy by entering a pack URL.",
                 code="curseforge_key_missing",
+            )
+        if not _header_safe(key):  # e.g. a CURSEFORGE_API_KEY from the environment with a stray character
+            raise ServiceUnavailable(
+                "The CurseForge API key in the settings contains characters a key cannot have. Enter it again in System "
+                "settings.",
+                code="invalid_curseforge_key",
             )
         data = _request("GET", f"{CURSEFORGE_API}{path}", params=params, headers={"x-api-key": key}, provider="CurseForge")
         # Every CurseForge v1 response is wrapped in {"data": ...}; anything else (e.g. an empty body during
@@ -400,7 +456,8 @@ class CurseForge:
         }
 
     def project(self, project_id: str) -> dict[str, Any]:
-        data = _cached(f"cf:project:{project_id}", 600, lambda: self._get(f"/v1/mods/{int(project_id)}"))
+        pid = _numeric_id(project_id, "CurseForge")
+        data = _cached(f"cf:project:{pid}", 600, lambda: self._get(f"/v1/mods/{pid}"))
         return self._project(data["data"])
 
     @staticmethod
@@ -439,28 +496,41 @@ class CurseForge:
         game_versions: list[str] | None = None,
         include_changelog: bool = False,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"pageSize": 50, "index": 0}
+        pid = _numeric_id(project_id, "CurseForge")
+        params: dict[str, Any] = {"pageSize": CF_FILES_PAGE}
         if game_versions:
             params["gameVersion"] = game_versions[0]
         if loaders and loaders[0] in CF_LOADER_IDS:
             params["modLoaderType"] = CF_LOADER_IDS[loaders[0]]
-        data = _cached(
-            f"cf:files:{project_id}:{hash(json.dumps(params, sort_keys=True))}",
-            300,
-            lambda: self._get(f"/v1/mods/{int(project_id)}/files", params),
-        )
-        releases = [self._release(f) for f in data.get("data", []) if not f.get("isServerPack")]
+        files = _cached(f"cf:files:{pid}:{hash(json.dumps(params, sort_keys=True))}", 300, lambda: self._all_files(pid, params))
+        releases = [self._release(f) for f in files if isinstance(f, dict) and not f.get("isServerPack")]
         releases.sort(key=lambda r: r.get("published") or "", reverse=True)
         return releases
 
+    def _all_files(self, pid: int, params: dict[str, Any]) -> list[dict[str, Any]]:
+        """Every file of a project (all pages, at most CF_FILES_MAX)."""
+        files: list[dict[str, Any]] = []
+        index = 0
+        while index < CF_FILES_MAX:
+            data = self._get(f"/v1/mods/{pid}/files", {**params, "index": index})
+            page = data.get("data") or []
+            if not isinstance(page, list):
+                break
+            files.extend(page)
+            total = (data.get("pagination") or {}).get("totalCount")
+            index += CF_FILES_PAGE
+            if len(page) < CF_FILES_PAGE or not isinstance(total, int) or index >= total:
+                break
+        return files
+
     def release(self, project_id: str, file_id: str) -> dict[str, Any]:
-        data = _cached(
-            f"cf:file:{project_id}:{file_id}", 600, lambda: self._get(f"/v1/mods/{int(project_id)}/files/{int(file_id)}")
-        )
+        pid, fid = _numeric_id(project_id, "CurseForge"), _numeric_id(file_id, "CurseForge")
+        data = _cached(f"cf:file:{pid}:{fid}", 600, lambda: self._get(f"/v1/mods/{pid}/files/{fid}"))
         return self._release(data["data"])
 
     def changelog(self, project_id: str, file_id: str) -> str:
-        data = self._get(f"/v1/mods/{int(project_id)}/files/{int(file_id)}/changelog")
+        pid, fid = _numeric_id(project_id, "CurseForge"), _numeric_id(file_id, "CurseForge")
+        data = self._get(f"/v1/mods/{pid}/files/{fid}/changelog")
         return (data or {}).get("data", "")
 
     def resolve_modpack(self, project_id: str, version_id: str) -> dict[str, Any]:
@@ -510,7 +580,8 @@ class FTB:
         return data
 
     def _pack(self, pack_id: int | str) -> dict[str, Any]:
-        return _cached(f"ftb:pack:{pack_id}", 600, lambda: self._get(f"/modpack/{int(pack_id)}"))
+        pid = _numeric_id(pack_id, "Feed The Beast")
+        return _cached(f"ftb:pack:{pid}", 600, lambda: self._get(f"/modpack/{pid}"))
 
     def _project(self, p: dict[str, Any]) -> dict[str, Any]:
         art = p.get("art") or []

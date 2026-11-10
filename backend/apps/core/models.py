@@ -32,6 +32,9 @@ class SystemSetting(models.Model):
         "public_address": "",
         "lan_address": "",
         "timezone": "",
+        # RAM kept free for the host and everything else on it when servers are admitted
+        # (apps/instances/capacity.py, DEFAULT_RESERVE_MB)
+        "memory_reserve_mb": 4096,
     }
 
     @classmethod

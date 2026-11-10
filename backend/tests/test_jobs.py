@@ -375,7 +375,8 @@ def test_reconcile_marks_running_and_installed(inst, fake_agent):
     assert inst.status == "running"
     assert inst.installed_at is not None and inst.ready_at is not None
     assert inst.container_state == "running" and inst.health == "healthy"
-    assert inst.container_spec_hash  # adopted from the container label
+    # the container's spec-hash label is the agent's own hash, never the panel's: not taken over
+    assert inst.container_spec_hash == ""
 
 
 def test_reconcile_agent_down_is_unknown(inst, fake_agent):

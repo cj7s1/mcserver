@@ -249,8 +249,23 @@ describe("CommandPalette", () => {
     await user.click(within(group).getByRole("option", { name: /Restart server/ }));
     const confirm = await screen.findByRole("alertdialog", { name: "Restart Vanilla Test?" });
     expect(post).not.toHaveBeenCalled();
-    await user.click(within(confirm).getByRole("button", { name: "Restart server" }));
+    await user.click(within(confirm).getByRole("button", { name: "Restart" }));
     await waitFor(() => expect(post).toHaveBeenCalledWith(`/instances/${RUNNING.id}/power`, { action: "restart" }));
+  });
+
+  it("uses the regular Stop/Restart dialog, with the remembered in-game warning", async () => {
+    // chosen once in any Stop/Restart dialog (per-browser preference)
+    localStorage.setItem("mcpanel.power.warnMinutes", "10");
+    const { user } = setup({ path: `/servers/${RUNNING.id}` });
+    await user.keyboard("{Control>}k{/Control}");
+    const dialog = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(within(dialog).getByRole("group", { name: "Current server · Vanilla Test" })).getByRole("option", { name: /Restart server/ }));
+    const confirm = await screen.findByRole("alertdialog", { name: "Restart Vanilla Test?" });
+    expect(within(confirm).getByText(/Players are disconnected while the server restarts/)).toBeInTheDocument();
+    await user.click(within(confirm).getByRole("button", { name: "Restart in 10 min" }));
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(`/instances/${RUNNING.id}/power`, { action: "restart", warn_minutes: 10 }),
+    );
   });
 });
 

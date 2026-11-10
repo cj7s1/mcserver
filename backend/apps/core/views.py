@@ -32,7 +32,9 @@ EDITABLE = {
     "public_address": str,
     "lan_address": str,
     "timezone": str,
+    "memory_reserve_mb": int,
 }
+MEMORY_RESERVE_MAX_MB = 65536
 SECRETS = {"curseforge_api_key"}
 
 
@@ -83,6 +85,10 @@ class HealthView(APIView):
             checks["cache"] = "ok" if cache.get("health") == "1" else "error"
         except Exception:
             checks["cache"] = "error"
+        from .uploads import upload_dir_problem
+
+        # every request body above FILE_UPLOAD_MAX_MEMORY_SIZE is spooled there: without it they all fail
+        checks["uploads"] = "error" if upload_dir_problem() else "ok"
         ok = all(v == "ok" for v in checks.values())
         from mcpanel.celery import tick_age
 
@@ -125,6 +131,16 @@ class SystemInfoView(APIView):
         return Response({"version": "0.1.0", "node": {"id": node.id, "name": node.name}, "agent": agent, "counts": counts})
 
 
+def _is_ip(value: Any) -> bool:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return False
+    return True
+
+
 class SystemSettingsView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
@@ -148,7 +164,23 @@ class SystemSettingsView(APIView):
     def patch(self, request: Request) -> Response:
         require(request.user, "system.settings")
         data = request.data.get("values", {}) if isinstance(request.data, dict) else {}
+        secrets = request.data.get("secrets", {}) if isinstance(request.data, dict) else {}
+        if not isinstance(data, dict) or not isinstance(secrets, dict):
+            raise ApiError("values and secrets must be objects", code="invalid_setting")
+        warnings: list[str] = []
+        for key, value in secrets.items():
+            if key not in SECRETS or not isinstance(value, str) or len(value) > 500:
+                raise ApiError(f"Invalid secret {key}", code="invalid_setting")
+            if key == "curseforge_api_key" and value.strip():
+                # one authenticated call before anything is saved: a mistyped or revoked key would be
+                # passed to every CurseForge server, whose next start then fails
+                from apps.modpacks.providers import check_curseforge_key
+
+                warning = check_curseforge_key(value.strip())
+                if warning:
+                    warnings.append(warning)
         changed = {}
+        # every value is checked before any is saved: one invalid value leaves all settings as they were
         for key, value in data.items():
             if key not in EDITABLE:
                 raise ApiError(f"Unknown setting {key}", code="unknown_setting")
@@ -159,15 +191,29 @@ class SystemSettingsView(APIView):
                 raise ApiError("runtime_image_channel must be stable, latest or pinned:<version>", code="invalid_setting")
             if key in ("port_range_start", "port_range_end") and value is not None and not 1024 <= value <= 65535:
                 raise ApiError("Port range must be within 1024-65535", code="invalid_setting")
+            if key == "default_bind_ip" and value is not None and not _is_ip(value):
+                # used as the host_ip of every new server: a typo would make every create fail
+                raise ApiError(
+                    "default_bind_ip must be an IPv4 or IPv6 address without a port (0.0.0.0 = all interfaces)",
+                    code="invalid_setting",
+                )
+            if key == "memory_reserve_mb" and (
+                value is None or isinstance(value, bool) or not 0 <= value <= MEMORY_RESERVE_MAX_MB
+            ):
+                raise ApiError(
+                    f"memory_reserve_mb must be a whole number of MB from 0 to {MEMORY_RESERVE_MAX_MB}",
+                    code="invalid_setting",
+                )
+        for key, value in data.items():
             SystemSetting.set(key, value)
             changed[key] = value
-        for key, value in (request.data.get("secrets", {}) if isinstance(request.data, dict) else {}).items():
-            if key not in SECRETS or not isinstance(value, str) or len(value) > 500:
-                raise ApiError(f"Invalid secret {key}", code="invalid_setting")
+        for key, value in secrets.items():
             SystemSetting.set_secret(key, value.strip())
             changed[key] = "[updated]" if value else "[cleared]"
         audit.record("system.settings_updated", request=request, details=changed)
-        return self.get(request)
+        response = self.get(request)
+        response.data["warnings"] = warnings
+        return response
 
 
 class PortsView(APIView):

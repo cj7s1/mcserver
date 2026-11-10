@@ -2,17 +2,19 @@
  * Restart/Stop confirmation with the optional in-game warning
  * (POST /instances/{id}/power {action, warn_minutes, warn_message}; backend power_warnings.py).
  */
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, ApiError, errorMessage } from "@/lib/api";
+import { ApiError, errorMessage } from "@/lib/api";
+import { sendPower } from "@/lib/power";
 import {
   describeWarning,
   isWarnMinutes,
   powerBody,
+  powerToast,
   WARN_MESSAGE_MAX,
   WARN_MINUTES,
   warnMessageError,
@@ -21,7 +23,7 @@ import {
   type WarnMinutes,
 } from "@/lib/power-warning";
 import { useInvalidateInstance, useStats } from "@/lib/queries";
-import type { Instance } from "@/lib/types";
+import type { Instance, Job } from "@/lib/types";
 import { useStoredState } from "@/pages/library/server-utils";
 
 const COPY: Record<WarnableAction, { title: string; body: string; confirm: string; verb: string }> = {
@@ -57,11 +59,16 @@ export function PowerActionDialog({
   action,
   open,
   onOpenChange,
+  description,
+  onCloseAutoFocus,
 }: {
   instance: Pick<Instance, "id" | "name">;
   action: WarnableAction;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Replaces the default explanation (e.g. the command palette's stop timeout and restart notes). */
+  description?: ReactNode;
+  onCloseAutoFocus?: (event: Event) => void;
 }) {
   const uid = useId();
   const invalidate = useInvalidateInstance();
@@ -81,16 +88,14 @@ export function PowerActionDialog({
       }}
       title={`${copy.title} ${instance.name}?`}
       confirmLabel={minutes ? `${copy.confirm} in ${minutes} min` : copy.confirm}
-      description={<p>{copy.body}</p>}
+      description={<p>{description ?? copy.body}</p>}
+      onCloseAutoFocus={onCloseAutoFocus}
       onConfirm={async () => {
         if (localError) throw new Error(localError);
         try {
-          await api.post(`/instances/${instance.id}/power`, powerBody(action, minutes, message));
-          toast.success(
-            minutes
-              ? `${copy.title} of ${instance.name} scheduled in ${minutes} min; players are being warned`
-              : `${copy.title} requested for ${instance.name}`,
-          );
+          const outcome = await sendPower<Job>(instance, powerBody(action, minutes, message));
+          if (outcome.status === "cancelled") return; // not enough memory and the user declined
+          toast.success(powerToast(instance.name, copy.title, minutes, outcome.data));
           setMessage("");
           invalidate(instance.id);
         } catch (err) {

@@ -344,6 +344,11 @@ export interface FileEntry {
   size: number;
   modified: number;
   mode: string;
+  /**
+   * false: the real name has bytes that are not UTF-8 (shown with U+FFFD in their place), so the
+   * entry cannot be opened, renamed, moved or deleted by this name. Absent = a valid name.
+   */
+  name_valid?: boolean;
 }
 
 export interface PropertySchema {
@@ -541,8 +546,12 @@ export interface SystemSettings {
     public_address: string;
     lan_address: string;
     timezone: string;
+    /** RAM in MB kept free for the host when servers are started (memory admission); 0-65536 */
+    memory_reserve_mb: number;
   };
   secrets_configured: Record<string, boolean>;
+  /** PATCH only: notes about what was saved (e.g. the CurseForge key could not be verified) */
+  warnings?: string[];
   /** stored secrets that cannot be decrypted with the current MCPANEL_SECRET_KEY (re-enter them) */
   secrets_unreadable?: Record<string, boolean>;
   env: { port_range_default: [number, number] };

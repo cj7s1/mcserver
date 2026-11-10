@@ -218,6 +218,33 @@ docker restart "$PANEL" >/dev/null 2>&1 || docker start "$PANEL" >/dev/null
 wait_for 180 healthy
 verdict $? "healthy again once the old container is gone" "not healthy after the guard test: $(docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' "$PANEL" | tail -n 1)"
 
+echo "== 12. request bodies above 5 MB are spooled to disk by the web process"
+# Django writes a body above FILE_UPLOAD_MAX_MEMORY_SIZE (5 MB) to MCPANEL_UPLOAD_TMP before any
+# view runs. A folder the image build made as root made every such request a 500 (uploads,
+# imports, world replace); the web process makes it itself at start.
+check "the upload folder belongs to the runtime user (0700)" sh -c "[ \"\$(docker exec $PANEL sh -c 'stat -c \"%u %a\" \"\${MCPANEL_UPLOAD_TMP:-/tmp/mcpanel-uploads}\"')\" = '10001 700' ]"
+upload_status=$(py <<'PY'
+import urllib.error
+import urllib.request
+
+body = b"x" * (10 * 1024 * 1024)
+req = urllib.request.Request(
+    "http://127.0.0.1:8000/api/auth/login",
+    data=body,
+    method="POST",
+    headers={"Host": "localhost", "Content-Type": "application/octet-stream"},
+)
+try:
+    print(urllib.request.urlopen(req, timeout=60).status)
+except urllib.error.HTTPError as exc:
+    print(exc.code)
+PY
+)
+case "$upload_status" in
+    4[0-9][0-9]) pass "upload of 10 MB is spooled and answered (HTTP $upload_status, not a 500)" ;;
+    *) fail "upload of 10 MB: HTTP ${upload_status:-no answer} (a 500 means MCPANEL_UPLOAD_TMP is not writable)" ;;
+esac
+
 echo
 if [ "$FAILED" = 0 ]; then echo "ALL ACCEPTANCE TESTS PASSED"; else echo "SOME ACCEPTANCE TESTS FAILED"; docker logs --tail 60 "$PANEL" 2>&1; fi
 exit "$FAILED"

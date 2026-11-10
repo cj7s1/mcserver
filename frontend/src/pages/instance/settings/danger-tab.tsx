@@ -13,6 +13,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage } from "@/lib/api";
+import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -139,7 +140,7 @@ function CloneDialog({ instance, onClose }: { instance: Instance; onClose: () =>
             <InlineField
               id="clone-exclude-worlds"
               label="Leave out worlds"
-              hint="Copy configuration, mods and plugins only; the clone generates a fresh world on first start."
+              hint="Leaves out the server's world folders, every other top-level folder that holds a level.dat (an older world) and the panel's .mcpanel-world-* folders; everything else is copied. The clone generates a fresh world on first start."
             >
               <Switch id="clone-exclude-worlds" checked={excludeWorlds} onCheckedChange={setExcludeWorlds} />
             </InlineField>
@@ -198,7 +199,11 @@ export function DangerTab({ instance, can }: TabProps) {
   const showJobLog = job.data?.kind === "world_reset" && (job.data.status === "failed" || job.data.status === "cancelled");
 
   const action = useMutation({
-    mutationFn: (kind: "recreate" | "archive") => api.post<Job>(`/instances/${instance.id}/${kind}`),
+    // recreating a running server starts it again: the same memory check as a start ("Start anyway?")
+    mutationFn: (kind: "recreate" | "archive") =>
+      kind === "recreate"
+        ? postOrDecline<Job>(`/instances/${instance.id}/recreate`, instance, {}, "restart")
+        : api.post<Job>(`/instances/${instance.id}/${kind}`),
     onSuccess: (job, kind) => {
       setJobId(job.id);
       toast.success(kind === "recreate" ? "Recreating the container" : "Archiving the server");
@@ -258,7 +263,7 @@ export function DangerTab({ instance, can }: TabProps) {
                     try {
                       await action.mutateAsync("recreate");
                     } catch (err) {
-                      toast.error(errorMessage(err));
+                      if (!(err instanceof OvercommitDeclined)) toast.error(errorMessage(err));
                     }
                   }}
                 />

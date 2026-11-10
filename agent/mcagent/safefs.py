@@ -47,14 +47,36 @@ class Entry:
     ino: int = 0
 
     def as_dict(self) -> dict:
-        return {
-            "name": self.name,
-            "path": self.path,
+        out = {
+            "name": display_name(self.name),
+            "path": display_name(self.path),
             "type": self.type,
             "size": self.size,
             "modified": self.modified,
             "mode": self.mode,
         }
+        if not name_is_utf8(self.path):
+            # A name with bytes that are not UTF-8 (old Latin-1 file names): shown with U+FFFD in
+            # their place, which is not the real name, so the entry cannot be opened, renamed or
+            # deleted by that name. One such file no longer breaks the whole listing.
+            out["name_valid"] = False
+        return out
+
+
+def name_is_utf8(name: str) -> bool:
+    """False for a name Python decoded with surrogate escapes (bytes that are not UTF-8)."""
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def display_name(name: str) -> str:
+    """``name`` with undecodable bytes replaced by U+FFFD (always encodable as UTF-8)."""
+    if name_is_utf8(name):
+        return name
+    return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def split_path(rel: str) -> list[str]:
@@ -412,7 +434,7 @@ class SafeRoot:
             if st.st_size > max_file_bytes or not path.lower().endswith(extensions):
                 continue
             if needle in path.lower():
-                results.append({"path": path, "line": None, "text": None})
+                results.append({"path": display_name(path), "line": None, "text": None})
             try:
                 data = self.read_bytes(path, max_file_bytes)
             except (PathError, OSError):
@@ -420,7 +442,7 @@ class SafeRoot:
             text = data.decode("utf-8", errors="replace")
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if needle in line.lower():
-                    results.append({"path": path, "line": lineno, "text": line.strip()[:300]})
+                    results.append({"path": display_name(path), "line": lineno, "text": line.strip()[:300]})
                     if len(results) >= max_results:
                         break
         return results

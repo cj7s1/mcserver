@@ -6,6 +6,8 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/lib/api";
+import { BATCH_SIZE, chunk, type BatchProgress } from "@/lib/batches";
+import { sendPower } from "@/lib/power";
 import { qk, useInvalidateInstance } from "@/lib/queries";
 import type { Instance } from "@/lib/types";
 
@@ -49,9 +51,15 @@ export interface ContentFile {
   sha1: string | null;
   /**
    * modrinth = identified by hash; hangar / spigot = installed from Hangar / SpigotMC by the panel;
-   * manual = not on Modrinth; unknown = identification failed; pending = the node has not read (hashed) the file yet
+   * manual = not on Modrinth; unknown = identification failed; pending = the node has not read (hashed) the file yet;
+   * too_large = larger than the node reads to identify (2 GiB), so it stays unidentified
    */
-  source: "modrinth" | "hangar" | "spigot" | "manual" | "unknown" | "pending";
+  source: "modrinth" | "hangar" | "spigot" | "manual" | "unknown" | "pending" | "too_large";
+  /**
+   * Installed by the server's modpack (listed in the runtime's pack manifest). Disabling, removing or
+   * updating it is remembered, so the modpack does not put it back on the next start.
+   */
+  pack_managed?: boolean;
   /** Set when source is "hangar" (recorded at install time; Hangar has no hash lookup). */
   hangar?: { slug: string; version: string };
   /** Set when source is "spigot": recorded at install time, and the file still has the recorded hash. */
@@ -195,11 +203,90 @@ export interface UpdateResultEntry {
 }
 
 export interface UpdateResponse {
+  /** One entry per requested file: updated | up_to_date | skipped | failed. */
   results: UpdateResultEntry[];
   updated: number;
   failed: number;
+  skipped?: number;
+  up_to_date?: number;
+  /**
+   * Set when the server stopped being changeable part-way (another job took it, it was archived):
+   * the files not processed are `skipped` with reason `instance_busy`.
+   */
+  stopped?: string | null;
   missing_dependencies: MissingDependency[];
   restart_required: boolean;
+}
+
+/** The update endpoint takes at most this many file names per request (backend MAX_FILES_PER_UPDATE). */
+export const MAX_FILES_PER_UPDATE = BATCH_SIZE;
+
+/** One report for several update batches. */
+export function mergeUpdateResponses(parts: UpdateResponse[]): UpdateResponse {
+  const seen = new Set<string>();
+  const missing: MissingDependency[] = [];
+  for (const p of parts) {
+    for (const m of p.missing_dependencies ?? []) {
+      const key = `${m.project_id ?? m.file_name ?? m.title ?? ""}|${m.required_by}|${m.reason}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      missing.push(m);
+    }
+  }
+  const results = parts.flatMap((p) => p.results ?? []);
+  return {
+    results,
+    updated: parts.reduce((n, p) => n + (p.updated ?? 0), 0),
+    failed: parts.reduce((n, p) => n + (p.failed ?? 0), 0),
+    skipped: results.filter((r) => r.status === "skipped").length,
+    up_to_date: results.filter((r) => r.status === "up_to_date").length,
+    stopped: parts.find((p) => p.stopped)?.stopped ?? null,
+    missing_dependencies: missing,
+    restart_required: parts.some((p) => p.restart_required),
+  };
+}
+
+export interface BatchedUpdateResult {
+  response: UpdateResponse;
+  batches: number;
+  /** Set when a batch after the first failed as a whole; later batches were not sent. */
+  error: unknown | null;
+  failedBatch: number | null;
+  /** Files of the failed batch and every later one. */
+  notAttempted: string[];
+}
+
+/**
+ * POST /content/update in batches of at most 100 names, one after another. A batch that fails as a
+ * whole (e.g. the server became busy) stops the run: the batches before it are reported with the
+ * rest listed as not attempted. When the very first batch fails, the error is thrown as before.
+ */
+export async function updateInBatches(
+  instanceId: string,
+  files: string[],
+  onBatch?: (p: BatchProgress) => void,
+): Promise<BatchedUpdateResult> {
+  const batches = chunk(files, MAX_FILES_PER_UPDATE);
+  const parts: UpdateResponse[] = [];
+  let done = 0;
+  for (let i = 0; i < batches.length; i++) {
+    onBatch?.({ batch: i + 1, batches: batches.length, done, total: files.length });
+    try {
+      parts.push(await api.post<UpdateResponse>(contentPath(instanceId, "update"), { files: batches[i] }));
+    } catch (err) {
+      if (i === 0) throw err;
+      return { response: mergeUpdateResponses(parts), batches: batches.length, error: err, failedBatch: i + 1, notAttempted: files.slice(done) };
+    }
+    done += batches[i].length;
+    const stopped = parts[parts.length - 1].stopped;
+    if (stopped && done < files.length) {
+      // The server became busy part-way: the later batches would only be skipped (or refused) too.
+      const rest = files.slice(done).map((filename) => ({ filename, status: "skipped" as const, reason: "instance_busy", message: stopped }));
+      parts.push({ results: rest, updated: 0, failed: 0, stopped, missing_dependencies: [], restart_required: false });
+      break;
+    }
+  }
+  return { response: mergeUpdateResponses(parts), batches: batches.length, error: null, failedBatch: null, notAttempted: [] };
 }
 
 export interface ToggleResponse {
@@ -208,11 +295,15 @@ export interface ToggleResponse {
   enabled: boolean;
   changed: boolean;
   restart_required: boolean;
+  /** A modpack's jar: the panel recorded the change so the pack does not put the file back. */
+  pack_managed?: boolean;
 }
 
 export interface DeleteResponse {
   deleted: string;
   restart_required: boolean;
+  /** A modpack's jar: the removal is remembered so the pack does not reinstall it. */
+  pack_managed?: boolean;
 }
 
 export interface UploadResponse {
@@ -590,8 +681,9 @@ export function useRestartHint(instance: Instance) {
 export function useRestartServer(instance: Instance) {
   const invalidate = useInvalidateInstance();
   return useMutation({
-    mutationFn: () => api.post(`/instances/${instance.id}/power`, { action: "restart" }),
-    onSuccess: () => {
+    mutationFn: () => sendPower(instance, { action: "restart" }),
+    onSuccess: (outcome) => {
+      if (outcome.status === "cancelled") return;
       toast.success("Restart requested");
       invalidate(instance.id);
     },

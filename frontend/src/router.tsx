@@ -1,18 +1,23 @@
 import { lazy, Suspense, type ComponentType, type ReactNode } from "react";
 import { createBrowserRouter, Navigate, Outlet } from "react-router";
 import { AppLayout } from "@/components/layout/AppLayout";
-import { ErrorState, LoadingState } from "@/components/States";
+import { PageErrorBoundary, RouteErrorScreen } from "@/components/RouteError";
+import { ConnectionLostBanner, ErrorState, LoadingState } from "@/components/States";
 import { useAuth, useAuthLifecycle } from "@/hooks/use-auth";
-import { authGateView } from "@/lib/auth-gate";
+import { authGateView, authStateStale } from "@/lib/auth-gate";
 import { LoginPage, ResetPasswordPage, SetupPage } from "@/pages/AuthPages";
 import { InstanceLayout } from "@/pages/instance/InstanceLayout";
 
 function page(loader: () => Promise<{ default: ComponentType }>): ReactNode {
   const C = lazy(loader);
+  // The boundary keeps the layout (sidebar, header) when a page fails to load or render, e.g. a
+  // chunk of the previous build requested by a tab left open across a panel upgrade.
   return (
-    <Suspense fallback={<LoadingState />}>
-      <C />
-    </Suspense>
+    <PageErrorBoundary>
+      <Suspense fallback={<LoadingState />}>
+        <C />
+      </Suspense>
+    </PageErrorBoundary>
   );
 }
 
@@ -37,15 +42,26 @@ function AuthGate() {
       return forcedPasswordChange;
     case "app":
       // Keyed by user: a different account (e.g. signed in from another tab) never inherits the
-      // previous one's in-memory page state (console history, terminal, forms).
-      return <Outlet key={state?.user?.id} />;
+      // previous one's in-memory page state (console history, terminal, forms). A failed refetch
+      // of the auth state keeps the pages mounted and only shows a banner until it recovers.
+      return (
+        <>
+          {authStateStale({ state, error }) && (
+            <div className="fixed inset-x-0 top-2 z-50 mx-auto w-fit max-w-[calc(100%-2rem)] rounded-lg bg-background shadow-md">
+              <ConnectionLostBanner onRetry={() => refetch()} />
+            </div>
+          )}
+          <Outlet key={state?.user?.id} />
+        </>
+      );
   }
 }
 
 export const router = createBrowserRouter([
-  { path: "/reset-password", element: <ResetPasswordPage /> },
+  { path: "/reset-password", element: <ResetPasswordPage />, errorElement: <RouteErrorScreen /> },
   {
     element: <AuthGate />,
+    errorElement: <RouteErrorScreen />,
     children: [
       {
         element: <AppLayout />,

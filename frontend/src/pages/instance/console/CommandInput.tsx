@@ -131,7 +131,8 @@ export function CommandInput({
         {disabledReason ?? (
           <>
             Enter to send · <kbd className="font-mono">↑</kbd>/<kbd className="font-mono">↓</kbd> history · no leading slash needed ·
-            commands run over RCON and are recorded in the audit log
+            commands run over RCON and are recorded in the audit log ·{" "}
+            <span className="font-mono">stop</span> stops the server through the panel
           </>
         )}
       </p>

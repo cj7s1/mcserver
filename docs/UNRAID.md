@@ -48,6 +48,21 @@ array:
 Make sure the share used for `appdata` is set to stay on the pool (Primary storage: cache, no mover to
 array), otherwise the mover may relocate live world files.
 
+If that share is exported over SMB, set it to **Private** or
+**Secure**, not **Public**: the server folders hold the RCON passwords (`.rcon-cli.env`). The agent
+makes the data directory and its `instances` folder mode 0750, owned by root, at every start, so a
+guest login over SMB can no longer read the server folders; the share setting is the second line.
+
+**This also ends access to the data folder for every other user, on purpose.** From this release
+on, an SMB login (also a named, non-guest user), the `nobody` user of Unraid's file manager or of
+other containers (Krusader, a backup container), and a non-root shell on the host can no longer
+open `appdata/mcpanel` or the server folders in it: only root (the Unraid terminal, the panel's
+Files page and its backups) can. The agent sets it again at every start, so a `chmod` by hand does
+not last. To edit server files, use the panel's Files page, or the Unraid terminal as root. To copy
+worlds off the box, use a backup or the panel's download (zip) of a folder. A backup container that
+must read the folder has to run as root (or read the restic backups in `MCPANEL_BACKUP_DIR`
+instead).
+
 ## 3. Configure
 
 Open a terminal (Unraid web UI → the `>_` icon). If `git --version` fails, install git with a plugin
@@ -78,7 +93,10 @@ MCPANEL_LAN_ADDRESS=192.168.1.10
 TZ=Europe/Berlin
 ```
 
-**Write down `AGENT_RESTIC_PASSWORD` somewhere other than the server.**
+**Write down `AGENT_RESTIC_PASSWORD` somewhere other than the server** (a password manager), and set
+up the daily copy of the panel database (DEPLOYMENT.md, "Backing up the panel itself"): the worlds,
+the database and `.env` are all on the cache pool, and without the database and the password the
+backups on the array cannot be used from the panel (section 10).
 
 ## 4. Start
 
@@ -128,7 +146,7 @@ image)" and lets you remove it. Two kinds belong to MCPanel:
 
 | Image | Why no container uses it | If you remove it |
 |---|---|---|
-| `itzg/minecraft-server:<tag>`, for example `stable-java21` | Every server that uses this tag is stopped, and a stopped server has no container. | The next start of such a server downloads the image again. That needs internet access, takes a while and can bring a newer build of the tag. Keep it while stopped servers use that tag. |
+| `itzg/minecraft-server:<tag>`, for example `stable-java21` | Every server that uses this tag is stopped, and a stopped server has no container. | The next start of such a server must download the image again, which needs internet access and takes a while. With the image on the host a start checks for a newer build anyway, but starts on the image it has when the host is offline. Keep it while stopped servers use that tag. |
 | `mcpanel-rollback/...:<time>` | They are the images of the version before the last upgrade. | `./scripts/upgrade.sh rollback` is no longer possible (`./scripts/upgrade.sh status` shows `IS GONE`). Keep them as long as you want to be able to go back. The next successful upgrade removes them itself. |
 
 `docker image prune -a` and `docker system prune -a` remove both kinds as well.
@@ -138,16 +156,20 @@ image)" and lets you remove it. Two kinds belong to MCPanel:
 Unraid's Docker tab gives a container 10 seconds to stop (Settings → Docker).
 
 * With no job running that is enough: a stop took about 5 seconds in a test.
-* A job that is running at that moment (install, backup, restore) is cut off after the 10
-  seconds. The panel marks it as failed ("interrupted") only about 6 minutes later (measured:
-  6 min 9 s). Until then its server stays locked: no start, stop or backup. **Mark as failed** on
-  the Activity page releases it sooner. Check the server before you retry the job.
+* A job that is running at that moment (install, backup, restore) is cut off. A job that is
+  waiting for the agent at that moment, which is most of the time of such a job, is marked as
+  failed ("interrupted") at once and its server is unlocked; the agent finishes what it had
+  started. A job cut off in other work is marked as failed about 6 minutes later (measured before
+  this change: 6 min 9 s), and its server stays locked until then: no start, stop or backup.
+  **Mark as failed** on the Activity page releases it sooner. A server the job had stopped stays
+  stopped. Check the server before you retry the job.
 * When the Activity page is not empty, use
   `cd /mnt/user/appdata/mcpanel-src/deploy && docker compose restart panel` instead: it gives jobs
   up to 110 seconds to finish.
-* A platform container that was stopped from the Docker tab, or by a backup plugin that stops
-  containers, is not started again by Docker, also not after a reboot. Start it from the Docker
-  tab or with `docker compose up -d` in `deploy/`.
+* A platform container that was stopped from the Docker tab, on a folder, or by a backup plugin
+  that stops containers stays stopped until Docker starts again: the three platform containers
+  have the restart policy `always`, so the next reboot or array start brings them back. To start
+  them before that: the Docker tab, or `docker compose up -d` in `deploy/`.
 
 The Minecraft servers keep running in all of these cases.
 
@@ -389,14 +411,89 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
   array.
 * **Panel unreachable:** confirm `MCPANEL_BIND` is the Unraid LAN IP and the port isn't already used.
 * **Container shows "update available" in the Docker tab:** ignore it for `mcpanel-*` server
-  containers. Runtime image updates are managed per server (System settings → runtime image channel).
+  containers. Each start of a server that creates its container checks for a newer build of its
+  image (System settings → runtime image channel says which tag); a stop and start in the panel
+  updates it.
 * **A stopped server is missing in the Docker tab:** expected. A stopped server has no container;
   start it in the panel (section 4).
 * **A server shows "restart required" after an update of MCPanel:** its container was made by the
   older version. Restart it when it suits you; the world is kept.
-* **The panel is down after a backup plugin ran, or after Stop in the Docker tab:** Docker does not
-  start containers again that were stopped that way. Run `docker compose up -d` in `deploy/`, and
-  exclude the `mcpanel-*` containers in plugins that stop containers.
+* **The panel is down after a backup plugin ran, or after Stop in the Docker tab:** Docker starts
+  the platform containers again at its next start (restart policy `always`), not at once. Run
+  `docker compose up -d` in `deploy/`, and exclude the `mcpanel-*` containers in plugins that stop
+  containers. A stack installed before this policy gets it with the next `./scripts/upgrade.sh run`.
+* **A start says "Not enough memory":** the running servers plus this one need more than the
+  host's RAM minus the reserve (System settings → Memory kept free for the host, default 4096 MB).
+  Stop another server, lower the memory, or use **Start anyway** (DEPLOYMENT.md, "Memory").
 * **A server stays busy after the `panel` row was stopped during a job:** the job is marked as
   failed about 6 minutes later, or at once with **Mark as failed** on the Activity page.
 * **Servers did not come back after a reboot:** see UNRAID-SHUTDOWN.md, "How the servers come back".
+
+## 10. When the cache drive died
+
+The worlds (`MCPANEL_DATA_DIR`), the panel database (`MCPANEL_POSTGRES_DIR`), the source folder with
+`deploy/.env` and a generated restic password all live on the cache pool. What survives on the
+array: the restic repositories (`MCPANEL_BACKUP_DIR`, one per server under `restic/<server id>`)
+and, if you set it up, the daily database dump of `backup-db.sh` (DEPLOYMENT.md, "Backing up the
+panel itself") with its copy of `.env`.
+
+> **Not tested:** this procedure has been run in parts only (the scripts and the command have unit
+> tests); it has not been run end to end on a real stack or on Unraid.
+
+What you need:
+
+* **`AGENT_RESTIC_PASSWORD`.** Without it the repositories cannot be opened by anyone. It is in
+  `deploy/.env`, and so in every `mcpanel-db-<time>.env` that `backup-db.sh` wrote. Keep one more
+  copy outside the server (a password manager). If `.env` has no `AGENT_RESTIC_PASSWORD`, the agent
+  generated one in `<MCPANEL_DATA_DIR>/agent/restic-password`, which was on the lost drive: copy
+  that file somewhere else while you still have it.
+* **A database dump** from `backup-db.sh` (`mcpanel-db-<time>.sql.gz`) and the `.env` copy of the
+  same time (`mcpanel-db-<time>.env`): its `MCPANEL_SECRET_KEY` decrypts what the dump holds.
+
+Steps, in the Unraid terminal, once the pool is back:
+
+1. Get the source again (section 3: `git clone` into `/mnt/user/appdata/mcpanel-src`), then put
+   the `.env` copy in place and check its paths:
+
+   ```bash
+   cd /mnt/user/appdata/mcpanel-src/deploy
+   cp /mnt/user/Backups/mcpanel-db/mcpanel-db-<time>.env .env && chmod 600 .env
+   nano .env     # MCPANEL_DATA_DIR / MCPANEL_POSTGRES_DIR on the new pool, MCPANEL_BACKUP_DIR on the array
+   ```
+
+2. Start the database alone, unpack the dump and load it (`restore-db` reads plain SQL; without
+   `--yes` it only says what it would do):
+
+   ```bash
+   docker compose up -d postgres
+   gunzip -k /mnt/user/Backups/mcpanel-db/mcpanel-db-<time>.sql.gz
+   ./scripts/upgrade.sh restore-db /mnt/user/Backups/mcpanel-db/mcpanel-db-<time>.sql
+   ./scripts/upgrade.sh restore-db /mnt/user/Backups/mcpanel-db/mcpanel-db-<time>.sql --yes
+   ```
+
+   It loads the dump into a new database and swaps it in; the empty database from the first start
+   is kept under another name, and the command prints how to remove it. It refuses while other
+   services of the stack run. Remove the unpacked `.sql` afterwards (`rm` it; the `.gz` stays).
+
+3. Start the stack: `docker compose up -d --build`. Everybody logs in again (the dump holds no
+   login sessions). The panel knows every server of the dump, but their folders are empty.
+
+4. Take over the backups that were made after the dump was taken (the database has no record of
+   them), first as a dry run:
+
+   ```bash
+   docker compose exec panel python manage.py adopt_backups --all --dry-run
+   docker compose exec panel python manage.py adopt_backups --all
+   ```
+
+   `--instance <server id>` does one server. Each snapshot of a server's repository that no backup
+   row points to becomes a backup named "Adopted: <date time>", with a warning that it is not known
+   whether world saving was paused for it. Running it again adds nothing.
+
+5. Restore each server from its newest backup on its **Backups** page, then start it.
+
+Limits: `adopt_backups` only reads the repositories of servers that the restored database knows.
+A server created after the dump was taken is not in it; its repository is still on the array
+under `restic/<server id>` and can be restored with restic by hand (`docs/reference/backup-snapshots.md`
+has the restic notes), but not from the panel. Adopted backups carry no record of the server's software,
+so restoring one does not change the server's version.

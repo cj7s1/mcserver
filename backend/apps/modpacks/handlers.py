@@ -17,12 +17,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from apps.backups.handlers import require_local_backup, run_backup
+from apps.backups.handlers import RESTORE_UNTOUCHED, require_local_backup, run_backup
 from apps.backups.models import Backup, BackupKind, BackupStatus
 from apps.catalog.providers import resolve_java
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
-from apps.instances.handlers import apply_container, ensure_stopped
+from apps.instances.handlers import Progress, _apply_refused, apply_container, ensure_stopped, put_back, starting_again
 from apps.instances.models import Instance
 from apps.instances.spec import image_for
 from apps.jobs.models import Job
@@ -108,32 +108,52 @@ def modpack_update(job: Job, ctx: JobContext) -> dict[str, Any]:
             code="minecraft_change_unconfirmed",
             status_code=409,
         )
-    was_running = ensure_stopped(instance, ctx)
+    was_running = False
+    pinned = False  # the new release is pinned in the database
     backup = None
-    if job.params.get("backup", SystemSetting.get("pre_update_backup")):
-        ctx.progress(0.05, "Creating a pre-update backup")
-        backup = run_backup(
-            instance,
-            ctx,
-            name=f"Before update to {plan['target']['modpack_version_name'] or plan['target']['modpack_version_id']}",
-            kind=BackupKind.PRE_UPDATE,
-            user=job.user,
-            span=(0.05, 0.5),
-            job=job,
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        if job.params.get("backup", SystemSetting.get("pre_update_backup")):
+            ctx.progress(0.05, "Creating a pre-update backup")
+            backup = run_backup(
+                instance,
+                ctx,
+                name=f"Before update to {plan['target']['modpack_version_name'] or plan['target']['modpack_version_id']}",
+                kind=BackupKind.PRE_UPDATE,
+                user=job.user,
+                span=(0.05, 0.5),
+                job=job,
+            )
+            backup.meta = {**(backup.meta or {}), "modpack_before": plan["current"], "modpack_after": plan["target"]}
+            backup.save(update_fields=["meta"])
+        ctx.check_cancelled()
+        ctx.progress(0.55, f"Pinning {instance.modpack_name} {plan['target']['modpack_version_name']}", force=True)
+        history = list((instance.modpack_meta or {}).get("history", []))
+        history.append(
+            {"from": plan["current"], "to": plan["target"], "job": str(job.id), "backup": str(backup.id) if backup else None}
         )
-        backup.meta = {**(backup.meta or {}), "modpack_before": plan["current"], "modpack_after": plan["target"]}
-        backup.save(update_fields=["meta"])
-    ctx.progress(0.55, f"Pinning {instance.modpack_name} {plan['target']['modpack_version_name']}", force=True)
-    history = list((instance.modpack_meta or {}).get("history", []))
-    history.append(
-        {"from": plan["current"], "to": plan["target"], "job": str(job.id), "backup": str(backup.id) if backup else None}
-    )
-    instance.modpack_meta = {**(instance.modpack_meta or {}), "history": history[-20:]}
-    instance.save(update_fields=["modpack_meta"])
-    _apply_pin(instance, plan["target"])
-    instance.refresh_from_db()
-    ctx.progress(0.6, "Recreating the container; the new release installs on start")
-    apply_container(instance, ctx, start=was_running or bool(job.params.get("start")), span=(0.6, 0.95))
+        instance.modpack_meta = {**(instance.modpack_meta or {}), "history": history[-20:]}
+        instance.save(update_fields=["modpack_meta"])
+        pinned = True
+        _apply_pin(instance, plan["target"])
+        instance.refresh_from_db()
+        ctx.progress(0.6, "Recreating the container; the new release installs on start")
+        if was_running:  # (started again without the memory check: it ran when the job began)
+            starting_again(ctx, lambda: apply_container(instance, ctx, start=True, span=(0.6, 0.95), admit=False))
+        else:
+            apply_container(instance, ctx, start=bool(job.params.get("start")), span=(0.6, 0.95))
+    except Exception as exc:
+        untouched = not pinned or _apply_refused(exc, instance)
+        if pinned and untouched:
+            # the agent refused the new container or could not get its image: nothing changed
+            _apply_pin(instance, plan["current"])
+            meta = dict(instance.modpack_meta or {})
+            meta["history"] = [h for h in meta.get("history", []) if h.get("job") != str(job.id)]
+            instance.modpack_meta = meta
+            instance.save(update_fields=["modpack_meta"])
+            ctx.log("The update was not applied: the previous release is pinned again")
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=untouched)
+        raise
     return {
         "from": plan["current"]["modpack_version_id"],
         "to": plan["target"]["modpack_version_id"],
@@ -151,15 +171,29 @@ def modpack_rollback(job: Job, ctx: JobContext) -> dict[str, Any]:
         raise ApiError("Only successful pre-update backups can be used to roll back", code="not_rollback_point")
     require_local_backup(backup, instance)
     client = AgentClient(instance.node)
-    was_running = ensure_stopped(instance, ctx)
-    ctx.progress(0.05, "Creating a safety backup of the current state")
-    run_backup(
-        instance, ctx, name="Before modpack rollback", kind=BackupKind.PRE_RESTORE, user=job.user, span=(0.05, 0.4), job=job
-    )
-    ctx.progress(0.45, f"Restoring '{backup.name}'", force=True)
-    op = client.restore_backup(instance.id, backup.snapshot_id)
-    client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.45, 0.35))
-    _apply_pin(instance, before)
-    instance.refresh_from_db()
-    apply_container(instance, ctx, start=was_running, span=(0.85, 0.98))
+    was_running = False
+    progress = Progress(RESTORE_UNTOUCHED)
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        ctx.progress(0.05, "Creating a safety backup of the current state")
+        run_backup(
+            instance, ctx, name="Before modpack rollback", kind=BackupKind.PRE_RESTORE, user=job.user, span=(0.05, 0.4), job=job
+        )
+        ctx.check_cancelled()
+        ctx.progress(0.45, f"Restoring '{backup.name}'", force=True)
+        progress.requested()
+        op = client.restore_backup(instance.id, backup.snapshot_id)
+        progress.running()
+        client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.45, 0.35))
+        progress.changed()
+        _apply_pin(instance, before)
+        instance.refresh_from_db()
+        if was_running:
+            starting_again(ctx, lambda: apply_container(instance, ctx, start=True, span=(0.85, 0.98), admit=False))
+        else:
+            apply_container(instance, ctx, start=False, span=(0.85, 0.98))
+    except Exception as exc:
+        # after the restore the files are the old release's: never start the new release's container on them
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=progress.untouched(exc))
+        raise
     return {"restored_backup": str(backup.id), "pinned": before.get("modpack_version_id")}

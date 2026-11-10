@@ -90,7 +90,11 @@ class InstanceSpec(BaseModel):
 class ApplySpecRequest(BaseModel):
     spec: InstanceSpec
     start: bool = False
-    pull: Literal["missing", "always", "never"] = "missing"
+    # missing: pull only when the tag is not on this host; always: pull, failing the apply when
+    # that fails; newer: try to pull (bounded in time) and use the local image when that fails,
+    # at most once per tag per 24 h (docker_ops.PULL_CHECK_INTERVAL; any successful pull of the
+    # tag counts, a failed one does not); never: use the local image only
+    pull: Literal["missing", "always", "newer", "never"] = "missing"
 
 
 class StopRequest(BaseModel):
@@ -122,6 +126,8 @@ class WriteTextRequest(BaseModel):
     path: str
     content: str = Field(max_length=10 * 1024 * 1024)
     create_only: bool = False
+    # None: UTF-8, except for an existing *.properties file stored in ISO-8859-1 (see files/text)
+    encoding: Literal["utf-8", "iso-8859-1"] | None = None
 
 
 class RetireRequest(BaseModel):
@@ -169,6 +175,11 @@ class ForgetRequest(BaseModel):
 class CloneRequest(BaseModel):
     target_instance_id: UUID
     exclude_worlds: bool = False
+    # With exclude_worlds: the world of this level-name (and layout) is left out, exactly its
+    # folders at the top of the server folder. Without level_name the folders world,
+    # world_nether and world_the_end are left out at every depth (agents before 2026-11).
+    level_name: str | None = Field(default=None, min_length=1, max_length=200)
+    layout: Literal["vanilla", "bukkit"] | None = None
 
 
 class PrepareInstanceRequest(BaseModel):

@@ -1,6 +1,8 @@
 # Development status
 
-_Last updated: 2026-11-10 (release on branch `feature/reset-world`: three containers, upgrade script,
+_Last updated: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
+`fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
+all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
 stopped servers without a container, stop safety, Unraid shutdown hook, btrfs snapshots without
 `CAP_SYS_ADMIN`, backup safeguards, Reset world). Before that: 2026-11-06 (session 2), 2026-11-03 (end
 of session 1)._
@@ -26,6 +28,206 @@ server, and validated on Unraid are **different** levels.
   the `docker` stand-in. A final gate run with real containers was still in progress when this file
   was written; its results are not in here.
 
+* **The audit fixes of 2026-11-09 are unit-tested only.** Four packages (agent, backend lifecycle,
+  backend web, frontend) on branch `fix/audit-remaining`: nothing of them has run on real Docker, with
+  a real Minecraft server, in a browser, or on the Unraid host. Section "Audit of 2026-11-09" lists
+  the findings and what is left of them.
+
+## Audit of 2026-11-09: open findings fixed (branch `fix/audit-remaining`)
+
+The audit round of 2026-11-09 left open findings in four work lists (`audit-2026-11-09/briefs/open-
+{agent,backend-lifecycle,backend-web,frontend}.md`, next to the checkout, outside the repository;
+each heading is one finding with its id). They were fixed in parallel by package. How the result
+works is in ARCHITECTURE.md ("Schedules", "Request limits and file transfers", "Container
+lifecycle", decisions 3 and 7); how to use it is in DEPLOYMENT.md and docs/UNRAID.md (section 10,
+"When the cache drive died").
+
+**Verification level of every row below: unit/API tests only** (the new test files are listed in
+TESTING.md, "Tests of the audit fixes of 2026-11-09"). Suites after the four packages were joined
+(2026-11-10, with `tests/test_contracts_2026_11_10.py` for the joins between the layers): backend
+1565 passed, agent 991 passed and 45 skipped, frontend 327 tests. Not run: the
+integration tests, `panel-acceptance.sh`, `upgrade-rehearsal.sh`, a browser pass, anything on
+Unraid. In particular never run for real: `backup-db.sh` against a real postgres container, the
+cache-drive recovery of docs/UNRAID.md section 10, `adopt_backups` against a real restic
+repository, `pull="newer"` against Docker Hub (rate limits on frequent starts are unknown), the
+status ping against real servers (vanilla, Paper, modded), `restart: always` after a real
+reboot, the memory check against a real host's RAM, and daylight saving time on a real night.
+
+| Package | Closed | Closed with a remaining point (list below) | Partly done |
+|---|---|---|---|
+| agent | agent-docker#6, agent-files#1, agent-files#4, agent-files#6, agent-files#7, agent-files#8, agent-backups#7, agent-backups#8, live-ops#7 | agent-docker#3, agent-docker#5, agent-files#3, agent-files#5, agent-backups#4, agent-backups#6, backend-content#3 | agent-docker#4 |
+| backend-lifecycle | backend-jobs#1, backend-backups#3, backend-jobs#2, scenario-boot-shutdown#5, backend-jobs#5, backend-lifecycle#4, backend-backups#4, backend-modpacks#1, scenario-boot-shutdown#7, scenario-data#4, backend-jobs#6, backend-backups#8, backend-jobs#3, backend-lifecycle#8, backend-jobs#7, live-ops#8, frontend-create-admin#1, scenario-boot-shutdown#6 | backend-backups#5, deploy#5, live-ops#5 | backend-jobs#4, backend-lifecycle#2, scenario-boot-shutdown#2, backend-backups#6 |
+| backend-web | backend-api#1, backend-api#2, backend-api#4, backend-api#6, backend-api#7, backend-realtime#3, backend-realtime#4, backend-content#5, backend-content#6, backend-content#7, backend-modpacks#3, backend-auth#4, frontend-instance-b#3 | backend-api#3, backend-realtime#6, backend-content#1, backend-content#4, backend-modpacks#4, backend-modpacks#5 | — |
+| frontend | frontend-core#1, frontend-core#3, frontend-core#4, frontend-core#5, frontend-core#6, frontend-instance-a#6, frontend-instance-b#1, frontend-instance-b#2, frontend-create-admin#3, frontend-create-admin#5, backend-auth#5 | frontend-create-admin#2, frontend-create-admin#6, frontend-create-admin#7, frontend-create-admin#8 | frontend-instance-b#5 |
+
+What is left (checked against the code when this was written):
+
+* **Schedules and jobs.** backend-jobs#4: jobs still queued when the panel went down are sent
+  again at the next start if they are younger than 2 hours (only schedules have the misfire
+  limit); older ones are failed by the watchdog as `not_started`. Missed backups of all servers
+  are queued in the same tick once each server has settled. The "Hourly snapshot" template still
+  runs at minute 0 (the nightly backup at 04:xx no longer collides: the later one waits).
+* **Memory.** backend-lifecycle#2: creating or resizing a server only checks one container against
+  the node's RAM, not the sum; `AGENT_MAX_MEMORY_MB` is still 65536. frontend-create-admin#2: the
+  commit bar in the wizard and the Resources tab compares with the whole RAM, the start check with
+  RAM minus `memory_reserve_mb`, so a start can be refused while the bar shows no warning.
+  frontend-create-admin#6: a user without `system.settings` sees 4096 MB in the wizard while the
+  panel's default memory applies. (A create with "start now" now gets the Start anyway dialog: see
+  "Review of the audit fixes", finding 13.)
+* **Boot.** scenario-boot-shutdown#2: without the shutdown hook Docker still starts every server
+  that was running at the same moment (the servers' restart policy is still `unless-stopped`);
+  the stagger and the memory check only apply to servers the hook marked. live-ops#5: the agent of
+  an additional node (`docker-compose.node.yml`) and the optional `redis` container still use
+  `unless-stopped`; there is no "started outside the panel" state.
+* **Backups and recovery.** backend-backups#5 / deploy#5: `adopt_backups` only reads repositories
+  of servers the database knows, so it needs the database dump first; a server created after the
+  last dump can only be restored with restic by hand. The dump of `backup-db.sh` is not encrypted
+  and the `.env` copy is clear text (0600 in a 0700 folder). The agent still overwrites
+  `<data root>/agent/restic-password` when the password changes. backend-backups#6: the agent
+  still accepts restic exit code 3 for `forget`. agent-backups#4: the start-up unlock uses
+  `restic unlock --remove-all` (safe only while no other host uses the repository); `ls`,
+  `snapshots`, `stats`, `dump` and `restore` rely on unlock-and-retry instead of `--retry-lock`.
+  agent-backups#6: a failed removal of the old tree after a single-path restore is only logged.
+  agent-docker#3: the panel shows no warning when the agent lost an operation while world saving
+  was paused (the agent's marker switches it on again by itself).
+* **Agent.** agent-docker#5: a CPU limit above the node's CPUs is refused when the setting is
+  saved (when the node can be asked) and by the agent's apply (`cpu_limit`; a job treats it, like
+  `create_failed`, as "nothing changed" and starts the server again); the UI still allows up to
+  256; if the old container was removed but the rename of the new one fails (`rename_failed`), no
+  container is left and the server is left stopped (the next start creates one). agent-docker#4: no "check for image updates" action, no indicator that a newer
+  build is waiting, no weekly check; images are only refreshed at starts. agent-files#3: no list
+  of files left out of a zip; two names that differ only in invalid bytes can give duplicate
+  entries. agent-files#5: an import refused before the agent's operation started (the server is
+  running, another job holds it) now deletes its uploaded `.mcpanel-import-*` file; one left by a
+  job that was cut off is still not removed by the agent's start-up sweep. backend-content#3: a blocking hash request still holds an agent thread for up to 240 s.
+* **Web.** backend-api#3: a raw single-file upload (DRF `FileUploadParser`) still keeps two copies
+  on disk; `MCPANEL_UPLOAD_TMP` is not passed by the compose file (default in the container's
+  writable layer) and nothing empties it at start (since the review it is created at start by the
+  web process, finding 23); the comment in `settings.py` names
+  `apps/core/middleware.UPLOAD_PATH`, which is in `apps/core/asgi.py`. backend-realtime#6: the
+  status ping's sample holds about 12 names, so busy servers' player history misses players (the
+  names now go through the same name check as the RCON `list` parser). backend-content#1: disabled pack jars are kept out only for the pinned release (a
+  modpack update installs the new release as the pack ships it); `CF_EXCLUDE_MODS` /
+  `MODRINTH_EXCLUDE_FILES` are not used. backend-content#4: a bulk update is still one web request
+  (no job, no lock, no pre-update backup, no rollback); it re-checks the lock between batches of
+  50. backend-modpacks#5: `CF_API_KEY` still goes to every CurseForge modpack container.
+* **Frontend.** frontend-instance-b#5: the console has a Reconnect button while live, but no
+  automatic stall detection. frontend-create-admin#8: import does not read the world's version
+  (nothing is preselected instead). frontend-create-admin#7: the Java override is cleared on every
+  change of software or version, but a too-low Java is not refused.
+* **Joined 2026-11-10 (contracts between the layers).** Fixed while joining the packages, all
+  unit-tested only: the panel turns the agent's 415 `not_utf8` into the editor's read-only answer
+  (`binary_or_non_utf8`, lossy preview) and writes a `*.properties` file the agent keeps in
+  ISO-8859-1 back in ISO-8859-1 with only the characters it cannot store as `\uXXXX`; the mods
+  inventory shows jars over 2 GiB as unidentified (`too_large`) and an agent busy hashing as
+  pending, and asks for `.jar` / `.jar.disabled` only; the Overview and Dashboard count players by
+  status ping (no more RCON `list` every 20 s while a page is open); the reconciler retries the
+  keyless CurseForge pinning (once a minute per server); a typed `stop` is shown once in the
+  console (the notice carries the command's `id`); clone sends `level_name` only to agents with
+  `clone_level_name` and warns otherwise; `memory_reserve_mb` and a valid `default_bind_ip` are
+  checked when System settings are saved (and nothing is saved when one value is refused);
+  daylight saving: a doubled fall-back time runs once only for schedules whose hour field names
+  hours; `*` or step hour fields run on real elapsed time through the doubled hour. The test fake
+  agent (`tests/conftest.py`) now answers like the current agent (all four features, strict text
+  decoding); tests of older agents say so.
+
+### Review of the audit fixes (2026-11-10)
+
+A code review of the tree above (frozen copy `audit-2026-11-09/r3-src`, reproductions in
+`audit-2026-11-09/work/review-r3/`) found 22 points, and a real-stack test of the same frozen copy
+(logs in `audit-2026-11-09/r3-e2e/logs/`) six more (23-28). All were taken; none was rejected.
+**Verification level: unit/API tests only**, each new test checked by mutation (the fix taken out
+on a scratch copy, the test fails; runners in `/tmp/r3be/tools` and `/tmp/r3mut/tools` on the
+desktop, not kept). Nothing of this round has run on real Docker, in a browser or on Unraid; the
+real-stack findings were fixed from their logs, not re-run. New test files: TESTING.md, "Tests of
+the audit fixes". Suites afterwards: backend 1617 passed (2 skipped: no shellcheck), agent 1049
+passed and 45 skipped, frontend 330 tests; ruff, `tsc -b`, lint and the build clean.
+
+* **1 (blocker) pack files.** Deleting or renaming a folder (`mods/`, `config/`) in the file manager
+  recorded every manifest path below it as removed, so itzg never reinstalled them. Now only a
+  single `.jar` directly in `mods/` or `plugins/` is recorded (`packfiles.recordable`): disabled,
+  deleted or replaced on the Mods tab, or deleted / renamed alone in the file manager; never
+  folders, config files, several files at once, or an operation that timed out (outcome unknown).
+  The Modpack tab lists the record ("Removed pack files", `GET /modpack/removed-files`) with "Let
+  the pack reinstall them" (`DELETE`, audited `modpack.removed_files_cleared`; the configuration
+  revision changes, so the next restart recreates the container).
+* **2** The upload gate parses cookies with Django's `parse_cookie`: a JSON cookie of another app
+  in front no longer hides the session (signed-in users got 413 above 25 MB).
+* **3** Editing a schedule resets `deferred_at` as well as `next_run_at`.
+* **4** A run whose wait reached 60 minutes is given up before it runs (also after downtime), and a
+  waiting power action is "Missed" when the panel was restarted while it waited and the wait is
+  past the 10-minute grace. Deviation from the review's wording: the grace is not applied to every
+  wait of a power action, only to one the panel was down for (`runtime_started_at`); otherwise a
+  restart that waits 20 minutes for a backup would no longer run at all.
+* **5, 6a, 6b, 10, 12 (agent tests).** The fake restic records start and end times (no repository
+  command before its start-up unlock ended); the fake Docker removes an image with one tag like
+  Docker (the tagged-image guard is what keeps it); the mountpoint check before `zfs destroy`; the
+  sweep's age and busy checks for siblings, staging/ and trash/ (and `O_NOFOLLOW`); the clean-up
+  after a failed create, remove or rename.
+* **6c, 7 (tests).** The modpack rollback counts its restore as a change; restore, software and
+  modpack updates start a running server again without the memory check; a recreating restart
+  checks memory before it stops; a job marked as failed after its stop leaves the server stopped
+  and drops the resume mark.
+* **8** The start-up sweep keeps and reports both halves of an interrupted swap (convert +
+  preconvert, restore-<t> + old-<t>, staging restore + trash pre-restore, rollback + old), whatever
+  the server folder holds. Before, both copies were deleted once the folder had been recreated.
+* **9** The sweep renames each leftover to a unique `*discard-<hex>` name (inode checked) before it
+  deletes it, so a clone starting into the fixed staging name is never reached.
+* **11** Deleting a server and removing its container (archive, migration) also remove a stale
+  `<name>-replacement` container, under the instance lock.
+* **13** Memory: a resume after boot that gives up for memory sends a `job.failed` notification
+  (scheduled starts already did, after their 60-minute wait; now tested). Creating a server that
+  starts, a software or modpack update with "start afterwards" of a stopped server, recreating a
+  running server and moving a running server are checked when requested (409
+  `insufficient_memory`) and take `allow_overcommit`; the frontend asks "Start anyway?" for all of
+  them (`lib/power.ts`: `postAllowingOvercommit`, `postOrDecline`). A migration also checks the
+  target node in the job, before anything is stopped or copied.
+* **14** A recreate (restart with changes, Recreate) and a world reset remember that they stopped
+  the server (`stopped_server`).
+* **15** A worker stop is reported as an interruption, not as "marked as failed" (start_again, world
+  reset). Every step that starts a server again goes through `handlers.starting_again`: once the
+  node works on that start, an interrupted job no longer records the server as stopped.
+* **16** `create_failed` counts as "nothing changed" only with agents that have `pull_newer` (older
+  agents remove the old container first).
+* **17** A restore cut off by a panel stop after its request went out says in the log and in the
+  job's error that the files may be the backup's while the software is the newer one, and to
+  restore the backup again or set the versions first.
+* **18** More than 25 MB needs an active user and a session valid for the current password
+  (session auth hash): the session as before, then one database read for the user.
+* **19** A CurseForge key with a character a header cannot carry is refused as
+  `invalid_curseforge_key` without asking CurseForge (also one already in the settings: 503 with
+  that code instead of a 500).
+* **20** The file editor writes `server.properties` as the Properties tab does: ASCII with
+  `\uXXXX` (also through an older agent, which now reads an ISO-8859-1 `*.properties` exactly
+  instead of offering a lossy copy), ISO-8859-1 when the agent keeps it so.
+* **21** Test that a download the browser leaves closes the agent's response itself.
+* **22 (docs)** docs/UNRAID.md section 2 and DEPLOYMENT.md ("The data folder is root-only after the
+  upgrade"): the 0750 data root ends SMB, file-manager, other-container and non-root access.
+* **23 (high, real stack)** Every request body over 5 MB was a 500 on the built image: importing the
+  settings during the build (collectstatic, root) created `/tmp/mcpanel-uploads` as root 0700. The
+  settings create nothing now; the web process (`mcpanel/asgi.py`) and the entrypoint create the
+  folder as UID 10001; `/api/health` reports `"uploads": "error"` while it is not writable; the
+  Dockerfile fails the build if the folder exists after collectstatic; `panel-acceptance.sh` sends
+  a 10 MB body and checks the folder's owner (the script was not run).
+* **24** The agent, retire and backup-browse integration tests check the data root through `docker
+  exec` with `MCPANEL_IT_AGENT_CONTAINER`, or skip with a message (not run).
+* **25** Streamed downloads (file, zip, backup file) close their source when the answer ends, also
+  when the client goes away: the file closes at once, the zip producer stops, restic gets SIGINT.
+* **26** "Leave out worlds" in a clone also leaves out every top-level folder that directly holds a
+  `level.dat` and the `.mcpanel-world-*` folders (listed in `skipped_worlds`); the hint says so.
+* **27** `pull="newer"` asks the registry at most once per tag per 24 h (`image-checks.json` in the
+  agent's state folder; a failed check is not recorded). The superseded image stayed because
+  Docker's containerd image store (new Docker 29 installs) shows it without RepoTags or
+  RepoDigests: its repository now comes from the reference the agent knew it by. That cause was
+  found on a similar image on the test host, not reproduced with itzg; Unraid's default store
+  keeps RepoDigests.
+* **28** `backup-db.sh` runs one at a time per destination (lock folder with the pid; a dead
+  holder's lock is taken over) and names a second dump of the same second `_2`, `_3`.
+
+Still open from this round: superseded runtime images are only removed during an apply, so an
+image whose last container went away through delete, archive or retire can stay until a later
+apply lists it.
+
 ## Last verified working state
 
 Suites of this tree, run on the desktop on 2026-11-10. The restic, btrfs and zfs binaries are not
@@ -34,9 +236,9 @@ separately in a VM, see the release section).
 
 | Suite | Result |
 |---|---|
-| `backend: pytest -q -m "not integration"` | **1377 passed** (10 integration tests deselected) |
-| `agent: pytest -q` | **867 passed, 43 skipped** |
-| `frontend: npx vitest run` | **266 tests** passed |
+| `backend: pytest -q -m "not integration"` | **1565 passed**, 2 skipped (shellcheck), 10 integration tests deselected (2026-11-10, after the audit packages were joined) |
+| `agent: pytest -q` | **991 passed, 45 skipped** (2026-11-10, after the join) |
+| `frontend: npx vitest run` | **327 tests** passed (2026-11-10, after the join); `tsc -b`, lint and build clean |
 | `backend: … -m integration` | Run one file at a time against a real agent on the desktop, before the last round of fixes: `test_integration_agent.py` 1 passed (75-86 s), `test_integration_retire.py` 1 passed (89-98 s), `test_integration_world_reset.py` 2 passed (103-114 s). The content, backup-browse, import and btrfs-snapshot files were **not** re-run for this release (last run 2026-11-06 in the sandbox) |
 | `.github/scripts/panel-acceptance.sh` (real containers) | 29 checks passed, by hand on the desktop, before the last changes to the supervisor and to the script |
 | `.github/scripts/upgrade-rehearsal.sh` (real containers, 7 → 3 → 7 → 3) | passed, by hand on the desktop, before the last fixes to `upgrade.sh` and to the script |
@@ -555,6 +757,12 @@ backup-browse, import and btrfs-snapshot integration files were not.
 
 ## Next recommended tasks (in order)
 
+0. The audit fixes of 2026-11-09 (branch `fix/audit-remaining`): run the integration tests and
+   `panel-acceptance.sh` on the final tree, a browser pass over the changed screens (memory dialog
+   and bar, System settings reserve, schedules list, Files with non-UTF-8 files and names, Mods tab
+   of a modpack server, console `stop`), one real `backup-db.sh` run and the recovery of
+   docs/UNRAID.md section 10 on a test stack, then the remaining points in "Audit of 2026-11-09".
+
 1. Read the result of the final gate run (real containers, after the last fixes to `upgrade.sh`) and
    record it under "Release of 2026-11-10".
 2. Upgrade the owner's Unraid server: `./scripts/upgrade.sh dry-run`, then the command it prints
@@ -628,7 +836,18 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   (a server's Docker stop timeout must fit inside those 30 s) and the `stopping_docker` hook.
 * A container stopped with `docker stop` (also from Unraid's Docker tab or a backup plugin) counts as
   stopped by hand: `restart: unless-stopped` does not start it again, not even after a reboot. That is
-  why the hook never uses `docker stop` while the panel runs.
+  why the hook never uses `docker stop` while the panel runs, and why the three platform containers
+  use `restart: always` since the audit fixes of 2026-11-09 (Minecraft containers still use
+  `unless-stopped`).
+* Django's ASGI handler reads the whole request body to disk before any middleware runs, and uvicorn
+  has no body limit: a size limit in a Django middleware only picks the status code after the upload
+  is on disk. Limits belong in front of Django (`apps/core/asgi.py`).
+* Under ASGI every request runs in its own thread, so `CONN_MAX_AGE` > 0 in the web process leaks one
+  PostgreSQL connection per request until the garbage collector closes it.
+* Celery beat adds its intervals in its own time zone as wall-clock time: with a DST zone it skipped
+  an hour of ticks on the fall-back night. Beat runs in UTC; cron schedules compute their own times.
+* restic never removes a stale lock on its own; a killed restic blocks its repository until
+  `restic unlock`. Stop restic with SIGINT so it removes its own lock.
 * docker-py's `containers.create()` rejects `stop_timeout`; only the low-level `create_container()`
   sets Docker's stop timeout (`docker_ops.create_container`).
 * The itzg runner tries `rcon-cli stop` once on SIGTERM. Before the server has opened RCON that fails,

@@ -24,7 +24,15 @@ from apps.instances.models import Instance
 from apps.nodes.client import AgentClient
 
 NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,16}$")
-LIST_RE = re.compile(r"There are (\d+)(?: of a max of| out of maximum| of a max) (\d+) players online[:.]?\s*(.*)", re.I | re.S)
+# The count line of `list`: vanilla 1.13+ ("There are 2 of a max of 20 players online: A, B"; 1.13-1.15
+# "of a max 20"), EssentialsX ("There are 2 out of maximum 20 players online." and, with vanished
+# players, "There are 2/1 out of maximum 20 ...": visible/hidden) and vanilla/CraftBukkit 1.12 and
+# older ("There are 2/20 players online:", the names in a second message).
+COUNT_RE = re.compile(r"There (?:are|is) (\d+)(?:/(\d+))? (?:of a max(?: of)?|out of maximum) (\d+) players? online[:.]?", re.I)
+LEGACY_COUNT_RE = re.compile(r"There (?:are|is) (\d+)/(\d+) players? online[:.]?", re.I)
+# EssentialsX lists players by group, one "group: names" line each, and marks names ("[AFK]Bob")
+_GROUP_LABEL = re.compile(r"^[^:,\[\]]{1,48}:\s*")
+_NAME_TAGS = re.compile(r"^(?:\[[^\]]{0,24}\]\s*|[~*+]\s*)+")
 FILES = {"whitelist": "whitelist.json", "ops": "ops.json", "bans": "banned-players.json", "ip_bans": "banned-ips.json"}
 COLOR_CODES = re.compile(r"§.")
 
@@ -61,13 +69,35 @@ def online_players(instance: Instance, *, max_age: int = 20) -> dict[str, Any]:
     return result
 
 
+def parse_list(out: str) -> dict[str, Any]:
+    """Online count, maximum and player names from the output of `list` (see COUNT_RE).
+
+    Only valid player names are kept: group labels, AFK/vanish markers and nicknames that are no
+    Minecraft names (EssentialsX shows display names) are dropped.
+    """
+    m = COUNT_RE.search(out)
+    if m:
+        online = int(m.group(1)) + int(m.group(2) or 0)
+        maximum = int(m.group(3))
+    else:
+        m = LEGACY_COUNT_RE.search(out)
+        if not m:
+            return {"online": None, "max": None, "players": [], "raw": out[:500]}
+        online, maximum = int(m.group(1)), int(m.group(2))
+    names: list[str] = []
+    for index, line in enumerate(out[m.end() :].splitlines()):
+        line = line.strip()
+        if index > 0 or not line[:1].isalnum() or ":" in line.split(",", 1)[0]:
+            line = _GROUP_LABEL.sub("", line, count=1)
+        for token in line.split(","):
+            name = _NAME_TAGS.sub("", token.strip()).strip()
+            if NAME_RE.match(name) and name not in names:
+                names.append(name)
+    return {"online": online, "max": maximum, "players": names}
+
+
 def _query_online(instance: Instance) -> dict[str, Any]:
-    out = rcon(instance, "list")
-    m = LIST_RE.search(out)
-    if not m:
-        return {"online": None, "max": None, "players": [], "raw": out[:500]}
-    names = [n.strip() for n in m.group(3).replace("\n", ",").split(",") if n.strip()]
-    return {"online": int(m.group(1)), "max": int(m.group(2)), "players": names}
+    return parse_list(rcon(instance, "list"))
 
 
 def _read_json(instance: Instance, path: str) -> list[dict[str, Any]]:
@@ -98,7 +128,7 @@ def offline_uuid(name: str) -> str:
 def lookup_profile(instance: Instance, name: str) -> dict[str, str]:
     online_mode = True
     try:
-        raw = AgentClient(instance.node).read_text(instance.id, "server.properties")["content"]
+        raw = properties.read_file(AgentClient(instance.node), instance.id) or ""
         online_mode = properties.parse(raw).get("online-mode", "true").lower() != "false"
     except ApiError:
         pass

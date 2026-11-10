@@ -40,6 +40,9 @@ import {
 import { Advanced, ChoiceCard, describedBy, Field } from "./WizardBits";
 import {
   CATEGORY_TYPES,
+  CF_LOADER_LABELS,
+  CF_LOADERS,
+  type CfLoader,
   type Derived,
   type FieldErrors,
   JAVA_VERSIONS,
@@ -256,6 +259,14 @@ function StandardSoftware({
     typeInfo?.loader_label ??
     (category === "plugins" ? "Build" : "Loader version");
 
+  if (state.category === "import" && !d.serverType) {
+    return (
+      <Section title="Minecraft version">
+        <p className="text-sm text-muted-foreground">Choose the software of the imported server first.</p>
+      </Section>
+    );
+  }
+
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4">
       {types.length > 1 && (
@@ -285,6 +296,8 @@ function StandardSoftware({
                       serverType: v as ServerType,
                       minecraftVersion: null,
                       loaderVersion: null,
+                      // a Java picked for the previous choice may not run the new one
+                      javaOverride: "",
                     })
                   }
                   title={info?.label ?? TYPE_LABELS[t]}
@@ -329,7 +342,7 @@ function StandardSoftware({
                   id={`${uid}-mc`}
                   value={d.minecraftVersion}
                   onChange={(v) =>
-                    patch({ minecraftVersion: v, loaderVersion: null })
+                    patch({ minecraftVersion: v, loaderVersion: null, javaOverride: "" })
                   }
                   options={versionOptions}
                   loading={versions.isLoading}
@@ -503,6 +516,26 @@ function CurseForgeByUrl({
             />
           </Field>
         </div>
+        <Field
+          id={`${base}-loader`}
+          label="Mod loader"
+          hint="Shown on the pack's CurseForge page. The Mods tab uses it to find compatible mods."
+          error={errors.cfLoader}
+          className="max-w-xs"
+        >
+          <Select value={state.cfLoader} onValueChange={(v) => patch({ cfLoader: v as CfLoader })}>
+            <SelectTrigger id={`${base}-loader`} className="w-full" aria-invalid={!!errors.cfLoader || undefined}>
+              <SelectValue placeholder="Choose the loader" />
+            </SelectTrigger>
+            <SelectContent>
+              {CF_LOADERS.map((l) => (
+                <SelectItem key={l} value={l}>
+                  {CF_LOADER_LABELS[l]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
         <p className="text-xs text-muted-foreground">
           Better MC: use the CurseForge editions (BMC4 Forge, BMC2 Fabric). The
           Modrinth editions need dozens of files that can only be downloaded by
@@ -591,7 +624,7 @@ function ModpackBrowse({
     [patch, state.projectId],
   );
   const onRelease = useCallback(
-    (r: ReleaseData) => patch({ versionId: r.id }),
+    (r: ReleaseData) => patch({ versionId: r.id, javaOverride: "" }),
     [patch],
   );
 

@@ -15,10 +15,10 @@ import { qk } from "@/lib/queries";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPos } from "./code-editor";
-import { baseName, countLines, parentPath, TEXT_EDIT_LIMIT, utf8Length } from "./file-utils";
+import { baseName, countLines, isNonUtf8, parentPath, TEXT_EDIT_LIMIT, utf8Length, type NonUtf8Flags } from "./file-utils";
 import { UnsavedChangesDialog, useUnsavedChangesGuard } from "./use-unsaved-guard";
 
-interface TextFile {
+interface TextFile extends NonUtf8Flags {
   path: string;
   content: string;
   size: number;
@@ -72,6 +72,10 @@ export function FileEditorDialog({
   const blocker = useUnsavedChangesGuard(dirty);
   const live = LIVE_STATUSES.includes(instance.status);
   const name = baseName(target.path);
+  // Not valid UTF-8: the text shown is a lossy decoding, and saving it would rewrite the file with
+  // replacement characters. Open it read-only and offer the download instead.
+  const nonUtf8 = isNonUtf8(file.data);
+  const editable = canWrite && !nonUtf8;
 
   const save = useMutation({
     mutationFn: (content: string) =>
@@ -87,7 +91,7 @@ export function FileEditorDialog({
   });
 
   const doSave = () => {
-    if (!canWrite || !dirty || tooLarge || save.isPending) return;
+    if (!editable || !dirty || tooLarge || save.isPending) return;
     save.mutate(text);
   };
 
@@ -120,7 +124,7 @@ export function FileEditorDialog({
             <DialogTitle className="flex min-w-0 items-center gap-2">
               <FileText className="size-4 shrink-0 text-muted-foreground" aria-hidden />
               <span className="truncate">{name}</span>
-              {!canWrite && (
+              {!editable && (
                 <Badge variant="outline" className="shrink-0">
                   <Lock /> Read-only
                 </Badge>
@@ -134,7 +138,20 @@ export function FileEditorDialog({
             <DialogDescription className="truncate font-mono text-xs">/{target.path}</DialogDescription>
           </DialogHeader>
 
-          {live && canWrite && (
+          {nonUtf8 && (
+            <div
+              className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200"
+              role="note"
+            >
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+              <p>
+                This file is not valid UTF-8 text (it may be binary or use another encoding), so it is opened read-only: saving
+                it here would replace the characters that cannot be shown. Download it to edit it with an editor that keeps its
+                encoding.
+              </p>
+            </div>
+          )}
+          {live && editable && (
             <div className="flex gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
               <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden />
               <p>
@@ -172,12 +189,12 @@ export function FileEditorDialog({
             >
               <RefreshCw className={cn(file.isFetching && "animate-spin")} /> Reload
             </Button>
-            <Button size="sm" variant="outline" asChild>
+            <Button size="sm" variant={nonUtf8 ? "default" : "outline"} className={cn(nonUtf8 && "ml-auto")} asChild>
               <a href={downloadUrl(`/instances/${instance.id}/files/download`, { path: target.path })} download={name}>
                 <Download /> Download
               </a>
             </Button>
-            {canWrite && (
+            {editable && (
               <Button size="sm" className="ml-auto" onClick={doSave} disabled={!dirty || tooLarge || save.isPending}>
                 {save.isPending ? <Loader2 className="animate-spin" /> : <Save />} Save
                 <kbd className="ml-1 hidden rounded border border-primary-foreground/30 px-1 font-sans text-[10px] sm:inline">
@@ -200,8 +217,8 @@ export function FileEditorDialog({
               <CodeEditor
                 className="flex-1"
                 value={text}
-                onChange={canWrite ? setDraft : undefined}
-                readOnly={!canWrite}
+                onChange={editable ? setDraft : undefined}
+                readOnly={!editable}
                 ariaLabel={`Contents of ${name}`}
                 jumpTo={target.line ? { line: target.line, key: target.key } : null}
                 onCursor={setCursor}
@@ -220,7 +237,7 @@ export function FileEditorDialog({
                 {formatBytes(bytes)} / {formatBytes(TEXT_EDIT_LIMIT, 0)} limit
               </span>
               <span className="hidden sm:inline">Modified {formatDateTime(file.data.modified)}</span>
-              {canWrite && <span className="ml-auto hidden md:inline">Ctrl/⌘+S saves</span>}
+              {editable && <span className="ml-auto hidden md:inline">Ctrl/⌘+S saves</span>}
             </div>
           )}
         </DialogContent>

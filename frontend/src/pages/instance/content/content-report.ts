@@ -1,5 +1,6 @@
 /** Turns content API results into the report card shown after a change. */
-import type { InstallResponse, MissingDependency, UpdateResponse, UploadResponse, nouns } from "./content-api";
+import { errorMessage } from "@/lib/api";
+import type { BatchedUpdateResult, InstallResponse, MissingDependency, UpdateResponse, UploadResponse, nouns } from "./content-api";
 
 export interface ReportLine {
   tone: "ok" | "warn" | "error" | "muted";
@@ -44,6 +45,7 @@ export function reportFromUpdate(res: UpdateResponse): ContentReport {
   if (skipped) parts.push(`${skipped} skipped`);
   if (res.failed) parts.push(`${res.failed} failed`);
   const warnings = res.results.filter((r) => r.warning).map((r) => `${r.filename}: ${r.warning}`);
+  if (res.stopped) warnings.unshift(`Stopped part-way, the remaining files were skipped: ${res.stopped}`);
   return {
     title: `Update finished: ${parts.join(", ")}`,
     tone: res.failed ? (res.updated ? "warning" : "error") : res.missing_dependencies.length || warnings.length ? "warning" : "success",
@@ -82,5 +84,18 @@ export function reportFromUpload(res: UploadResponse): ContentReport {
     lines,
     missing: [],
     warnings: res.warnings,
+  };
+}
+
+/** Report for a batched update; a batch that failed as a whole lists the files it did not reach. */
+export function reportFromBatchedUpdate(run: BatchedUpdateResult): ContentReport {
+  const report = reportFromUpdate(run.response);
+  if (!run.error) return report;
+  const reason = `not attempted: batch ${run.failedBatch} of ${run.batches} failed (${errorMessage(run.error)})`;
+  return {
+    ...report,
+    title: `${report.title}; stopped at batch ${run.failedBatch} of ${run.batches}`,
+    tone: run.response.updated ? "warning" : "error",
+    lines: [...report.lines, ...run.notAttempted.map((f) => ({ tone: "error" as const, label: f, detail: reason }))],
   };
 }

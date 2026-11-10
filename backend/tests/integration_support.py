@@ -152,6 +152,86 @@ def backup_repo_dir(node: Any, instance_id: uuid.UUID) -> Path:
     return Path(AgentClient(node).info()["storage"]["backups"]["path"]) / "restic" / str(instance_id)
 
 
+# The agent makes its data root root:root 0750 at every start (mcagent/maintenance.py), so a test
+# run as a normal user cannot look into it. With MCPANEL_IT_AGENT_CONTAINER (the agent's container,
+# which sees the data root at the same path, as the dev and CI setups mount it) the on-disk checks
+# go through `docker exec <container>`; without it they are skipped with a message saying so.
+AGENT_CONTAINER = os.environ.get("MCPANEL_IT_AGENT_CONTAINER", "")
+DISK_SKIP = (
+    "the agent's data root is root:root 0750 and this test runs as uid {uid}: set MCPANEL_IT_AGENT_CONTAINER "
+    "to the agent's container (the checks then run there with docker exec), or run the tests as root"
+)
+
+
+def agent_exec(*argv: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", "exec", AGENT_CONTAINER, *argv], capture_output=True, text=True, check=False)
+
+
+class AgentDisk:
+    """Checks of files under the agent's data root: directly when this process may read them,
+    else in the agent's container (``MCPANEL_IT_AGENT_CONTAINER``), else the test is skipped."""
+
+    @staticmethod
+    def _direct(fn: Any, *args: Any) -> Any:
+        try:
+            return True, fn(*args)
+        except PermissionError:
+            if not AGENT_CONTAINER:
+                pytest.skip(DISK_SKIP.format(uid=os.geteuid()))
+            return False, None
+
+    def exists(self, path: Path) -> bool:
+        direct, value = self._direct(lambda p: p.exists(), path)
+        return value if direct else agent_exec("test", "-e", str(path)).returncode == 0
+
+    def is_dir(self, path: Path) -> bool:
+        direct, value = self._direct(lambda p: p.is_dir(), path)
+        return value if direct else agent_exec("test", "-d", str(path)).returncode == 0
+
+    def stat(self, path: Path) -> tuple[int, int, int]:
+        """(permission bits, uid, gid) of ``path`` (not following a link)."""
+
+        def local(p: Path) -> tuple[int, int, int]:
+            st = p.lstat()
+            return st.st_mode & 0o7777, st.st_uid, st.st_gid
+
+        direct, value = self._direct(local, path)
+        if direct:
+            return value
+        proc = agent_exec("stat", "-c", "%a %u %g", str(path))
+        assert proc.returncode == 0, proc.stderr
+        mode, uid, gid = proc.stdout.split()
+        return int(mode, 8), int(uid), int(gid)
+
+    def owners(self, top: Path) -> list[tuple[str, int, int]]:
+        """(path, uid, gid) of ``top`` and, for a directory, everything below it (links not followed)."""
+
+        def local(t: Path) -> list[tuple[str, int, int]]:
+            paths = [t, *(t.rglob("*") if t.is_dir() and not t.is_symlink() else [])]
+            return [(str(p), p.lstat().st_uid, p.lstat().st_gid) for p in paths]
+
+        direct, value = self._direct(local, top)
+        if direct:
+            return value
+        proc = agent_exec("find", str(top), "-printf", "%p\t%U\t%G\n")
+        assert proc.returncode == 0, proc.stderr
+        return [(p, int(u), int(g)) for p, u, g in (line.split("\t") for line in proc.stdout.splitlines() if line)]
+
+    def names_below(self, top: Path) -> list[str]:
+        def local(t: Path) -> list[str]:
+            return [p.name for p in t.rglob("*")]
+
+        direct, value = self._direct(local, top)
+        if direct:
+            return value
+        proc = agent_exec("find", str(top), "-mindepth", "1", "-printf", "%f\n")
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout.splitlines()
+
+
+disk = AgentDisk()
+
+
 def runtime_owner(node: Any) -> tuple[int, int]:
     """The uid/gid the agent gives server files (the itzg runtime user)."""
     from apps.nodes.client import AgentClient
@@ -161,14 +241,8 @@ def runtime_owner(node: Any) -> tuple[int, int]:
 
 
 def wrong_owner(paths: list[Path], owner: tuple[int, int]) -> list[str]:
-    """The given paths (directories recursively) that are not owned by ``owner``."""
-    bad = []
-    for top in paths:
-        for p in [top, *(top.rglob("*") if top.is_dir() and not top.is_symlink() else [])]:
-            st = p.lstat()
-            if (st.st_uid, st.st_gid) != owner:
-                bad.append(f"{p} is {st.st_uid}:{st.st_gid}")
-    return bad
+    """The given paths (directories recursively) that are not owned by ``owner`` (``disk``)."""
+    return [f"{p} is {uid}:{gid}" for top in paths for p, uid, gid in disk.owners(top) if (uid, gid) != owner]
 
 
 def container_names(instance_id: uuid.UUID) -> str | None:

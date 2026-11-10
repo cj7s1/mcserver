@@ -14,12 +14,15 @@ import {
 import { hasPerm } from "@/lib/queries";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { DISMISS_HINT, powerButtons } from "@/pages/instance/power-controls";
 import { isRunningLike, useServerPower, useUnarchive } from "./server-utils";
 
 /**
  * Per-server quick actions: an inline Start/Stop button (when the user may control the server)
  * plus a menu with restart, console, settings and unarchive. Permission-aware via instance.permissions.
  * Stop and Restart open the same confirmation (with the optional in-game warning) as the server page.
+ * A server that is down but still meant to run (failed, or stopped by itself) and keeps its container
+ * also gets Stop, by the same rule as the server header (`powerButtons(...).dismiss`).
  */
 export function ServerQuickActions({
   instance,
@@ -41,6 +44,7 @@ export function ServerQuickActions({
   const running = isRunningLike(instance);
   const stopping = instance.status === "stopping";
   const busy = !!instance.active_job || power.isPending;
+  const dismiss = powerButtons(instance).dismiss;
   const base = `/servers/${instance.id}`;
 
   return (
@@ -84,6 +88,12 @@ export function ServerQuickActions({
               {!running && !stopping && (
                 <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("start")}>
                   <Play /> Start
+                </DropdownMenuItem>
+              )}
+              {dismiss && (
+                // nobody is online, so there is no countdown to offer (same as the header's Stop)
+                <DropdownMenuItem disabled={busy} onSelect={() => power.mutate("stop")} title={DISMISS_HINT}>
+                  <Square /> Stop
                 </DropdownMenuItem>
               )}
               {running && (

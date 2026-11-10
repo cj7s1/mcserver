@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import mimetypes
 from typing import Any
 
@@ -22,20 +23,23 @@ from apps.catalog.providers import resolve_java
 from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.core.permissions import get_instance_for, require, visible_instances
+from apps.core.streaming import AgentStreamingResponse, read_bytes
 from apps.core.utils import content_disposition
 from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
-from apps.nodes.client import AgentClient
+from apps.nodes.client import FILE_OPERATION_TIMEOUT, AgentClient, AgentTimeout, AgentUnavailable
 from apps.nodes.models import Node
 
-from . import power_warnings, properties, services
+from . import capacity, power_warnings, properties, services
 from .models import Instance, Schedule, Source
 from .serializers import CreateInstanceSerializer, InstanceSerializer, ScheduleSerializer
 from .spec import image_for
 from .world import RESET_KEEP, SEED_MODES
 
 TEXT_EDIT_LIMIT = 5 * 1024 * 1024
+
+log = logging.getLogger(__name__)
 
 
 def _ser(instance: Instance, request: Request) -> dict[str, Any]:
@@ -129,6 +133,11 @@ class InstanceListView(APIView):
         fields["image"] = image_for(java)
         default_mem = 6144 if data["mode"] == "modpack" else int(SystemSetting.get("default_memory_mb") or 4096)
         fields["memory_mb"] = data.get("memory_mb") or default_mem
+        # a server that starts right away must fit into the node's memory (409 insufficient_memory before
+        # anything is created; the client asks "Start anyway?" and sends allow_overcommit)
+        overcommit = capacity.admit_request(
+            Instance(**fields), starts=bool(data.get("start", True)), allow_overcommit=data.get("allow_overcommit")
+        )
 
         requested_port = data.get("game_port")
         try:
@@ -158,7 +167,7 @@ class InstanceListView(APIView):
             title=f"Install {instance.name}",
             instance=instance,
             user=request.user,
-            params={"server_properties": props, "start": data.get("start", True)},
+            params={"server_properties": props, "start": data.get("start", True), **overcommit},
         )
         audit.record(
             "instance.created",
@@ -281,6 +290,11 @@ class PowerSerializer(serializers.Serializer):
     warn_message = serializers.CharField(
         max_length=power_warnings.MESSAGE_MAX, required=False, allow_blank=True, default="", trim_whitespace=True
     )
+    allow_overcommit = serializers.BooleanField(
+        default=False,
+        help_text="start/restart: start even when the server does not fit into the node's memory next to the "
+        "servers running there (otherwise 409 insufficient_memory, with the numbers in details)",
+    )
 
     def validate_warn_message(self, value: str) -> str:
         try:
@@ -308,6 +322,7 @@ class InstancePowerView(APIView):
             request,
             warn_minutes=int(data.get("warn_minutes") or 0),
             warn_message=data.get("warn_message") or "",
+            allow_overcommit=bool(data.get("allow_overcommit")),
         )
         if isinstance(result, dict):
             return Response({"status": result})
@@ -361,8 +376,15 @@ class InstanceActionView(APIView):
             raise ConflictError("Server is already archived", code="archived")
         if action == "recreate" and instance.archived_at:
             raise ConflictError("Unarchive this server before recreating its container", code="archived")
-        job = enqueue(action, title=f"{title}: {instance.name}", instance=instance, user=request.user)
-        audit.record(f"instance.{action}", request=request, instance=instance, target=instance)
+        params: dict[str, Any] = {}
+        if action == "recreate":
+            # a running server is started again from the new container: the same memory check as a start
+            data = request.data if isinstance(request.data, dict) else {}
+            params = capacity.admit_request(
+                instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit")
+            )
+        job = enqueue(action, title=f"{title}: {instance.name}", instance=instance, user=request.user, params=params or None)
+        audit.record(f"instance.{action}", request=request, instance=instance, target=instance, details=params or None)
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
 
@@ -447,13 +469,28 @@ class InstanceStatsView(APIView):
         if request.query_params.get("disk") == "true":
             stats["disk"] = client.disk(instance.id)
         if stats.get("running") and request.query_params.get("players") != "false":
-            try:
-                from apps.players.service import online_players
-
-                stats["players"] = online_players(instance)
-            except ApiError:
-                stats["players"] = None
+            stats["players"] = _polled_players(instance, client)
         return Response(stats)
+
+
+POLLED_PLAYERS_MAX_AGE = 20  # seconds; the dashboard and the overview ask every 5 s
+
+
+def _polled_players(instance: Instance, client: AgentClient) -> dict[str, Any] | None:
+    """Players online for pages that poll: a status ping when the agent can (it leaves nothing in
+    the server's log), RCON ``list`` only for agents without the ``ping`` feature; cached briefly.
+    None when unknown (a server that is still starting does not answer the ping)."""
+    from django.core.cache import cache
+
+    from apps.metrics.tasks import player_count
+
+    key = f"players:polled:{instance.pk}"
+    hit = cache.get(key)
+    if hit is not None:
+        return hit or None
+    players = player_count(instance, client)
+    cache.set(key, players or {}, POLLED_PLAYERS_MAX_AGE)
+    return players
 
 
 class InstanceLogsView(APIView):
@@ -519,14 +556,9 @@ class PropertiesView(APIView):
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
         client = AgentClient(instance.node)
-        try:
-            raw = client.read_text(instance.id, "server.properties")["content"]
-            exists = True
-        except ApiError as exc:
-            if exc.error_code != "not_found":
-                raise
-            raw, exists = "", False
-        raw = redact_properties(raw)
+        raw = properties.read_file(client, instance.id)
+        exists = raw is not None
+        raw = redact_properties(raw or "")
         values = properties.parse(raw)
         return Response(
             {
@@ -545,12 +577,7 @@ class PropertiesView(APIView):
         changes = request.data.get("values") if isinstance(request.data, dict) else None
         raw_text = request.data.get("raw") if isinstance(request.data, dict) else None
         client = AgentClient(instance.node)
-        try:
-            current = client.read_text(instance.id, "server.properties")["content"]
-        except ApiError as exc:
-            if exc.error_code != "not_found":
-                raise
-            current = ""
+        current = properties.read_file(client, instance.id) or ""
         before = properties.parse(current)
         if raw_text is not None:
             if not isinstance(raw_text, str) or len(raw_text) > 512 * 1024:
@@ -561,7 +588,8 @@ class PropertiesView(APIView):
             for key in properties.MANAGED_KEYS:
                 if after.get(key) != before.get(key) and key in after:
                     raise ValidationError({"raw": [f"'{key}' is managed by MCPanel"]})
-            new_text = raw_text if raw_text.endswith("\n") else raw_text + "\n"
+            # ASCII with \uXXXX escapes: read alike by servers before 1.20 (ISO-8859-1) and after (UTF-8)
+            new_text = properties.ascii_text(raw_text if raw_text.endswith("\n") else raw_text + "\n")
             changed_keys = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
         else:
             if not isinstance(changes, dict):
@@ -605,20 +633,130 @@ class FilesListView(APIView):
         return Response(AgentClient(instance.node).list_files(instance.id, request.query_params.get("path", "")))
 
 
+def _not_utf8(client: AgentClient, instance: Instance, path: str, answer: dict[str, Any]) -> bool:
+    """Whether the text of a read is a lossy decoding of the file (saving it back would replace the
+    characters that could not be read for good).
+
+    An agent that decodes strictly says so itself: it returns the ``encoding`` it read (the text is
+    then exact) and refuses other files with 415 ``not_utf8``. An older agent decodes bytes that are
+    not UTF-8 as U+FFFD without telling; for it the bytes are checked."""
+    if answer.get("binary_or_non_utf8") is not None:
+        return bool(answer["binary_or_non_utf8"])
+    if answer.get("encoding"):
+        return False
+    if "\ufffd" not in str(answer.get("content") or ""):
+        return False
+    # U+FFFD can also be a real character of a UTF-8 file: look at the bytes
+    try:
+        return properties.decode_text(read_bytes(client, instance.id, path, TEXT_EDIT_LIMIT + 1))[1] != "utf-8"
+    except ApiError:
+        return True
+
+
+def _non_utf8_preview(client: AgentClient, instance: Instance, path: str) -> dict[str, Any]:
+    """The answer for a file the agent refused with 415 ``not_utf8``: the editor's usual shape with
+    ``binary_or_non_utf8: true`` and a lossy, read-only preview of the text (``encoding`` null)."""
+    answer: dict[str, Any] = {"path": path, "content": "", "encoding": None, "size": 0, "modified": 0}
+    try:
+        entry = client.stat_file(instance.id, path)
+        answer.update(path=entry.get("path", path), size=entry.get("size", 0), modified=entry.get("modified", 0))
+        answer["content"] = read_bytes(client, instance.id, path, TEXT_EDIT_LIMIT).decode("utf-8", errors="replace")
+    except ApiError as exc:
+        log.info("no preview of the non-UTF-8 file %s of %s: %s", path, instance.pk, exc)
+    return {**answer, "binary_or_non_utf8": True}
+
+
+def _is_properties(path: str) -> bool:
+    return path.lower().endswith(".properties")
+
+
+def _exact_properties(client: AgentClient, instance: Instance, path: str, answer: dict[str, Any]) -> dict[str, Any]:
+    """An older agent (no ``encoding`` in its answer) decodes a ``*.properties`` file that is not
+    UTF-8 lossily: such a file is ISO-8859-1 (what servers before 1.20 write), so its bytes are
+    read and decoded as that, as the Properties tab does (``properties.read_file``). The answer is
+    then marked ``legacy_latin1`` (the agent cannot be asked to write ISO-8859-1)."""
+    if answer.get("encoding") or not _is_properties(path) or "\ufffd" not in str(answer.get("content") or ""):
+        return answer
+    try:
+        text, encoding = properties.decode_text(read_bytes(client, instance.id, path, TEXT_EDIT_LIMIT + 1))
+    except ApiError:
+        return answer
+    if encoding != "iso-8859-1":
+        return answer  # U+FFFD is a real character of this UTF-8 file
+    return {**answer, "content": text, "legacy_latin1": True}
+
+
+def _properties_text(path: str, content: str, current: dict[str, Any] | None) -> tuple[str | None, str]:
+    """(encoding to ask the agent for, text) of a ``*.properties`` file saved from the editor,
+    written as the Properties tab writes server.properties:
+
+    * a file the agent keeps in ISO-8859-1: ISO-8859-1 again, what it cannot store as ``\\uXXXX``;
+    * server.properties otherwise (UTF-8, a new file) and an ISO-8859-1 file on an older agent
+      (it writes only UTF-8): pure ASCII, everything above U+007E as ``\\uXXXX``, which every
+      Minecraft version reads alike (before 1.20 as ISO-8859-1, since then as UTF-8).
+    Other files keep what the user typed."""
+    if not _is_properties(path):
+        return None, content
+    if current is not None and current.get("encoding") == "iso-8859-1":
+        return "iso-8859-1", properties.ascii_text(content, above=0xFF)
+    if path.strip("/").lower() == "server.properties" or (current is not None and current.get("legacy_latin1")):
+        return None, properties.ascii_text(content)
+    return None, content
+
+
 class FilesTextView(APIView):
+    """Read and write a text file. ``GET`` answers ``binary_or_non_utf8: true`` for a file that is
+    not valid UTF-8 (its ``content`` is then a read-only preview with replacement characters);
+    ``PUT`` refuses to overwrite such a file (409 ``non_utf8_file``) unless the body has
+    ``confirm_non_utf8: true``. ``*.properties`` files are read and written as the Properties tab
+    does (``_exact_properties``, ``_properties_text``)."""
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.files.read")
-        return Response(AgentClient(instance.node).read_text(instance.id, request.query_params.get("path", "")))
+        client = AgentClient(instance.node)
+        path = request.query_params.get("path", "")
+        try:
+            answer = _exact_properties(client, instance, path, client.read_text(instance.id, path))
+        except ApiError as exc:
+            if exc.error_code != "not_utf8":
+                raise
+            return Response(_non_utf8_preview(client, instance, path))
+        latin1 = bool(answer.pop("legacy_latin1", False))
+        not_utf8 = False if latin1 else _not_utf8(client, instance, path, answer)
+        return Response({**answer, **({"encoding": "iso-8859-1"} if latin1 else {}), "binary_or_non_utf8": not_utf8})
 
     @extend_schema(request=dict, responses={200: dict})
     def put(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.files.write")
-        path = str(request.data.get("path", ""))
-        content = request.data.get("content")
+        data = request.data if isinstance(request.data, dict) else {}
+        path = str(data.get("path", ""))
+        content = data.get("content")
         if not isinstance(content, str) or len(content.encode()) > TEXT_EDIT_LIMIT:
             raise ValidationError({"content": ["Text content is required (max 5 MB)"]})
-        result = AgentClient(instance.node).write_text(instance.id, path, content, bool(request.data.get("create_only")))
+        client = AgentClient(instance.node)
+        create_only = bool(data.get("create_only"))
+        current: dict[str, Any] | None = None
+        if not create_only:
+            try:
+                current = _exact_properties(client, instance, path, client.read_text(instance.id, path))
+            except ApiError as exc:
+                if exc.error_code == "not_utf8":
+                    current = {"binary_or_non_utf8": True}
+                elif exc.error_code in ("not_found", "binary_file", "too_large"):
+                    current = None
+                else:
+                    raise
+        lossy = current is not None and not current.get("legacy_latin1") and _not_utf8(client, instance, path, current)
+        if lossy and data.get("confirm_non_utf8") is not True:
+            raise ConflictError(
+                "This file is not valid UTF-8 text (it may use another encoding such as Latin-1). Saving it from "
+                "the editor replaces the characters that could not be read. Download it and edit it with an "
+                "editor that keeps its encoding, or confirm to overwrite it anyway.",
+                code="non_utf8_file",
+            )
+        encoding, content = _properties_text(path, content, current)
+        result = client.write_text(instance.id, path, content, create_only, encoding=encoding)
         audit.record("files.write", request=request, instance=instance, target=instance, details={"path": path})
         return Response(result)
 
@@ -628,9 +766,10 @@ class FilesDownloadView(APIView):
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
         instance = get_instance_for(request.user, pk, "instance.files.read")
         path = request.query_params.get("path", "")
-        chunks, length, _resp = AgentClient(instance.node).download(instance.id, path)
+        chunks, length, upstream = AgentClient(instance.node).download(instance.id, path)
         filename = path.rsplit("/", 1)[-1] or "download"
-        response = StreamingHttpResponse(chunks, content_type=mimetypes.guess_type(filename)[0] or "application/octet-stream")
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        response = AgentStreamingResponse(chunks, upstream, content_type=content_type)
         response["Content-Disposition"] = content_disposition(filename)
         if length is not None:
             response["Content-Length"] = str(length)
@@ -650,22 +789,40 @@ class FilesUploadView(APIView):
         files = request.FILES.getlist("file") or list(request.FILES.values())
         if not files:
             raise ValidationError({"file": ["No file uploaded"]})
-        client = AgentClient(instance.node)
-        results = []
+        targets = []
         for f in files:
             name = f.name.replace("\\", "/").rsplit("/", 1)[-1]
             if not name or name in (".", ".."):
                 raise ValidationError({"file": ["Invalid file name"]})
-            target = f"{directory}/{name}" if directory else name
-            results.append(client.upload(instance.id, target, f.chunks(256 * 1024), overwrite=overwrite))
+            targets.append((f, name, f"{directory}/{name}" if directory else name))
+        client = AgentClient(instance.node)
+        results: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        first_error: ApiError | None = None
+        for f, name, target in targets:
+            try:
+                results.append(client.upload(instance.id, target, f.chunks(256 * 1024), overwrite=overwrite))
+            except AgentUnavailable:
+                raise  # the node is gone: the files after this one would fail the same way
+            except ApiError as exc:
+                # one file that cannot be stored (exists already, bad name on the node) does not
+                # stop the others; each is reported
+                first_error = first_error or exc
+                failed.append({"name": name, "path": target, "code": exc.error_code, "message": str(exc.detail)})
+        if not results and first_error is not None:
+            raise first_error
         audit.record(
             "files.upload",
             request=request,
             instance=instance,
             target=instance,
-            details={"paths": [r["path"] for r in results][:50]},
+            details={
+                "paths": [r["path"] for r in results][:50],
+                "count": len(results),
+                "failed": [f["path"] for f in failed][:50],
+            },
         )
-        return Response({"uploaded": results}, status=status.HTTP_201_CREATED)
+        return Response({"uploaded": results, "failed": failed}, status=status.HTTP_201_CREATED)
 
 
 class FilesOpView(APIView):
@@ -680,15 +837,8 @@ class FilesOpView(APIView):
         data = request.data if isinstance(request.data, dict) else {}
         if op == "mkdir":
             result = client.mkdir(instance.id, str(data.get("path", "")), bool(data.get("parents")))
-        elif op == "rename":
-            result = client.rename(
-                instance.id, str(data.get("source", "")), str(data.get("destination", "")), bool(data.get("overwrite"))
-            )
-        elif op == "delete":
-            paths = data.get("paths")
-            if not isinstance(paths, list) or not paths:
-                raise ValidationError({"paths": ["Provide a list of paths"]})
-            result = client.delete_files(instance.id, [str(p) for p in paths][:500], bool(data.get("recursive")))
+        elif op in ("rename", "delete"):
+            return self._long_operation(request, instance, client, op, data)
         elif op == "search":
             query = str(data.get("query", ""))
             if len(query) < 2:
@@ -698,6 +848,88 @@ class FilesOpView(APIView):
             raise ApiError("Unknown file operation", code="invalid_action", status_code=404)
         audit.record(f"files.{op}", request=request, instance=instance, target=instance, details=data)
         return Response(result)
+
+    @staticmethod
+    def _long_operation(request: Request, instance: Instance, client: AgentClient, op: str, data: dict[str, Any]) -> Response:
+        """rename / delete: a big folder can take minutes on the node, which works inside the request.
+
+        The panel waits FILE_OPERATION_TIMEOUT. If the answer does not come in time the node is
+        most likely still at it: 202 ``{"still_running": true, "message"}`` (the client refreshes the
+        listing), never an error, and the audit entry says so.
+        """
+        # only one jar deleted or renamed directly in mods/ (or plugins/) counts as a pack file the
+        # user removed on purpose; folders and config files are never recorded (packfiles.recordable)
+        if op == "rename":
+            source, destination = str(data.get("source", "")), str(data.get("destination", ""))
+            removed = [source]
+            details: dict[str, Any] = {"source": source, "destination": destination, "overwrite": bool(data.get("overwrite"))}
+
+            def run() -> dict[str, Any]:
+                return client.rename(
+                    instance.id, source, destination, bool(data.get("overwrite")), timeout=FILE_OPERATION_TIMEOUT
+                )
+        else:
+            paths = data.get("paths")
+            if not isinstance(paths, list) or not paths:
+                raise ValidationError({"paths": ["Provide a list of paths"]})
+            removed = [str(p) for p in paths][:500]
+            details = {"paths": removed, "recursive": bool(data.get("recursive"))}
+
+            def run() -> dict[str, Any]:
+                return client.delete_files(instance.id, removed, bool(data.get("recursive")), timeout=FILE_OPERATION_TIMEOUT)
+
+        try:
+            result = run()
+        except AgentTimeout:
+            # the outcome is unknown (it may still fail): no pack file is recorded as removed
+            audit.record(
+                f"files.{op}", request=request, instance=instance, target=instance, details={**details, "still_running": True}
+            )
+            return Response(
+                {
+                    "still_running": True,
+                    "message": "The node is still working on this (a big folder takes a while). Refresh the list in a "
+                    "minute to see the result.",
+                },
+                status=status.HTTP_202_ACCEPTED,
+            )
+        except ApiError as exc:
+            audit.record(
+                f"files.{op}",
+                request=request,
+                instance=instance,
+                target=instance,
+                success=False,
+                details={**details, "error": exc.error_code},
+            )
+            raise
+        audit.record(f"files.{op}", request=request, instance=instance, target=instance, details=details)
+        if len(removed) == 1:
+            _record_pack_files(instance, client, removed[0])
+        if op == "rename":
+            _forget_pack_files(instance, [details["destination"]])
+        return Response(result)
+
+
+def _record_pack_files(instance: Instance, client: AgentClient, path: str) -> None:
+    """One jar of a CurseForge/Modrinth pack deleted or moved away directly in mods/ (or plugins/) in
+    the file manager: keep the runtime from re-installing the whole pack at the next start
+    (apps/content/packfiles.py). A folder, a config file or several files at once are not recorded."""
+    from apps.content import packfiles
+
+    if not packfiles.applies(instance) or not packfiles.recordable(path):
+        return
+    try:
+        packfiles.record_removed(instance, client, [path])
+    except Exception:  # the file operation is done; only the re-install protection is missing
+        log.exception("could not record removed pack files of %s", instance.pk)
+
+
+def _forget_pack_files(instance: Instance, paths: list[str]) -> None:
+    from apps.content import packfiles
+
+    if packfiles.applies(instance):
+        packfiles.forget(instance, paths)
 
 
 # --- schedules ---------------------------------------------------------------------------
@@ -770,7 +1002,8 @@ class ScheduleDetailView(APIView):
             require_schedule_action(
                 request.user, sched.instance, data.get("action", sched.action), data.get("payload", sched.payload)
             )
-        sched = ser.save(next_run_at=None)
+        # a new due time, and the wait of an earlier due time (deferral while busy) is over too
+        sched = ser.save(next_run_at=None, deferred_at=None)
         audit.record("schedule.updated", request=request, instance=sched.instance, target=sched, details=ser.data)
         return Response(ScheduleSerializer(sched).data)
 
@@ -916,20 +1149,27 @@ class ImportArchiveView(APIView):
         client = AgentClient(instance.node)
         client.upload(instance.id, temp_name, upload.chunks(1024 * 1024), overwrite=False)
         overwrite = request.query_params.get("overwrite") == "true"
-        job = enqueue(
-            "extract_archive",
-            title=f"Import {upload.name}",
-            instance=instance,
-            user=request.user,
-            params={
-                "path": temp_name,
-                "destination": "",
-                "strip": "auto",
-                "overwrite": overwrite,
-                "delete_archive": True,
-                "mark_installed": True,
-            },
-        )
+        try:
+            job = enqueue(
+                "extract_archive",
+                title=f"Import {upload.name}",
+                instance=instance,
+                user=request.user,
+                params={
+                    "path": temp_name,
+                    "destination": "",
+                    "strip": "auto",
+                    "overwrite": overwrite,
+                    "delete_archive": True,
+                    "mark_installed": True,
+                },
+            )
+        except Exception:
+            # no job will extract (and so delete) the uploaded archive (e.g. another job holds the server)
+            from .handlers import drop_import_archive
+
+            drop_import_archive(client, instance, temp_name)
+            raise
         audit.record(
             "instance.imported",
             request=request,
@@ -1299,6 +1539,13 @@ class SoftwareUpdateView(APIView):
                 code="downgrade_unconfirmed",
                 status_code=409,
             )
+        # a stopped server started afterwards must fit into the node's memory (a running one is started
+        # again without the check: it ran when the job began)
+        overcommit = capacity.admit_request(
+            instance,
+            starts=bool(data.get("start")) and not capacity.runs_now(instance),
+            allow_overcommit=data.get("allow_overcommit"),
+        )
         job = enqueue(
             "software_update",
             title=f"Update {instance.name} to {mc}",
@@ -1310,6 +1557,7 @@ class SoftwareUpdateView(APIView):
                 "java_version": int(java),
                 "backup": bool(data.get("backup", SystemSetting.get("pre_update_backup"))),
                 "start": bool(data.get("start")),
+                **overcommit,
             },
         )
         audit.record(
@@ -1369,9 +1617,9 @@ class FilesArchiveView(APIView):
                 flushed = True
             except ApiError:
                 pass  # not running after all / RCON not ready: download what is on disk
-        chunks, _length, _resp = client.download(instance.id, paths[0] if len(paths) == 1 else paths, endpoint="archive")
+        chunks, _length, upstream = client.download(instance.id, paths[0] if len(paths) == 1 else paths, endpoint="archive")
         name = (request.query_params.get("name") or "").strip()[:100] or paths[0].strip("/").rsplit("/", 1)[-1] or instance.name
-        response = StreamingHttpResponse(chunks, content_type="application/zip")
+        response = AgentStreamingResponse(chunks, upstream, content_type="application/zip")
         response["Content-Disposition"] = content_disposition(f"{name}.zip")
         response["X-Content-Type-Options"] = "nosniff"
         details: dict[str, Any] = {"path": paths[0]} if len(paths) == 1 else {"paths": paths}
@@ -1398,12 +1646,16 @@ class MigrateView(APIView):
             raise ApiError(
                 "Migration stops the server and copies all of its files. Confirm to continue.", code="confirmation_required"
             )
+        # a running server is started on the target node: it must fit there (the job checks it again before copying)
+        overcommit = capacity.admit_request(
+            instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit"), node=target
+        )
         job = enqueue(
             "migrate",
             title=f"Move {instance.name} to {target.name}",
             instance=instance,
             user=request.user,
-            params={"target_node": target.pk, "delete_source": bool(data.get("delete_source"))},
+            params={"target_node": target.pk, "delete_source": bool(data.get("delete_source")), **overcommit},
         )
         audit.record(
             "instance.migrate",

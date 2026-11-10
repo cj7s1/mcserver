@@ -31,13 +31,16 @@ Prism-Launcher-style instance management with game-panel administration, and it 
 - **Worlds:** replace the world from an archive or export it as a zip; reset the world so that the
   server generates a new one (a safety backup is taken and checked first).
 - **Console:** live log streaming and RCON commands over WebSockets, with history and filtering.
+  Typing `stop` stops the server the way the Stop button does.
 - **Files:** a web file manager and editor that is confined to the server folder and never follows
   symlinks, with uploads/downloads, search, and a typed `server.properties` editor.
 - **Backups:** restic-based (encrypted, deduplicated) with coordinated `save-off` / `save-all` while
   running. Includes schedules, retention, integrity checks, restore in place (with a safety backup),
   restore as a new server, and a backup browser for single-file restores. New servers get a nightly
   backup schedule unless you switch it off, and a server without a recent backup says so ("No
-  backup yet", "Last backup N days ago").
+  backup yet", "Last backup N days ago"). On Unraid a User Scripts job copies the panel database off
+  the cache drive every day (`deploy/unraid/backup-db.sh`), and `manage.py adopt_backups` takes the
+  backups on the array over after a restore of that database.
 - **Snapshots:** instant snapshots and rollback when the data directory is on a btrfs pool, with the
   default stack (no extra privileges). ZFS is implemented and has not run on a real pool yet.
 - **Mods/plugins:** a manager for Modrinth, Hangar and SpigotMC (through Spiget) with hash
@@ -45,9 +48,12 @@ Prism-Launcher-style instance management with game-panel administration, and it 
 - **Players:** whitelist, operators, bans, kick, and online and historical player lists.
 - **Multi-user:** a permission matrix with built-in and custom roles, per-server access grants, and an
   audit log.
-- **Automation:** cron schedules (restart/stop/backup/snapshot/command), in-game countdown warnings
-  before restarts and stops (manual or scheduled, cancellable), Discord/webhook notifications, and
-  resource history.
+- **Automation:** cron schedules (restart/stop/backup/snapshot/command) that wait for a busy server
+  instead of being dropped and do not fire late power actions after downtime, in-game countdown
+  warnings before restarts and stops (manual or scheduled, cancellable), Discord/webhook
+  notifications, and resource history.
+- **Memory check:** a start that would commit more than the host's RAM minus a reserve is refused
+  with the numbers (or started anyway when you confirm).
 - **Keyboard:** a command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>⌘</kbd>+<kbd>K</kbd>) to jump to any
   page or server and start/stop/restart servers (stop and restart always ask first), plus shortcuts such as
   `g s` (servers) and `c` (create server); press `?` for the list.
@@ -61,7 +67,9 @@ Prism-Launcher-style instance management with game-panel administration, and it 
 What has run where: the panel has been in use on the owner's Unraid server since 2026-11-07 in an
 earlier version. The three-container layout, the upgrade script, stopped servers without a
 container, the stop safety, the shutdown hook, the backup safeguards and Reset world were tested
-on a Linux desktop with real Docker and real Minecraft servers and have not run on Unraid yet.
+on a Linux desktop with real Docker and real Minecraft servers and have not run on Unraid yet. The
+fixes of the audit round of 2026-11-09 (memory check, schedules, database backup, uploads and
+more) are unit-tested only.
 
 ## Architecture in one paragraph
 

@@ -83,7 +83,28 @@ export function cronError(expr: string): string | null {
       }
     }
   }
-  return null;
+  return impossibleDateError(parts);
+}
+
+/** Longest length of each month (February: 29, which leap years have). */
+const MONTH_DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * A day of month that none of the listed months has (e.g. 31 February) never occurs: such a
+ * schedule would never run. Only checked when the weekday field is "*", since a restricted weekday
+ * makes the schedule run on either match.
+ */
+function impossibleDateError(parts: string[]): string | null {
+  const [, , dom, month, dow] = parts;
+  if (dow !== "*" && dow !== "?") return null;
+  const days = plainValues(dom);
+  if (!days?.length) return null;
+  const months = month === "*" ? null : plainValues(month, MONTH_ALIASES);
+  if (!months?.length) return null;
+  const longest = Math.max(...months.map((m) => MONTH_DAYS[m - 1] ?? 31));
+  if (days[0] <= longest) return null;
+  const names = months.map((m) => MONTH_NAMES[m - 1]).filter(Boolean);
+  return `${listJoin(names)} ${names.length === 1 ? "has" : "have"} no day ${days[0]}${days.length > 1 ? " or later" : ""}, so this schedule would never run.`;
 }
 
 /** Parse a field into a sorted list of plain values when it only contains numbers/aliases (no steps). */

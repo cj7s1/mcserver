@@ -43,6 +43,7 @@ import { FileSearchSheet } from "./files/file-search";
 import { FileTable, type FileActions } from "./files/file-table";
 import {
   baseName,
+  hasInvalidName,
   isWorldEntry,
   isWorldPath,
   joinPath,
@@ -61,6 +62,16 @@ interface Listing {
 }
 
 const LIVE_STATUSES = ["running", "starting", "unhealthy", "restarting", "stopping"];
+
+/** 202 from rename/delete: the node did not finish within the panel's wait and is still at it. */
+interface StillRunning {
+  still_running: true;
+  message: string;
+}
+
+function isStillRunning(res: unknown): res is StillRunning {
+  return typeof res === "object" && res !== null && (res as { still_running?: unknown }).still_running === true;
+}
 const EMPTY = new Set<string>();
 
 export default function Files() {
@@ -162,7 +173,7 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
     const f = filter.trim().toLowerCase();
     return f ? sorted.filter((e) => e.name.toLowerCase().includes(f)) : sorted;
   }, [sorted, filter]);
-  const selectedEntries = entries.filter((e) => selected.has(e.path));
+  const selectedEntries = entries.filter((e) => selected.has(e.path) && !hasInvalidName(e));
   const existingNames = useMemo(() => new Set(entries.map((e) => e.name)), [entries]);
   const live = LIVE_STATUSES.includes(instance.status);
   const inWorld = isWorldPath(path, levelName, entries);
@@ -195,20 +206,30 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
   const folderZipName = `${baseName(path) || "server"}.zip`;
 
   const doRename = async (source: string, destination: string, overwrite = false) => {
-    await api.post(`/instances/${instance.id}/files/rename`, { source, destination, overwrite });
-    toast.success(`Renamed to ${destination}`);
-    refreshDir(parentPath(source));
-    if (parentPath(destination) !== parentPath(source)) refreshDir(parentPath(destination));
+    try {
+      const res = await api.post<{ destination: string } | StillRunning>(`/instances/${instance.id}/files/rename`, {
+        source,
+        destination,
+        overwrite,
+      });
+      // 202: the node is still moving a big folder; neither done nor failed yet
+      if (isStillRunning(res)) toast.info(res.message);
+      else toast.success(`Renamed to ${destination}`);
+    } finally {
+      refreshDir(parentPath(source));
+      if (parentPath(destination) !== parentPath(source)) refreshDir(parentPath(destination));
+    }
   };
 
   const doDelete = async (targets: FileEntry[]) => {
     const recursive = targets.some((e) => e.type === "directory");
     try {
-      const res = await api.post<{ deleted: string[] }>(`/instances/${instance.id}/files/delete`, {
+      const res = await api.post<{ deleted: string[] } | StillRunning>(`/instances/${instance.id}/files/delete`, {
         paths: targets.map((e) => e.path),
         recursive,
       });
-      toast.success(res.deleted.length === 1 ? `Deleted ${baseName(res.deleted[0])}` : `Deleted ${res.deleted.length} items`);
+      if (isStillRunning(res)) toast.info(res.message);
+      else toast.success(res.deleted.length === 1 ? `Deleted ${baseName(res.deleted[0])}` : `Deleted ${res.deleted.length} items`);
       setSel({ path, set: EMPTY });
     } catch (err) {
       toast.error(errorMessage(err));

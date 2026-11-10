@@ -90,9 +90,26 @@ connection.close()
 PY
 }
 
+# The spool folder of request bodies and uploads (settings.FILE_UPLOAD_TEMP_DIR), made by the
+# runtime user itself: a folder the image build left there would belong to root, and the web
+# process could not spool any body above 5 MB (the web process checks it again at start, and
+# /api/health fails while it is not writable).
+ensure_upload_dir() {
+    upload_dir="${MCPANEL_UPLOAD_TMP:-/tmp/mcpanel-uploads}"
+    if ! mkdir -p -m 0700 "$upload_dir" 2>/dev/null || [ ! -w "$upload_dir" ]; then
+        echo "mcpanel: the upload folder $upload_dir (MCPANEL_UPLOAD_TMP) is not writable by uid $(id -u):" \
+            "every upload or request body above 5 MB will fail. Point MCPANEL_UPLOAD_TMP to a folder this user owns." >&2
+    fi
+}
+
 [ "$#" -gt 0 ] || usage
 mode="$1"
 shift
+
+# Every mode: Django's system checks (run by `manage check`, `migrate`, and the upgrade script's
+# `manage migrate --plan`) refuse to start when FILE_UPLOAD_TEMP_DIR does not exist (files.E001),
+# and the image no longer contains the folder (it used to be created as root at build time).
+ensure_upload_dir
 
 case "$mode" in
     all)

@@ -143,6 +143,8 @@ export interface WizardState {
   cfRef: string;
   cfMinecraftVersion: string;
   cfFileId: string;
+  /** The pack's mod loader (shown on its CurseForge page); the Mods tab needs it. "" = not chosen. */
+  cfLoader: CfLoader | "";
   // resources & network
   name: string | null;
   memoryMb: number | null;
@@ -181,6 +183,11 @@ export const GAMEPLAY_DEFAULTS = {
   maxPlayers: "20",
 } as const;
 
+/** Loaders the backend accepts as `modpack_loader`. */
+export const CF_LOADERS = ["forge", "neoforge", "fabric", "quilt"] as const;
+export type CfLoader = (typeof CF_LOADERS)[number];
+export const CF_LOADER_LABELS: Record<CfLoader, string> = { forge: "Forge", neoforge: "NeoForge", fabric: "Fabric", quilt: "Quilt" };
+
 export function initialState(): WizardState {
   return {
     category: null,
@@ -198,6 +205,7 @@ export function initialState(): WizardState {
     cfRef: "",
     cfMinecraftVersion: "",
     cfFileId: "",
+    cfLoader: "",
     name: null,
     memoryMb: null,
     gamePort: null,
@@ -237,6 +245,11 @@ export interface Derived {
   suggestedName: string;
   memoryMb: number;
   defaultMemoryMb: number;
+  /**
+   * The heap was left at a default the wizard could not read: the panel's "Default memory" setting
+   * needs system.settings. memory_mb is then omitted, so the backend applies that setting.
+   */
+  memoryIsPanelDefault?: boolean;
   gamePort: string;
   ports: PortsInfo | undefined;
   resolved: ResolvedModpackData | undefined;
@@ -355,11 +368,15 @@ export function validateStep(
               /^\d{0,12}$/,
               "File ids are numbers (from the …/files/<id> URL)",
             ),
+          cfLoader: z.enum(CF_LOADERS, {
+            error: "Choose the pack's mod loader (shown on its CurseForge page)",
+          }),
         })
         .safeParse({
           cfRef: state.cfRef,
           cfMinecraftVersion: state.cfMinecraftVersion,
           cfFileId: state.cfFileId,
+          cfLoader: state.cfLoader,
         });
       return r.success ? {} : issuesToErrors(r.error);
     }
@@ -529,6 +546,7 @@ export function stepForField(key: string): StepId {
       "cfRef",
       "cfMinecraftVersion",
       "cfFileId",
+      "cfLoader",
       "importFile",
     ].includes(k)
   )
@@ -553,6 +571,7 @@ export const SERVER_FIELD_MAP: Record<string, string> = {
   modpack_provider: "projectId",
   modpack_project_id: "projectId",
   modpack_version_id: "versionId",
+  modpack_loader: "cfLoader",
   java_version: "javaOverride",
   memory_mb: "memoryMb",
   jvm_flags_preset: "jvmPreset",
@@ -582,8 +601,11 @@ export interface CreatePayload {
   modpack_provider?: Provider;
   modpack_project_id?: string;
   modpack_version_id?: string;
+  /** CurseForge-by-URL only: the loader is not known in advance without an API key. */
+  modpack_loader?: CfLoader;
   java_version?: number;
-  memory_mb: number;
+  /** Omitted = the panel's default memory setting (standard servers). */
+  memory_mb?: number;
   jvm_flags_preset: JvmPreset;
   jvm_args?: string;
   env?: Record<string, string>;
@@ -637,7 +659,7 @@ export function buildPayload(state: WizardState, d: Derived): CreatePayload {
     mode: d.isModpack ? "modpack" : "standard",
     name: d.name.trim(),
     accept_eula: state.acceptEula,
-    memory_mb: d.memoryMb,
+    ...(d.memoryIsPanelDefault ? {} : { memory_mb: d.memoryMb }),
     jvm_flags_preset: state.jvmPreset,
     game_port: Number(d.gamePort),
     // an imported server stays stopped: the archive is uploaded into it after creation
@@ -652,6 +674,7 @@ export function buildPayload(state: WizardState, d: Derived): CreatePayload {
     payload.minecraft_version = state.cfMinecraftVersion.trim();
     if (state.cfFileId.trim())
       payload.modpack_version_id = state.cfFileId.trim();
+    if (state.cfLoader) payload.modpack_loader = state.cfLoader;
   } else if (d.isModpack) {
     payload.modpack_provider = state.provider;
     payload.modpack_project_id = state.projectId;

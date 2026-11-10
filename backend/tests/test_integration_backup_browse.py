@@ -22,6 +22,7 @@ from .integration_support import (
     InstanceTracker,
     Timer,
     backup_repo_dir,
+    disk,
     make_node,
     restic_available,
     run_job,
@@ -107,7 +108,7 @@ def test_backup_browse_download_and_restore_paths(it_node, tracker, owner_api):
         assert backup.files_count and backup.files_count >= 5
         repo = backup_repo_dir(it_node, iid)  # not always <data root>/backups
         if DATA_ROOT:
-            assert repo.is_dir(), repo
+            assert disk.is_dir(repo), repo
         timer.mark("backup job")
 
         # --- browse + download ----------------------------------------------------------------
@@ -156,7 +157,7 @@ def test_backup_browse_download_and_restore_paths(it_node, tracker, owner_api):
 
         run_job("delete", inst)
         if DATA_ROOT:
-            assert not repo.exists(), repo
+            assert not disk.exists(repo), repo
         timer.mark("delete")
     finally:
         timer.summary()

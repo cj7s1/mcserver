@@ -24,8 +24,12 @@ A server stopped this way gets at most 20 seconds, and nobody tells it to save f
 not done by then, it is killed.
 
 The panel container is stopped in the same way. A job that is running at that moment (a backup,
-an install) is cut off and shown as failed ("interrupted") after the next start. Stop the array
-when the Activity page is empty.
+an install) is cut off: a job that is waiting for the agent, which is most of its time, is marked
+as failed ("interrupted") at once, others after the next start. A server such a job had stopped
+for its work stays stopped. Stop the array when the Activity page is empty.
+
+The three MCPanel containers have the restart policy `always`: Docker starts them at its next
+start, also when they were stopped on their own before (Docker tab, a backup plugin).
 
 ## The four ways a server is stopped
 
@@ -171,11 +175,18 @@ default of 90 seconds, set it to **at least 150**.
   the panel stopped it because it kept crashing. Its files may be incomplete, so check it and
   start it yourself. A failed backup, snapshot, clone, start or restart does not count.
 - When the panel drops a mark like this without starting the server, the audit log has
-  `instance.not_resumed_after_boot` with the reason: `not_meant_to_run`, `job_failed` or
-  `host_not_restarted` (the ten-minute rule at the end of this page). A server stopped for
+  `instance.not_resumed_after_boot` with the reason: `not_meant_to_run`, `job_failed`,
+  `insufficient_memory` or `host_not_restarted` (the ten-minute rule at the end of this page). A server stopped for
   crashing has `instance.crash_loop_stopped` instead.
 - While the agent does not answer, or a job holds the server, the panel waits and tries again a
   minute later.
+- A server that does not fit into the host's memory next to the servers already running (the
+  memory check, DEPLOYMENT.md "Memory") waits too. When it still does not fit 10 minutes after the
+  panel started, the panel drops its mark (`instance.not_resumed_after_boot`, reason
+  `insufficient_memory`, with the numbers) and it stays stopped.
+- Schedules whose time passed while the host was off: restarts, starts, stops and commands are
+  not run late; a missed backup or snapshot runs once its server has been ready for 2 minutes (or
+  the panel has been up for 5).
 - Without the hook nothing changes: Docker starts every server that was running, all at once.
 
 ## Check that it works

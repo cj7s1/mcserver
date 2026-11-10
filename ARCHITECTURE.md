@@ -35,9 +35,15 @@ health check and `/api/health` read. The entrypoint still has the one-role modes
 
 On a stop the supervisor works in stages: web, scheduler and job worker first (the job worker
 gets 110 seconds to finish its jobs), then the periodic worker, then Redis. Everything is gone
-after 116 seconds at the latest, inside the container's `stop_grace_period` of 2 minutes. After a
+after 116 seconds at the latest, inside the container's `stop_grace_period` of 2 minutes. A job
+that is only waiting (for an agent operation, a countdown or a server's lock) does not use those
+110 seconds: when the job worker gets its stop signal it leaves a flag file, the pool process
+running the job sees it in `JobContext.check_cancelled` and the guard of `wait_operation`, and the
+job is failed as `interrupted` at once (`apps/jobs/shutdown.py`, `worker_shutting_down` in
+`mcpanel/celery.py`). An operation the agent has already started goes on there. After a
 restart of Redis alone the job worker is not killed: it finishes the job it is running, without
-a time limit, and is started again when it has exited.
+a time limit, and is started again when it has exited (a flag only counts while the supervisor's
+status file says it is stopping).
 
 Health: the container is healthy when the database and the cache answer, every child runs, both
 workers answered a ping within 2 minutes and the reconcile task started within the last 3
@@ -91,6 +97,18 @@ Redis runs as its own container and the supervisor has four children.
    `interrupted`, and settles backup rows whose job ended without finishing them
    (`backups.handlers.settle_orphaned_backups`): a snapshot the agent completed anyway is taken
    over, anything else is marked failed.
+   `runner.finish()` only ends a job that is still active: a job already marked failed (abandoned,
+   cancelled, interrupted) stays failed when its handler returns. **Mark as failed** is refused
+   (409 `not_active`) for a job that has ended; for a running one the handler notices within about
+   2 seconds (`operation_guard` in `AgentClient.wait_operation`, `check_cancelled` before every
+   destructive step), so an abandoned restore never replaces the files afterwards.
+   A job that stops a running server for its work (restart with changes, recreate, software or
+   modpack update and rollback, restore, single-path restore, snapshot rollback and conversion,
+   migration, world replace and reset) tracks how far it got (`Progress`). When it fails and the
+   files are provably unchanged it starts the server again (`put_back`); after anything unclear
+   it sets `desired_state` to "stopped" and says so in the job log. A job cut off by a worker stop
+   or found by the watchdog never restarts the server: `settle_interrupted` records it stopped,
+   drops its resume mark and adds that to the job's error.
 4. **server.properties is a file, not env.** itzg rewrites properties from env on every start, so the
    panel only sets env for what it owns (port, RCON, type/version, memory, JVM) and edits
    `server.properties` directly for everything else. Initial values are written before first start.
@@ -108,7 +126,17 @@ Redis runs as its own container and the supervisor has four children.
    (`snapshots.prepare_replacement`): a btrfs subvolume is replaced by a new subvolume built next to it,
    a ZFS dataset (a mount point, which cannot be renamed) is filled in place through an fd-anchored
    hidden staging folder and an entry-by-entry swap. Retention is computed in the panel
-   (`apps/backups/retention.py`) so pinned and safety backups are honoured.
+   (`apps/backups/retention.py`) so pinned and safety backups are honoured; snapshots whose row
+   is failed or deleted are pruned with it. Before `save-off` the agent writes a marker
+   (`<data root>/agent/saving-paused/<id>`): if the agent ends inside the pause, `save-on` is sent
+   at its shutdown, at its next start and every 30 seconds for marked running servers. restic
+   never removes a stale lock itself, so the agent runs `restic unlock --remove-all` on every
+   repository at start (nothing of its own runs yet), and a command that finds its repository
+   locked (exit 11) unlocks stale locks and retries once; restic is stopped with SIGINT first so
+   that it removes its own lock. Every backup records the server's software (`meta.software`);
+   restoring a "Before update" backup puts that software back and recreates the container.
+   `manage.py adopt_backups` creates rows for snapshots of a server's repository that the
+   database does not know (after a database restore from an older dump).
 8. **File access is fd-based.** `agent/mcagent/safefs.py` walks paths with `O_NOFOLLOW` directory fds,
    rejects `..`, never follows symlinks (even ones created concurrently by a mod) and writes atomically.
 9. **One agent per host.** `Node` model + `AgentClient(node)`; the default node comes
@@ -153,6 +181,23 @@ stopped server has none.
   The Start job passes `apply_changes`, which also recreates a container whose configuration is
   out of date. Restore, rollback, world replace and world reset use the same helper to start
   the server again. Every start by a job records `desired_state = "running"` (`_started`).
+  Every start that creates a container asks the agent for `pull="newer"` (feature `pull_newer`;
+  older agents get `missing`): the agent tries a pull bounded to 180 seconds and falls back to
+  the image on the host with a warning in the job log; afterwards it removes superseded runtime
+  images that are untagged and unused. The image comes from `spec.current_image`, so a change of
+  the runtime image channel reaches existing servers at their next start (and shows as restart
+  required while they run). An apply creates the new container under a temporary name first and
+  removes the old one only when that worked, so a spec Docker refuses (or a CPU limit above the
+  host's cores) leaves the old container as it was.
+* **Memory admission** (`apps/instances/capacity.py`). Before a start that creates or starts a
+  container, the limits (`container_memory_mb`) of the servers whose containers run on the node
+  plus the new one must fit into the node's RAM (`docker.memory_bytes` of `GET /v1/info`, cached
+  5 minutes) minus the system setting `memory_reserve_mb` (default 4096, 0 to 65536, editable in
+  System settings). A start a user asked for fails with 409 `insufficient_memory` and the
+  numbers; the UI offers **Start anyway**, which resends with `allow_overcommit`. Scheduled starts
+  and the resume step after a host shutdown wait instead. A container that already runs with its
+  current configuration, stops, and the restart of a server a job stopped for its own work are
+  never refused. When the RAM or the containers cannot be read the start goes ahead.
 * **Restart required.** `spec.spec_outdated` says that the stored spec hash differs from the
   current one. `spec.restart_required`, what the UI shows, is `spec_outdated` and "the server
   has a container": a stopped server gets a container from the current settings at its next
@@ -165,14 +210,15 @@ What the agent API offers for this (all under `/v1`, `agent/mcagent/main.py`):
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /info` | Carries `features` (currently `["retire"]`) and `container_format` (currently 2). The panel caches the feature list per node for 5 minutes, "none" for 1 minute |
+| `GET /info` | Carries `features` (currently `retire`, `pull_newer`, `ping`, `clone_level_name`), `container_format` (currently 2) and `docker.memory_bytes`. The panel caches the feature list per node for 5 minutes, "none" for 1 minute |
 | `GET /instances` | `containers` plus `last_runs`: the last-run record without console lines, per server |
 | `GET /instances/{id}/status` | Without a container: `exists: false` and `last_run` |
 | `POST /instances/{id}/retire` | Save the record, remove the container (body: `settle_seconds`) |
 | `DELETE /instances/{id}/last-run` | Delete the record |
 | `GET /instances/{id}/logs` | `previous=false` leaves the previous run out (the diagnostics ask like that) |
 | `POST /instances/{id}/stop`, `/restart` | The answer carries `stop` (see below) |
-| `PUT /instances/{id}/container` | The result of the apply carries `container_format` |
+| `PUT /instances/{id}/container` | The result of the apply carries `container_format`, the image ids before and after, `pulled`, `images_removed` and `warnings` |
+| `GET /instances/{id}/ping` | Minecraft server list ping (`slp.py`): online count, a sample of names, version. The panel counts players with it every minute; RCON `list` only for agents without `ping`, so the console gets no RCON connect lines |
 | `POST /instances/{id}/world/reset`, `GET /instances/{id}/world?sizes=false` | World reset (see below) and the folder list without measuring sizes |
 
 ## Stopping a server
@@ -219,10 +265,76 @@ one `start` job per run. For each marked server, in this order:
 | The agent does not answer | Waits for the next run |
 | The container runs already (Docker's restart policy, or someone started it) | Mark dropped |
 | A job holds the server, or another server was started in this run | Waits for the next run |
+| It does not fit into the node's memory next to the running servers (`capacity`) | Waits for the next run; once the panel has been up for 10 minutes the mark is dropped (reason `insufficient_memory`, with the numbers) |
 | Otherwise | `start` job queued, mark dropped, audit `instance.resumed_after_boot` |
 
 A mark dropped without a start is audited as `instance.not_resumed_after_boot` with the reason. An
 explicit start, stop, kill, archive or delete clears the mark, and so does the crash-loop stop.
+
+## Schedules
+
+`scheduling.run_due_schedules` runs in the minute tick. Schedules are matched in the servers'
+time zone (system setting `timezone`, else the panel's `TIME_ZONE`). Celery beat itself runs in
+UTC (`CELERY_TIMEZONE`): its interval entries are added to the last run as wall-clock time, and
+in a zone with daylight saving time the tick that crossed the fall-back hour used to land an hour
+late, so there was no reconcile, scheduler or watchdog tick for that hour.
+
+* **One schedule cannot stop the others.** Each is handled in its own `try`. An expression that
+  never matches a date (`0 0 31 2 *`) is refused when it is saved (`validate_cron`, 400 on
+  `cron`; the frontend checks it too); a row saved by an older release is paused with the reason
+  in `last_result`. Any other error is recorded on the row and the loop goes on.
+* **Order within a tick:** backups, then snapshots, then power actions and commands; on one
+  server the first takes the lock.
+* **Deferral.** A run that finds its server locked by another job (`instance_busy`) or without
+  room in the node's memory (`insufficient_memory`) is put off, not dropped: `Schedule.deferred_at`
+  records when, `next_run_at` stays, and it is tried on every tick ("Waiting: ..." in
+  `last_result`). After 60 minutes it is recorded as failed, the schedule moves to its next time
+  and `job.failed` is notified (also `backup.failed` for a backup). Other refusals ("Skipped: ...")
+  move it on at once.
+* **Misfire limit.** A restart, start, stop or command more than 10 minutes late (the panel was
+  down) is not run late: "Missed: ..." and the next time. A missed backup or snapshot runs once,
+  but only when its server has been ready for 2 minutes or the panel has been up for 5 (so not
+  on servers that are still starting after a boot); several missed times collapse into that one
+  run. A run that was already deferred is not counted as missed.
+* **Daylight saving time.** On the fall-back night, a time that occurs twice runs once (at its
+  first occurrence) for a schedule whose hour field names fixed hours (`30 1 * * *`).
+  Interval-style schedules (hour field `*` or a step such as `*/2`) follow real elapsed time and
+  also run through the repeated hour. A time inside the hour skipped in spring runs at the end of
+  the gap (03:00 for a 02:30 schedule); several times inside the gap run once there.
+
+## Request limits and file transfers
+
+* **Body limits before Django** (`apps/core/asgi.RequestBodyLimit`, wired in `mcpanel/asgi.py`).
+  Django's ASGI handler reads the whole body before any middleware or login check, so the limits
+  are enforced in front of it: a declared `Content-Length` above the limit is answered 413 without
+  reading the body, a chunked body is cut off as it passes the limit. Every request may carry at
+  most 25 MB (`MCPANEL_MAX_REQUEST_BYTES`). The upload endpoints (`files/upload`, `import`,
+  `content/upload`, `world/replace`) take up to `MCPANEL_MAX_UPLOAD_BYTES` (default 2 GiB), must
+  declare their length (411 otherwise) and need a signed-in session for anything above 25 MB.
+  `UploadLimitMiddleware` stays as the fallback for other servers and the test client.
+* **One copy on disk.** Bodies are spooled to `FILE_UPLOAD_TEMP_DIR` (`MCPANEL_UPLOAD_TMP`, default
+  `/tmp/mcpanel-uploads`, created 0700), and `apps/core/uploads.ReleaseRequestBodyHandler` empties
+  the body spool once the multipart parser has copied the files out (raw single-file uploads
+  through DRF's `FileUploadParser` still keep both copies until the request ends).
+* **Many files.** A multipart request may carry up to 1000 files (`DATA_UPLOAD_MAX_NUMBER_FILES`;
+  more is 413 `too_many_files`); the frontend sends batches of 100. The file manager stores each
+  file on its own and answers `{"uploaded": [...], "failed": [{name, path, code, message}]}`;
+  only when no file could be stored is the first error raised.
+* **Downloads stream** (`apps/core/streaming.AgentStreamingResponse`): one agent chunk is read and
+  sent before the next, and the agent's response is closed when the browser goes away. File
+  downloads, folder and world zips and backup file downloads use it.
+* **Database connections.** The web process has `CONN_MAX_AGE=0` (under ASGI each request runs in
+  its own thread, so a kept connection was never reused); workers and `manage.py` keep
+  `POSTGRES_CONN_MAX_AGE`.
+* **Long file operations.** Rename and delete (up to 500 paths) wait up to 15 minutes for the agent
+  (`FILE_OPERATION_TIMEOUT`); a read time-out answers 202 `{"still_running": true}` and is audited
+  as such, because the agent keeps working.
+* **Text encodings.** The agent decodes text strictly: a file that is not UTF-8 is answered 415
+  `not_utf8`, except `*.properties`, which it reads and writes as ISO-8859-1 (Java's encoding for
+  them) and reports `encoding`. The editor opens such files read-only with a download. Everything
+  the panel writes into `server.properties` is ASCII: characters above `~` become `\uXXXX`. A file
+  name that is not valid UTF-8 is listed with U+FFFD and `name_valid: false`; it cannot be opened,
+  renamed, moved or deleted from the panel.
 
 ## World reset
 
@@ -256,10 +368,21 @@ After anything unclear the server is left stopped.
 <data root>/.mcpanel-probe/              -> btrfs: exists only while the agent tests how it can delete subvolumes
 <data root>/trash/                       -> deletes are renamed here first, then removed
 <data root>/agent/                       -> restic password (if generated) and cache
+<data root>/agent/saving-paused/<id>     -> marker while a backup/snapshot holds save-off (save-on is sent if it is left)
+<data root>/agent/instance-networks.json -> last known instance-network subnets for the source guard (0600)
 <data root>/agent/last-run/<instance-uuid>.json -> record of a stopped server's last run: exit state and the last
                                            2,000 console lines (folder 0700, file 0600; never in a backup)
 <data root>/agent/cache/file-hashes/     -> persistent file-digest cache for /files/hashes (AGENT_CACHE_ROOT; rebuildable)
 ```
+
+The agent sets `<data root>` and `<data root>/instances` to mode 0750, owner root, at every start
+(`maintenance.restrict_data_root`), so other users of the host (a guest-readable appdata share)
+cannot read server folders and their RCON passwords. Also at every start, in a thread,
+`maintenance.sweep_leftovers` removes what interrupted operations left behind (`.mcpanel-tmp-*`,
+`.mcpanel-world-new-*`, clone copies, `staging/` and `trash/` entries) when it is older than the
+agent process and no operation runs for that server. Copies that may be the only copy of a
+server's files (a restore or previous copy whose server folder is missing or empty,
+`.mcpanel-world-old-*`) are kept and reported in the log.
 
 ## Backend apps
 
@@ -268,20 +391,31 @@ client) · `catalog` (Mojang/Fabric/Quilt/Forge/NeoForge/Paper/Purpur metadata, 
 `instances` (model, spec builder, state, reconcile, handlers, schedules, files/properties/console
 proxies) · `jobs` (runner, watchdog) · `modpacks` (Modrinth, CurseForge, FTB adapters) · `content`
 (mods/plugins manager) · `backups` · `players` · `console` (WebSocket consumers, event fan-out) · `core`
-(errors, permissions helpers, settings, crypto).
+(errors, permissions helpers, settings, crypto, request limits, streaming).
 
 Management commands (`docker compose exec panel python manage.py <command>`): `host_shutdown`
 and `retire_stopped_containers` (`apps/instances`), `ensure_backup_schedules` (`apps/backups`),
-`add_node` (`apps/nodes`), `reencrypt_secrets` (`apps/core`).
+`adopt_backups` (`apps/backups`), `add_node` (`apps/nodes`), `reencrypt_secrets` (`apps/core`).
 
 Deployment code outside the two images: `deploy/scripts/upgrade.sh` (upgrade, rollback,
 database restore; state in `deploy/upgrade-state.env`) and `deploy/unraid/` (the
-`stopping_docker` hook and `install-hook.sh`).
+`stopping_docker` hook, `install-hook.sh`, and `backup-db.sh`, the daily dump of the database
+off the cache drive).
 
 ## Real-time
 
 * `/ws/instances/<id>/console/` — the panel relays the agent's log stream
   (`/v1/instances/<id>/logs/stream`, follows across restarts) and executes commands via RCON with a
-  per-command permission check and audit entry.
+  per-command permission check and audit entry. `stop` typed there (any case, with or without `/`)
+  is not sent: over RCON it makes the server exit and Docker's restart policy starts it again at
+  once. With `instance.control` the console enqueues the Stop button's job instead and sends a
+  `notice` saying so; without it the command is refused (`stop_refused`). The notice carries the
+  command's `id` (and `job_id`); the `command_result` with the same id and text follows, and the SPA
+  ends the command's wait at the notice and does not show the result's text again. If the agent's log pump
+  fails it reports the error and retries, and when it ends the agent closes the socket so that the
+  panel's relay connects again. Both consumers cancel their relay and watchdog tasks in a
+  `finally`, also when they end by an exception.
 * `/ws/events/` — instance status and job progress, filtered by what the user may view; the SPA uses
-  it to invalidate cached queries (polling remains as a fallback).
+  it to invalidate cached queries (polling remains as a fallback). The consumer renews its Channels
+  group membership every hour (groups expire after 24 hours). After a 4401 the SPA reconnects if
+  the tab is still signed in (a password change ends the old session's sockets); 4403 never.

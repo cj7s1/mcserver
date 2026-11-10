@@ -339,16 +339,17 @@ class BackupBrowseView(APIView):
 class BackupFileDownloadView(APIView):
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str, bid: str):  # type: ignore[no-untyped-def]
-        from django.http import StreamingHttpResponse
+        from apps.core.streaming import AgentStreamingResponse
 
         instance, backup = BackupDetailView()._get(request, pk, bid, "instance.backup")
         if not backup.snapshot_id:
             raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
         require(request.user, "instance.files.read", instance)
         path = request.query_params.get("path", "")
-        chunks, _resp = backup_agent(backup, instance).backup_download(instance.id, backup.snapshot_id, path)
+        chunks, upstream = backup_agent(backup, instance).backup_download(instance.id, backup.snapshot_id, path)
         filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
-        response = StreamingHttpResponse(chunks, content_type="application/octet-stream")
+        # streamed chunk by chunk under ASGI; the agent's response is closed when the browser goes away
+        response = AgentStreamingResponse(chunks, upstream, content_type="application/octet-stream")
         from apps.core.utils import content_disposition
 
         response["Content-Disposition"] = content_disposition(filename)

@@ -8,6 +8,8 @@
  *   POST /instances/{id}/modpack/rollback {backup_id, confirm: true}                         -> Job (202)
  *   POST /instances/{id}/modpack/check                      -> ModpackUpdateInfo (instance.view; runs the
  *        "update available" check now, otherwise the worker runs it every 6 h; 30 s cooldown)
+ *   GET  /instances/{id}/modpack/removed-files               -> RemovedPackFilesInfo (instance.view)
+ *   DELETE /instances/{id}/modpack/removed-files             -> "Let the pack reinstall them" (instance.content)
  */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
@@ -231,4 +233,27 @@ export function updateCheckSummary(u: ModpackUpdateInfo | null | undefined): { t
   if (failed && !u.last_success_at) return { tone: "error", text: `Update check failed: ${u.detail || "unknown error"}` };
   const base = u.latest ? "Up to date with the newest compatible release." : "No compatible release found.";
   return { tone: failed ? "error" : "ok", text: failed ? `${base} The last check failed: ${u.detail || "unknown error"}` : base };
+}
+
+/** The pack files kept from being re-installed (RemovedPackFiles.tsx, apps/content/packfiles.py). */
+export interface RemovedPackFilesInfo {
+  /** false for packs the runtime does not install from a manifest (nothing is ever recorded) */
+  supported: boolean;
+  release: string | null;
+  paths: string[];
+  /** false when the record belongs to another release than the pinned one (it is not used then) */
+  applies: boolean;
+  restart_required: boolean;
+  cleared?: string[];
+}
+
+export const removedPackFilesKey = (id: string) => ["instances", id, "modpack", "removed-files"] as const;
+
+export function useRemovedPackFiles(instanceId: string, enabled: boolean) {
+  return useQuery({
+    queryKey: removedPackFilesKey(instanceId),
+    queryFn: ({ signal }) => api.get<RemovedPackFilesInfo>(`/instances/${instanceId}/modpack/removed-files`, undefined, signal),
+    enabled,
+    staleTime: 30_000,
+  });
 }

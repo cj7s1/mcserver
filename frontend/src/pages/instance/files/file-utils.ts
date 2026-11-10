@@ -187,3 +187,24 @@ export function countLines(text: string): number {
 export function isArchive(entry: Pick<FileEntry, "name" | "type">): boolean {
   return entry.type === "file" && /\.(zip|tar|tar\.gz|tgz|tar\.xz|txz)$/i.test(entry.name);
 }
+
+/**
+ * Flags GET /files/text may set when the file is not valid UTF-8 (newer panels; the exact name is
+ * either of these). Absent on older panels, which refuse such files with `binary_file` instead.
+ */
+export interface NonUtf8Flags {
+  binary_or_non_utf8?: boolean;
+  non_utf8?: boolean;
+}
+
+export function isNonUtf8(file: NonUtf8Flags | null | undefined): boolean {
+  return !!file && (file.binary_or_non_utf8 === true || file.non_utf8 === true);
+}
+
+/** The agent could not give this entry's real name (bytes that are not UTF-8): no file actions. */
+export function hasInvalidName(entry: Pick<FileEntry, "name_valid">): boolean {
+  return entry.name_valid === false;
+}
+
+export const INVALID_NAME_HINT =
+  "This name contains characters that are not valid UTF-8 (shown as \uFFFD), so the panel cannot open, rename, move or delete it. Rename it on the server itself, e.g. over the network share or a shell.";

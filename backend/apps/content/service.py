@@ -35,6 +35,8 @@ from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.modpacks.providers import PROVIDERS
 from apps.nodes.client import AgentClient, AgentError
 
+from . import packfiles
+
 log = logging.getLogger(__name__)
 
 # Which Modrinth loader tags each server can run. Paper forks load Bukkit/Spigot/Paper
@@ -73,7 +75,11 @@ DISABLED_SUFFIX = ".jar.disabled"
 MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 MAX_DEPENDENCY_DEPTH = 3
 MAX_INSTALLS_PER_REQUEST = 25
-MAX_FILES_PER_UPDATE = 100
+# "Update all" on a big pack: up to this many files per request, processed in batches of
+# UPDATE_BATCH (between batches the server is checked again: a job that started meanwhile, e.g. a
+# restart, stops the rest, which are reported as skipped).
+MAX_FILES_PER_UPDATE = 1000
+UPDATE_BATCH = 50
 HASH_BATCH = 500
 # One /projects request for 245 ids took 0.68 s, three of up to 100 took 1.59 s (measured);
 # 250 ids keep the URL around 4 KB.
@@ -92,8 +98,10 @@ UNTRUSTED_UPLOAD_NOTICE = (
     "and network. Only upload files from sources you trust."
 )
 MODPACK_WARNING = (
-    "This server runs a modpack. Mods installed by the pack may be replaced, re-added or removed when the "
-    "modpack is updated or re-synchronised, so changes to pack-managed files may not be permanent."
+    "This server runs a modpack. Files that came with the pack are marked: if you disable, delete or update "
+    "one, the panel tells the runtime not to install it again, which takes effect when the container is "
+    "recreated (the panel's restart does that). A modpack update installs the new release's files as the pack "
+    "ships them, so such changes are replaced then."
 )
 UNPINNED_WARNING = (
     "This server follows the newest Minecraft version, which can change on restart. Set a specific Minecraft "
@@ -175,7 +183,7 @@ def context_for(instance: Instance, *, require_version: bool = True) -> ContentC
         loaders = PLUGIN_LOADERS[instance.server_type]
         directory, project_type = "plugins", "plugin"
     else:
-        loader = (instance.effective_loader or "").strip().lower()
+        loader = (instance.effective_loader or "").strip().lower() or _manifest_loader(instance)
         if loader not in MOD_LOADERS:
             raise ConflictError(
                 "Could not determine which mod loader this server uses, so compatible mods cannot be selected",
@@ -200,6 +208,14 @@ def context_for(instance: Instance, *, require_version: bool = True) -> ContentC
         loaders=loaders,
         minecraft_version=pinned,
     )
+
+
+def _manifest_loader(instance: Instance) -> str:
+    """The loader of a keyless CurseForge pack, from the install manifest the panel pinned it from."""
+    from apps.modpacks.pinning import loader_from_manifest
+
+    pinned = (instance.modpack_meta or {}).get("pinned_from_manifest") if instance.is_modpack else None
+    return loader_from_manifest((pinned or {}).get("modLoaderId")) if isinstance(pinned, dict) else ""
 
 
 def ensure_mutable(instance: Instance) -> None:
@@ -490,12 +506,18 @@ class LocalFile:
 
 @dataclass(frozen=True)
 class PendingFile:
-    """A jar the agent has not hashed yet (progressive inventory only)."""
+    """A jar without a hash: the agent has not read it yet (progressive inventory, or the agent is
+    busy hashing the folder: ``too_large`` False), or it never reads it because it is larger than
+    the agent's limit (``too_large`` True; the file stays unidentified)."""
 
     filename: str
     enabled: bool
     size: int
     modified: float | None
+    too_large: bool = False
+
+
+JAR_SUFFIXES = (ENABLED_SUFFIX, DISABLED_SUFFIX)
 
 
 def _parse_entries(entries: list[dict[str, Any]]) -> tuple[list[LocalFile], list[PendingFile]]:
@@ -509,7 +531,11 @@ def _parse_entries(entries: list[dict[str, Any]]) -> tuple[list[LocalFile], list
             continue
         size, modified = int(e.get("size") or 0), e.get("modified")
         if e.get("hash") is None:
-            pending.append(PendingFile(filename=name, enabled=is_enabled(name), size=size, modified=modified))
+            pending.append(
+                PendingFile(
+                    filename=name, enabled=is_enabled(name), size=size, modified=modified, too_large=bool(e.get("too_large"))
+                )
+            )
             continue
         digest = str(e.get("hash")).lower()
         if _SHA1.match(digest):
@@ -520,15 +546,35 @@ def _parse_entries(entries: list[dict[str, Any]]) -> tuple[list[LocalFile], list
 
 
 def scan(ctx: ContentContext, client: AgentClient) -> list[LocalFile]:
-    """Every jar in the content folder with its SHA-1 (waits until the agent hashed all of them)."""
-    files, _pending = _parse_entries(client.hash_files(ctx.instance.id, ctx.directory, "sha1"))
+    """Every jar in the content folder with its SHA-1 (waits until the agent hashed all of them;
+    jars too large to hash are left out). Raises the agent's 503 ``hashing_busy`` when it is still
+    reading a big folder."""
+    files, _pending = _parse_entries(client.hash_files(ctx.instance.id, ctx.directory, "sha1", suffixes=JAR_SUFFIXES))
     return files
 
 
 def scan_progressive(ctx: ContentContext, client: AgentClient, wait: float) -> tuple[list[LocalFile], list[PendingFile]]:
     """Like :func:`scan`, but returns after about ``wait`` seconds with the jars not hashed yet."""
-    result = client.hash_files_partial(ctx.instance.id, ctx.directory, "sha1", wait=wait)
+    result = client.hash_files_partial(ctx.instance.id, ctx.directory, "sha1", wait=wait, suffixes=JAR_SUFFIXES)
     return _parse_entries(result.get("files") or [])
+
+
+def _scan_or_listing(ctx: ContentContext, client: AgentClient) -> tuple[list[LocalFile], list[PendingFile]]:
+    """:func:`scan` for the inventory; while the agent is still hashing the folder (503
+    ``hashing_busy``) every jar of a plain listing is shown as pending."""
+    try:
+        files, pending = _parse_entries(client.hash_files(ctx.instance.id, ctx.directory, "sha1", suffixes=JAR_SUFFIXES))
+    except ApiError as exc:
+        if exc.error_code != "hashing_busy":
+            raise
+        try:
+            entries = client.list_files(ctx.instance.id, ctx.directory)["entries"]
+        except ApiError as list_exc:
+            if list_exc.error_code != "not_found":
+                raise
+            entries = []
+        return _parse_entries([{**e, "hash": None, "too_large": False} for e in entries])
+    return files, pending
 
 
 def _installed_key(instance: Instance) -> str:
@@ -553,6 +599,24 @@ def installed_project_ids(ctx: ContentContext, client: AgentClient) -> set[str]:
     return _remember_installed(ctx.instance, identify([f.sha1 for f in files]))
 
 
+def _pack_path(ctx: ContentContext, filename: str) -> str:
+    """The path of a jar as the pack manifest lists it (the enabled name: a .disabled file is the pack's jar renamed)."""
+    return ctx.path(filename.removesuffix(".disabled"))
+
+
+def _pack_managed(ctx: ContentContext, manifest: packfiles.PackManifest | None, filename: str) -> bool:
+    return manifest is not None and _pack_path(ctx, filename) in manifest.files
+
+
+def _record_pack_removal(ctx: ContentContext, client: AgentClient, filename: str) -> bool:
+    """After a pack jar was disabled, deleted or replaced: keep the runtime from re-installing the pack."""
+    try:
+        return bool(packfiles.record_removed(ctx.instance, client, [_pack_path(ctx, filename)]))
+    except ApiError as exc:  # the change itself is done; the next restart may re-install the pack
+        log.warning("could not record the removed pack file %s of %s: %s", filename, ctx.instance.pk, exc)
+        return False
+
+
 def base_warnings(ctx: ContentContext) -> list[str]:
     warnings = []
     if ctx.instance.is_modpack:
@@ -571,9 +635,12 @@ def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any
     ctx = context_for(instance, require_version=False)
     client = AgentClient(instance.node)
     if wait is None:
-        files, pending = scan(ctx, client), []
+        files, pending = _scan_or_listing(ctx, client)
     else:
         files, pending = scan_progressive(ctx, client, wait)
+    unreadable = [p for p in pending if p.too_large]  # never hashed: unidentified for good
+    pending = [p for p in pending if not p.too_large]
+    manifest = packfiles.read_manifest(instance, client)
     warnings = base_warnings(ctx)
     identification_error: str | None = None
     versions: dict[str, dict[str, Any]] = {}
@@ -601,6 +668,7 @@ def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any
             "project": None,
             "version": None,
             "compatibility": None,
+            "pack_managed": _pack_managed(ctx, manifest, f.filename),
         }
         if release:
             pid = release.get("project_id")
@@ -615,7 +683,7 @@ def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any
                 enabled_by_project.setdefault(pid, []).append(f.filename)
         items.append(item)
 
-    for p in pending:
+    for p in [*pending, *unreadable]:
         items.append(
             {
                 "filename": p.filename,
@@ -623,10 +691,12 @@ def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any
                 "size": p.size,
                 "modified": p.modified,
                 "sha1": None,
-                "source": "pending",
+                # too_large: the node never reads a file this big, so it cannot be identified
+                "source": "too_large" if p.too_large else "pending",
                 "project": None,
                 "version": None,
                 "compatibility": None,
+                "pack_managed": _pack_managed(ctx, manifest, p.filename),
             }
         )
     items.sort(key=lambda i: i["filename"].lower())
@@ -644,6 +714,9 @@ def inventory(instance: Instance, *, wait: float | None = None) -> dict[str, Any
         "loaders": list(ctx.loaders),
         "minecraft_version": ctx.minecraft_version,
         "is_modpack": instance.is_modpack,
+        # pack-managed files can be disabled/deleted/updated: the panel keeps the runtime from
+        # re-installing them (apps/content/packfiles.py)
+        "pack_manifest_found": manifest is not None,
         "restart_required_for_changes": ctx.restart_required,
         "identification": {
             "available": identification_error is None,
@@ -974,7 +1047,25 @@ def install(
     }
 
 
+def _still_mutable(instance: Instance) -> str | None:
+    """Why the rest of a bulk update must stop (archived meanwhile, another job holds the server), or None."""
+    fresh = Instance.objects.filter(pk=instance.pk).only("archived_at", "active_job_id").first()
+    if fresh is None:
+        return "The server was deleted"
+    try:
+        ensure_mutable(fresh)
+    except ConflictError as exc:
+        return str(exc.detail)
+    return None
+
+
 def update(instance: Instance, filenames: list[Any]) -> dict[str, Any]:
+    """Update ``filenames`` to their newest compatible release; one result per file.
+
+    Up to MAX_FILES_PER_UPDATE files, processed in batches of UPDATE_BATCH: before each batch the
+    server is checked again, and once another operation holds it (or it was archived) the files
+    not processed yet are reported as ``skipped`` with reason ``instance_busy``.
+    """
     ctx = context_for(instance)
     ensure_mutable(instance)
     if not isinstance(filenames, list) or not filenames:
@@ -999,55 +1090,40 @@ def update(instance: Instance, filenames: list[Any]) -> dict[str, Any]:
         raise UpstreamError(f"Could not identify files on Modrinth: {exc.detail}", code="identification_failed") from exc
     targets = [by_name[n] for n in names]
     latest = _latest_versions(ctx, {f.sha1: current[f.sha1] for f in targets if f.sha1 in current})
+    manifest = packfiles.read_manifest(instance, client)
     existing = set(by_name)
     results: list[dict[str, Any]] = []
     updated_releases: list[tuple[dict[str, Any], str]] = []
-    for f in targets:
-        cur = current.get(f.sha1)
-        base = {"filename": f.filename}
-        if not cur:
-            results.append(
-                {**base, "status": "skipped", "reason": "manual", "message": "Not found on Modrinth; update it manually"}
-            )
-            continue
-        new = latest.get(f.sha1)
-        if new is None or not _is_newer(cur, new):
-            results.append({**base, "status": "up_to_date", "version": _version_out(cur)})
-            continue
-        problem = incompatibility(ctx, new)
-        if problem:
-            results.append({**base, "status": "failed", "reason": problem[0], "message": problem[1]})
-            continue
-        new_name = new["file"]["filename"] + ("" if f.enabled else ".disabled")
-        same = new_name == f.filename
-        sibling = new_name[: -len(".disabled")] if new_name.endswith(DISABLED_SUFFIX) else f"{new_name}.disabled"
-        clash = next((n for n in (new_name, sibling) if n in existing and n != f.filename), None)
-        if clash:
-            results.append({**base, "status": "failed", "reason": "file_exists", "message": f"{clash} already exists"})
-            continue
-        try:
-            fetched = _fetch(client, ctx, new, new_name, overwrite=same)
-        except ApiError as exc:
-            results.append({**base, "status": "failed", "reason": exc.error_code, "message": str(exc.detail)})
-            continue
-        entry: dict[str, Any] = {
-            **base,
-            "status": "updated",
-            "new_filename": new_name,
-            "size": fetched.get("size"),
-            "from_version": _version_out(cur),
-            "to_version": _version_out(new),
-        }
-        existing.add(new_name)
-        if not same:
+    replaced_pack_files: list[str] = []
+    stopped: str | None = None
+    batches = 0
+    try:
+        for offset in range(0, len(targets), UPDATE_BATCH):
+            batch = targets[offset : offset + UPDATE_BATCH]
+            if offset and stopped is None:
+                stopped = _still_mutable(instance)
+            if stopped is not None:
+                results.extend(
+                    {"filename": f.filename, "status": "skipped", "reason": "instance_busy", "message": stopped} for f in batch
+                )
+                continue
+            batches += 1
+            for f in batch:
+                entry = _update_one(ctx, client, f, current, latest, existing)
+                results.append(entry)
+                if entry["status"] == "updated":
+                    new = latest[f.sha1]
+                    updated_releases.append((new, new.get("name") or entry["new_filename"]))
+                    replaced = entry["new_filename"] != f.filename and "warning" not in entry
+                    if replaced and _pack_managed(ctx, manifest, f.filename):
+                        replaced_pack_files.append(_pack_path(ctx, f.filename))
+    finally:
+        invalidate(instance)
+        if replaced_pack_files:
             try:
-                client.delete_files(instance.id, [ctx.path(f.filename)])
-                existing.discard(f.filename)
-            except ApiError as exc:
-                entry["warning"] = f"The new version was installed but the old file could not be removed: {exc.detail}"
-        results.append(entry)
-        updated_releases.append((new, new.get("name") or new_name))
-    invalidate(instance)
+                packfiles.record_removed(instance, client, replaced_pack_files, manifest=manifest)
+            except Exception:  # the files are updated; only the re-install protection is missing
+                log.exception("could not record the replaced pack files of %s", instance.pk)
 
     enabled_ids = {v["project_id"] for f in files if f.enabled and (v := current.get(f.sha1)) and v.get("project_id")}
     enabled_ids |= {r["project_id"] for r, _ in updated_releases if r.get("project_id")}
@@ -1056,11 +1132,63 @@ def update(instance: Instance, filenames: list[Any]) -> dict[str, Any]:
     _annotate_titles(missing)
     return {
         "results": results,
+        "requested": len(names),
         "updated": sum(1 for r in results if r["status"] == "updated"),
         "failed": sum(1 for r in results if r["status"] == "failed"),
+        "skipped": sum(1 for r in results if r["status"] == "skipped"),
+        "up_to_date": sum(1 for r in results if r["status"] == "up_to_date"),
+        "batches": batches,
+        "stopped": stopped,
         "missing_dependencies": missing,
         "restart_required": ctx.restart_required and any(r["status"] == "updated" for r in results),
     }
+
+
+def _update_one(
+    ctx: ContentContext,
+    client: AgentClient,
+    f: LocalFile,
+    current: dict[str, dict[str, Any]],
+    latest: dict[str, dict[str, Any]],
+    existing: set[str],
+) -> dict[str, Any]:
+    """Update one file (see :func:`update`); its result entry."""
+    base = {"filename": f.filename}
+    cur = current.get(f.sha1)
+    if not cur:
+        return {**base, "status": "skipped", "reason": "manual", "message": "Not found on Modrinth; update it manually"}
+    new = latest.get(f.sha1)
+    if new is None or not _is_newer(cur, new):
+        return {**base, "status": "up_to_date", "version": _version_out(cur)}
+    problem = incompatibility(ctx, new)
+    if problem:
+        return {**base, "status": "failed", "reason": problem[0], "message": problem[1]}
+    new_name = new["file"]["filename"] + ("" if f.enabled else ".disabled")
+    same = new_name == f.filename
+    sibling = new_name[: -len(".disabled")] if new_name.endswith(DISABLED_SUFFIX) else f"{new_name}.disabled"
+    clash = next((n for n in (new_name, sibling) if n in existing and n != f.filename), None)
+    if clash:
+        return {**base, "status": "failed", "reason": "file_exists", "message": f"{clash} already exists"}
+    try:
+        fetched = _fetch(client, ctx, new, new_name, overwrite=same)
+    except ApiError as exc:
+        return {**base, "status": "failed", "reason": exc.error_code, "message": str(exc.detail)}
+    entry: dict[str, Any] = {
+        **base,
+        "status": "updated",
+        "new_filename": new_name,
+        "size": fetched.get("size"),
+        "from_version": _version_out(cur),
+        "to_version": _version_out(new),
+    }
+    existing.add(new_name)
+    if not same:
+        try:
+            client.delete_files(ctx.instance.id, [ctx.path(f.filename)])
+            existing.discard(f.filename)
+        except ApiError as exc:
+            entry["warning"] = f"The new version was installed but the old file could not be removed: {exc.detail}"
+    return entry
 
 
 def _require_regular_file(ctx: ContentContext, client: AgentClient, filename: str) -> None:
@@ -1093,12 +1221,19 @@ def toggle(instance: Instance, filename: Any, enabled: bool) -> dict[str, Any]:
         raise
     finally:
         invalidate(instance)
+    pack_managed = False
+    if packfiles.applies(instance):
+        if enabled:  # the pack's jar is back under its own name
+            pack_managed = bool(packfiles.forget(instance, [_pack_path(ctx, new)]))
+        else:
+            pack_managed = _record_pack_removal(ctx, client, name)
     return {
         "filename": new,
         "previous_filename": name,
         "enabled": enabled,
         "changed": True,
         "restart_required": ctx.restart_required,
+        "pack_managed": pack_managed,
     }
 
 
@@ -1112,7 +1247,29 @@ def delete(instance: Instance, filename: Any) -> dict[str, Any]:
         client.delete_files(instance.id, [ctx.path(name)], recursive=False)
     finally:
         invalidate(instance)
-    return {"deleted": name, "restart_required": ctx.restart_required and is_enabled(name)}
+    _forget_source_records(instance, client, ctx, name)
+    pack_managed = _record_pack_removal(ctx, client, name) if packfiles.applies(instance) else False
+    return {"deleted": name, "restart_required": ctx.restart_required and is_enabled(name), "pack_managed": pack_managed}
+
+
+def _forget_source_records(instance: Instance, client: AgentClient, ctx: ContentContext, filename: str) -> None:
+    """Drop the Hangar record of a jar that was deleted, unless its .disabled (or enabled) twin is still there."""
+    from . import hangar_source
+
+    base = filename.removesuffix(".disabled")
+    if base not in hangar_source.recorded(instance):
+        return
+    twin = base if filename != base else f"{base}.disabled"
+    try:
+        client.stat_file(instance.id, ctx.path(twin))
+        return
+    except AgentError as exc:
+        if exc.agent_status != 404:
+            return  # cannot tell; the inventory prunes stale records later
+    try:
+        hangar_source.forget_files(instance, [base])
+    except Exception:  # bookkeeping only
+        log.exception("could not drop the Hangar record of %s on %s", filename, instance.pk)
 
 
 def _inspect_jar(fileobj: Any) -> tuple[set[str], bool | None]:
@@ -1200,6 +1357,8 @@ def upload(instance: Instance, uploaded: Any, *, overwrite: bool = False) -> dic
     finally:
         invalidate(instance)
 
+    if packfiles.applies(instance):
+        packfiles.forget(instance, [ctx.path(name)])
     sha1 = digest.hexdigest()
     identified = None
     try:

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, ApiError, onApiError } from "./api";
-import { authGateView, isMustChangePasswordError, markMustChangePassword, resolveAuthState, sessionUserId } from "./auth-gate";
+import { authGateView, authStateStale, isMustChangePasswordError, markMustChangePassword, resolveAuthState, sessionUserId } from "./auth-gate";
 import type { AuthState, Me } from "./types";
 
 const me = (over: Partial<Me> = {}): Me => ({
@@ -73,10 +73,19 @@ describe("auth gate decision", () => {
   it("keeps the existing gate behaviour otherwise", () => {
     expect(view(undefined, { isLoading: true })).toBe("loading");
     expect(view(undefined, { error: new Error("down") })).toBe("error");
-    expect(view(signedIn(), { error: new Error("down") })).toBe("error");
+    // a failed background refetch keeps the app (and its unsaved page state) mounted
+    expect(view(signedIn(), { error: new Error("down") })).toBe("app");
+    expect(view({ setup_required: false, authenticated: false, user: null }, { error: new Error("down") })).toBe("login");
     expect(view({ setup_required: true, authenticated: false, user: null })).toBe("setup");
     expect(view({ setup_required: false, authenticated: false, user: null })).toBe("login");
     expect(view(signedIn())).toBe("app");
+  });
+
+  it("flags a stale state only when cached data survives a failed refetch", () => {
+    expect(authStateStale({ state: signedIn(), error: new Error("down") })).toBe(true);
+    expect(authStateStale({ state: undefined, error: new Error("down") })).toBe(false);
+    expect(authStateStale({ state: signedIn(), error: null })).toBe(false);
+    expect(authStateStale({ state: signedIn({ must_change_password: true }), error: mustChange })).toBe(false);
   });
 
   it("shows the app again once the flag is cleared", () => {

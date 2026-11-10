@@ -33,13 +33,13 @@ export function ImportSoftware({
   const id = useId();
   const serverTypes = useServerTypes();
   const hint =
-    "Use the software and Minecraft version the files were made with. The panel installs exactly this; it does not read it from the archive.";
+    "Choose the software and Minecraft version the files were made with. Nothing is preselected: the panel installs exactly this and does not read it from the archive, and a newer version upgrades the world on its first start (it cannot be downgraded).";
   return (
     <Section title="Server software">
       <Field id={id} label="Software of the imported server" hint={hint} error={errors.serverType} className="max-w-md">
         <Select
-          value={d.serverType ?? "VANILLA"}
-          onValueChange={(v) => patch({ serverType: v as ServerType, minecraftVersion: null, loaderVersion: null })}
+          value={d.serverType ?? ""}
+          onValueChange={(v) => patch({ serverType: v as ServerType, minecraftVersion: null, loaderVersion: null, javaOverride: "" })}
         >
           <SelectTrigger
             id={id}
@@ -47,7 +47,7 @@ export function ImportSoftware({
             aria-invalid={!!errors.serverType || undefined}
             aria-describedby={describedBy(id, errors.serverType, hint)}
           >
-            <SelectValue />
+            <SelectValue placeholder="Choose the software" />
           </SelectTrigger>
           <SelectContent position="popper">
             {GROUPS.map((g) => (

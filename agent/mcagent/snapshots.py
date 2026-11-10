@@ -362,12 +362,19 @@ class BtrfsSnapshots:
         if not cap["available"]:
             raise AgentError(cap["reason"] or "Snapshots unavailable", "snapshots_unavailable", 409)
         tmp = self.instance_dir.with_name(f"{self.instance_id}.mcpanel-convert")
-        if tmp.exists():
-            raise AgentError(
-                "A previous conversion was interrupted; remove the .mcpanel-convert folder",
-                "convert_conflict",
-                409,
-            )
+        if os.path.lexists(tmp):
+            # Left by a conversion that was interrupted (the agent stopped during the copy). The
+            # server folder is still here, so it is only a partial copy of it, and no other
+            # operation of this server can be using it (the caller holds the server's lock).
+            problem = _discard(tmp)
+            if problem:
+                raise AgentError(
+                    f"A previous conversion was interrupted and its copy {tmp} could not be removed "
+                    f"({problem}); delete it on the host",
+                    "convert_conflict",
+                    409,
+                )
+            log.warning("Removed %s, left by an interrupted conversion", tmp)
         self.create_subvolume(tmp)
         old = self.settings.trash_dir / f"{self.instance_id}-preconvert-{int(time.time())}"
         moved = False
@@ -391,8 +398,16 @@ class BtrfsSnapshots:
                 old.rename(self.instance_dir)  # put the original back
             remove_tree(tmp)  # the half-made copy; never hides the error that got us here
             raise
-        shutil.rmtree(old, ignore_errors=True)
-        return {"converted": True}
+        result: dict[str, Any] = {"converted": True}
+        problem = _discard(old)
+        if problem:
+            log.warning("The folder before the conversion was not removed: %s (%s)", old, problem)
+            result["warnings"] = [
+                f"The server folder as it was before the conversion could not be removed completely "
+                f"({problem}); the rest is in {old}. It still uses disk space; delete it on the host"
+            ]
+            result["leftovers"] = [str(old)]
+        return result
 
     # -- snapshots ---------------------------------------------------------------------
     def _meta_path(self, name: str) -> Path:

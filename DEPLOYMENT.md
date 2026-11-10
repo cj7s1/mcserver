@@ -56,6 +56,13 @@ Three containers:
 | `agent` | `mcpanel/agent` | Root, Docker socket, data directory. Never published. It refuses requests coming from the Minecraft network. |
 | `postgres` | upstream | Internal network only. |
 
+All three have the restart policy `restart: always`, not `unless-stopped`: Docker starts them
+again at its next start also after they were stopped through its API (Stop in Unraid's Docker
+tab or on a folder, a backup plugin that stops all containers), so the panel does not stay down
+across a reboot. `docker compose stop` still stops them until the next `docker compose up` or the
+next start of the Docker daemon. The agent of an additional node (`docker-compose.node.yml`) and
+the optional `redis` container still use `unless-stopped`.
+
 Inside `panel`, a small supervisor (`backend/container/supervise.py`) starts and watches five
 processes. Every line of `docker compose logs panel` begins with the name of the process that
 wrote it:
@@ -84,11 +91,15 @@ What to expect from it:
 * **Healthy** means: the database and the cache answer, all five processes run, both workers
   answered a ping in the last 2 minutes and the reconcile task ran in the last 3 minutes.
 * `docker compose stop panel` / `restart panel` / `down` give running jobs up to 110 seconds to
-  finish. A job that needs longer is cut off. The panel marks it as failed ("interrupted") after
-  5 minutes without a sign of life, checked every 2 minutes, so about 6 minutes later (measured:
-  6 min 9 s). Until then its server stays locked; **Mark as failed** on the Activity page
-  releases it sooner. Check that server before you retry. So restart the panel when the Activity
-  page is empty.
+  finish. A job that is waiting at that moment (for the agent, for a countdown or for a server's
+  lock, which is most of a backup, restore or install) does not wait for them: it is marked as
+  failed ("interrupted") at once and its server is unlocked; the agent finishes an operation it
+  had already started. A job that is cut off in the middle of other work is marked as failed
+  after 5 minutes without a sign of life, checked every 2 minutes, so about 6 minutes later
+  (measured before this change: 6 min 9 s). Until then its server stays locked; **Mark as
+  failed** on the Activity page releases it sooner, and the job stops within about 2 seconds.
+  A server the job had stopped for its work is left stopped and says so in the job's error.
+  Check that server before you retry. So restart the panel when the Activity page is empty.
 * Restarting the panel container empties Redis. Jobs that were still waiting are sent again at the
   start. Lost: webhook notifications that were waiting for a retry or were queued in the last
   seconds before the stop, and the crash-loop counters (they start counting again).
@@ -129,10 +140,63 @@ Settings and commands:
 | List what would be removed, without removing anything | `docker compose exec panel python manage.py retire_stopped_containers --dry-run` |
 | Remove the containers of all stopped servers once, also while the setting is `false` | `docker compose exec panel python manage.py retire_stopped_containers` (`--node <name>` for one node) |
 
-Because a stopped server holds no container, nothing keeps its `itzg/minecraft-server` image on
-the host. If you remove that image (`docker image prune -a`, Unraid's "orphan image" rows), the
-next start downloads it again, which needs internet access and can bring a newer build of the
-same tag. The start job says so in its log when the build changed.
+**Runtime images are refreshed at each start that creates a container**, which is nearly every
+start, because a stopped server has no container. The agent checks for a newer build of the
+server's `itzg/minecraft-server` tag, for at most 3 minutes. When the host is offline or the
+registry does not answer, the server starts on the image it has and the job log says that no
+newer build could be checked. Only a tag that is not on the host at all must be downloaded
+before the start. The job log names the build that runs and the one it replaced, and the agent
+removes the replaced image when it has no tag left and no container uses it. The runtime image
+channel in System settings (stable, latest, ...) applies to existing servers too: a running
+server shows **restart required** after a change and gets the new image at its next start.
+
+### Memory
+
+Before a server is started, the panel checks that it fits into the host's RAM: the memory limits
+of the servers that run on that host plus the new one must not exceed the RAM Docker reports
+minus a reserve for everything else on the host. The reserve is **Memory kept free for the host
+(MB)** in System settings (`memory_reserve_mb`, default 4096, 0 to 65536). A start that does not fit is
+refused with the numbers, and the panel offers **Start anyway**. Scheduled starts and restarts
+wait (see "Schedules"), and servers started again after a host shutdown wait for their turn. A
+stop is never refused, nor the restart of a server whose container already runs with its
+settings. The create wizard and the Resources tab show how much host memory the running servers
+reserve already; that bar compares with the whole RAM, not with RAM minus the reserve.
+
+### Schedules
+
+* A schedule that comes due while another job holds its server (a backup due while a snapshot
+  runs, two templates at the same minute) waits and is tried every minute for up to an hour; the
+  schedule list says "Waiting: ...". After an hour it is recorded as failed and a notification is
+  sent. Backups run before snapshots, snapshots before restarts, stops and commands.
+* After the panel was down (host off, upgrade), a restart, start, stop or command more than 10
+  minutes late is not run late ("Missed: ..."). A missed backup or snapshot runs once, when its
+  server has been ready for 2 minutes or the panel has been up for 5.
+* A date that never occurs (`0 0 31 2 *`) cannot be saved. Daylight saving time: on the
+  fall-back night a schedule at a fixed hour runs once; schedules with `*` or a step in the hour
+  field run through the repeated hour as on any other night. A time in the hour skipped in
+  spring runs when the gap ends.
+* Schedules use the time zone of System settings (the one the servers get), not the panel
+  process's.
+
+### Uploads
+
+* One upload may be at most `MCPANEL_MAX_UPLOAD_BYTES` (default 2 GiB); every other request at
+  most 25 MB. Both limits are checked before the panel reads the body: an upload that is too
+  large is refused at once, and without a signed-in session no request may send more than 25 MB.
+* The file manager uploads any number of files, in batches of 100; each file is stored on its
+  own and the answer lists the files that were uploaded and those that failed (an existing file,
+  for example).
+* While an upload is received it is kept in `MCPANEL_UPLOAD_TMP` inside the panel container
+  (default `/tmp/mcpanel-uploads`, in the container's writable layer, which on Unraid is
+  `docker.img`). It is held there once, until it has been passed on to the agent. The compose
+  file does not pass this variable; to move the folder (for example to a volume on the cache
+  pool with room for the largest upload), set it and mount the volume in a
+  `docker-compose.override.yml` for the `panel` service, writable by UID 10001.
+* The panel's web process creates that folder (mode 0700) when it starts, as its own user (UID
+  10001); the image contains no such folder. If it cannot write there, every request body above
+  5 MB fails (uploads, imports, world replace, mod uploads): the container log says so at start
+  and `/api/health` reports `"uploads": "error"`, so the container turns unhealthy.
+
 
 ### Stopping servers
 
@@ -166,6 +230,23 @@ before Docker stops: [docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md).
 * `docker compose exec panel python manage.py ensure_backup_schedules --dry-run` lists the
   servers without an enabled backup schedule; without `--dry-run` it adds the nightly schedule
   to each of them. Archived servers are skipped. Running it twice changes nothing.
+
+### Console, files and mods
+
+* Typing `stop` in the console stops the server the way the Stop button does and the console
+  says so. Sent to the server itself, `stop` would only restart it (Docker's restart policy
+  starts it again). It needs the permission to start and stop the server.
+* Text files that are not UTF-8 open read-only with a **Download** button, so that saving cannot
+  damage them. `server.properties` and other `*.properties` files are read and written as
+  ISO-8859-1, as Java does; characters outside ASCII are written as `\uXXXX`.
+* A file whose name is not valid UTF-8 is listed (with a replacement character) but cannot be
+  renamed, moved or deleted from the panel; do that on the host.
+* Deleting or renaming a very large folder can take longer than the panel waits: it then says
+  that the node is still working on it. Refresh the list a minute later.
+* Mods: jars larger than 2 GiB are not hashed and stay unidentified; while the agent is still
+  reading a large mods folder, files are shown as pending. On modpack servers the jars that came
+  with the pack are marked as such. Disabling or deleting one is remembered and the modpack's
+  re-sync at the next start leaves it out, until the modpack is updated to another release.
 
 ### Redis as its own container (optional)
 
@@ -500,6 +581,17 @@ Every server that is running during the upgrade shows **restart required** after
 none of its settings changed: its container was made by the older version ("Stopping servers"
 above). Restart it when it suits you.
 
+### The data folder is root-only after the upgrade
+
+The agent of this release makes the data directory (`MCPANEL_DATA_DIR`) and its `instances` folder
+`root:root 0750` at every start: the server folders hold RCON passwords. Afterwards only root can
+open them on the host. **An SMB share of that folder, Unraid's file manager, other containers that
+run as `nobody` or another user (Krusader, backup containers) and non-root shells lose access to
+it**, also for named SMB users. A `chmod` by hand is undone at the next agent start. Use the
+panel's Files page (or a root shell) to edit files, and backups or the panel's zip download to copy
+worlds off the host; a backup tool that reads the folder directly must run as root. See
+docs/UNRAID.md, section 2.
+
 ### Other things to know
 
 * Run `./scripts/upgrade.sh run` at least monthly even without new commits: it rebuilds on current
@@ -516,6 +608,8 @@ above). Restart it when it suits you.
 * `docker compose pull` only fetches `postgres`: the panel and agent images are built on your host
   and are never pulled from a registry.
 * Migrations run automatically when `panel` starts, before its processes do.
+* The upgrade that brings `restart: always` recreates the three platform containers (their
+  configuration changed); `upgrade.sh run` does that. The Minecraft servers are not touched.
 
 **Coming from the 7-container layout** (`panel`, `worker`, `worker-periodic`, `beat`, `agent`,
 `postgres`, `redis`): the same commands, with `--with-migrations`. `run` removes the four
@@ -553,8 +647,44 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
   the login sessions: with them, anyone holding the dump could act as a logged-in user until the
   sessions expire. The dump plus `.env` (whose `MCPANEL_SECRET_KEY` decrypts the stored secrets) is
   everything needed to impersonate the panel, so store both like passwords.
+* **Daily, off the cache drive: `deploy/unraid/backup-db.sh`.** It runs `pg_dump` in the postgres
+  container of the Compose project (without the login sessions), writes
+  `mcpanel-db-<date>-<time>.sql.gz` and next to it `mcpanel-db-<date>-<time>.env`, a copy of
+  `deploy/.env`, into its destination folder, and keeps the newest 14 of each pair. The folder is
+  made 0700 and the files 0600. A dump that `pg_dump` did not finish is never kept.
+
+  ```
+  backup-db.sh [--project NAME] [--env FILE] [--keep N] [DEST_DIR]
+  ```
+
+  | Argument | Default |
+  |---|---|
+  | `DEST_DIR` (absolute path) | `/mnt/user/Backups/mcpanel-db` |
+  | `--project` | `mcpanel` (the Compose project, `docker compose ls`) |
+  | `--env` | found through the postgres container's Compose label (the project folder), else `../.env` next to the script |
+  | `--keep` | 14 |
+
+  On Unraid, with the **User Scripts** plugin: Settings → User Scripts → **Add New Script**, name
+  it `mcpanel-db-backup`, edit it to contain
+
+  ```bash
+  #!/bin/bash
+  bash /mnt/user/appdata/mcpanel-src/deploy/unraid/backup-db.sh /mnt/user/Backups/mcpanel-db
+  ```
+
+  (adjust the path to your checkout; the destination should be an array share, not the cache
+  pool that holds the database) and set its schedule to **Scheduled Daily**. Run it once with
+  **Run Script** and read the last line: `mcpanel-db backup: OK ...` (exit status 0) or
+  `mcpanel-db backup: FAILED ...` (exit status 1, nothing half-written left behind). The `.env`
+  copy holds every secret of the stack in clear text, including `MCPANEL_SECRET_KEY` and
+  `AGENT_RESTIC_PASSWORD`: do not export that share over SMB or NFS without a password, or
+  choose a share that is not exported. Restoring after a lost cache drive: docs/UNRAID.md,
+  "When the cache drive died".
 * **`MCPANEL_DATA_DIR`:** server files. These are best protected with in-panel backups plus your normal NAS backup.
 * **`MCPANEL_BACKUP_DIR`:** restic repositories, which are encrypted with `AGENT_RESTIC_PASSWORD`.
+  Keep a copy of that password outside the host (a password manager): without it no backup can
+  be restored. `backup-db.sh` copies it with `.env`; a generated password
+  (`<MCPANEL_DATA_DIR>/agent/restic-password`) is not in `.env` and must be copied separately.
 * **`deploy/.env`:** your secrets (mode 600, git-ignored like `deploy/node.env`).
 
 ## Troubleshooting
@@ -574,6 +704,10 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
 | A stopped server has no entry in `docker ps -a` | Expected: a stopped server has no container ("Minecraft server containers" above). Start it in the panel. |
 | A server shows "restart required" although nothing was changed | Its container was made by an older MCPanel version. The next start or restart recreates it; world data is kept. |
 | A server stays "busy" after the panel container was stopped during a job | The job is marked as failed about 6 minutes later, or at once with **Mark as failed** on the Activity page. |
+| A start says "Not enough memory on node ..." | The running servers plus this one exceed the host's RAM minus the reserve ("Memory" above). Stop another server, lower this one's memory, use **Start anyway**, or lower **Memory kept free for the host** in System settings. |
+| A schedule says "Waiting: ..." or "Missed: ..." | "Waiting": its server was busy; it is tried every minute for an hour. "Missed": a power action or command whose time passed while the panel was down ("Schedules" above). |
+| A schedule is "Paused: the cron expression ... never matches a date" | It was saved by an older version with a date that does not exist. Correct the expression and resume it. |
+| A server restarted after `stop` was typed into it from another tool | Docker's restart policy starts a server that exits by itself. Stop it in the panel (the panel's console turns `stop` into a stop). |
 | `./scripts/upgrade.sh run` says the last run did not finish | `./scripts/upgrade.sh status` names the state and the two commands to choose from ("A run that did not finish" above). |
 
 Logs: `docker compose logs -f panel agent`. Each server's own log is in its console and in

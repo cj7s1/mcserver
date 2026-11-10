@@ -6,10 +6,10 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 
 | Boundary | What protects it |
 |---|---|
-| Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation (scheme, host **and port** must be the panel's own origin or one of `MCPANEL_CSRF_TRUSTED_ORIGINS`, so another web app on the same machine cannot open the console with your cookies), `X-Frame-Options: DENY` and a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`) on every page, login throttling (10/min), scrypt password hashing. |
+| Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation (scheme, host **and port** must be the panel's own origin or one of `MCPANEL_CSRF_TRUSTED_ORIGINS`, so another web app on the same machine cannot open the console with your cookies), `X-Frame-Options: DENY` and a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`) on every page, login throttling (10/min), scrypt password hashing. Request bodies are limited before Django reads them, so before any login check (see "Request size limits"). |
 | Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
-| Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
+| Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. The data root and its `instances` folder are mode 0750, owner root (set at every agent start), so other host users and guest SMB logins cannot read server folders. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
 | Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). Resetting a world needs two permissions (`instance.restore` and `instance.files.write`) and the server's name typed exactly; the seed is not written to the audit log. |
 
 ## What Docker does **not** protect you from
@@ -94,7 +94,14 @@ Anything that can talk to the Docker socket is effectively root on the host. The
   then serves HTTPS with a pinned certificate. Bind it to the LAN/VPN interface the panel uses
   (`MCPANEL_NODE_BIND`) and never forward it to the internet,
 * refuses API requests whose source address is on an instance network (Minecraft containers run
-  third-party code), even with a valid token,
+  third-party code), even with a valid token (403 `forbidden_source`, WebSocket close 4403). The
+  subnets come from Docker and are refreshed every minute. Until Docker has answered after a start
+  the agent does not let everything through (`agent/mcagent/netguard.py`): loopback and
+  `/v1/health` pass; a subnet that was an instance network at the last run (remembered in
+  `<data root>/agent/instance-networks.json`, 0600) stays refused; an attached subnet that was
+  trusted then passes; an attached subnet it does not know gets 503 `agent_starting` (WebSocket
+  1013); an address outside every subnet the agent is attached to passes. With no record at all
+  only loopback and health pass,
 * exposes only the narrow operations listed in `agent/mcagent/main.py` (no arbitrary exec, no arbitrary
   mounts, no arbitrary images),
 * requires the bearer token on every request (except the unauthenticated `/v1/health`, which reveals
@@ -113,6 +120,27 @@ is only treated as a server's own when it is mounted at the server folder with r
 destroyed.
 
 Keep `MCPANEL_AGENT_TOKEN` secret and long (48+ random characters).
+
+## Request size limits
+
+Django's ASGI handler reads a whole request body to disk before any middleware, login check or
+URL routing runs, and uvicorn has no limit of its own. The panel therefore checks the size in
+front of Django (`backend/apps/core/asgi.py`, `RequestBodyLimit`):
+
+* every request may carry at most 25 MB; a declared `Content-Length` above that is answered 413
+  without reading the body, and a chunked body is cut off as soon as it passes the limit;
+* only the four upload endpoints (file upload, import, content upload, world replace) accept more,
+  up to `MCPANEL_MAX_UPLOAD_BYTES` (default 2 GiB), they must declare the length (411
+  otherwise), and above 25 MB the request must carry a session cookie of a signed-in user (one
+  database read; permissions and CSRF are checked by Django afterwards, as for every request);
+* a multipart request carries at most 1000 files and fields as Django counts them; more is 413.
+
+So an anonymous client can make the panel spool at most 25 MB per request. Spooled bodies go to
+`MCPANEL_UPLOAD_TMP` (default `/tmp/mcpanel-uploads`, mode 0700, created by the web process as UID
+10001 when it starts) and are emptied once the uploaded files are copied out. More than 25 MB needs
+a session of an active user that is still valid for the user's current password (Django's session
+auth hash), checked before the body is read: the session as usual, then the user with one more
+database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
 
 ## Network exposure
 
@@ -217,6 +245,13 @@ example) contains these files. Treat such a backup like the console logs themsel
    whose sessions were signed with the old key have to log in again.
 * **Back up `AGENT_RESTIC_PASSWORD`** (or `<data root>/agent/restic-password` if it was generated).
   Without it, backups cannot be restored.
+* `deploy/unraid/backup-db.sh` writes the database dump (gzip, **not encrypted**) and a clear-text
+  copy of `.env` next to it, in a folder it makes 0700, files 0600. Together they are everything
+  needed to impersonate the panel and to open every backup; keep that folder off shares other
+  people or devices can read.
+* The CurseForge API key is checked against CurseForge before it is saved: a key CurseForge
+  refuses (401/403) is not stored. When CurseForge cannot be reached the key is saved with a
+  warning.
 
 ## Files the upgrade script writes
 
@@ -275,13 +310,34 @@ would stop that server itself at array stop and count it as stopped by hand.
   even when `save-all flush` fails, times out or the backup/snapshot itself fails.
 * Console streaming keeps at most 16 KiB per line (longer lines are truncated) and a bounded backlog
   per viewer; a viewer that cannot keep up loses the oldest lines and is told how many.
+* The status ping that counts players (`agent/mcagent/slp.py`) reads at most 2 MiB, at most 100
+  sample names of 64 characters, a MOTD of 1024 and a version of 256 characters, and strips `§`
+  formatting codes. It replaced the minute's RCON `list` (which logged two lines per minute).
+* Text a server wrote is decoded strictly: a file that is not UTF-8 is refused (415 `not_utf8`)
+  rather than decoded with replacement characters and saved back damaged; `*.properties` is
+  read and written as ISO-8859-1. A file name that is not valid UTF-8 no longer breaks a folder
+  listing or the mod inventory: it is shown with U+FFFD (`name_valid: false`), and the panel does
+  not rename, move or delete it.
+* Mod hashing never reads a file larger than 2 GiB (it is listed unhashed), and callers share one
+  background pass per folder: a caller waits at most 240 s, then gets 503 `hashing_busy`, so
+  repeated requests for a sparse or huge file cannot tie up the agent's threads without bound.
+* A crafted `plugin.yml` cannot freeze the panel: the SpigotMC reader scans at most 2,000 lines
+  of at most 1,000 characters each, in linear time.
+* Typing `stop` in the console is not sent to the server (Docker would start it again at once):
+  with the permission to start and stop the server the panel runs its Stop job instead and audits
+  it as `instance.stop` from the console; without that permission the command is refused.
 * File reads (editor, downloads, hashing, search, zip export, archive import) refuse FIFOs, sockets
   and device nodes without blocking; clones skip them.
 * Archive imports also bound the archive's own index: the zip central directory (128 MiB, 500 000
   entries) is measured before it is loaded, tar headers are counted as they are read, pax/GNU
   long-name headers are limited to 1 MiB each and 64 MiB in total, GNU sparse members are refused.
-* An abandoned folder-zip download stops its producer thread. restic's output pipes are drained
-  concurrently and a restic backup/restore is stopped after 12 hours.
+* An abandoned folder-zip download stops its producer thread, and a zip whose producer died ends
+  with an error instead of hanging. restic's output pipes are drained concurrently and a restic
+  backup/restore is stopped after 12 hours, with SIGINT first so that restic removes its lock.
+* A backup file download whose restic fails ends the response with an error instead of an empty
+  or cut-off HTTP 200. Single-file restores escape `[ ] * ?` before passing a name to restic.
+* World saving that a backup switched off (`save-off`) is switched on again even if the agent
+  process ends during the pause (a marker file; `save-on` at shutdown, at start and every 30 s).
 
 ## Reporting
 

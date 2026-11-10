@@ -5,7 +5,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, errorMessage } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
+import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { relativeTime } from "@/lib/format";
 import type { Instance, Job } from "@/lib/types";
 import type { PanelNode } from "./migrate-api";
@@ -54,7 +55,8 @@ export function MigrateDialog({
           throw new Error("no target");
         }
         try {
-          const job = await api.post<Job>(`/instances/${instance.id}/migrate`, {
+          // a running server is started on the target node: it must fit there ("Start anyway?")
+          const job = await postOrDecline<Job>(`/instances/${instance.id}/migrate`, instance, {
             node: target.id,
             confirm: true,
             delete_source: deleteSource,
@@ -62,7 +64,7 @@ export function MigrateDialog({
           onStarted(job);
           toast.success(`Moving ${instance.name} to ${target.name}`);
         } catch (err) {
-          toast.error(errorMessage(err));
+          if (!(err instanceof OvercommitDeclined)) toast.error(errorMessage(err));
           throw err;
         }
       }}

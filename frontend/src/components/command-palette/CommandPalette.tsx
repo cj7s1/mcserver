@@ -2,7 +2,8 @@
  * Command palette (Ctrl+K / Cmd+K or the search button in the top bar) and global keyboard shortcuts.
  *
  * Offers navigation, every server the user can see with its pages, permission-aware power actions
- * (Start runs like the existing Start buttons; Stop and Restart always go through ConfirmDialog),
+ * (Start runs like the existing Start buttons; Stop and Restart open the same PowerActionDialog, with
+ * the optional in-game warning and its remembered default, as the server page),
  * theme switching and the shortcuts help ("?"). Power actions reuse `useServerPower`, i.e. the same
  * `POST /instances/<id>/power` call, toasts and cache invalidation as the server library buttons.
  */
@@ -10,7 +11,7 @@ import { Command as CommandPrimitive, useCommandState } from "cmdk";
 import { Keyboard, Monitor, Search, SunMoon, UserRound } from "lucide-react";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { matchPath, useLocation, useNavigate } from "react-router";
-import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { PowerActionDialog } from "@/components/PowerActionDialog";
 import { Button } from "@/components/ui/button";
 import {
   Command,
@@ -217,7 +218,7 @@ export function CommandPalette({ navigation }: { navigation: readonly PaletteNav
   );
 }
 
-/** Stop/Restart confirmation; the request goes through the same hook as the library power buttons. */
+/** Stop/Restart confirmation: the same dialog (and in-game warning choice) as the server page and library. */
 function PowerConfirm({
   request,
   onClose,
@@ -227,19 +228,16 @@ function PowerConfirm({
   onClose: () => void;
   onCloseAutoFocus: (event: Event) => void;
 }) {
-  const power = useServerPower(request.instance);
   const copy = powerConfirmCopy(request.instance, request.action);
   return (
-    <ConfirmDialog
+    <PowerActionDialog
+      instance={request.instance}
+      action={request.action}
       open
       onOpenChange={(o) => {
         if (!o) onClose();
       }}
-      title={copy.title}
       description={copy.description}
-      confirmLabel={copy.confirmLabel}
-      destructive={copy.destructive}
-      onConfirm={() => power.mutateAsync(request.action)}
       onCloseAutoFocus={onCloseAutoFocus}
     />
   );
@@ -515,7 +513,7 @@ function EntryItem({
 
 /**
  * Start/Stop/Restart for one server. Start runs at once (like the Start buttons elsewhere); Stop and
- * Restart close the palette and open ConfirmDialog.
+ * Restart close the palette and open PowerActionDialog.
  */
 function ServerPowerItems({
   instance,

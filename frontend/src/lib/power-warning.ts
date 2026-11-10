@@ -73,3 +73,15 @@ export function powerBody(action: string, minutes: number, message: string): Rec
   const m = message.trim();
   return m ? { action, warn_minutes: minutes, warn_message: m } : { action, warn_minutes: minutes };
 }
+
+/**
+ * Success toast. A countdown is only scheduled when the server is up (the job title then names the
+ * warning), and even then it acts at once when nobody is online or RCON is unreachable, so the text
+ * never promises a countdown.
+ */
+export function powerToast(name: string, title: string, minutes: number, job: { title?: string } | null | undefined): string {
+  const scheduled = minutes > 0 && /warning/i.test(job?.title ?? "");
+  return scheduled
+    ? `${title} of ${name} requested; anyone online gets a ${minutes} min warning first`
+    : `${title} requested for ${name}`;
+}

@@ -133,12 +133,90 @@ async def _run_command(user: Any, instance: Any, command: str) -> str:
     return output
 
 
-class ConsoleConsumer(AsyncJsonWebsocketConsumer):
+def is_stop_command(command: str) -> bool:
+    """``stop`` typed in the console (any case, with leading slashes and surrounding blanks).
+
+    Sent over RCON it makes the server exit, and Docker's restart policy then starts it again at
+    once: the server is not stopped, it restarts. The console runs the panel's Stop instead.
+    """
+    return command.strip().lstrip("/").strip().lower() == "stop"
+
+
+def _enqueue_stop(user: Any, instance: Any) -> Any:
+    """The Stop button's job (apps.instances.services.power), audited as the user's ``instance.stop``."""
+    from apps.audit import service as audit
+    from apps.core.errors import ConflictError
+    from apps.instances.models import Instance
+    from apps.instances.services import enqueue_power
+
+    fresh = Instance.objects.select_related("node").get(pk=instance.pk)
+    if fresh.archived_at:
+        raise ConflictError("This server is archived", code="archived")
+    job = enqueue_power(fresh, "stop", user=user)
+    audit.record("instance.stop", actor=user, instance=fresh, target=fresh, details={"job": str(job.id), "via": "console"})
+    return job
+
+
+class _GuardedConsumer(AsyncJsonWebsocketConsumer):
+    """Cleanup that runs however the consumer ends.
+
+    Channels calls ``disconnect()`` only for a ``websocket.disconnect`` message. A consumer that
+    ends with an exception instead (a send to a browser that went away, a channel layer error)
+    would leave its background tasks running for as long as the session lives.
+    """
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            with contextlib.suppress(Exception):
+                await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        raise NotImplementedError
+
+    async def receive(self, text_data: str | None = None, bytes_data: bytes | None = None, **kwargs: Any) -> None:
+        """Ignore frames that are no JSON object (binary, invalid JSON, a list): they used to end
+        the consumer with an exception."""
+        if text_data is None:
+            return
+        try:
+            content = await self.decode_json(text_data)
+        except ValueError:
+            return
+        if isinstance(content, dict):
+            await self.receive_json(content, **kwargs)
+
+    async def _send(self, content: dict[str, Any]) -> bool:
+        """send_json that reports a browser that went away (False) instead of raising."""
+        try:
+            await self.send_json(content)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return False
+        return True
+
+
+async def _cancel(task: asyncio.Task | None) -> None:
+    if task and task is not asyncio.current_task() and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+class ConsoleConsumer(_GuardedConsumer):
+    """Server -> browser messages: ``hello{can_command}``, ``agent{connected, message?}``,
+    ``reset``, the agent's log messages (``logs``, ``log``, ``state``, ``error``, ``closed``),
+    ``command_result{id, ok, command?, output? | error?, code?}`` and ``notice{level, message, job_id?}``
+    (a message of the panel to show in the console, e.g. for a typed ``stop``)."""
+
     relay_task: asyncio.Task | None = None
     watch_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
         self.instance_id = str(self.scope["url_route"]["kwargs"]["instance_id"])
+        self._closing = False
         user = self.scope.get("user")
         loaded = await _load_instance(user, self.instance_id) if user else None
         if loaded is None:
@@ -151,18 +229,18 @@ class ConsoleConsumer(AsyncJsonWebsocketConsumer):
         self.user = user
         self.user_id = user.pk
         self.session_key = _session_key(self.scope)
-        self._closing = False
         await self.accept()
         await self.send_json({"type": "hello", "can_command": "instance.command" in self.perms})
         self.relay_task = asyncio.create_task(self._relay())
         self.watch_task = asyncio.create_task(self._watch())
 
     async def disconnect(self, code: int) -> None:
-        for task in (self.relay_task, self.watch_task):
-            if task and task is not asyncio.current_task():
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, Exception):
-                    await task
+        await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        self._closing = True
+        await _cancel(self.relay_task)
+        await _cancel(self.watch_task)
 
     async def _end(self, code: int) -> None:
         if self._closing:
@@ -170,7 +248,8 @@ class ConsoleConsumer(AsyncJsonWebsocketConsumer):
         self._closing = True
         if self.relay_task:
             self.relay_task.cancel()
-        await self.close(code=code)
+        with contextlib.suppress(Exception):  # the browser may be gone already
+            await self.close(code=code)
 
     async def _check_access(self) -> bool:
         """Re-read session, account and permissions; close the socket when access is gone."""
@@ -208,7 +287,7 @@ class ConsoleConsumer(AsyncJsonWebsocketConsumer):
         tls_kwargs: dict[str, Any] = {}
         backoff = 1.0
         first = True
-        while True:
+        while not self._closing:
             try:
                 if url.startswith("wss://") and not tls_kwargs:
                     # may read and pin the agent certificate (network I/O + DB) on first use
@@ -221,55 +300,107 @@ class ConsoleConsumer(AsyncJsonWebsocketConsumer):
                     max_size=8 * 1024 * 1024,
                     **tls_kwargs,
                 ) as ws:
-                    await self.send_json({"type": "agent", "connected": True})
+                    if not await self._send({"type": "agent", "connected": True}):
+                        return  # the browser is gone: never reconnect to the agent for it
                     backoff = 1.0
-                    if not first:
-                        # resubscribed: the agent re-sends the tail; tell the client to reset its buffer
-                        await self.send_json({"type": "reset"})
+                    # resubscribed: the agent re-sends the tail; tell the client to reset its buffer
+                    if not first and not await self._send({"type": "reset"}):
+                        return
                     first = False
                     async for raw in ws:
                         msg = json.loads(raw)
                         if msg.get("type") == "ping":
                             continue
-                        await self.send_json(msg)
+                        if not await self._send(msg):
+                            return
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.info("console relay for %s lost: %s", self.instance_id, exc)
-                with contextlib.suppress(Exception):
-                    await self.send_json(
-                        {"type": "agent", "connected": False, "message": "Lost connection to the node agent; retrying"}
-                    )
+                if not await self._send(
+                    {"type": "agent", "connected": False, "message": "Lost connection to the node agent; retrying"}
+                ):
+                    return
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 15)
 
-    async def receive_json(self, content: dict[str, Any], **kwargs: Any) -> None:
-        if content.get("type") != "command":
+    async def receive_json(self, content: Any, **kwargs: Any) -> None:
+        if not isinstance(content, dict) or content.get("type") != "command":
             return
         req_id = content.get("id")
         if not await self._check_access():  # revoked grants, disabled users and logged-out sessions
             return
         if "instance.command" not in self.perms:
-            await self.send_json({"type": "command_result", "id": req_id, "ok": False, "error": "You may not send commands"})
+            await self._send({"type": "command_result", "id": req_id, "ok": False, "error": "You may not send commands"})
             return
         command = str(content.get("command", "")).strip().lstrip("/")
         if not command or len(command) > 1400 or "\n" in command or "\r" in command:
-            await self.send_json({"type": "command_result", "id": req_id, "ok": False, "error": "Invalid command"})
+            await self._send({"type": "command_result", "id": req_id, "ok": False, "error": "Invalid command"})
+            return
+        if is_stop_command(command):
+            await self._stop(req_id, command)
             return
         try:
             output = await _run_command(self.user, self.instance, command)
-            await self.send_json({"type": "command_result", "id": req_id, "ok": True, "command": command, "output": output})
+            result = {"type": "command_result", "id": req_id, "ok": True, "command": command, "output": output}
         except ApiError as exc:
-            await self.send_json(
+            result = {
+                "type": "command_result",
+                "id": req_id,
+                "ok": False,
+                "command": command,
+                "error": str(exc.detail),
+                "code": exc.error_code,
+            }
+        if not await self._send(result):
+            # the browser went away while the command ran (RCON can take 40 s): end cleanly
+            await self._end(1000)
+
+    async def _stop(self, req_id: Any, command: str) -> None:
+        """A typed ``stop`` runs the panel's Stop (Docker would restart a server stopped over RCON).
+
+        The answer is a ``notice`` (``level`` info/error, ``message``, the command's ``id``, and
+        ``job_id`` of the stop job) followed by the ``command_result`` with the same ``id`` and the
+        same text; a client that showed the notice can skip the result's text."""
+        if "instance.control" not in self.perms:
+            message = (
+                "Not sent: 'stop' over the console makes the server exit, and Docker starts it again at once. "
+                "Stopping the server needs the permission to start and stop it, which you do not have."
+            )
+            await self._send({"type": "notice", "level": "error", "message": message, "id": req_id})
+            await self._send(
                 {
                     "type": "command_result",
                     "id": req_id,
                     "ok": False,
                     "command": command,
-                    "error": str(exc.detail),
+                    "error": message,
+                    "code": "stop_refused",
+                }
+            )
+            return
+        try:
+            job = await database_sync_to_async(_enqueue_stop)(self.user, self.instance)
+        except ApiError as exc:
+            message = f"Could not stop the server: {exc.detail}"
+            await self._send({"type": "notice", "level": "error", "message": message, "id": req_id})
+            await self._send(
+                {
+                    "type": "command_result",
+                    "id": req_id,
+                    "ok": False,
+                    "command": command,
+                    "error": message,
                     "code": exc.error_code,
                 }
             )
+            return
+        message = (
+            "'stop' was not sent to the server: the panel is stopping it instead (the same as the Stop button), "
+            "so Docker does not start it again."
+        )
+        await self._send({"type": "notice", "level": "info", "message": message, "id": req_id, "job_id": str(job.id)})
+        await self._send({"type": "command_result", "id": req_id, "ok": True, "command": command, "output": message})
 
 
 @database_sync_to_async
@@ -277,10 +408,16 @@ def _can_view(user: Any, instance_id: str) -> bool:
     return "instance.view" in user.instance_permissions(instance_id)
 
 
-class EventsConsumer(AsyncJsonWebsocketConsumer):
+# channels_redis forgets a group member after group_expiry (default 86400 s) unless it is added
+# again: a socket open for a day would silently stop getting events. Re-add it well before that.
+GROUP_REFRESH_SECONDS = 3600.0
+
+
+class EventsConsumer(_GuardedConsumer):
     watch_task: asyncio.Task | None = None
 
     async def connect(self) -> None:
+        self._closing = False
         user = self.scope.get("user")
         if not user or not user.is_authenticated or not user.is_active:
             await self.close(code=CLOSE_UNAUTHENTICATED)
@@ -291,19 +428,21 @@ class EventsConsumer(AsyncJsonWebsocketConsumer):
         self.user = user
         self.user_id = user.pk
         self.session_key = _session_key(self.scope)
-        self._closing = False
         self._cache: dict[str, tuple[float, bool]] = {}
         await self.channel_layer.group_add(EVENTS_GROUP, self.channel_name)
+        self._joined = time.monotonic()
         await self.accept()
         self.watch_task = asyncio.create_task(self._watch())
 
     async def disconnect(self, code: int) -> None:
-        if self.watch_task and self.watch_task is not asyncio.current_task():
-            self.watch_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self.watch_task
-        with contextlib.suppress(Exception):
-            await self.channel_layer.group_discard(EVENTS_GROUP, self.channel_name)
+        await self._cleanup()
+
+    async def _cleanup(self) -> None:
+        self._closing = True
+        await _cancel(self.watch_task)
+        if getattr(self, "channel_name", None) and self.channel_layer is not None:
+            with contextlib.suppress(Exception):
+                await self.channel_layer.group_discard(EVENTS_GROUP, self.channel_name)
 
     async def _check_access(self) -> bool:
         if self._closing:
@@ -320,11 +459,17 @@ class EventsConsumer(AsyncJsonWebsocketConsumer):
         self._cache.clear()
         return True
 
+    async def _refresh_membership(self) -> None:
+        if time.monotonic() - self._joined >= GROUP_REFRESH_SECONDS:
+            await self.channel_layer.group_add(EVENTS_GROUP, self.channel_name)
+            self._joined = time.monotonic()
+
     async def _watch(self) -> None:
         while not self._closing:
-            await asyncio.sleep(REVALIDATE_SECONDS)
+            await asyncio.sleep(min(REVALIDATE_SECONDS, GROUP_REFRESH_SECONDS))
             try:
-                await self._check_access()
+                if await self._check_access():
+                    await self._refresh_membership()
             except asyncio.CancelledError:
                 raise
             except Exception:

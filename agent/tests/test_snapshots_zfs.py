@@ -741,13 +741,78 @@ def test_convert_failure_puts_the_directory_back(agent_settings, fake):
     assert sorted(p.name for p in agent_settings.instances_dir.iterdir()) == [str(iid)]
 
 
-def test_convert_refuses_leftovers(agent_settings, fake):
+def _interrupted_convert(agent_settings, fake, *, marked: bool = True) -> tuple[uuid.UUID, Path, str]:
+    """A plain server folder and what a conversion stopped during its copy left: its dataset,
+    mounted at the .mcpanel-convert folder, with part of the files."""
     iid = uuid.uuid4()
-    (agent_settings.instances_dir / str(iid)).mkdir()
+    path = agent_settings.instances_dir / str(iid)
+    write(path, "world/level.dat", "precious")
+    tmp = path.with_name(f"{iid}.mcpanel-convert")
+    name = f"{PARENT}/mcpanel-{iid}"
+    owner = iid if marked else uuid.uuid4()
+    zfs._run(["create", "-o", f"mountpoint={tmp}", "-o", f"mcpanel:instance={owner}", name])
+    write(tmp, "world/level.dat", "prec")  # the copy got that far
+    fake.clear_calls()
+    return iid, path, name
+
+
+def test_convert_removes_what_an_interrupted_conversion_left(agent_settings, fake):
+    """audit agent-backups#6: the leftover used to block 'Enable snapshots' for good."""
+    iid, path, name = _interrupted_convert(agent_settings, fake)
+    assert ZfsSnapshots(agent_settings, iid).convert() == {"converted": True, "dataset": name}
+    assert fake.mutating()[0] == ["destroy", name]  # without -r
+    assert (path / "world/level.dat").read_text() == "precious"
+    assert sorted(p.name for p in agent_settings.instances_dir.iterdir()) == [str(iid)]
+
+
+def test_convert_removes_an_empty_leftover_folder(agent_settings, fake):
+    iid = uuid.uuid4()
+    write(agent_settings.instances_dir / str(iid), "keep.txt", "x")
     (agent_settings.instances_dir / f"{iid}.mcpanel-convert").mkdir()
+    assert ZfsSnapshots(agent_settings, iid).convert()["converted"] is True
+
+
+def test_convert_leaves_a_dataset_it_cannot_tell_is_its_own_alone(agent_settings, fake):
+    iid, path, name = _interrupted_convert(agent_settings, fake, marked=False)
     with pytest.raises(AgentError) as err:
         ZfsSnapshots(agent_settings, iid).convert()
     assert err.value.code == "convert_conflict" and fake.mutating() == []
+    assert name in fake.datasets() and (path / "world/level.dat").read_text() == "precious"
+
+
+def test_convert_leaves_a_leftover_dataset_mounted_elsewhere_alone(agent_settings, fake, tmp_path):
+    """Marked as this server's, but not mounted at the .mcpanel-convert folder: not what an
+    interrupted copy leaves (someone moved it, or it holds other files), so never destroyed."""
+    iid, path, name = _interrupted_convert(agent_settings, fake)
+    elsewhere = tmp_path / "moved-by-hand"
+    zfs._run(["set", f"mountpoint={elsewhere}", name])
+    write(elsewhere, "world/level.dat", "someone's files")
+    fake.clear_calls()
+    with pytest.raises(AgentError) as err:
+        ZfsSnapshots(agent_settings, iid).convert()
+    assert err.value.code == "convert_conflict" and "is not mounted at" in str(err.value)
+    assert fake.mutating() == [] and name in fake.datasets()
+    assert (elsewhere / "world/level.dat").read_text() == "someone's files"
+    assert (path / "world/level.dat").read_text() == "precious"
+
+
+def test_convert_leaves_a_leftover_dataset_with_snapshots_alone(agent_settings, fake):
+    iid, _path, name = _interrupted_convert(agent_settings, fake)
+    zfs._run(["snapshot", f"{name}@keep"])
+    fake.clear_calls()
+    with pytest.raises(AgentError) as err:
+        ZfsSnapshots(agent_settings, iid).convert()
+    assert err.value.code == "convert_conflict" and name in fake.datasets()
+
+
+def test_convert_reports_a_previous_folder_it_could_not_remove(agent_settings, fake, monkeypatch):
+    iid = uuid.uuid4()
+    write(agent_settings.instances_dir / str(iid), "keep.txt", "x")
+    monkeypatch.setattr(zfs.shutil, "rmtree", lambda *_a, **_k: None)  # rmtree gave up
+    result = ZfsSnapshots(agent_settings, iid).convert()
+    assert result["converted"] is True and len(result["warnings"]) == 1
+    (old,) = result["leftovers"]
+    assert ".mcpanel-preconvert-" in old and Path(old).exists()
 
 
 # -- in-place swaps (restic restore / clone into a dataset) -------------------------------

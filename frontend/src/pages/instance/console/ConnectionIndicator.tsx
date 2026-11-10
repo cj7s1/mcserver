@@ -83,6 +83,18 @@ export function ConnectionIndicator({
           <RefreshCw /> Reconnect now
         </Button>
       )}
+      {state === "connected" && (
+        // A stream can stop delivering lines without the socket closing (e.g. the agent's log pump
+        // died during a container recreate): offer a manual re-subscribe in the live state too.
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button type="button" variant="ghost" size="icon-xs" onClick={onRetry} aria-label="Reconnect the console">
+              <RefreshCw />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Reconnect and reload the log tail (use it if new output stops appearing)</TooltipContent>
+        </Tooltip>
+      )}
     </div>
   );
 }

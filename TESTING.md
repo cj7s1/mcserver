@@ -9,7 +9,7 @@ suites are and how to run them.
 |---|---|---|---|
 | Backend unit + API | `cd backend && uv run pytest -q -m "not integration"` | Postgres; bash, git and coreutils for the script tests (they skip without them) | state machine, retention, properties, spec/env builder, catalog parsing, ports, permission matrix, auth/CSRF/setup, permission enforcement through the API (scenario 8), validation, job locks, content manager, diagnostics signatures, crash-loop tracking, notifications, metrics, mrpack preflight, world replace and world reset; the platform tests in the next table |
 | Backend integration | `cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m integration` (+ the btrfs variables below) | running agent(s) + Docker + internet | see "Integration tests" below: vanilla lifecycle + backup/restore, a stopped server without a container, backup browser + single-path restore, Paper + Modrinth plugin, zip import, btrfs snapshots over a TLS-pinned node, world reset |
-| Agent | `cd agent && uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test` for the real btrfs tests: run them twice, see "Agent tests on a real btrfs filesystem" below) | nothing (the restic, btrfs and ZFS-restore tests skip without the binaries) | symlink/traversal-safe file ops, archive extraction (zip-slip, links, bombs), spec/security policy, auth, fetch allow-list, storage parsing, real restic backup/ls/dump/restore-path, btrfs snapshots (real, or against a stand-in), the graceful stop, the last-run record and retire, world replace and world reset on a real filesystem |
+| Agent | `cd agent && uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test` for the real btrfs tests: run them twice, see "Agent tests on a real btrfs filesystem" below) | nothing (the restic, btrfs and ZFS-restore tests skip without the binaries; restic lock handling runs against `tests/fake_restic.py`) | symlink/traversal-safe file ops, archive extraction (zip-slip, links, bombs), spec/security policy, auth, fetch allow-list, storage parsing, real restic backup/ls/dump/restore-path, btrfs snapshots (real, or against a stand-in), the graceful stop, the last-run record and retire, world replace and world reset on a real filesystem |
 | Frontend | `cd frontend && npx tsc -b && npm run lint && npm run build && npx vitest run` | nothing | type safety, lint, build, component tests |
 | Real containers | `.github/scripts/panel-acceptance.sh`, `.github/scripts/upgrade-rehearsal.sh` (see "Tests with real containers") | Docker with Compose and BuildKit | the single panel container, and an upgrade with rollback from the 7-container layout |
 | Browser | Playwright scripts used during development (see DEVELOPMENT_STATUS.md) | dev server + API | every route at desktop and mobile widths, console errors, layout |
@@ -45,6 +45,41 @@ None of these needs Docker or a Minecraft server. They run in the normal backend
 | `agent/tests/test_snapshots_btrfs_delete.py` | Deleting btrfs subvolumes and snapshots with and without `CAP_SYS_ADMIN`, the probe, `delete_mode`, "unavailable" when neither way works | `tests/fake_btrfs.py`, a stand-in for the `btrfs` command that refuses deletes the way the kernel does; a real btrfs mount with `MCPANEL_TEST_BTRFS` |
 | `agent/tests/test_world_reset.py` | Which folders count as a world, the reset with undo on failure, leftovers, the route | A real temporary filesystem, a faked Docker status |
 
+### Tests of the audit fixes of 2026-11-09
+
+Regression tests for the findings of the audit round of 2026-11-09 (DEVELOPMENT_STATUS.md, "Audit
+of 2026-11-09"). Each test or section names its finding id. They are part of the normal suites;
+none needs Docker, restic or a Minecraft server. Run one file with, for example,
+`cd backend && uv run pytest -q tests/test_audit_schedules.py` or
+`cd agent && uv run pytest -q tests/test_restic_locks.py`.
+
+| File | What it runs | Stand-ins |
+|---|---|---|
+| `backend/tests/test_audit_schedules.py` | Deferral of busy schedules and the hour limit with its notification, backups before snapshots before power actions, impossible cron dates (refused, paused), one broken schedule cannot stop the others, no late power actions after downtime, missed backups catch up once the server settled, daylight saving time in a real zone, Celery beat in UTC | Fake agent, fake clock; one test starts Django in a subprocess with `TZ=America/Los_Angeles` |
+| `backend/tests/test_audit_job_endings.py` | `finish()` only ends an active job, abandoned and cancelled jobs stop waiting within seconds, a stopping worker ends its waits at once (`apps/jobs/shutdown.py`), an interrupted job that stopped a server says so | Fake agent, flag files in a temp folder |
+| `backend/tests/test_audit_recovery.py` | Jobs that stop a running server and then fail: started again when provably nothing changed, recorded as stopped otherwise (restart with changes, recreate, software and modpack updates, restores, snapshot rollback and conversion); a "Before update" backup restores the software with the files | Fake agent |
+| `backend/tests/test_audit_memory_images.py` | Memory admission (`capacity.py`, the reserve setting, `allow_overcommit`, start jobs, scheduled starts, resume after boot), `pull="newer"` and the image channel, spec hashes, player counting by status ping, status writes, clones without worlds, `manage.py adopt_backups`, `restart: always` in the compose file | Fake agent |
+| `backend/tests/test_backup_db_script.py` | `deploy/unraid/backup-db.sh`: dump, `.env` copy, modes, retention, refusals, the OK/FAILED line, shellcheck when installed | A stand-in `docker` written per test |
+| `backend/tests/test_web_audit_2026_11_09.py` | Request body limits in front of Django, one copy of an upload on disk, the upload temp folder, uploads of more than 100 files and per-file `failed`, streamed downloads, no persistent DB connections in the web process, `server.properties` escapes and ISO-8859-1, non-UTF-8 files in the editor, long file operations (202), the console's `stop`, consumer clean-up, events group renewal, `list` formats, CurseForge pages, pinning and key check, superusers | The real ASGI application driven like uvicorn (transactional databases), fake agent, respx |
+| `backend/tests/test_contracts_2026_11_10.py` | The joins between the layers after the four packages were merged: the fake agent's features equal the agent's `FEATURES`; the agent's 415 `not_utf8` as the editor's read-only preview; `*.properties` in ISO-8859-1 through the editor without double escaping; jars too large to hash and an agent busy hashing; `suffix` on `/files/hashes`; `memory_reserve_mb` and `default_bind_ip` validation; pinning retried by the reconciler; a refused import deletes its upload; `cpu_limit` / `create_failed` / `rename_failed` applies; the CPU limit checked when saved; players by status ping on the polled stats; daylight saving for fixed-hour and interval schedules; clone with an older agent | Fake agent (answers like the current agent; `strict_text = False` and a shorter `features` list play older agents), respx |
+| `backend/tests/test_review_2026_11_10_{web,jobs,schedules,world,container}.py` | The review of the fixes (DEVELOPMENT_STATUS.md, "Review of the audit fixes"): only single jars in `mods/`/`plugins/` recorded as removed pack files, the Modpack tab's record and "Let the pack reinstall them"; the upload gate with a JSON cookie first, inactive users and changed passwords; CurseForge keys with odd characters; `server.properties` from the file editor (also with an older agent); a download that is left closes the agent's response; schedule edits and deferred runs after downtime; where jobs skip the memory check and where requests now ask "Start anyway"; what jobs remember after a stop; worker stops; `create_failed` of older agents; a restore cut off by a panel stop; the upload spool folder made at start (not at import of the settings) and its health check | Fake agent, fake clock, the real ASGI application, respx, the entrypoint with stub commands |
+| `backend/tests/test_content_audit_2026_11_09.py` | Pack-managed jars kept from being re-installed (`packfiles.py`), bulk updates above 100 files, `plugin.yml` parsing in linear time, Hangar replacement and records | Fake agent |
+| `agent/tests/test_apply_images.py` | `pull="newer"` (bounded, falls back to the local image), removal of superseded images, the new container created before the old one is removed, CPU limit above the host's | A fake Docker |
+| `agent/tests/test_restic_locks.py` | Unlock at start, unlock and retry on exit 11, SIGINT before SIGTERM/SIGKILL, restic children stopped at shutdown, glob escaping, backup downloads that fail | `tests/fake_restic.py`: a stand-in `restic` executable. Each test writes a plan per subcommand (exit code, output, delay, reaction to SIGINT/SIGTERM) to `$HOME/fake-restic/plan.json`; every run and signal is logged to `log.jsonl` for the assertions |
+| `agent/tests/test_saving_recovery.py` | `save-on` after an agent that ended inside a backup's `save-off` (marker, shutdown hook, start, periodic) | Fake container and RCON |
+| `agent/tests/test_maintenance.py` | Data root 0750 at start, the sweep of leftovers of interrupted operations (and what it keeps) | Real temporary folders |
+| `agent/tests/test_files_robustness.py` | Zip export with old dates and odd names, a growing file downloaded, failed import leftovers, non-UTF-8 names in listings and hashes, non-UTF-8 text and ISO-8859-1 properties | Real temporary folders, names created as bytes |
+| `agent/tests/test_clone.py` | Clone owned by the runtime user, "leave out worlds" by the server's `level-name` | Real temporary folders; the owner change is recorded, not done |
+| `agent/tests/test_log_pump.py` | The console log pump reports Docker errors, retries, and closes the socket when it ends | A fake Docker |
+| `agent/tests/test_ping.py` | `GET /v1/instances/{id}/ping` (server list ping) and its bounds | A small in-process fake Minecraft server |
+
+Frontend tests of the same round: `components/RouteError.test.tsx`, `MemoryOvercommitDialog.test.tsx`,
+`lib/{batches,clipboard,socket-reconnect,auth-gate}.test.*`, `pages/instance/InstanceLayout.test.tsx`,
+`console/console-notice.test.tsx` (also the pending-command wait ended once by a `stop` notice),
+`files/{file-editor,file-table}.test.tsx` (`name_valid: false` entries), `schedules/cron.test.ts`,
+`library/ServerActions.test.tsx` (run with `npx vitest run`). `lib/batches.test.tsx` also covers
+the per-file `failed` list of uploads and a bulk update the server stopped part-way.
+
 ## Tests with real containers
 
 Both scripts are called by CI (`.github/workflows/ci.yml`, jobs "docker" and "upgrade") and can be
@@ -66,7 +101,9 @@ environment; the periodic worker has 2 slots; the scheduler keeps its schedule i
 `kill -9` of each child (it comes back alone; after Redis all of them); a planted Redis dump file
 is removed before the start; a queued job survives a restart of the container; the health check
 turns unhealthy with a reason and back; `docker stop` ends in order inside the grace period; the
-start-up guard refuses next to a worker container of the old layout. It kills and restarts the
+start-up guard refuses next to a worker container of the old layout; a 10 MB request body is
+spooled to `MCPANEL_UPLOAD_TMP` and answered without a 500, and that folder belongs to UID 10001
+(mode 0700). It kills and restarts the
 processes of the stack it is pointed at: do not run it against a panel you use.
 
 **`.github/scripts/upgrade-rehearsal.sh SITE NEW_REV [URL]`**: `deploy/scripts/upgrade.sh` with
@@ -144,7 +181,7 @@ MCPANEL_IT_BTRFS_FINGERPRINT="$FP" uv run pytest -q -m integration -s
 | `MCPANEL_IT_AGENT_URL` | — (skip) | agent, retire, backup browser, content, import, world reset tests |
 | `MCPANEL_IT_AGENT_TOKEN` | `dev-agent-token` | same |
 | `MCPANEL_IT_AGENT_DATA_ROOT` | `/srv/mcpanel-dev` | on-disk checks (removal, ownership); empty skips them |
-| `MCPANEL_IT_AGENT_CONTAINER` | — | retire test: the name of the agent's own container. The last-run record is readable by root only, so its file mode and content are checked through `docker exec` there. Unset: that check is skipped, and the test says so |
+| `MCPANEL_IT_AGENT_CONTAINER` | — | the name of the agent's own container, which must see the data root at the same path. The agent makes its data root `root:root 0750` at every start, so a run as a normal user cannot look into it: the on-disk checks (removal, ownership, the retire test's last-run record) then run there through `docker exec` (`tests/integration_support.py`, `AgentDisk`). Unset, and not root: a test that reaches such a check is **skipped** with a message naming this variable |
 | `MCPANEL_IT_READY_TIMEOUT` | `360` | seconds to wait for a server to become healthy |
 | `MCPANEL_IT_BIND_IP` | `127.0.0.1` | host address the test servers' game ports are published on; the default keeps them off the LAN |
 | `MCPANEL_IT_BTRFS_AGENT_URL`, `_TOKEN`, `_FINGERPRINT` | — (skip) | snapshot tests: an `https://` agent on btrfs, pinned via `Node.tls_fingerprint` |
@@ -162,6 +199,10 @@ MCPANEL_IT_BTRFS_FINGERPRINT="$FP" uv run pytest -q -m integration -s
 
 The content, backup-browse, import and snapshot files were last run on 2026-11-06 in the
 development sandbox, before this release.
+
+Run as a normal user against an agent of this release, set `MCPANEL_IT_AGENT_CONTAINER` (or run as
+root): the data root is no longer readable for other users, and without it the agent, retire and
+backup-browse tests stop at their first on-disk check with a skip.
 
 ## Acceptance scenarios: verification log
 

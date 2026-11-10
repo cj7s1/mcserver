@@ -8,12 +8,12 @@ CurseForge, FTB, version metadata, restic) — use them instead of guessing endp
 ## Layout
 
 ```
-agent/      FastAPI node agent (only component with Docker socket). mcagent/{main,docker_ops,lastrun,safefs,backups,snapshots,zfs,world,archive,fetch,hashcache,storage,rcon,tls,schemas,operations}.py
+agent/      FastAPI node agent (only component with Docker socket). mcagent/{main,docker_ops,lastrun,safefs,backups,snapshots,zfs,world,archive,fetch,hashcache,storage,rcon,tls,schemas,operations,maintenance,netguard,slp}.py
 backend/    Django 5.2 + DRF + Channels + Celery. mcpanel/ (settings, urls, asgi, celery), apps/<app>/,
             container/ (entrypoint.sh, supervise.py, healthcheck.py: the single panel container)
 frontend/   React 19 + TS 7 + Vite 8 + Tailwind 4 + shadcn/ui (radix-nova) + TanStack Query + react-router 8 + xterm.js
 deploy/     docker-compose.yml (prod: panel, agent, postgres), docker-compose.node.yml, docker-compose.dev.yml,
-            .env.example, scripts/ (generate-secrets.sh, upgrade.sh), unraid/ (stopping_docker hook, install-hook.sh)
+            .env.example, scripts/ (generate-secrets.sh, upgrade.sh), unraid/ (stopping_docker hook, install-hook.sh, backup-db.sh)
 docs/       QUICKSTART-UNRAID.md, UNRAID.md, UNRAID-SHUTDOWN.md, SECURITY.md, reference/ (upstream notes)
 .github/    workflows/ci.yml, scripts/ (panel-acceptance.sh, upgrade-rehearsal.sh: real containers)
 scripts/cloud-dev/  sandbox-only helpers (egress forwarder, env files, start-services.sh)
@@ -65,26 +65,33 @@ docs/QUICKSTART-UNRAID.md must not name the old periodic-worker service. Run bot
 
 | Area | Backend | Agent |
 |---|---|---|
-| Lifecycle, spec, status, crash loops | `apps/instances/{handlers,spec,state,reconcile}.py`. A job starts a server only through `handlers.start_server` (creates the container when there is none) | `docker_ops.py` |
+| Lifecycle, spec, status, crash loops | `apps/instances/{handlers,spec,state,reconcile}.py`. A job starts a server only through `handlers.start_server` (creates the container when there is none). A job that stopped a running server and then fails starts it again when nothing was changed, else records it stopped (`put_back`, `Progress`) | `docker_ops.py`; apply creates the new container before it removes the old one |
+| Memory admission | `apps/instances/capacity.py` (node RAM minus system setting `memory_reserve_mb` vs. limits of running containers; 409 `insufficient_memory`, override `allow_overcommit`); frontend `lib/power.ts` (`sendPower`, the one power path), `components/{MemoryOvercommitDialog,MemoryCommitBar}.tsx` | `GET /v1/info` (`docker.memory_bytes`) |
+| Runtime images | `spec.current_image` (channel reaches existing servers), `handlers.apply_container` (`pull="newer"` on every start that creates a container) | `main.apply_spec`, `docker_ops` (bounded pull, superseded images removed); feature `pull_newer` |
+| Cron schedules | `apps/instances/scheduling.py`: one try/except per schedule, impossible dates refused/paused, backups before snapshots before power actions, deferral when busy (`Schedule.deferred_at`, 60 min), misfire rule after downtime, wall-clock DST handling; Celery beat runs in UTC | — |
 | Stopped server = no container (retire, last-run record) | `reconcile.py` (`retire_blocker`, `maybe_retire`, `retire_container`), `state.compute` (reads `last_run`), `diagnostics.py`, `manage.py retire_stopped_containers`, setting `MCPANEL_RETIRE_STOPPED_CONTAINERS` | `docker_ops.py` (`retire`, `instance_lock`: the per-server lock around apply/start/restart/remove/retire), `lastrun.py`, `POST /retire`, `DELETE /last-run`, `FEATURES` in `main.py` |
 | Restart required | `spec.py`: `spec_outdated` (hash differs) vs `restart_required` (hash differs **and** the server has a container); `CONTAINER_FORMAT` is mixed into the hash | `docker_ops.CONTAINER_FORMAT` (reported in `/v1/info` and by every apply). Raise both together |
 | Graceful stop, Docker stop timeout | `handlers._log_stop`, `spec.build_env` (`CREATE_CONSOLE_IN_PIPE`), `nodes/client.py` (`STOP_EXTRA_SECONDS`) | `docker_ops.py` (`graceful_stop`, `_RconStopCourier`, `build_create_kwargs`, `create_container`), `config.py` (`shutdown_stop_timeout` = `AGENT_SHUTDOWN_STOP_TIMEOUT`) |
 | Host shutdown + resume (Unraid hook) | `manage.py host_shutdown`, `scheduling.resume_flagged_servers` (from `tasks.scheduler_tick`), `Instance.resume_after_boot` / `resume_flagged_at`; hook and installer in `deploy/unraid/`; docs/UNRAID-SHUTDOWN.md | the stop endpoint |
 | Panel container (supervisor, health, start-up guard) | `backend/container/{entrypoint.sh,supervise.py,healthcheck.py}`, `mcpanel/celery.py` (tick age, quiet tick logging), `apps/core/views.py` (`HealthView`: `components`, `tick_age_seconds`) | — |
-| Jobs: locks, heartbeat, re-sending, watchdog | `apps/jobs/{runner,tasks}.py` (`dispatch`, `resend_queued_jobs`, `watchdog`), `mcpanel/celery.py` (`worker_ready`), `apps/backups/handlers.settle_orphaned_backups` | `operations.py` (one operation per server) |
+| Jobs: locks, heartbeat, re-sending, watchdog | `apps/jobs/{runner,tasks}.py` (`dispatch`, `resend_queued_jobs`, `watchdog`; `finish()` only ends an active job), `apps/jobs/shutdown.py` (a stopping worker ends job waits at once), `mcpanel/celery.py` (`worker_ready`, `worker_shutting_down`), `apps/backups/handlers.settle_orphaned_backups` | `operations.py` (one operation per server) |
+| Request limits, uploads, downloads | `apps/core/asgi.py` (`RequestBodyLimit` before Django, `PanelASGIHandler` spools to `MCPANEL_UPLOAD_TMP`), `apps/core/uploads.py` (one copy on disk), `apps/core/streaming.py` (`AgentStreamingResponse`); web process has `CONN_MAX_AGE=0` | — |
+| Agent housekeeping at start | — | `maintenance.py` (data root 0750, sweep of interrupted-operation leftovers), `netguard.py` (instance-network source guard before Docker answers), `backups.startup_unlock` (restic locks), saving-paused markers in `main.py` |
 | Agent capabilities for mixed versions | `nodes/client.py` (`features`, `supports`), `spec.applied_container_format` | `main.py` (`FEATURES`, `GET /v1/info`) |
 | Upgrade, rollback, database restore | `deploy/scripts/upgrade.sh` (state in `deploy/upgrade-state.env`); tests `tests/test_upgrade_script.py` + `tests/upgrade_shim/docker`, `.github/scripts/upgrade-rehearsal.sh` | — |
 | Diagnostics / manual downloads | `apps/instances/diagnostics.py` | (reads logs/files) |
 | Modpacks (Modrinth/CurseForge/FTB), preflight, pinning, update/rollback | `apps/modpacks/{providers,mrpack,pinning,handlers}.py` | — |
-| Mods/plugins (Modrinth + Hangar + SpigotMC via Spiget) | `apps/content/{service,hangar_source,spigot_source}.py`, `apps/modpacks/{hangar,spiget}.py` | `fetch.py`, `hashcache.py`, `/files/hashes` |
-| Backups (restic), backup browser, retention | `apps/backups/{handlers,retention,views}.py` | `backups.py` |
+| Mods/plugins (Modrinth + Hangar + SpigotMC via Spiget) | `apps/content/{service,hangar_source,spigot_source}.py`, `apps/content/packfiles.py` (pack-managed jars, `*_IGNORE_MISSING_FILES`), `apps/modpacks/{hangar,spiget}.py` | `fetch.py`, `hashcache.py`, `/files/hashes` (null hash above 2 GiB, 503 `hashing_busy`) |
+| Backups (restic), backup browser, retention | `apps/backups/{handlers,retention,views}.py`; `manage.py adopt_backups` (rows for snapshots the database does not know); `deploy/unraid/backup-db.sh` (daily database dump) | `backups.py` |
 | Backup safeguards (notice, nightly schedule) | `apps/instances/services.py` (`add_nightly_backup_schedule`, `nightly_backup_cron`, `backup_overview_annotations`), `serializers.py` (`last_backup_at`, `backup_schedules`, `nightly_backup`), `manage.py ensure_backup_schedules`; frontend `lib/backup-health.ts`, `components/BackupNotice.tsx` | — |
 | Snapshots (btrfs, ZFS) | `apps/backups/handlers.py` (snapshot_*), schedules in `apps/instances/scheduling.py` | `snapshots.py` (`delete_support`: probes whether deletes are `native` or file-by-file `fallback`), `zfs.py` |
 | Import / export (archives) | `apps/instances/views.py` (Import/Extract/Archive) | `archive.py` |
 | Power warnings / update checks | `apps/instances/power_warnings.py` (in-game countdown before restart/stop), `apps/modpacks/{updates,tasks}.py` (periodic modpack update checks) | (RCON via `rcon.py`) |
 | World import / export (level-name, Bukkit dims, replace + rollback) | `apps/instances/{world,views,handlers}.py` (`world_replace` job) | `world.py` |
 | World reset (plan + blockers, verified safety backup, seed, delete + undo; UI: Settings → Danger zone, `frontend/src/pages/instance/settings/reset-world-*`) | `apps/instances/world.py` (`reset_plan`), `views.py` (`WorldResetView`), `handlers.py` (`world_reset` job); contract tests `tests/test_world_reset_contract.py` | `world.py` (`classify`, `reset`), `POST /world/reset` |
-| Metrics + player history | `apps/metrics` | `/stats` |
+| Metrics + player history | `apps/metrics` (players by status ping, RCON `list` only for older agents) | `/stats`, `/ping` (`slp.py`) |
+| Console | `apps/console/consumers.py` (typed `stop` becomes the stop job + a notice; tasks cleaned up in `finally`; events group renewed hourly) | log stream (`main.stream_logs`) |
+| Frontend resilience | `components/RouteError.tsx`, `lib/chunk-reload.ts`, `ConnectionLostBanner` in `components/States.tsx`, `lib/clipboard.ts`, `lib/batches.ts` | — |
 | Notifications | `apps/notifications` | — |
 | Nodes (multi-host) | `apps/nodes` | one agent per host |
 
@@ -107,7 +114,8 @@ docs/QUICKSTART-UNRAID.md must not name the old periodic-worker service. Run bot
 * Keep `DEVELOPMENT_STATUS.md` and `ROADMAP.md` updated when a feature lands; commit often.
 
 * Security audit: on hold in session 1 at the user's request; the user asked to start it on 2026-11-06
-  (session 2). Results and open findings are tracked in DEVELOPMENT_STATUS.md.
+  (session 2). Results and open findings are tracked in DEVELOPMENT_STATUS.md, also for the audit of
+  2026-11-09 (work lists in `audit-2026-11-09/briefs/` next to the checkout, outside the repository).
 
 ## Security rules (non-negotiable)
 

@@ -13,6 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api, ApiError, errorMessage } from "@/lib/api";
+import { sendPower } from "@/lib/power";
 import { qk, useInvalidateInstance } from "@/lib/queries";
 import type { PropertiesResponse, PropertySchema } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -163,12 +164,14 @@ function PropertyControl({
 
 function RestartBanner({
   instanceId,
+  instanceName,
   keys,
   canControl,
   running,
   onDismiss,
 }: {
   instanceId: string;
+  instanceName: string;
   keys: string[];
   canControl: boolean;
   running: boolean;
@@ -176,8 +179,9 @@ function RestartBanner({
 }) {
   const invalidate = useInvalidateInstance();
   const restart = useMutation({
-    mutationFn: () => api.post(`/instances/${instanceId}/power`, { action: "restart" }),
-    onSuccess: () => {
+    mutationFn: () => sendPower({ id: instanceId, name: instanceName }, { action: "restart" }),
+    onSuccess: (outcome) => {
+      if (outcome.status === "cancelled") return;
       toast.success("Restart requested");
       invalidate(instanceId);
       onDismiss();
@@ -340,6 +344,7 @@ export function PropertiesTab({ instance, can, onDirtyChange }: TabProps) {
       {restartKeys && (
         <RestartBanner
           instanceId={instance.id}
+          instanceName={instance.name}
           keys={restartKeys}
           canControl={can("instance.control")}
           running={live}

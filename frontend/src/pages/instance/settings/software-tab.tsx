@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, ApiError, errorMessage } from "@/lib/api";
+import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { formatDateTime } from "@/lib/format";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Instance, JavaInfo, Job, ServerTypeInfo, VersionEntry } from "@/lib/types";
@@ -165,8 +166,9 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
   }, [jobStatus, instance.id, qc]);
 
   const update = useMutation({
+    // with "start afterwards" a stopped server must fit into the node's memory ("Start anyway?")
     mutationFn: (allowDowngrade: boolean) =>
-      api.post<Job>(`/instances/${instance.id}/software`, {
+      postOrDecline<Job>(`/instances/${instance.id}/software`, instance, {
         minecraft_version: mc,
         loader_version: loader,
         java_version: javaValue,
@@ -247,6 +249,7 @@ export function SoftwareTab({ instance, can, onDirtyChange }: TabProps) {
         setDowngradeMessage(err.message);
         return;
       }
+      if (err instanceof OvercommitDeclined) return; // nothing was started
       toast.error(errorMessage(err));
       if (allowDowngrade) throw err;
     }

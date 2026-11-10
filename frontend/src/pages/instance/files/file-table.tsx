@@ -1,5 +1,6 @@
 /** Directory listing table: selection, sortable columns and per-row actions. */
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   Copy,
@@ -31,10 +32,21 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { copyText } from "@/lib/clipboard";
 import { formatBytes, formatDateTime, relativeTime } from "@/lib/format";
 import type { FileEntry } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { canTryAsText, isArchive, isTextEditable, isWorldEntry, typeLabel, type SortDir, type SortKey } from "./file-utils";
+import {
+  canTryAsText,
+  hasInvalidName,
+  INVALID_NAME_HINT,
+  isArchive,
+  isTextEditable,
+  isWorldEntry,
+  typeLabel,
+  type SortDir,
+  type SortKey,
+} from "./file-utils";
 
 export interface FileActions {
   open: (entry: FileEntry) => void;
@@ -101,6 +113,23 @@ function SortHeader({
 
 function NameCell({ entry, world, actions }: { entry: FileEntry; world: boolean; actions: FileActions }) {
   const icon = <EntryIcon entry={entry} world={world} />;
+  if (hasInvalidName(entry)) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex min-w-0 items-center gap-2 rounded" tabIndex={0}>
+            {icon}
+            <span className="truncate max-sm:line-clamp-2 max-sm:break-all max-sm:whitespace-normal" title={entry.name}>
+              {entry.name}
+            </span>
+            <AlertTriangle className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden />
+            <span className="sr-only">(name is not valid UTF-8; no actions available)</span>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{INVALID_NAME_HINT}</TooltipContent>
+      </Tooltip>
+    );
+  }
   if (entry.type === "symlink") {
     return (
       <Tooltip>
@@ -144,6 +173,21 @@ function NameCell({ entry, world, actions }: { entry: FileEntry; world: boolean;
 }
 
 function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boolean; actions: FileActions }) {
+  if (hasInvalidName(entry)) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          {/* a disabled button gets no pointer events: the wrapper carries the tooltip */}
+          <span tabIndex={0} className="inline-flex rounded" aria-label={`No actions for ${entry.name}: ${INVALID_NAME_HINT}`}>
+            <Button variant="ghost" size="icon-sm" disabled aria-hidden tabIndex={-1}>
+              <MoreHorizontal />
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent className="max-w-72">{INVALID_NAME_HINT}</TooltipContent>
+      </Tooltip>
+    );
+  }
   const items: ReactNode[] = [];
   if (entry.type === "directory") {
     items.push(
@@ -183,10 +227,8 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
     <DropdownMenuItem
       key="copy"
       onSelect={() => {
-        navigator.clipboard
-          ?.writeText(entry.path)
-          .then(() => toast.success("Path copied"))
-          .catch(() => toast.error("Could not copy to the clipboard"));
+        // works over plain HTTP too (no async Clipboard API there)
+        void copyText(entry.path).then((ok) => (ok ? toast.success("Path copied") : toast.error("Could not copy to the clipboard")));
       }}
     >
       <Copy /> Copy path
@@ -247,8 +289,10 @@ export function FileTable({
   actions: FileActions;
   now: number;
 }) {
-  const allSelected = entries.length > 0 && entries.every((e) => selected.has(e.path));
-  const someSelected = !allSelected && entries.some((e) => selected.has(e.path));
+  // entries whose real name the agent could not give cannot be deleted, so they are never selected
+  const selectable = entries.filter((e) => !hasInvalidName(e));
+  const allSelected = selectable.length > 0 && selectable.every((e) => selected.has(e.path));
+  const someSelected = !allSelected && selectable.some((e) => selected.has(e.path));
   const toggle = (path: string, on: boolean) =>
     onSelectedChange((prev) => {
       const next = new Set(prev);
@@ -266,8 +310,8 @@ export function FileTable({
                 <Checkbox
                   aria-label="Select all items in this folder"
                   checked={allSelected ? true : someSelected ? "indeterminate" : false}
-                  onCheckedChange={(v) => onSelectedChange(() => (v === true ? new Set(entries.map((e) => e.path)) : new Set()))}
-                  disabled={entries.length === 0}
+                  onCheckedChange={(v) => onSelectedChange(() => (v === true ? new Set(selectable.map((e) => e.path)) : new Set()))}
+                  disabled={selectable.length === 0}
                 />
               </th>
             )}
@@ -294,7 +338,13 @@ export function FileTable({
               >
                 {canWrite && (
                   <td className="w-9 py-1.5 pr-0 pl-4 align-middle">
-                    <Checkbox aria-label={`Select ${e.name}`} checked={isSel} onCheckedChange={(v) => toggle(e.path, v === true)} />
+                    <Checkbox
+                      aria-label={`Select ${e.name}`}
+                      checked={isSel}
+                      onCheckedChange={(v) => toggle(e.path, v === true)}
+                      disabled={hasInvalidName(e)}
+                      title={hasInvalidName(e) ? INVALID_NAME_HINT : undefined}
+                    />
                   </td>
                 )}
                 <td className={cn("max-w-0 px-2 py-1.5 align-middle", !canWrite && "pl-4")}>

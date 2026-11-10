@@ -34,7 +34,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import stat
 import subprocess
 import time
 from datetime import timedelta
@@ -43,7 +42,17 @@ from typing import Any
 
 import pytest
 
-from .integration_support import READY_TIMEOUT, InstanceTracker, Timer, container_names, make_node, rcon, run_job, wait_status
+from .integration_support import (
+    READY_TIMEOUT,
+    InstanceTracker,
+    Timer,
+    container_names,
+    disk,
+    make_node,
+    rcon,
+    run_job,
+    wait_status,
+)
 
 AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
@@ -254,13 +263,13 @@ def test_stopped_server_has_no_container(it_node, tracker, monkeypatch, settings
 
         if record_path is not None:
             folder = record_path.parent
-            st = os.stat(folder)
-            assert stat.S_IMODE(st.st_mode) == 0o700 and st.st_uid == 0, oct(st.st_mode)
+            mode, uid, _gid = disk.stat(folder)
+            assert mode == 0o700 and uid == 0, oct(mode)
             if os.geteuid() != 0:
                 with pytest.raises(PermissionError):  # root only: not even its name is visible to others
                     os.stat(record_path)
             assert tracker.instance_dir(inst) not in record_path.parents
-            leaked = [p for p in tracker.instance_dir(inst).rglob("*") if "last-run" in p.name]
+            leaked = [name for name in disk.names_below(tracker.instance_dir(inst)) if "last-run" in name]
             assert leaked == []  # nothing of it inside the server folder (and so in no backup)
         if AGENT_CONTAINER and record_path is not None:
             mode = _agent_exec("stat", "-c", "%a %u %g", str(record_path)).strip()
@@ -381,7 +390,7 @@ def test_stopped_server_has_no_container(it_node, tracker, monkeypatch, settings
             left = _agent_exec("sh", "-c", f"ls -A {record_path.parent} | grep -c {iid} || true").strip()
             assert left == "0", left
         if DATA_ROOT:
-            assert not tracker.path("instances", str(iid)).exists()
+            assert not disk.exists(tracker.path("instances", str(iid)))
         assert container_names(iid) in ("", None)
         timer.mark("delete removes the record")
     finally:

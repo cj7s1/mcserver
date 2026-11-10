@@ -688,6 +688,7 @@ def test_stop_copes_with_a_container_removed_between_status_and_stop(server, fak
 def test_a_changed_runtime_image_is_noted_in_the_job_log_and_the_audit_log(
     server, fake_agent, django_capture_on_commit_callbacks
 ):
+    fake_agent.features = ["retire"]  # an agent without pull_newer: the panel compares the images itself
     inst = stopped_and_retired(fake_agent, server(), django_capture_on_commit_callbacks)
     before = fake_agent.last_runs[str(inst.id)]["image_id"]
     # same tag, same build: nothing to say

@@ -28,6 +28,8 @@ WRITE = "instance.content"
 MAX_QUERY_LENGTH = 200
 # multipart framing overhead allowed on top of the jar size limit
 UPLOAD_OVERHEAD = 1024 * 1024
+# a bulk update of a big pack: at most this many file names in its audit entry
+AUDIT_LIST_LIMIT = 200
 
 
 def _int(value: Any, default: int, lo: int, hi: int, field: str) -> int:
@@ -183,7 +185,7 @@ class ContentUpdateView(APIView):
         files = _body(request).get("files")
         if not isinstance(files, list):
             raise ApiError("files must be a list of file names", code="invalid_files")
-        details = {"files": [str(f)[:255] for f in files[: service.MAX_FILES_PER_UPDATE]]}
+        details = {"files": [str(f)[:255] for f in files[:AUDIT_LIST_LIMIT]], "count": len(files)}
         result = _audited(request, instance, "content.update", details, lambda: service.update(instance, files))
         audit.record(
             "content.update",
@@ -200,8 +202,11 @@ class ContentUpdateView(APIView):
                         "to_version": (r.get("to_version") or {}).get("id"),
                         "reason": r.get("reason"),
                     }
-                    for r in result["results"]
-                ]
+                    for r in result["results"][:AUDIT_LIST_LIMIT]
+                ],
+                "updated": result["updated"],
+                "failed": result["failed"],
+                "skipped": result["skipped"],
             },
         )
         return Response(result)
@@ -309,13 +314,20 @@ class HangarVersionsView(APIView):
 
 
 class HangarInstallView(APIView):
-    @extend_schema(request=dict, responses={200: dict}, summary="Install a plugin from Hangar (SHA-256 verified)")
+    parser_classes = [JSONParser]
+
+    @extend_schema(
+        request=dict,
+        responses={200: dict},
+        summary="Install a plugin from Hangar (SHA-256 verified); replaces a version the panel installed before",
+    )
     def post(self, request: Request, pk: str) -> Response:
         from . import hangar_source
 
         instance = get_instance_for(request.user, pk, WRITE)
-        slug = str(request.data.get("slug") or "")
-        version = request.data.get("version") or None
+        data = _body(request)
+        slug = str(data.get("slug") or "")
+        version = data.get("version") or None
         try:
             result = hangar_source.install(instance, slug, str(version) if version else None)
         except Exception:
@@ -333,7 +345,11 @@ class HangarInstallView(APIView):
             request=request,
             instance=instance,
             target=instance,
-            details={"slug": slug[:64], "version": result["installed"]["version"]},
+            details={
+                "slug": slug[:64],
+                "version": result["installed"]["version"],
+                "replaced": (result.get("replaced") or {}).get("filename"),
+            },
         )
         return Response(result)
 

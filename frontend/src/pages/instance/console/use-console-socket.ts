@@ -2,7 +2,10 @@
  * WebSocket client for /ws/instances/{id}/console/ (backend/apps/console/consumers.py).
  *
  * Server → client: hello{can_command}, agent{connected,message?}, logs{lines}, log{line},
- * state{state}, reset, error{message}, closed, command_result{id,ok,command,output|error}.
+ * state{state}, reset, error{message}, closed, command_result{id,ok,command,output|error},
+ * notice{level, message, id?, job_id?} (a note from the panel, e.g. that a typed `stop` was turned into a
+ * Stop of the server or refused; `id` names the command it answers, whose command_result with the same
+ * text follows; `job_id` is the stop job). Unknown types are ignored.
  * Client → server: command{id,command}.
  *
  * Reconnects with exponential backoff (1 s → 30 s). The backoff only resets once a
@@ -11,8 +14,7 @@
  */
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { closeSocket, wsUrl } from "@/lib/events";
-import { qk } from "@/lib/queries";
+import { closeSocket, sessionStillValid, wsUrl } from "@/lib/events";
 
 export type ConsoleServerMessage =
   | { type: "hello"; can_command: boolean }
@@ -23,7 +25,8 @@ export type ConsoleServerMessage =
   | { type: "reset" }
   | { type: "error"; message: string }
   | { type: "closed" }
-  | { type: "command_result"; id: string; ok: boolean; command?: string; output?: string; error?: string; code?: string };
+  | { type: "command_result"; id: string; ok: boolean; command?: string; output?: string; error?: string; code?: string }
+  | { type: "notice"; level?: "info" | "error"; message?: string; text?: string; id?: string; job_id?: string; command?: string };
 
 /** Synthetic events emitted by the hook itself. */
 export type ConsoleLocalEvent = { type: "_open"; reconnect: boolean } | { type: "_disconnected" };
@@ -51,11 +54,6 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<() => void>(() => {});
   const qc = useQueryClient();
-  // 4401: the session is gone (logout elsewhere, expiry, password change) -> refresh auth to show the login page.
-  const onDenied = useRef<(code: number) => void>(() => {});
-  onDenied.current = (code: number) => {
-    if (code === 4401) void qc.invalidateQueries({ queryKey: qk.auth });
-  };
 
   useEffect(() => {
     const life = { disposed: false };
@@ -116,7 +114,14 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
         if (NO_RETRY_CLOSE_CODES.has(ev.code)) {
           setState("denied");
           setRetryAt(null);
-          onDenied.current(ev.code);
+          // 4401: the session is gone (logout elsewhere, expiry) -> refreshing auth shows the login
+          // page. After the user's own password change the tab is still signed in under a new
+          // session key: reconnect then.
+          if (ev.code === 4401) {
+            void sessionStillValid(qc).then((ok) => {
+              if (ok && !life.disposed && ws === sock) scheduleRetry();
+            });
+          }
           return;
         }
         if (immediate) {
@@ -124,12 +129,17 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
           connect();
           return;
         }
-        const delay = backoff;
-        backoff = Math.min(backoff * 2, MAX_BACKOFF);
-        setState((s) => (s === "stream_closed" ? s : "reconnecting"));
-        setRetryAt(Date.now() + delay);
-        retryTimer = setTimeout(connect, delay);
+        scheduleRetry();
       };
+    };
+
+    const scheduleRetry = () => {
+      const delay = backoff;
+      backoff = Math.min(backoff * 2, MAX_BACKOFF);
+      setState((s) => (s === "stream_closed" ? s : "reconnecting"));
+      setRetryAt(Date.now() + delay);
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(connect, delay);
     };
 
     reconnectRef.current = () => {
@@ -151,7 +161,7 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
       closeSocket(ws);
       wsRef.current = null;
     };
-  }, [instanceId]);
+  }, [instanceId, qc]);
 
   const send = useCallback((msg: { type: "command"; id: string; command: string }): boolean => {
     const ws = wsRef.current;

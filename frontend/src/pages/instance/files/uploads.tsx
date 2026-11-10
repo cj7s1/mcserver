@@ -15,6 +15,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { ApiError, errorMessage, uploadWithProgress } from "@/lib/api";
+import { BATCH_SIZE, batchLabel, chunk, type BatchProgress } from "@/lib/batches";
 import { formatBytes } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,25 @@ interface UploadItem {
   progress: number;
   status: "uploading" | "done" | "error";
   error?: string;
+  /** Set while more than 100 files go up in several requests (the panel takes 100 per request). */
+  batch?: BatchProgress;
+  /** Files written before a later batch failed. */
+  uploaded?: number;
+  /** Files the server could not store (the others were written): name and reason. */
+  failures?: UploadFailure[];
+}
+
+/** One entry of the upload answer's `failed` list (201 with `uploaded` and `failed`). */
+interface UploadFailure {
+  name: string;
+  path?: string;
+  code?: string;
+  message: string;
+}
+
+interface UploadAnswer {
+  uploaded: { path: string; size: number }[];
+  failed?: UploadFailure[];
 }
 
 interface Conflict {
@@ -50,25 +70,72 @@ export function useFileUploads(instanceId: string) {
     if (!files.length) return;
     const id = ++uploadSeq;
     const bytes = files.reduce((n, f) => n + f.size, 0);
+    const batches = chunk(files, BATCH_SIZE);
     setItems((list) => [...list, { id, dir, names: files.map((f) => f.name), bytes, progress: 0, status: "uploading" }]);
-    const form = new FormData();
-    for (const f of files) form.append("file", f, f.name);
+    let done = 0;
+    let doneBytes = 0;
+    let written = 0;
+    const failures: UploadFailure[] = [];
     try {
-      await uploadWithProgress<{ uploaded: { path: string; size: number }[] }>(
-        `/instances/${instanceId}/files/upload`,
-        form,
-        { path: dir, overwrite },
-        (fraction) => patch(id, { progress: fraction }),
-      );
-      patch(id, { status: "done", progress: 1 });
-      toast.success(files.length === 1 ? `Uploaded ${files[0].name}` : `Uploaded ${files.length} files`);
-      setTimeout(() => dismiss(id), 4000);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409 && err.code === "exists" && !overwrite) {
-        dismiss(id);
-        setConflict({ dir, files, existing: [] });
+      for (let b = 0; b < batches.length; b++) {
+        const part = batches[b];
+        const partBytes = part.reduce((n, f) => n + f.size, 0);
+        const batch: BatchProgress = { batch: b + 1, batches: batches.length, done, total: files.length };
+        patch(id, { batch: batches.length > 1 ? batch : undefined });
+        const form = new FormData();
+        for (const f of part) form.append("file", f, f.name);
+        try {
+          const res = await uploadWithProgress<UploadAnswer>(
+            `/instances/${instanceId}/files/upload`,
+            form,
+            { path: dir, overwrite },
+            (fraction) => patch(id, { progress: bytes ? (doneBytes + fraction * partBytes) / bytes : fraction }),
+          );
+          written += res?.uploaded?.length ?? part.length;
+          failures.push(...(res?.failed ?? []));
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 409 && err.code === "exists" && !overwrite && !failures.length) {
+            // Ask about the files not written yet (this batch and the later ones).
+            dismiss(id);
+            if (written) toast.success(`Uploaded ${written} of ${files.length} files`);
+            setConflict({ dir, files: files.slice(done), existing: [] });
+            return;
+          }
+          const prefix = batches.length > 1 ? `Batch ${b + 1} of ${batches.length} failed` : "";
+          const rest =
+            batches.length > 1 ? `; ${written} of ${files.length} files were uploaded, the other ${files.length - written} were not` : "";
+          patch(id, {
+            status: "error",
+            error: prefix ? `${prefix}: ${errorMessage(err)}${rest}` : errorMessage(err),
+            uploaded: written,
+            failures: failures.length ? failures : undefined,
+          });
+          return;
+        }
+        done += part.length;
+        doneBytes += partBytes;
+      }
+      // Files that exist already are offered for overwriting; every other failure is listed.
+      const clashes = overwrite ? [] : failures.filter((f) => f.code === "exists");
+      const other = failures.filter((f) => !clashes.includes(f));
+      if (other.length) {
+        patch(id, {
+          status: "error",
+          progress: 1,
+          batch: undefined,
+          uploaded: written,
+          failures: other,
+          error: `${written} of ${files.length} files uploaded; ${other.length} could not be stored:`,
+        });
       } else {
-        patch(id, { status: "error", error: errorMessage(err) });
+        patch(id, { status: "done", progress: 1, batch: undefined });
+        setTimeout(() => dismiss(id), 4000);
+      }
+      if (written === files.length) toast.success(files.length === 1 ? `Uploaded ${files[0].name}` : `Uploaded ${files.length} files`);
+      else if (written) toast.success(`Uploaded ${written} of ${files.length} files`);
+      if (clashes.length) {
+        const names = new Set(clashes.map((f) => f.name));
+        setConflict({ dir, files: files.filter((f) => names.has(f.name)), existing: [...names] });
       }
     } finally {
       qc.invalidateQueries({ queryKey: qk.files(instanceId, dir) });
@@ -129,10 +196,22 @@ export function UploadList({ items, onDismiss }: { items: UploadItem[]; onDismis
           {u.status === "uploading" && (
             <Progress value={u.progress * 100} className="mt-2 h-1.5" aria-label={`Upload progress for ${u.names.join(", ")}`} />
           )}
+          {u.status === "uploading" && u.batch && (
+            <p className="mt-1 text-xs text-muted-foreground">Sending {batchLabel(u.batch)}</p>
+          )}
           {u.status === "uploading" && u.progress >= 1 && (
             <p className="mt-1 text-xs text-muted-foreground">Transferred — writing files on the server…</p>
           )}
           {u.error && <p className="mt-1 text-xs text-destructive">{u.error}</p>}
+          {u.failures && u.failures.length > 0 && (
+            <ul className="mt-1 max-h-32 overflow-auto text-xs text-destructive" aria-label="Files that were not uploaded">
+              {u.failures.map((f) => (
+                <li key={f.path ?? f.name} className="truncate" title={`${f.name}: ${f.message}`}>
+                  <span className="font-mono">{f.name}</span>: {f.message}
+                </li>
+              ))}
+            </ul>
+          )}
         </li>
       ))}
     </ul>

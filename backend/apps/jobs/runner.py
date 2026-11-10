@@ -9,9 +9,13 @@
   timeout expired during a long job) and the message is ignored; with a stale heartbeat the
   worker that ran it crashed/restarted, so it is marked failed ("interrupted") rather than
   blindly re-executed. The watchdog (``tasks.watchdog``) fails stale jobs without a redelivery.
-* Long waits inside a handler (``JobContext.sleep_until``) notice when the job was cancelled
-  or abandoned meanwhile and raise ``JobCancelled``; the runner then keeps the status set by
-  whoever stopped the job.
+* Long waits inside a handler (``JobContext.sleep_until`` and, through
+  ``apps.nodes.client.operation_guard``, every ``AgentClient.wait_operation``) notice when the job
+  was cancelled or abandoned meanwhile and raise ``JobCancelled``; the runner then keeps the
+  status set by whoever stopped the job. When the worker is being stopped they raise
+  ``WorkerStopping`` (apps/jobs/shutdown.py) and the job is failed as interrupted at once.
+* ``finish`` only ends a job that is still queued or running: a handler that returns after its
+  job was cancelled or marked as failed does not turn it "succeeded".
 * A job enqueued with ``exclusive=False`` can take the instance lock later with
   ``claim_lock`` (used by power actions that first warn players for several minutes).
 """
@@ -52,6 +56,23 @@ class JobCancelled(Exception):
     def __init__(self, status: str) -> None:
         super().__init__(f"the job is {status}")
         self.status = status
+
+
+class WorkerStopping(JobCancelled):
+    """The worker running the job is being stopped (apps/jobs/shutdown.py): the job ends now and
+    is failed as interrupted, instead of holding the worker until it is killed."""
+
+    def __init__(self) -> None:
+        super().__init__(JobStatus.RUNNING)
+        self.args = ("the worker is stopping",)
+        # what a handler adds to the job's error (WORKER_STOPPING_ERROR) about the state it leaves
+        self.note = ""
+
+
+WORKER_STOPPING_ERROR = (
+    "The panel was being stopped (or restarted) while this operation ran, so the job ended here. "
+    "The node's agent finishes a step it had started; check the server state before retrying."
+)
 
 
 def heartbeat_interval() -> float:
@@ -144,6 +165,7 @@ class JobContext:
     def __init__(self, job: Job) -> None:
         self.job = job
         self._last_save = 0.0
+        self._last_check: float | None = None
 
     def progress(self, value: float | None = None, message: str | None = None, *, force: bool = False) -> None:
         job = self.job
@@ -165,10 +187,35 @@ class JobContext:
         Job.objects.filter(pk=self.job.pk).update(log=self.job.log, heartbeat_at=timezone.now())
 
     def check_cancelled(self) -> None:
-        """Raise JobCancelled if someone cancelled or abandoned this job meanwhile."""
+        """Raise JobCancelled if someone cancelled or abandoned this job meanwhile, WorkerStopping
+        when the worker is being stopped."""
+        from .shutdown import stop_requested
+
+        if stop_requested():
+            raise WorkerStopping()
         status = Job.objects.filter(pk=self.job.pk).values_list("status", flat=True).first()
         if status != JobStatus.RUNNING:
             raise JobCancelled(status or "deleted")
+        self._last_check = monotonic()
+
+    def guard(self) -> None:
+        """``check_cancelled`` for polling loops (``AgentClient.wait_operation``): the worker's stop
+        is noticed at once, the job's status is read at most every CANCEL_POLL_SECONDS."""
+        from .shutdown import stop_requested
+
+        if stop_requested():
+            raise WorkerStopping()
+        if self._last_check is None or monotonic() - self._last_check >= CANCEL_POLL_SECONDS:
+            self.check_cancelled()
+
+    def remember(self, **facts: Any) -> None:
+        """Keep facts about what the job did to its server in ``Job.result`` right away (the
+        handler's own result replaces them when it ends). The watchdog reads them when the job
+        was cut off: ``stopped_server`` = the job stopped a running server."""
+        current = Job.objects.filter(pk=self.job.pk).values_list("result", flat=True).first() or {}
+        merged = {**current, **facts}
+        Job.objects.filter(pk=self.job.pk, status=JobStatus.RUNNING).update(result=merged)
+        self.job.result = {**(self.job.result or {}), **facts}
 
     def sleep_until(self, deadline: float) -> None:
         """Wait until ``deadline`` (a ``runner.monotonic()`` value), checking for cancellation."""
@@ -288,7 +335,13 @@ def _release(job: Job) -> None:
         Instance.objects.filter(pk=job.instance_id, active_job_id=job.pk).update(active_job=None)
 
 
-def finish(job: Job, status: str, *, error: str = "", error_code: str = "", result: dict[str, Any] | None = None) -> None:
+FINISH_FIELDS = ("status", "finished_at", "error", "error_code", "result", "progress", "log", "message")
+
+
+def finish(job: Job, status: str, *, error: str = "", error_code: str = "", result: dict[str, Any] | None = None) -> bool:
+    """End a job that is still queued or running. Returns False (and changes nothing but the
+    lock) when it has ended already: cancelled, marked as failed, failed by the watchdog. Its
+    handler may still return later, and must not turn it "succeeded", nor the other way round."""
     job.status = status
     job.finished_at = timezone.now()
     job.error = error
@@ -299,10 +352,15 @@ def finish(job: Job, status: str, *, error: str = "", error_code: str = "", resu
         job.progress = 1.0
     if error:
         job.append_log(f"ERROR: {error}")
-    job.save(update_fields=["status", "finished_at", "error", "error_code", "result", "progress", "log", "message"])
+    ended = Job.objects.filter(pk=job.pk, status__in=ACTIVE_STATUSES).update(**{f: getattr(job, f) for f in FINISH_FIELDS})
     _release(job)
+    if not ended:
+        log.info("Job %s had ended already; its status is kept", job.pk)
+        job.refresh_from_db()
+        return False
     broadcast("job.finished", job_payload(job), str(job.instance_id) if job.instance_id else None)
     _notify_job(job)
+    return True
 
 
 def _notify_job(job: Job) -> None:
@@ -327,6 +385,27 @@ def _notify_job(job: Job) -> None:
 INTERRUPTED_ERROR = (
     "The worker running this operation stopped (crashed or restarted) before it finished. Check the server state before retrying."
 )
+LEFT_STOPPED_NOTE = (
+    " It had stopped the server for its work, and the server was left stopped: check its files and start it when it is fine."
+)
+
+
+def settle_interrupted(job: Job) -> None:
+    """After a job was failed as interrupted: a server the job had stopped for its work
+    (``Job.result["stopped_server"]``, see ``instances.handlers.ensure_stopped``) and that is not
+    running now is recorded as stopped, and the job's error says so. Whether the job got to the
+    step that changes the server's files is not known, so it is not started again. Never raises."""
+    from apps.instances.models import Instance
+
+    try:
+        if not job.instance_id or not (job.result or {}).get("stopped_server"):
+            return
+        Instance.objects.filter(pk=job.instance_id, desired_state="running").exclude(container_state="running").update(
+            desired_state="stopped", resume_after_boot=False, resume_flagged_at=None
+        )
+        Job.objects.filter(pk=job.pk).update(error=job.error + LEFT_STOPPED_NOTE)
+    except Exception as exc:
+        log.warning("Could not settle the server of interrupted job %s: %s", job.pk, exc)
 
 
 @shared_task(name="apps.jobs.runner.run_job", acks_late=True)
@@ -346,7 +425,8 @@ def run_job(job_id: str) -> None:
                 log.warning("Job %s is still running on another worker (redelivered message ignored)", job_id)
                 return
             log.warning("Job %s was interrupted (no heartbeat since %s); marking failed", job_id, last_sign_of_life(job))
-            finish(job, JobStatus.FAILED, error=INTERRUPTED_ERROR, error_code="interrupted")
+            if finish(job, JobStatus.FAILED, error=INTERRUPTED_ERROR, error_code="interrupted"):
+                settle_interrupted(job)
             return
         if job.status != JobStatus.QUEUED:
             return
@@ -367,9 +447,20 @@ def run_job(job_id: str) -> None:
             error_code="unknown_job_kind",
         )
         return
+    from apps.nodes.client import operation_guard
+
+    guard_token = operation_guard.set(ctx.guard)
     try:
         with _Heartbeat(job.pk, heartbeat_interval()):
             result = handler(job, ctx) or {}
+    except WorkerStopping as stopping:
+        log.warning("Job %s (%s) ended because the worker is stopping", job.id, job.kind)
+        error = f"{WORKER_STOPPING_ERROR} {stopping.note}" if stopping.note else WORKER_STOPPING_ERROR
+        try:
+            if finish(job, JobStatus.FAILED, error=error, error_code="interrupted"):
+                settle_interrupted(job)
+        except Exception as exc:  # the database may be going away too: the watchdog fails it later
+            log.warning("Could not record the end of job %s (%s); the watchdog does it", job.id, exc)
     except JobCancelled as exc:
         # finished by the cancel/abandon request already; only make sure the lock is free
         log.info("Job %s (%s) stopped early: %s", job.id, job.kind, exc)
@@ -383,6 +474,7 @@ def run_job(job_id: str) -> None:
     else:
         finish(job, JobStatus.SUCCEEDED, result=result)
     finally:
+        operation_guard.reset(guard_token)
         if job.instance_id:
             try:
                 from apps.instances.reconcile import reconcile_instance

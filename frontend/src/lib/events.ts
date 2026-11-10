@@ -2,6 +2,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { qk } from "./queries";
+import type { AuthState } from "./types";
 
 export function wsUrl(path: string): string {
   const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -22,6 +23,23 @@ export function closeSocket(sock: WebSocket | null | undefined): void {
   } else if (sock.readyState === WebSocket.OPEN) {
     sock.close();
   }
+}
+
+/**
+ * After a socket was closed with 4401 ("session gone"): refresh the auth state and tell whether
+ * this tab is still signed in. Changing one's own password rotates the session key, so sockets
+ * opened before the change are closed with 4401 although the tab stays signed in; they should then
+ * reconnect. When the session really ended, the refreshed state makes the gate show the login page
+ * (which unmounts the socket's owner).
+ */
+export async function sessionStillValid(qc: QueryClient): Promise<boolean> {
+  try {
+    await qc.invalidateQueries({ queryKey: qk.auth });
+  } catch {
+    /* the query records its own error */
+  }
+  const state = qc.getQueryData<AuthState>(qk.auth);
+  return !!state?.authenticated && !!state.user && !state.user.must_change_password;
 }
 
 export function useLiveEvents(enabled: boolean): boolean {
@@ -52,14 +70,21 @@ export function useLiveEvents(enabled: boolean): boolean {
       ws.onclose = (ev: CloseEvent) => {
         setConnected(false);
         if (life.closed) return;
-        // 4401 session gone / 4403 access revoked: do not retry; refresh auth (shows login if signed out)
+        // 4401 session gone / 4403 access revoked: refresh auth (shows login if signed out). A 4401
+        // while the tab is still signed in (own password change: new session key) reconnects.
         if (ev.code === 4401 || ev.code === 4403) {
-          void qc.invalidateQueries({ queryKey: qk.auth });
+          void sessionStillValid(qc).then((ok) => {
+            if (ok && ev.code === 4401 && !life.closed) schedule();
+          });
           return;
         }
-        timer = setTimeout(connect, retry.current);
-        retry.current = Math.min(retry.current * 2, 30_000);
+        schedule();
       };
+    };
+    const schedule = () => {
+      clearTimeout(timer);
+      timer = setTimeout(connect, retry.current);
+      retry.current = Math.min(retry.current * 2, 30_000);
     };
     connect();
     return () => {

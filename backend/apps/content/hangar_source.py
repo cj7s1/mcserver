@@ -1,7 +1,9 @@
 """Hangar as a second plugin source for Paper/Purpur/Folia servers.
 
 Hangar has no hash lookup, so installs are recorded on the instance
-(``modpack_meta["hangar"][filename]``) to label them in the inventory.
+(``modpack_meta["hangar"][filename]``) to label them in the inventory. Installing a plugin whose
+recorded jar is still there replaces that jar (an update); records of jars that are gone are
+dropped when the inventory is built and when the jar is deleted in the content manager.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from apps.instances.models import PLUGIN_TYPES, Instance
 from apps.modpacks import hangar
 from apps.nodes.client import AgentClient
 
+from .packfiles import update_meta
 from .service import ensure_mutable, invalidate, validate_filename
 
 
@@ -31,6 +34,26 @@ def _require_plugins(instance: Instance) -> None:
 
 def recorded(instance: Instance) -> dict[str, dict[str, Any]]:
     return dict((instance.modpack_meta or {}).get("hangar") or {})
+
+
+def _set_record(instance: Instance, filename: str, record: dict[str, Any] | None, *, drop: tuple[str, ...] = ()) -> None:
+    """Store ``record`` for ``filename`` (None: store nothing) after dropping the records ``drop``."""
+
+    def change(meta: dict[str, Any]) -> None:
+        hang = dict(meta.get("hangar") or {})
+        for name in drop:
+            hang.pop(name, None)
+        if record is not None:
+            hang[filename] = record
+        meta["hangar"] = hang
+
+    update_meta(instance, change)
+
+
+def forget_files(instance: Instance, filenames: list[str]) -> None:
+    """Drop the records of jars that are gone."""
+    if any(f in recorded(instance) for f in filenames):
+        _set_record(instance, "", None, drop=tuple(filenames))
 
 
 def search(instance: Instance, query: str, offset: int = 0) -> dict[str, Any]:
@@ -54,6 +77,8 @@ def versions(instance: Instance, slug: str) -> dict[str, Any]:
 
 
 def install(instance: Instance, slug: str, version: str | None) -> dict[str, Any]:
+    """Install a Hangar plugin; when the panel installed another version of it before and that jar
+    is still there, this replaces it (the new jar is verified first, then the old one is deleted)."""
     _require_plugins(instance)
     ensure_mutable(instance)
     candidates = versions(instance, slug)["versions"]
@@ -80,23 +105,45 @@ def install(instance: Instance, slug: str, version: str | None) -> dict[str, Any
         existing = {e["name"] for e in client.list_files(instance.id, "plugins")["entries"]}
     except ApiError:
         existing = set()
-    if filename in existing or f"{filename}.disabled" in existing:
-        raise ConflictError(f"{filename} is already installed", code="already_installed")
-    client.mkdir(instance.id, "plugins", parents=True)
-    result = client.fetch_file(
-        instance.id, url=chosen["file"]["url"], path=f"plugins/{filename}", sha256=chosen["file"]["sha256"]
+    # the jar the panel installed of this plugin before, if it is still there (enabled or disabled)
+    previous = next(
+        (
+            name
+            for name, rec in recorded(instance).items()
+            if rec.get("slug") == slug and (name in existing or f"{name}.disabled" in existing)
+        ),
+        None,
     )
-    meta = dict(instance.modpack_meta or {})
-    hang = dict(meta.get("hangar") or {})
-    hang[filename] = {"slug": slug, "version": chosen["name"]}
-    meta["hangar"] = hang
-    instance.modpack_meta = meta
-    instance.save(update_fields=["modpack_meta"])
+    if filename in existing or f"{filename}.disabled" in existing:
+        raise ConflictError(
+            f"{filename} is already installed" if previous in (None, filename) else f"{filename} already exists in plugins/",
+            code="already_installed",
+            details={"filenames": [filename]},
+        )
+    # an update keeps the old jar's state: a disabled plugin stays disabled
+    disabled = previous is not None and previous not in existing
+    target = f"{filename}.disabled" if disabled else filename
+    client.mkdir(instance.id, "plugins", parents=True)
+    result = client.fetch_file(instance.id, url=chosen["file"]["url"], path=f"plugins/{target}", sha256=chosen["file"]["sha256"])
+    warnings: list[str] = []
+    if previous is not None:
+        old = f"{previous}.disabled" if disabled else previous
+        try:
+            client.delete_files(instance.id, [f"plugins/{old}"])
+        except ApiError as exc:
+            warnings.append(f"The new version was installed but the old file {old} could not be removed: {exc.detail}")
+    previous_version = recorded(instance).get(previous, {}).get("version") if previous else None
+    _set_record(instance, filename, {"slug": slug, "version": chosen["name"]}, drop=(previous,) if previous else ())
     invalidate(instance)
     deps = [d for d in chosen.get("dependencies") or [] if d.get("type") == "required"]
     return {
-        "installed": {"filename": filename, "slug": slug, "version": chosen["name"], "size": result.get("size")},
+        "installed": {"filename": target, "slug": slug, "version": chosen["name"], "size": result.get("size")},
+        # an update of a version installed before: the jar it replaced
+        "replaced": {"filename": f"{previous}.disabled" if disabled else previous, "version": previous_version}
+        if previous
+        else None,
         "required_dependencies": deps,
+        "warnings": warnings,
         "notes": [
             "Restart the server to load the plugin.",
             "Plugins are third-party code that runs with the server's full permissions.",
@@ -108,9 +155,15 @@ def annotate_inventory(instance: Instance, inventory: dict[str, Any]) -> dict[st
     rec = recorded(instance)
     if not rec:
         return inventory
+    present = {item["filename"].removesuffix(".disabled") for item in inventory.get("files", [])}
+    stale = tuple(name for name in rec if name not in present)
+    if stale and inventory.get("files") is not None:
+        # jars removed outside the content manager (file manager, by hand): forget them
+        _set_record(instance, "", None, drop=stale)
+        rec = {k: v for k, v in rec.items() if k not in stale}
     for item in inventory.get("files", []):
         base = item["filename"].removesuffix(".disabled")
-        if item.get("source") in ("manual", "unknown") and base in rec:  # not while still being hashed
+        if item.get("source") in ("manual", "unknown", "too_large") and base in rec:  # not while still being hashed
             item["source"] = "hangar"
             item["hangar"] = rec[base]
     summary = inventory.get("summary") or {}

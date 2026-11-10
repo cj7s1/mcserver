@@ -655,7 +655,7 @@ def test_info_advertises_the_retire_feature(api, auth, monkeypatch):
     monkeypatch.setattr(docker_ops, "docker_info", lambda: {})
     monkeypatch.setattr(main.storage, "capabilities", lambda _settings: {})
     monkeypatch.setattr(main, "restic_available", lambda _settings: None)
-    assert api.get("/v1/info", headers=auth).json()["features"] == ["retire"]
+    assert "retire" in api.get("/v1/info", headers=auth).json()["features"]
 
 
 # --- console history --------------------------------------------------------------------------------
@@ -908,10 +908,10 @@ def test_start_holds_the_lock_while_it_starts_the_container(api, auth, world, ag
     assert attempts[-1] == "got the lock"  # and it is free again afterwards
 
 
-def test_apply_holds_the_lock_from_the_removal_of_the_old_container_to_the_start_of_the_new_one(
+def test_apply_holds_the_lock_from_the_creation_of_the_new_container_to_its_start(
     api, auth, world, agent_settings, monkeypatch
 ):
-    """Remove, create, start are one step for a retire: it never sees the container in between."""
+    """Create, remove, start are one step for a retire: it never sees the container in between."""
     spec = {
         "name": "s",
         "image": "itzg/minecraft-server:java21",
@@ -927,16 +927,22 @@ def test_apply_holds_the_lock_from_the_removal_of_the_old_container_to_the_start
         _try_the_lock(attempts, instance_id)
         return real_remove(instance_id, **kwargs)
 
-    def create(_settings, instance_id, _spec, _hash):
+    def create(_settings, instance_id, _spec, _hash, *, name=None):
         _try_the_lock(attempts, instance_id)
-        world.container = new_container
+        assert name == docker_ops.replacement_name(instance_id)  # the old container is still there
         return new_container
+
+    def rename(c, name):
+        _try_the_lock(attempts, IID)
+        world.container = c
 
     def start(instance_id):
         _try_the_lock(attempts, instance_id)
         new_container.start()
 
-    monkeypatch.setattr(docker_ops, "image_present", lambda _image: True)
+    monkeypatch.setattr(docker_ops, "local_image_id", lambda _image: "sha256:" + "ab" * 32)
+    monkeypatch.setattr(docker_ops, "remove_superseded_images", lambda *_a: [])
+    monkeypatch.setattr(docker_ops, "rename_container", rename)
     monkeypatch.setattr(docker_ops, "remove_container", remove)
     monkeypatch.setattr(docker_ops, "create_container", create)
     monkeypatch.setattr(docker_ops, "start", start)
@@ -949,7 +955,8 @@ def test_apply_holds_the_lock_from_the_removal_of_the_old_container_to_the_start
         "instance_busy",
         "instance_busy",
         "instance_busy",
-    ]  # at the removal, the create and the start
+        "instance_busy",
+    ]  # at the create, the removal, the rename and the start
     _try_the_lock(attempts, IID)
     assert attempts[-1] == "got the lock"
 

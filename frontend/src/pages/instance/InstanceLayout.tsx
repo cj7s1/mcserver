@@ -8,10 +8,11 @@ import { JobProgress } from "@/components/JobProgress";
 import { PowerActionDialog } from "@/components/PowerActionDialog";
 import { PowerCountdownBanner } from "@/components/PowerCountdownBanner";
 import { ServerIcon } from "@/components/ServerIcon";
-import { ErrorState, LoadingState } from "@/components/States";
+import { ConnectionLostBanner, ErrorState, LoadingState } from "@/components/States";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
-import { api, errorMessage } from "@/lib/api";
+import { ApiError, errorMessage } from "@/lib/api";
+import { sendPower } from "@/lib/power";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
 import { restartRequiredText } from "@/lib/restart-required";
 import type { Instance, PermissionCode } from "@/lib/types";
@@ -39,8 +40,9 @@ function PowerControls({ instance, can }: InstanceContext) {
   const invalidate = useInvalidateInstance();
   const [confirm, setConfirm] = useState<"restart" | "stop" | null>(null);
   const power = useMutation({
-    mutationFn: (action: "start" | "stop" | "kill") => api.post(`/instances/${instance.id}/power`, { action }),
-    onSuccess: (_d, action) => {
+    mutationFn: (action: "start" | "stop" | "kill") => sendPower(instance, { action }),
+    onSuccess: (outcome, action) => {
+      if (outcome.status === "cancelled") return;
       toast.success(action === "kill" ? "Server process killed" : `${action[0].toUpperCase()}${action.slice(1)} requested`);
       invalidate(instance.id);
     },
@@ -132,11 +134,16 @@ export function InstanceLayout() {
     else if (a.right > n.right) nav.scrollLeft += a.right - n.right + 12;
   }, [pathname, loaded]);
   if (isLoading) return <LoadingState label="Loading server…" />;
-  if (error || !instance) return <ErrorState error={error ?? new Error("Server not found")} onRetry={() => refetch()} />;
+  // Only without data: a failed background poll keeps the page (and its unsaved edits, open dialogs)
+  // mounted and shows a banner until the next poll succeeds.
+  // A 403/404 means the server is gone or no longer visible: the cached data no longer applies.
+  const gone = error instanceof ApiError && (error.status === 403 || error.status === 404);
+  if (!instance || gone) return <ErrorState error={error ?? new Error("Server not found")} onRetry={() => refetch()} />;
   const can = (code: PermissionCode) => hasPerm(instance.permissions, code);
   const ctx: InstanceContext = { instance, can };
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4">
+      {error && <ConnectionLostBanner error={error} onRetry={() => refetch()} />}
       <div className="min-w-0">
         <NavLink to="/servers" className="mb-3 inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
           <ChevronLeft className="size-3.5" /> All servers

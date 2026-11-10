@@ -820,7 +820,9 @@ def test_reconcile_fills_empty_job_columns_once(inst, fake_agent):
     reconcile_instance(inst.id)
     inst.refresh_from_db()
     assert inst.installed_at is not None
-    assert inst.container_spec_hash == fake_agent.containers[str(inst.id)]["spec_hash"]
+    # the label is computed by the agent from its own form of the spec: adopting it made the
+    # server read restart-required for ever (audit 2026-11-09, backend-lifecycle#8)
+    assert inst.container_spec_hash == ""
 
 
 def test_reconcile_skips_an_observation_made_before_archive_or_migration(inst, fake_agent, node):

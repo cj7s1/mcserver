@@ -30,7 +30,7 @@ import { JobStatusIcon } from "./activity/job-status";
 import { jobStatusLabel } from "./activity/job-utils";
 import { softwareLabel } from "./instance/InstanceLayout";
 import { ServerQuickActions } from "./library/ServerActions";
-import { isRunningLike, reservedMemoryMb, statusBucket, statusRank } from "./library/server-utils";
+import { memoryCommitment, statusBucket, statusRank } from "./library/server-utils";
 
 const MAX_STATS = 6;
 const MAX_ROWS = 8;
@@ -383,8 +383,7 @@ function HostCapacity({
   const docker = agent?.docker ?? {};
   const cpus = typeof docker.cpus === "number" ? docker.cpus : null;
   const memBytes = typeof docker.memory_bytes === "number" ? docker.memory_bytes : null;
-  const reservedMb = instances.filter(isRunningLike).reduce((sum, i) => sum + reservedMemoryMb(i), 0);
-  const configuredMb = instances.reduce((sum, i) => sum + reservedMemoryMb(i), 0);
+  const { runningMb: reservedMb, allMb: configuredMb } = memoryCommitment(instances, { nodeId: system?.node.id });
   const storage = mergeVolumes(agent?.storage);
 
   return (

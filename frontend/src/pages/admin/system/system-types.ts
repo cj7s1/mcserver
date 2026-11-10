@@ -1,5 +1,16 @@
 /** Local shapes for GET /system/info (agent part), GET /system/ports (backend/apps/core/views.py). */
+import { z } from "zod";
 import type { SystemInfo, SystemSettings } from "@/lib/types";
+
+const IP_ADDRESS = z.union([z.ipv4(), z.ipv6()]);
+
+/**
+ * A literal IPv4 or IPv6 address (no port, no brackets, no zone): what the backend stores as a
+ * bind address (PostgreSQL inet). "192.168.1.10:8080" is not one.
+ */
+export function isIpAddress(value: string): boolean {
+  return IP_ADDRESS.safeParse(value).success;
+}
 
 /** Names of the stored secrets (backend apps/core/views.py SECRETS). */
 const SECRET_LABELS: Record<string, string> = { curseforge_api_key: "CurseForge API key" };

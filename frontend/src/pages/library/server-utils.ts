@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/lib/api";
+import { sendPower, type PowerOutcome } from "@/lib/power";
 import { qk, useInvalidateInstance } from "@/lib/queries";
 import { RESTART_REQUIRED_NOTE } from "@/lib/restart-required";
 import type { Instance, InstanceStatus, Job } from "@/lib/types";
@@ -135,14 +136,42 @@ export function reservedMemoryMb(i: Instance): number {
   return i.container_memory_mb || i.memory_mb;
 }
 
+export interface MemoryCommitment {
+  /** Container limits of the servers that are up or coming up (they hold their whole heap). */
+  runningMb: number;
+  /** Container limits of every non-archived server, as if all ran. */
+  allMb: number;
+}
+
+/**
+ * Memory promised to servers: the Dashboard's "Memory reserved" bar, the create wizard and the
+ * Resources tab use this one computation. `nodeId` limits it to one host (the host memory figure
+ * comes from that node's agent); `excludeId` leaves out the server being edited.
+ */
+export function memoryCommitment(
+  instances: readonly Instance[],
+  { nodeId, excludeId }: { nodeId?: number | null; excludeId?: string } = {},
+): MemoryCommitment {
+  const pool = instances.filter((i) => !i.archived_at && (nodeId == null || i.node === nodeId) && i.id !== excludeId);
+  return {
+    runningMb: pool.filter(isRunningLike).reduce((sum, i) => sum + reservedMemoryMb(i), 0),
+    allMb: pool.reduce((sum, i) => sum + reservedMemoryMb(i), 0),
+  };
+}
+
 const POWER_VERBS: Record<PowerAction, string> = { start: "Start", stop: "Stop", restart: "Restart" };
 
-/** POST /instances/{id}/power with toast feedback; one hook instance per server row/card. */
+/**
+ * POST /instances/{id}/power with toast feedback; one hook instance per server row/card. Goes
+ * through `sendPower`, so a start refused for lack of memory asks "Start anyway?" like every
+ * other start button.
+ */
 export function useServerPower(instance: Pick<Instance, "id" | "name">) {
   const invalidate = useInvalidateInstance();
-  return useMutation({
-    mutationFn: (action: PowerAction) => api.post<Job | { status: unknown }>(`/instances/${instance.id}/power`, { action }),
-    onSuccess: (_data, action) => {
+  return useMutation<PowerOutcome<Job>, unknown, PowerAction>({
+    mutationFn: (action: PowerAction) => sendPower<Job>(instance, { action }),
+    onSuccess: (outcome, action) => {
+      if (outcome.status === "cancelled") return;
       toast.success(`${POWER_VERBS[action]} requested for ${instance.name}`);
       invalidate(instance.id);
     },

@@ -5,7 +5,8 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
-import { api, errorMessage } from "@/lib/api";
+import { errorMessage } from "@/lib/api";
+import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import type { Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { loaderLabel } from "@/pages/modpacks/modpackMeta";
@@ -120,7 +121,7 @@ export function UpdateDialog({
           throw new Error("world upgrade not acknowledged");
         }
         try {
-          const job = await api.post<Job>(`/instances/${instance.id}/modpack/update`, {
+          const job = await postOrDecline<Job>(`/instances/${instance.id}/modpack/update`, instance, {
             version_id: target.modpack_version_id || release.id,
             backup,
             allow_minecraft_change: plan.minecraft_changed && ack,
@@ -129,7 +130,7 @@ export function UpdateDialog({
           onStarted(job);
           toast.success(`Updating to ${targetName}`);
         } catch (err) {
-          toast.error(errorMessage(err));
+          if (!(err instanceof OvercommitDeclined)) toast.error(errorMessage(err));
           throw err;
         }
       }}

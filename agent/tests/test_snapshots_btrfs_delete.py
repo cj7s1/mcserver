@@ -708,6 +708,42 @@ def test_convert_cleans_up_after_a_failed_copy(env, monkeypatch):
     assert snaps.list() == []
 
 
+def test_convert_removes_what_an_interrupted_conversion_left(env):
+    """audit agent-backups#6: a .mcpanel-convert left by an agent that stopped during the copy
+    used to block 'Enable snapshots' with a message about a folder the panel cannot reach."""
+    plain_id = uuid.uuid4()
+    plain = env.settings.instances_dir / str(plain_id)
+    plain.mkdir()
+    (plain / "server.properties").write_text("motd=x\n")
+    leftover = plain.with_name(f"{plain_id}.mcpanel-convert")
+    BtrfsSnapshots.create_subvolume(leftover)
+    (leftover / "server.prop").write_text("half")  # the copy got that far
+    snaps = BtrfsSnapshots(env.settings, plain_id)
+    assert snaps.convert() == {"converted": True}
+    assert env.is_subvolume(plain) and (plain / "server.properties").read_text() == "motd=x\n"
+    assert not (plain / "server.prop").exists()
+    assert sorted(p.name for p in plain.parent.iterdir() if str(plain_id) in p.name) == [str(plain_id)]
+
+
+def test_convert_reports_a_previous_folder_it_could_not_remove(env, monkeypatch):
+    plain_id = uuid.uuid4()
+    plain = env.settings.instances_dir / str(plain_id)
+    plain.mkdir()
+    (plain / "server.properties").write_text("motd=x\n")
+    real_remove = snapshots._remove_files
+
+    def stuck_in_trash(path):
+        if env.settings.trash_dir in Path(path).parents:
+            raise OSError("Permission denied: 'trash/.../world/session.lock'")
+        real_remove(path)
+
+    monkeypatch.setattr(snapshots, "_remove_files", stuck_in_trash)
+    result = BtrfsSnapshots(env.settings, plain_id).convert()
+    assert result["converted"] is True and "Permission denied" in result["warnings"][0]
+    (old,) = result["leftovers"]
+    assert f"{plain_id}-preconvert-" in old and Path(old).exists()
+
+
 def test_delete_runs_the_expected_commands(env):
     """Stand-in only: the btrfs calls for one snapshot delete, in order."""
     if env.kind == "real":

@@ -176,7 +176,7 @@ def test_tick_age_survives_a_broken_cache(monkeypatch):
 def test_health_reports_the_tick_age_and_keeps_its_meaning(monkeypatch):
     monkeypatch.delenv("MCPANEL_SUPERVISOR_STATUS", raising=False)
     body = Client().get("/api/health").json()
-    assert body == {"status": "ok", "checks": {"database": "ok", "cache": "ok"}, "tick_age_seconds": None}
+    assert body == {"status": "ok", "checks": {"database": "ok", "cache": "ok", "uploads": "ok"}, "tick_age_seconds": None}
     cache.set(celery_mod.TICK_KEY, time.time() - 42, 60)
     response = Client().get("/api/health")
     assert response.status_code == 200 and 41.5 < response.json()["tick_age_seconds"] < 44

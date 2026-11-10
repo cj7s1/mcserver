@@ -43,6 +43,7 @@ import {
   type ConsoleFilter,
   type LevelFilter,
 } from "./console/console-ansi";
+import { PendingCommands } from "./console/pending-commands";
 import { SEARCH_DECORATIONS, TERMINAL_THEMES } from "./console/terminal-theme";
 import { useConsoleSocket, type ConsoleLocalEvent, type ConsoleServerMessage } from "./console/use-console-socket";
 import { COMMAND_STATUSES, copyText } from "./overview/overview-utils";
@@ -90,7 +91,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
   const searchRef = useRef<SearchAddon | null>(null);
   const entriesRef = useRef<ConsoleEntry[]>([]);
   const filterRef = useRef<ConsoleFilter>({ text: "", level: "all" });
-  const pendingRef = useRef(new Map<string, string>());
+  const pendingRef = useRef(new PendingCommands());
   const seqRef = useRef(0);
   const atBottomRef = useRef(true);
   const containerStateRef = useRef<string | null>(null);
@@ -177,8 +178,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
         break;
       case "_disconnected":
         if (pendingRef.current.size) {
-          append([...pendingRef.current.values()].map((c) => makeEntry("err", `no result for "${c}": console disconnected`)));
-          pendingRef.current.clear();
+          append(pendingRef.current.drop().map((c) => makeEntry("err", `no result for "${c}": console disconnected`)));
           setPending(0);
         }
         break;
@@ -208,9 +208,19 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
       case "closed":
         append([sys("log stream ended · reconnecting")]);
         break;
+      case "notice": {
+        // A note from the panel (e.g. "stop" was turned into a Stop of the server, or refused). With
+        // an id it answers that command: the wait ends here, and the command_result that follows
+        // with the same text is not shown again (PendingCommands).
+        if (pendingRef.current.notice(msg.id)) setPending(pendingRef.current.size);
+        const text = typeof msg.message === "string" ? msg.message : typeof msg.text === "string" ? msg.text : "";
+        if (text) append([makeEntry(msg.level === "error" ? "err" : "notice", text)]);
+        break;
+      }
       case "command_result": {
-        pendingRef.current.delete(msg.id);
+        const shown = pendingRef.current.result(msg.id);
         setPending(pendingRef.current.size);
+        if (shown === "skip") break;
         if (msg.ok) {
           const lines = (msg.output ?? "").replace(/\r/g, "").split("\n");
           while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
@@ -420,7 +430,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
       toast.error("The console is not connected. Wait for it to reconnect and try again.");
       return false;
     }
-    pendingRef.current.set(id, command);
+    pendingRef.current.add(id, command);
     setPending(pendingRef.current.size);
     append([makeEntry("cmd", command)]);
     termRef.current?.scrollToBottom();

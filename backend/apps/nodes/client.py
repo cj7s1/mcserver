@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import ssl
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextvars import ContextVar
 from typing import Any
 from uuid import UUID
 
@@ -29,6 +30,14 @@ sleep = time.sleep
 OPERATION_RECONNECT_GRACE = 300.0
 OPERATION_RETRY_MAX_DELAY = 15.0
 TRANSIENT_AGENT_STATUSES = frozenset({502, 503, 504})
+# Longest single sleep of wait_operation between two calls of its guard (see ``operation_guard``).
+GUARD_SLICE = 1.0
+
+# Set by the job runner while a handler runs (apps/jobs/runner.py): wait_operation calls it while
+# an operation is still going (after every poll, and between the retries after a lost
+# connection). It raises to end the wait: the job was cancelled or marked as failed, or the
+# worker is stopping. The agent goes on with its operation; only the waiting ends.
+operation_guard: ContextVar[Callable[[], None] | None] = ContextVar("mcpanel_operation_guard", default=None)
 
 
 # What an agent says it can do (GET /v1/info, "features") is remembered per node for this long.
@@ -54,6 +63,19 @@ class AgentError(ApiError):
 class AgentUnavailable(ServiceUnavailable):
     default_code = "agent_unavailable"
     default_detail = "The node agent is unreachable. Check that the agent container is running."
+
+
+class AgentTimeout(AgentUnavailable):
+    """The request reached the agent, but its answer did not arrive in time.
+
+    Unlike a refused or timed-out connection, the agent may still be carrying the request out
+    (a recursive delete, a big move): callers of long file operations report "still running".
+    """
+
+
+# Long file manager operations (recursive delete, move of a big folder): the agent works inside
+# the request, so the panel waits this long before it reports "still running".
+FILE_OPERATION_TIMEOUT = 900.0
 
 
 class AgentClient:
@@ -94,8 +116,11 @@ class AgentClient:
         url = f"{self.base}{path}"
         try:
             resp = httpx.request(method, url, headers=self.headers, timeout=timeout or self.timeout, verify=self.verify, **kwargs)
-        except httpx.TimeoutException as exc:
+        except httpx.ConnectTimeout as exc:
             raise AgentUnavailable(f"The node agent did not respond in time ({method} {path})") from exc
+        except httpx.TimeoutException as exc:
+            # the request was sent (or is being sent): the agent may still be working on it
+            raise AgentTimeout(f"The node agent did not respond in time ({method} {path})") from exc
         except httpx.HTTPError as exc:
             raise self._transport_error(exc) from exc
         if resp.status_code >= 400:
@@ -169,6 +194,11 @@ class AgentClient:
         return self._json("POST", f"/v1/instances/{instance_id}/prepare", json={"files": files or {}})
 
     def apply(self, instance_id: UUID, spec: dict[str, Any], *, start: bool = False, pull: str = "missing") -> dict[str, Any]:
+        """Queue the (re)creation of the container. ``pull``: ``missing`` (only when the tag is not on
+        the host), ``newer`` (ask the registry whether the tag points to a newer build; agents with
+        the ``pull_newer`` feature only), ``always`` or ``never``. The operation's result carries
+        ``container``, ``container_format`` and, from agents with ``pull_newer``, ``image_id_before``,
+        ``image_id``, ``pulled`` and ``warnings``."""
         return self._json("PUT", f"/v1/instances/{instance_id}/container", json={"spec": spec, "start": start, "pull": pull})[
             "operation"
         ]
@@ -229,6 +259,13 @@ class AgentClient:
             params["previous"] = "false"
         return self._json("GET", f"/v1/instances/{instance_id}/logs", params=params)["lines"]
 
+    def ping(self, instance_id: UUID) -> dict[str, Any]:
+        """A Minecraft status ping of the running server (agents with the ``ping`` feature): ``online``,
+        ``max``, ``sample`` (a few of the players online), ``version``, ``motd``, ``latency_ms``.
+        Unlike an RCON command it leaves no line in the server's log. 409 ``not_running`` without a
+        running server."""
+        return self._json("GET", f"/v1/instances/{instance_id}/ping", timeout=15)
+
     def command(self, instance_id: UUID, command: str, timeout: float = 30) -> str:
         return self._json(
             "POST", f"/v1/instances/{instance_id}/command", json={"command": command, "timeout": timeout}, timeout=timeout + 10
@@ -237,12 +274,24 @@ class AgentClient:
     def delete_data(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("DELETE", f"/v1/instances/{instance_id}/data", json={"confirm": str(instance_id)})["operation"]
 
-    def clone(self, instance_id: UUID, target_id: UUID, exclude_worlds: bool = False) -> dict[str, Any]:
-        return self._json(
-            "POST",
-            f"/v1/instances/{instance_id}/clone",
-            json={"target_instance_id": str(target_id), "exclude_worlds": exclude_worlds},
-        )["operation"]
+    def clone(
+        self,
+        instance_id: UUID,
+        target_id: UUID,
+        exclude_worlds: bool = False,
+        *,
+        level_name: str | None = None,
+        layout: str | None = None,
+    ) -> dict[str, Any]:
+        """Copy the server folder into ``target_id``. With ``exclude_worlds`` the world folders are
+        left out: ``level_name`` and ``layout`` (apps.instances.world) say which they are; agents
+        from before these fields ignore them and leave out the default names."""
+        body: dict[str, Any] = {"target_instance_id": str(target_id), "exclude_worlds": exclude_worlds}
+        if level_name:
+            body["level_name"] = level_name
+        if layout:
+            body["layout"] = layout
+        return self._json("POST", f"/v1/instances/{instance_id}/clone", json=body)["operation"]
 
     # -- files ---------------------------------------------------------------------------
     def list_files(self, instance_id: UUID, path: str) -> dict[str, Any]:
@@ -254,10 +303,15 @@ class AgentClient:
     def read_text(self, instance_id: UUID, path: str) -> dict[str, Any]:
         return self._json("GET", f"/v1/instances/{instance_id}/files/text", params={"path": path})
 
-    def write_text(self, instance_id: UUID, path: str, content: str, create_only: bool = False) -> dict[str, Any]:
-        return self._json(
-            "PUT", f"/v1/instances/{instance_id}/files/text", json={"path": path, "content": content, "create_only": create_only}
-        )
+    def write_text(
+        self, instance_id: UUID, path: str, content: str, create_only: bool = False, encoding: str | None = None
+    ) -> dict[str, Any]:
+        """``encoding`` (``utf-8`` / ``iso-8859-1``) is sent only when given; an agent without it
+        ignores the field and writes UTF-8."""
+        body: dict[str, Any] = {"path": path, "content": content, "create_only": create_only}
+        if encoding is not None:
+            body["encoding"] = encoding
+        return self._json("PUT", f"/v1/instances/{instance_id}/files/text", json=body)
 
     def download(
         self, instance_id: UUID, path: str | list[str], *, endpoint: str = "download"
@@ -306,41 +360,61 @@ class AgentClient:
     def mkdir(self, instance_id: UUID, path: str, parents: bool = False) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/files/mkdir", json={"path": path, "parents": parents})
 
-    def rename(self, instance_id: UUID, source: str, destination: str, overwrite: bool = False) -> dict[str, Any]:
+    def rename(
+        self, instance_id: UUID, source: str, destination: str, overwrite: bool = False, *, timeout: float | None = None
+    ) -> dict[str, Any]:
         return self._json(
             "POST",
             f"/v1/instances/{instance_id}/files/rename",
             json={"source": source, "destination": destination, "overwrite": overwrite},
+            timeout=timeout,
         )
 
-    def delete_files(self, instance_id: UUID, paths: list[str], recursive: bool = False) -> dict[str, Any]:
-        return self._json("POST", f"/v1/instances/{instance_id}/files/delete", json={"paths": paths, "recursive": recursive})
+    def delete_files(
+        self, instance_id: UUID, paths: list[str], recursive: bool = False, *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """``timeout``: the agent deletes inside the request (a recursive delete of a big folder can
+        take minutes); :data:`FILE_OPERATION_TIMEOUT` for deletes a user started."""
+        return self._json(
+            "POST",
+            f"/v1/instances/{instance_id}/files/delete",
+            json={"paths": paths, "recursive": recursive},
+            timeout=timeout,
+        )
 
     def search_files(self, instance_id: UUID, query: str, path: str = "") -> list[dict[str, Any]]:
         return self._json("GET", f"/v1/instances/{instance_id}/files/search", params={"q": query, "path": path}, timeout=120)[
             "results"
         ]
 
-    def hash_files(self, instance_id: UUID, path: str, algorithm: str = "sha1") -> list[dict[str, Any]]:
-        return self._json(
-            "GET", f"/v1/instances/{instance_id}/files/hashes", params={"path": path, "algorithm": algorithm}, timeout=300
-        )["files"]
+    def hash_files(
+        self, instance_id: UUID, path: str, algorithm: str = "sha1", *, suffixes: tuple[str, ...] = ()
+    ) -> list[dict[str, Any]]:
+        """SHA digests of the files directly inside ``path``. A file the agent does not read (larger
+        than its limit) has ``hash: None`` and ``too_large: true``. ``suffixes`` limits the answer to
+        names ending in one of them (agents without the filter ignore it, so callers filter too). An
+        agent still reading a big folder answers 503 ``hashing_busy``."""
+        params: dict[str, Any] = {"path": path, "algorithm": algorithm}
+        if suffixes:
+            params["suffix"] = list(suffixes)
+        return self._json("GET", f"/v1/instances/{instance_id}/files/hashes", params=params, timeout=300)["files"]
 
-    def hash_files_partial(self, instance_id: UUID, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
+    def hash_files_partial(
+        self, instance_id: UUID, path: str, algorithm: str = "sha1", *, wait: float, suffixes: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
         """Like :meth:`hash_files`, but the agent answers after about ``wait`` seconds.
 
         Files it has not hashed yet have ``hash: None``; it keeps hashing in the background.
         Returns ``{"files", "complete", "pending"}`` (agents without progressive hashing
-        ignore ``wait`` and always return a complete result).
+        ignore ``wait`` and always return a complete result). Files too large to hash
+        (``too_large``) are never pending.
         """
-        data = self._json(
-            "GET",
-            f"/v1/instances/{instance_id}/files/hashes",
-            params={"path": path, "algorithm": algorithm, "wait": wait},
-            timeout=300,
-        )
+        params: dict[str, Any] = {"path": path, "algorithm": algorithm, "wait": wait}
+        if suffixes:
+            params["suffix"] = list(suffixes)
+        data = self._json("GET", f"/v1/instances/{instance_id}/files/hashes", params=params, timeout=300)
         files = data.get("files") or []
-        pending = sum(1 for f in files if f.get("hash") is None)
+        pending = sum(1 for f in files if f.get("hash") is None and not f.get("too_large"))
         return {"files": files, "complete": pending == 0, "pending": pending}
 
     def fetch_file(
@@ -516,8 +590,13 @@ class AgentClient:
         interval: float = 1.0,
         on_progress: Any = None,
         reconnect_grace: float | None = None,
+        guard: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Poll an agent operation until it finishes. Raises AgentError on failure.
+
+        ``guard`` (default: ``operation_guard``, which the job runner sets) is called while the
+        operation is still going; whatever it raises ends the wait. An operation that has
+        finished always returns its result (or its error) first.
 
         Transient errors while polling (see ``is_transient``) are retried with exponential
         backoff for up to ``reconnect_grace`` seconds in a row (default
@@ -527,6 +606,7 @@ class AgentClient:
         result is unknown: that is reported as ``operation_lost`` with an explicit message.
         """
         grace = OPERATION_RECONNECT_GRACE if reconnect_grace is None else reconnect_grace
+        guard = guard if guard is not None else operation_guard.get()
         deadline = monotonic() + timeout
         outage_since: float | None = None
         delay = interval
@@ -548,10 +628,10 @@ class AgentClient:
                     ) from exc
                 if not self.is_transient(exc):
                     raise
-                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline)
+                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline, guard)
                 continue
             except AgentUnavailable as exc:
-                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline)
+                outage_since, delay = self._wait_for_agent(op_id, exc, outage_since, delay, interval, grace, deadline, guard)
                 continue
             if outage_since is not None:
                 log.info(
@@ -566,7 +646,7 @@ class AgentClient:
                 raise AgentError(op.get("error") or "Agent operation failed", op.get("error_code") or "operation_failed", 500)
             if monotonic() > deadline:
                 raise AgentError("Timed out waiting for the agent operation", "operation_timeout", 504)
-            sleep(interval)
+            _guarded_sleep(interval, guard)
 
     @staticmethod
     def is_transient(exc: ApiError) -> bool:
@@ -584,6 +664,7 @@ class AgentClient:
         interval: float,
         grace: float,
         deadline: float,
+        guard: Callable[[], None] | None = None,
     ) -> tuple[float, float]:
         """Back off after a transient polling error; raise once the outage lasted too long."""
         now = monotonic()
@@ -596,8 +677,22 @@ class AgentClient:
                 f"operation ({exc.detail}). It may still be running on the node; check the server before retrying."
             ) from exc
         delay = min(max(delay * 2, interval, 0.5), OPERATION_RETRY_MAX_DELAY)
-        sleep(max(0.0, min(delay, deadline - now)))
+        _guarded_sleep(max(0.0, min(delay, deadline - now)), guard)
         return outage_since, delay
 
     def ws_url(self, path: str) -> str:
         return self.base.replace("http://", "ws://").replace("https://", "wss://") + path
+
+
+def _guarded_sleep(seconds: float, guard: Callable[[], None] | None) -> None:
+    """Sleep ``seconds``, calling ``guard`` before every slice of at most GUARD_SLICE seconds."""
+    if guard is None:
+        sleep(seconds)
+        return
+    end = monotonic() + seconds
+    while True:
+        guard()
+        left = end - monotonic()
+        if left <= 0:
+            return
+        sleep(min(left, GUARD_SLICE))

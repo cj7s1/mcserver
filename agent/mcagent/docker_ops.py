@@ -8,9 +8,12 @@ cannot express privileged mode, extra capabilities, devices or extra mounts.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import os
 import re
 import threading
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -78,6 +81,49 @@ def container_name(instance_id: UUID) -> str:
     return f"mcpanel-{instance_id.hex[:12]}"
 
 
+REPLACEMENT_SUFFIX = "-replacement"
+
+
+def replacement_name(instance_id: UUID) -> str:
+    """The name a new container gets while the one it replaces still exists (see apply)."""
+    return container_name(instance_id) + REPLACEMENT_SUFFIX
+
+
+def remove_stale_replacement(instance_id: UUID) -> bool:
+    """Remove a container left under :func:`replacement_name` by an apply that was interrupted.
+
+    Only a container that carries this server's labels and has never run is removed.
+    """
+    try:
+        c = client().containers.get(replacement_name(instance_id))
+    except NotFound:
+        return False
+    labels = c.labels or {}
+    if labels.get(LABEL_MANAGED) != "true" or labels.get(LABEL_INSTANCE) != str(instance_id):
+        raise AgentError(
+            "A container with the agent's replacement name exists but is not managed by MCPanel",
+            "foreign_container",
+            409,
+        )
+    if c.status not in ("created", "exited", "dead"):
+        raise AgentError("A replacement container of this server is running", "instance_busy", 409)
+    try:
+        c.remove(v=False, force=False)
+    except NotFound:
+        pass
+    log.warning("Removed the replacement container %s an interrupted apply left behind", c.name)
+    return True
+
+
+def rename_container(c: Container, name: str) -> None:
+    try:
+        c.rename(name)
+    except APIError as exc:
+        raise AgentError(
+            f"Docker could not rename the new container: {exc.explanation or exc}", "rename_failed", 502
+        ) from exc
+
+
 def instance_dir(settings: Settings, instance_id: UUID) -> Path:
     return settings.instances_dir / str(instance_id)
 
@@ -115,6 +161,157 @@ def image_present(image: str) -> bool:
         return True
     except ImageNotFound:
         return False
+
+
+def local_image_id(image: str) -> str | None:
+    """The id (sha256:...) the tag points to on this host; None when it is not here."""
+    try:
+        return client().images.get(image).id
+    except ImageNotFound:
+        return None
+
+
+def pull_image_bounded(image: str, timeout: float, progress: Any = None) -> None:
+    """:func:`pull_image`, given up after ``timeout`` seconds (504 ``pull_timeout``).
+
+    A pull that is given up keeps running in the Docker daemon (and in a daemon thread here,
+    until Docker ends the stream); the tag then moves whenever it completes.
+    """
+    box: dict[str, BaseException] = {}
+    given_up = threading.Event()
+
+    def report(p: float, m: str) -> None:
+        if progress is not None and not given_up.is_set():  # the operation has moved on
+            progress(p, m)
+
+    def run() -> None:
+        try:
+            pull_image(image, report)
+        except BaseException as exc:
+            box["error"] = exc
+
+    t = threading.Thread(target=run, name="image-pull", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        given_up.set()
+        raise AgentError(f"Pulling {image} did not finish within {int(timeout)} seconds", "pull_timeout", 504)
+    if "error" in box:
+        raise box["error"]
+
+
+def host_cpus() -> int | None:
+    """How many CPUs Docker can give a container on this host (None when Docker does not say)."""
+    try:
+        cpus = client().info().get("NCPU")
+    except Exception as exc:
+        log.debug("Docker did not report the CPU count: %s", exc)
+        return None
+    return cpus if isinstance(cpus, int) and cpus > 0 else None
+
+
+def _image_repos(attrs: dict[str, Any]) -> set[str]:
+    """Repositories an image came from (an untagged image still has its RepoDigests)."""
+    names = {ref.split("@", 1)[0] for ref in attrs.get("RepoDigests") or [] if ref and "@" in ref}
+    names |= {
+        ref.rsplit(":", 1)[0] for ref in attrs.get("RepoTags") or [] if ref and not ref.startswith("<none>")
+    }
+    return names
+
+
+def _repo_of(reference: str | None) -> str | None:
+    try:
+        return split_image(reference)[0] if reference else None
+    except AgentError:
+        return None
+
+
+def remove_superseded_images(
+    settings: Settings, candidates: set[str | None] | dict[str | None, str | None]
+) -> list[str]:
+    """Remove runtime images that nothing needs any more; returns the ids removed.
+
+    Only an image of an allow-listed repository (itzg/minecraft-server) that no longer has any
+    tag (its tag was moved to a newer pull: a dangling image) and that no container uses, running
+    or not. A tagged image is never removed, and nothing is forced. Never raises.
+
+    ``candidates`` may map each image id to the reference the caller knew it by (the tag it was
+    pulled under, the image of the server's container). Docker's containerd image store (the
+    default of new Docker 29 installs) reports a dangling image with neither RepoTags nor
+    RepoDigests, so its repository can only come from there; an image Docker names a
+    repository for is judged by Docker's names alone.
+    """
+    removed: list[str] = []
+    allowed = set(settings.allowed_images)
+    known = candidates if isinstance(candidates, dict) else dict.fromkeys(candidates)
+    for image_id in sorted(i for i in known if i):
+        try:
+            img = client().images.get(image_id)
+            attrs = img.attrs or {}
+            tags = [t for t in attrs.get("RepoTags") or [] if t and not t.startswith("<none>")]
+            repos = _image_repos(attrs)
+            if not repos and (repo := _repo_of(known[image_id])):
+                repos = {repo}
+            if tags or not (repos & allowed):
+                continue
+            if client().containers.list(all=True, filters={"ancestor": image_id}, ignore_removed=True):
+                continue
+            client().images.remove(image_id, noprune=False)
+        except NotFound:
+            continue
+        except Exception as exc:  # in use after all (409), Docker unreachable: try again next time
+            log.info("Superseded image %s was not removed: %s", image_id, exc)
+            continue
+        log.info("Removed superseded runtime image %s", image_id)
+        removed.append(image_id)
+    return removed
+
+
+# pull="newer": a tag is looked up at the registry at most once per this many seconds (a moved
+# tag means a full new itzg build, ~1.2 GB, at the next start that creates a container).
+PULL_CHECK_INTERVAL = 24 * 3600
+PULL_CHECK_FILE = "image-checks.json"
+_pull_checks_lock = threading.Lock()
+
+
+def _read_pull_checks(settings: Settings) -> dict[str, float]:
+    try:
+        data = json.loads((settings.state_dir / PULL_CHECK_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: float(v) for k, v in data.items() if isinstance(k, str) and isinstance(v, int | float)}
+
+
+def recently_checked(settings: Settings, image: str, now: float | None = None) -> float | None:
+    """When ``image`` (a tag) was last pulled successfully, if that is less than
+    :data:`PULL_CHECK_INTERVAL` ago; else None. A time in the future (the clock was set back)
+    does not count."""
+    now = time.time() if now is None else now
+    with _pull_checks_lock:
+        at = _read_pull_checks(settings).get(image)
+    if at is None or not 0 <= now - at < PULL_CHECK_INTERVAL:
+        return None
+    return at
+
+
+def remember_pull(settings: Settings, image: str, now: float | None = None) -> None:
+    """Record a successful pull of ``image`` (a failed one is never recorded). Never raises."""
+    now = time.time() if now is None else now
+    path = settings.state_dir / PULL_CHECK_FILE
+    with _pull_checks_lock:
+        checks = {k: v for k, v in _read_pull_checks(settings).items() if 0 <= now - v < PULL_CHECK_INTERVAL}
+        checks[image] = now
+        tmp = path.with_name(f".{path.name}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                json.dump(checks, fh)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.warning("Could not record the image check of %s in %s: %s", image, path, exc)
 
 
 def pull_image(image: str, progress: Any = None) -> None:
@@ -291,8 +488,16 @@ def build_create_kwargs(
     return kwargs
 
 
-def create_container(settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str) -> Container:
+def create_container(
+    settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str, *, name: str | None = None
+) -> Container:
+    """Create the container (stopped). ``name`` replaces the usual name (used while the old
+    container of the server still exists; see :func:`replacement_name`)."""
     kwargs = build_create_kwargs(settings, instance_id, spec, spec_hash)
+    if name is not None:
+        if name not in (container_name(instance_id), replacement_name(instance_id)):
+            raise AgentError("Invalid container name", "internal", 500)
+        kwargs["name"] = name
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
     # docker-py's high-level containers.create() cannot set Config.StopTimeout: it rejects a
@@ -879,6 +1084,8 @@ def list_managed() -> list[dict[str, Any]]:
     for c in client().containers.list(
         all=True, filters={"label": f"{LABEL_MANAGED}=true"}, ignore_removed=True
     ):
+        if (c.name or "").endswith(REPLACEMENT_SUFFIX):
+            continue  # an apply's new container before it takes over the name: not the server's yet
         info = describe(c)
         info["instance_id"] = c.labels.get(LABEL_INSTANCE)
         out.append(info)
@@ -1062,6 +1269,30 @@ def rcon_endpoint(settings: Settings, instance_id: UUID) -> tuple[str, int, str]
     if c.status != "running":
         raise AgentError("The server is not running", "not_running", 409)
     return _rcon_target(settings, c)
+
+
+def game_endpoint(settings: Settings, instance_id: UUID) -> tuple[str, int]:
+    """(host, port) of the running server's game port as the agent reaches it (server list ping)."""
+    c = get_container(instance_id)
+    if c is None:
+        raise AgentError("The server is not running", "not_running", 409)
+    try:
+        c.reload()
+    except NotFound as exc:
+        raise AgentError("The server is not running", "not_running", 409) from exc
+    if c.status != "running":
+        raise AgentError("The server is not running", "not_running", 409)
+    info = describe(c)
+    if settings.rcon_mode == "published":
+        for p in info["ports"]:
+            if p["container_port"] == GAME_PORT and p["protocol"] == "tcp":
+                return "127.0.0.1", p["host_port"]
+        raise AgentError("The game port is not published", "ping_unavailable", 409)
+    if c.attrs.get("HostConfig", {}).get("NetworkMode") == "host":
+        return "127.0.0.1", GAME_PORT
+    if not info["ip_address"]:
+        raise AgentError("Container has no IP address", "ping_unavailable", 409)
+    return info["ip_address"], GAME_PORT
 
 
 def _rcon_target(settings: Settings, c: Container) -> tuple[str, int, str]:

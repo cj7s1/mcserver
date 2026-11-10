@@ -48,6 +48,11 @@ ALLOWED_FETCH_HOSTS = {
 # --------------------------------------------------------------------------------------
 # Fake node agent
 # --------------------------------------------------------------------------------------
+# agent/mcagent/main.py FEATURES of the agent released with this panel (tests/test_contracts_2026_11_10.py
+# checks that the two agree).
+CURRENT_AGENT_FEATURES = ("retire", "pull_newer", "ping", "clone_level_name")
+
+
 class FakeAgent:
     """In-memory node agent. Mirrors the real agent's semantics and error codes closely
     enough that handlers and views behave as they would against the real thing."""
@@ -72,6 +77,7 @@ class FakeAgent:
         "disk",
         "logs",
         "command",
+        "ping",
         "delete_data",
         "clone",
         "list_files",
@@ -96,6 +102,7 @@ class FakeAgent:
         "forget_backups",
         "check_backups",
         "backup_files",
+        "backup_restore_path",
         "snapshots",
         "create_snapshot",
         "delete_snapshot",
@@ -111,10 +118,25 @@ class FakeAgent:
         self.last_runs: dict[str, dict[str, Any]] = {}
         # What the agent offers beyond the first API version (GET /v1/info); [] = an older agent,
         # which keeps the containers of stopped servers.
-        self.features: list[str] = ["retire"]
+        # The default is the current agent's list (agent/mcagent/main.py FEATURES); tests of older
+        # agents set fewer.
+        self.features: list[str] = list(CURRENT_AGENT_FEATURES)
+        # Total RAM of the node as GET /v1/info reports it (docker.memory_bytes): memory admission
+        self.memory_bytes: int | None = 16 * 1024**3
+        # pull="newer" (feature "pull_newer"): image name -> the id the registry has for its tag
+        # now; a different id than the local one is "pulled". Without an entry the local image is current.
+        self.registry_image_ids: dict[str, str] = {}
+        self.apply_warnings: list[str] = []
+        # GET /v1/instances/{id}/ping (feature "ping"): fields replacing the default answer
+        self.ping_answer: dict[str, Any] = {}
         # image name -> image id of containers created from it (default: derived from the name)
         self.image_ids: dict[str, str] = {}
         self.fs: dict[str, dict[str, Any]] = {}
+        # files/text: True = the current agent (strict decoding, ``encoding``, 415 not_utf8);
+        # False = an older agent that decodes bytes that are not UTF-8 as U+FFFD
+        self.strict_text = True
+        # files/hashes: paths of files larger than the agent hashes (hash None, too_large True)
+        self.too_large_files: set[str] = set()
         self.repos: dict[str, list[dict[str, Any]]] = {}
         self.snaps: dict[str, list[dict[str, Any]]] = {}
         self.snapshot_provider = "btrfs"  # tests may switch to "zfs"
@@ -414,7 +436,7 @@ class FakeAgent:
         return {
             "version": "fake",
             "features": list(self.features),
-            "docker": {"server_version": "fake", "cpus": 4, "memory_bytes": 16 * 1024**3},
+            "docker": {"server_version": "fake", "cpus": 4, "memory_bytes": self.memory_bytes},
             "restic": "restic 0.19.1 (fake)",
             "storage": {},
             "policy": {"allowed_images": ["itzg/minecraft-server"], "port_min": 1024, "port_max": 65535},
@@ -538,9 +560,18 @@ class FakeAgent:
         repo = str(spec.get("image", "")).rpartition(":")[0]
         if repo not in ("itzg/minecraft-server", "docker.io/itzg/minecraft-server"):
             raise self._err(f"Image repository '{repo}' is not in the agent allow-list", "image_not_allowed", 403)
+        if pull not in ("missing", "always", "never") and not (pull == "newer" and "pull_newer" in self.features):
+            # an agent's request schema: "newer" exists only with the feature
+            raise self._err("Request validation failed", "agent_validation_error", 422)
         if failed := self._injected("apply", iid):
             return failed
         existing = self.containers.get(iid)
+        local_id = self.image_ids.get(spec["image"]) or "sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest()
+        image_before = (existing or {}).get("image_id") or (self.last_runs.get(iid) or {}).get("image_id")
+        pulled = False
+        if pull in ("newer", "always") and self.registry_image_ids.get(spec["image"], local_id) != local_id:
+            local_id = self.image_ids[spec["image"]] = self.registry_image_ids[spec["image"]]
+            pulled = True
         was_running = bool(existing and existing["running"])
         if existing is not None and "retire" in self.features:
             # docker_ops.remove_container inside the agent's apply: the old container is stopped,
@@ -555,7 +586,7 @@ class FakeAgent:
             "id": uuid.uuid4().hex,
             "name": f"mcpanel-{uuid.UUID(iid).hex[:12]}",
             "image": spec["image"],
-            "image_id": self.image_ids.get(spec["image"]) or "sha256:" + hashlib.sha256(spec["image"].encode()).hexdigest(),
+            "image_id": local_id,
             "status": "created",
             "running": False,
             "restarting": False,
@@ -586,6 +617,8 @@ class FakeAgent:
         if start or was_running:
             self._set_running(c)
         result = {"container": self._public(c), "recreated": existing is not None}
+        if "pull_newer" in self.features:
+            result.update(image_id_before=image_before, image_id=local_id, pulled=pulled, warnings=list(self.apply_warnings))
         if self.container_format is not None:
             result["container_format"] = self.container_format
         return self._op("apply", iid, result)
@@ -701,6 +734,16 @@ class FakeAgent:
             lines = record[-(tail - len(lines)) :] + lines
         return lines
 
+    def ping(self, instance_id: Any) -> dict[str, Any]:
+        """GET /v1/instances/{id}/ping: a Minecraft status ping (agents with the feature "ping")."""
+        if "ping" not in self.features:
+            raise self._err("Not Found", "agent_error", 404)
+        c = self.containers.get(str(instance_id))
+        if c is None or not c["running"]:
+            raise self._err("The server is not running", "not_running", 409)
+        answer = {"online": 0, "max": 20, "sample": [], "version": "1.20.4", "motd": "A Minecraft Server", "latency_ms": 3}
+        return {**answer, **copy.deepcopy(self.ping_answer)}
+
     def command(self, instance_id: Any, command: str, timeout: float = 30) -> str:
         iid = str(instance_id)
         c = self._container_or_not_running(iid)
@@ -734,7 +777,15 @@ class FakeAgent:
             },
         )
 
-    def clone(self, instance_id: Any, target_id: Any, exclude_worlds: bool = False) -> dict[str, Any]:
+    def clone(
+        self,
+        instance_id: Any,
+        target_id: Any,
+        exclude_worlds: bool = False,
+        *,
+        level_name: str | None = None,
+        layout: str | None = None,
+    ) -> dict[str, Any]:
         src, dst = str(instance_id), str(target_id)
         if src not in self.fs:
             raise self._err("Source instance has no data directory", "not_found", 404)
@@ -747,7 +798,9 @@ class FakeAgent:
             return failed
         tree = copy.deepcopy(self.fs[src])
         if exclude_worlds:
-            worlds = ("world", "world_nether", "world_the_end")
+            # the folders of the world the panel names (agents before level_name: the default names)
+            level = level_name or "world"
+            worlds = (level, f"{level}_nether", f"{level}_the_end")
             for key in ("files", "dirs"):
                 items = tree[key]
                 for p in list(items):
@@ -782,21 +835,50 @@ class FakeAgent:
         return self._entry(root, rel)
 
     def read_text(self, instance_id: Any, path: str) -> dict[str, Any]:
+        """files/text. The current agent decodes strictly: UTF-8, or ISO-8859-1 for a ``*.properties``
+        file, with the ``encoding`` it read; other files that are not UTF-8 are refused with 415
+        ``not_utf8``. ``strict_text = False`` = an older agent (lossy U+FFFD decoding, no ``encoding``)."""
         iid = str(instance_id)
         data = self._read(iid, path)
         if b"\x00" in data[:8192]:
             raise self._err("This looks like a binary file and cannot be edited as text", "binary_file", 415)
         entry = self.stat_file(iid, path)
-        return {
-            "path": entry["path"],
-            "content": data.decode("utf-8", errors="replace"),
-            "size": len(data),
-            "modified": entry["modified"],
-        }
+        answer = {"path": entry["path"], "size": len(data), "modified": entry["modified"]}
+        if not self.strict_text:
+            return {**answer, "content": data.decode("utf-8", errors="replace")}
+        try:
+            return {**answer, "content": data.decode("utf-8"), "encoding": "utf-8"}
+        except UnicodeDecodeError:
+            if path.lower().endswith(".properties"):
+                return {**answer, "content": data.decode("iso-8859-1"), "encoding": "iso-8859-1"}
+            raise self._err("This file is not UTF-8 text; editing it here would damage it", "not_utf8", 415) from None
 
-    def write_text(self, instance_id: Any, path: str, content: str, create_only: bool = False) -> dict[str, Any]:
-        size = self._write(str(instance_id), path, content.encode(), overwrite=not create_only)
-        return {"path": path, "size": size}
+    def write_text(
+        self, instance_id: Any, path: str, content: str, create_only: bool = False, encoding: str | None = None
+    ) -> dict[str, Any]:
+        """files/text PUT: the requested encoding, else the one the agent reads the file with
+        (ISO-8859-1 only for an existing *.properties file that is not UTF-8)."""
+        iid = str(instance_id)
+        if not self.strict_text:
+            size = self._write(iid, path, content.encode(), overwrite=not create_only)
+            return {"path": path, "size": size}
+        chosen = encoding
+        if chosen is None:
+            chosen = "utf-8"
+            current = self.get_file(iid, path)
+            if current is not None and path.lower().endswith(".properties"):
+                try:
+                    current.decode("utf-8")
+                except UnicodeDecodeError:
+                    chosen = "iso-8859-1"
+        try:
+            data = content.encode(chosen)
+        except UnicodeEncodeError:
+            if encoding is not None:
+                raise self._err(f"The text contains characters that {chosen} cannot store", "not_encodable", 400) from None
+            chosen, data = "utf-8", content.encode("utf-8")
+        size = self._write(iid, path, data, overwrite=not create_only)
+        return {"path": path, "size": size, "encoding": chosen}
 
     def download(
         self, instance_id: Any, path: str | list[str], *, endpoint: str = "download"
@@ -857,7 +939,9 @@ class FakeAgent:
         root["dirs"].add(rel)
         return {"path": path}
 
-    def rename(self, instance_id: Any, source: str, destination: str, overwrite: bool = False) -> dict[str, Any]:
+    def rename(
+        self, instance_id: Any, source: str, destination: str, overwrite: bool = False, *, timeout: float | None = None
+    ) -> dict[str, Any]:
         root = self._root(str(instance_id))
         sp, dp = self._parts(source), self._parts(destination)
         if not sp or not dp:
@@ -883,7 +967,9 @@ class FakeAgent:
                 root["dirs"].add(dst + p[len(src) :])
         return {"source": source, "destination": destination}
 
-    def delete_files(self, instance_id: Any, paths: list[str], recursive: bool = False) -> dict[str, Any]:
+    def delete_files(
+        self, instance_id: Any, paths: list[str], recursive: bool = False, *, timeout: float | None = None
+    ) -> dict[str, Any]:
         root = self._root(str(instance_id))
         deleted = []
         for path in paths:
@@ -924,7 +1010,11 @@ class FakeAgent:
                     results.append({"path": rel, "line": lineno, "text": line.strip()[:300]})
         return results
 
-    def hash_files(self, instance_id: Any, path: str, algorithm: str = "sha1") -> list[dict[str, Any]]:
+    def hash_files(
+        self, instance_id: Any, path: str, algorithm: str = "sha1", *, suffixes: tuple[str, ...] = ()
+    ) -> list[dict[str, Any]]:
+        """files/hashes: files in ``too_large_files`` (paths) get ``hash: None, too_large: True``;
+        ``suffixes`` filters the names (the current agent's ``suffix``)."""
         try:
             listing = self.list_files(instance_id, path)
         except Exception as exc:
@@ -934,13 +1024,19 @@ class FakeAgent:
         root = self._root(str(instance_id))
         out = []
         for entry in listing["entries"]:
-            if entry["type"] == "file":
-                digest = hashlib.new(algorithm, root["files"][entry["path"]]).hexdigest()
-                out.append({**entry, "hash": digest})
+            if entry["type"] != "file" or (suffixes and not entry["name"].endswith(tuple(suffixes))):
+                continue
+            if entry["path"] in self.too_large_files:
+                out.append({**entry, "hash": None, "too_large": True})
+                continue
+            digest = hashlib.new(algorithm, root["files"][entry["path"]]).hexdigest()
+            out.append({**entry, "hash": digest})
         return out
 
-    def hash_files_partial(self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
-        files = self.hash_files(instance_id, path, algorithm)
+    def hash_files_partial(
+        self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float, suffixes: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
+        files = self.hash_files(instance_id, path, algorithm, suffixes=suffixes)
         return {"files": files, "complete": True, "pending": 0}
 
     def fetch_file(
@@ -1490,6 +1586,27 @@ class FakeAgent:
                 )
         return {"path": rel, "entries": entries}
 
+    def backup_restore_path(self, instance_id: Any, snapshot_id: str, path: str) -> dict[str, Any]:
+        """Restore one file or folder of a snapshot over the server folder (restore-path)."""
+        iid = str(instance_id)
+        rel = "/".join(self._parts(path))
+        if not rel:
+            raise self._err("Choose a file or folder (use a full restore for everything)", "invalid_path", 400)
+        if self.containers.get(iid, {}).get("running"):
+            raise self._err("Stop the server before restoring", "target_running", 409)
+        if failed := self._injected("restore_path", iid):
+            return failed
+        snap = next((s for s in self.repos.get(iid, []) if s["id"].startswith(snapshot_id)), None)
+        if snap is None:
+            return self._op("restore_path", iid, error=("Backup snapshot not found", "snapshot_not_found"))
+        tree = snap["tree"]
+        files = {p: d for p, d in tree["files"].items() if p == rel or p.startswith(rel + "/")}
+        if not files and rel not in tree["dirs"]:
+            return self._op("restore_path", iid, error=(f"'{rel}' is not in this backup", "not_found"))
+        for p, data in files.items():
+            self.put_file(iid, p, data)
+        return self._op("restore_path", iid, {"restored": rel, "files": len(files)})
+
     def check_backups(self, instance_id: Any, read_data_subset: str | None = None) -> dict[str, Any]:
         iid = str(instance_id)
         if iid not in self.repos:
@@ -1509,6 +1626,15 @@ class FakeAgent:
 # --------------------------------------------------------------------------------------
 # Fixtures
 # --------------------------------------------------------------------------------------
+@pytest.fixture(scope="session", autouse=True)
+def _upload_dir() -> None:
+    """The web process makes the upload spool folder at start (mcpanel/asgi.py); importing the
+    settings creates nothing, so the tests make it the same way."""
+    from apps.core.uploads import ensure_upload_dir
+
+    ensure_upload_dir()
+
+
 @pytest.fixture(autouse=True)
 def _isolated_cache() -> Iterator[None]:
     """Locmem cache is process-wide: clear it so throttles and catalog caches don't leak."""

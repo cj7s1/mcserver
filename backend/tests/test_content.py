@@ -213,7 +213,17 @@ class FakeModrinth:
 # Fake node agent (content-related file operations only)
 # ======================================================================================
 class ContentAgent:
-    METHODS = ("hash_files", "hash_files_partial", "fetch_file", "stat_file", "rename", "delete_files", "mkdir", "upload")
+    METHODS = (
+        "hash_files",
+        "hash_files_partial",
+        "fetch_file",
+        "stat_file",
+        "rename",
+        "delete_files",
+        "mkdir",
+        "upload",
+        "read_text",
+    )
 
     def __init__(self) -> None:
         self.files: dict[tuple[str, str], dict[str, Any]] = {}
@@ -222,6 +232,8 @@ class ContentAgent:
         self.dirs: set[tuple[str, str]] = set()
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.fail_fetch_urls: set[str] = set()
+        # (instance id, path) -> text, e.g. the runtime's modpack manifest
+        self.texts: dict[tuple[str, str], str] = {}
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
         for name in self.METHODS:
@@ -244,7 +256,9 @@ class ContentAgent:
         return [kw for n, kw in self.calls if n == name]
 
     # -- AgentClient surface -------------------------------------------------------------
-    def hash_files(self, instance_id: Any, path: str, algorithm: str = "sha1") -> list[dict[str, Any]]:
+    def hash_files(
+        self, instance_id: Any, path: str, algorithm: str = "sha1", *, suffixes: tuple[str, ...] = ()
+    ) -> list[dict[str, Any]]:
         assert algorithm == "sha1"
         out = []
         for (iid, p), meta in sorted(self.files.items()):
@@ -256,7 +270,9 @@ class ContentAgent:
             )
         return out
 
-    def hash_files_partial(self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float) -> dict[str, Any]:
+    def hash_files_partial(
+        self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float, suffixes: tuple[str, ...] = ()
+    ) -> dict[str, Any]:
         assert 0 < wait <= 60
         files = [
             {**f, "hash": None} if (str(instance_id), f["path"]) in self.unhashed else f
@@ -294,7 +310,15 @@ class ContentAgent:
             raise AgentError("Does not exist", "not_found", 404)
         return {"name": path.rsplit("/", 1)[-1], "path": path, "type": meta["type"], "size": meta["size"]}
 
-    def rename(self, instance_id: Any, source: str, destination: str, overwrite: bool = False) -> dict[str, Any]:
+    def read_text(self, instance_id: Any, path: str) -> dict[str, Any]:
+        text = self.texts.get((str(instance_id), path))
+        if text is None:
+            raise AgentError("Does not exist", "not_found", 404)
+        return {"path": path, "content": text, "size": len(text), "modified": 1.7e9}
+
+    def rename(
+        self, instance_id: Any, source: str, destination: str, overwrite: bool = False, timeout: float | None = None
+    ) -> dict[str, Any]:
         src, dst = (str(instance_id), source), (str(instance_id), destination)
         if src not in self.files:
             raise AgentError("Source does not exist", "not_found", 404)
@@ -303,7 +327,9 @@ class ContentAgent:
         self.files[dst] = self.files.pop(src)
         return {"source": source, "destination": destination}
 
-    def delete_files(self, instance_id: Any, paths: list[str], recursive: bool = False) -> dict[str, Any]:
+    def delete_files(
+        self, instance_id: Any, paths: list[str], recursive: bool = False, timeout: float | None = None
+    ) -> dict[str, Any]:
         for p in paths:
             if (str(instance_id), p) not in self.files:
                 raise AgentError("Does not exist", "not_found", 404)
@@ -614,6 +640,7 @@ def test_inventory_progressive_lists_pending_files(
         "project": None,
         "version": None,
         "compatibility": None,
+        "pack_managed": False,
     }
     assert files["Late.jar.disabled"]["enabled"] is False and files["Late.jar.disabled"]["source"] == "pending"
     assert files["LuckPerms-5.4.0.jar"]["source"] == "modrinth"

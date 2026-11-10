@@ -220,7 +220,9 @@ Better MC comes in several editions. Use a **CurseForge edition**:
 * **Server name:** filled in from the URL; change it if you like.
 * **Memory (heap):** **6 GB** is right for Better MC (8 GB if you expect many players). The panel adds
   room for the JVM itself, so the *container limit* shown below the slider is what the server can
-  really use. Make sure it fits in your free RAM.
+  really use. The bar below it shows how much of the host's memory the running servers already
+  hold. A start that does not fit next to them (the host's RAM minus 4 GB kept free for Unraid,
+  System settings) is refused with the numbers, and the panel offers **Start anyway**.
 * **Game port:** the panel suggests a free one starting at 25565. Note it down.
 * **Nightly backup:** leave it switched on. It gives the server a backup schedule that runs once
   every night between 03:00 and 05:00 (panel time), also while the server is stopped. Without a
@@ -302,6 +304,17 @@ docker compose exec panel python manage.py ensure_backup_schedules
 
 Restoring is one click on a backup. The panel takes a safety backup of the current state first
 unless you turn that off. You can also browse a backup and restore a single file or folder.
+
+A schedule that comes due while its server is busy (for example a backup while a snapshot runs)
+waits and is tried every minute for up to an hour; the list then says "Waiting". After the
+server or the panel was off, a restart or stop whose time has passed is skipped ("Missed"), while
+a missed backup still runs once the server is up.
+
+**Protect the panel too.** Your worlds, the panel database and `.env` are all on the cache pool;
+the backups are on the array. Set up the daily database copy with the User Scripts plugin
+(DEPLOYMENT.md, "Backing up the panel itself", `deploy/unraid/backup-db.sh`) and keep
+`AGENT_RESTIC_PASSWORD` in a password manager. If the cache drive dies, docs/UNRAID.md section 10
+says how to get everything back.
 
 ### Starting over with a new world
 
@@ -413,11 +426,14 @@ logged-in user.
 | Unraid's Docker tab says "update available" for `mcpanel-…` | Ignore it. The panel manages those containers; change their runtime in the panel instead. **Don't edit or start `mcpanel-…` containers from the Docker tab.** |
 | Panel or agent logs | `docker compose logs --tail 100 panel` (or `agent`). Every panel line starts with the part that wrote it: `[web]`, `[worker]`, `[periodic]`, `[beat]`, `[redis]`. They never contain passwords. |
 | `panel` shows **unhealthy** | `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status` shows which part is not running; `docker compose logs --tail 100 panel` shows why. |
-| You stopped or restarted `panel` in the Docker tab and a job failed | The Docker tab gives 10 seconds. With jobs running use `docker compose restart panel` in `deploy/` (up to 110 seconds for jobs to finish). A job that was cut off keeps its server locked for about 6 minutes; **Mark as failed** on the Activity page releases it sooner. |
+| You stopped or restarted `panel` in the Docker tab and a job failed | The Docker tab gives 10 seconds. With jobs running use `docker compose restart panel` in `deploy/` (up to 110 seconds for jobs to finish). A job that was waiting for the agent is marked as failed at once; one cut off in other work keeps its server locked for about 6 minutes, and **Mark as failed** on the Activity page releases it sooner. The `panel` row comes back by itself at the next start of Docker (reboot, array start). |
 | A stopped server is missing in Unraid's Docker tab | Expected: a stopped server has no container. Start it in the panel. |
 | A server shows "restart required" after you updated MCPanel | Its container was made by the older version. Restart it when it suits you; the world is kept. |
 | A server shows **No backup yet** | Create one on its Backups page and check that it has a backup schedule (section 10). |
 | Servers did not start after a reboot | See [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md), "How the servers come back". |
+| A start says "Not enough memory" | The running servers plus this one need more than the host's RAM minus the reserve. Stop another server, lower the memory, or press **Start anyway**. |
+| You typed `stop` in the console | The panel stops the server the way the Stop button does (typed straight into the server, Docker would only restart it). |
+| A text file opens read-only | It is not UTF-8 text; saving it from the panel would damage it. Use **Download** and edit it on your computer. |
 
 More detail: [docs/UNRAID.md](UNRAID.md) (the Docker tab, orphan images, snapshots on btrfs and ZFS
 pools), [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md) (array stop, reboot, shutdown),

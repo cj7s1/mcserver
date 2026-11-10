@@ -12,11 +12,15 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
+import signal
 import subprocess
 import threading
+import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -34,6 +38,221 @@ EXIT_WRONG_PASSWORD = 12
 STDERR_TAIL_LINES = 200  # kept for error messages; the rest of restic's stderr is discarded
 MAX_OUTPUT_LINE = 1024 * 1024  # longest line read from restic at once
 MAX_STORED_LINE = 2000
+
+# Locks. restic never removes a stale lock by itself: one restic that dies without cleaning up
+# (SIGKILL, the agent container stopped mid-backup) blocks that server's repository until
+# `restic unlock` runs. So: every repository is unlocked with --remove-all when the agent starts
+# (no restic of this agent can be alive then, see startup_unlock), a command that finds the
+# repository locked (exit 11) runs `restic unlock` (stale locks only) and is tried once more, the
+# long commands wait for a lock instead of failing at once, and restic is always stopped with
+# SIGINT first (it then removes its own lock) and only killed when it does not react.
+RETRY_LOCK = "2m"  # --retry-lock for backup, forget and check
+UNLOCK_TIMEOUT = 120.0
+SIGINT_GRACE_SECONDS = 15.0  # after SIGINT, before SIGTERM
+SIGTERM_GRACE_SECONDS = 5.0  # after SIGTERM, before SIGKILL
+# restic's include/exclude patterns are globs per path component (Go filepath.Match)
+_GLOB_SPECIAL = re.compile(r"([\\\[\]*?])")
+
+
+def glob_escape(name: str) -> str:
+    """``name`` as a restic pattern that matches exactly that name."""
+    return _GLOB_SPECIAL.sub(r"\\\1", name)
+
+
+# Every restic process this agent started and has not reaped yet (stopped at agent shutdown).
+_children_lock = threading.Lock()
+_children: set[subprocess.Popen[Any]] = set()
+
+
+def _register(proc: subprocess.Popen[Any]) -> None:
+    with _children_lock:
+        _children.add(proc)
+
+
+def _unregister(proc: subprocess.Popen[Any]) -> None:
+    with _children_lock:
+        _children.discard(proc)
+
+
+def running_children() -> int:
+    with _children_lock:
+        return sum(1 for p in _children if p.poll() is None)
+
+
+def terminate(
+    proc: subprocess.Popen[Any],
+    int_grace: float = SIGINT_GRACE_SECONDS,
+    term_grace: float = SIGTERM_GRACE_SECONDS,
+) -> int:
+    """Stop a restic process the way that lets it remove its lock: SIGINT, then SIGTERM, then SIGKILL."""
+    for sig, grace in ((signal.SIGINT, int_grace), (signal.SIGTERM, term_grace)):
+        if proc.poll() is not None:
+            return proc.returncode
+        with contextlib.suppress(OSError):
+            proc.send_signal(sig)
+        try:
+            return proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            continue
+    with contextlib.suppress(OSError):
+        proc.kill()
+    return proc.wait()
+
+
+def stop_children(grace: float = 6.0) -> int:
+    """Agent shutdown: stop every running restic child (all at once, within about ``grace`` seconds).
+
+    SIGINT first, so restic removes its lock; SIGTERM for what is still running after most of
+    ``grace``; SIGKILL for the rest. Returns how many processes were running.
+    """
+    with _children_lock:
+        procs = [p for p in _children if p.poll() is None]
+    if not procs:
+        return 0
+    log.warning("Stopping %d running restic process(es) before the agent exits", len(procs))
+    stages = ((signal.SIGINT, grace * 0.7), (signal.SIGTERM, grace * 0.3))
+    for sig, wait in stages:
+        alive = [p for p in procs if p.poll() is None]
+        for p in alive:
+            with contextlib.suppress(OSError):
+                p.send_signal(sig)
+        deadline = time.monotonic() + wait
+        for p in alive:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                p.wait(timeout=max(0.0, deadline - time.monotonic()))
+    for p in procs:
+        if p.poll() is None:
+            with contextlib.suppress(OSError):
+                p.kill()
+    return len(procs)
+
+
+# Repositories whose start-up unlock has not run yet: commands on them wait for it (so the unlock
+# with --remove-all can never remove the lock of a command this agent has just started).
+_startup_lock = threading.Condition()
+_startup_pending: set[str] = set()
+
+
+def repositories(settings: Settings) -> list[Path]:
+    """Every initialised per-instance repository under the backup root."""
+    base = settings.backups_dir / "restic"
+    try:
+        children = sorted(base.iterdir())
+    except OSError:
+        return []
+    return [p for p in children if p.is_dir() and not p.is_symlink() and (p / "config").exists()]
+
+
+def prepare_startup_unlock(settings: Settings) -> list[Path]:
+    """Mark every repository as waiting for its start-up unlock (call before serving requests)."""
+    repos = repositories(settings) if shutil.which(settings.restic_binary) else []
+    with _startup_lock:
+        _startup_pending.update(str(p) for p in repos)
+    return repos
+
+
+def _startup_unlock_done(repo: Path) -> None:
+    with _startup_lock:
+        _startup_pending.discard(str(repo))
+        _startup_lock.notify_all()
+
+
+def startup_unlock(settings: Settings, repos: Iterable[Path], workers: int = 4) -> dict[str, str]:
+    """``restic unlock --remove-all`` on each repository (the agent just started, so no restic of
+    it is running: every lock in there is left over). Bounded in time, logged; never raises.
+    Returns {repository: "ok" | why not}."""
+    results: dict[str, str] = {}
+
+    def one(repo: Path) -> None:
+        try:
+            r = Restic(settings, UUID(repo.name))
+            proc = r._exec(["unlock", "--remove-all"], timeout=UNLOCK_TIMEOUT)
+            if proc.returncode == 0:
+                results[str(repo)] = "ok"
+                removed = (proc.stdout + proc.stderr).strip()
+                log.info(
+                    "restic unlock --remove-all %s: %s", repo, removed.splitlines()[-1] if removed else "ok"
+                )
+            else:
+                tail = (proc.stderr.strip().splitlines() or [f"exit code {proc.returncode}"])[-1]
+                results[str(repo)] = tail
+                log.warning("restic unlock --remove-all %s failed: %s", repo, tail)
+        except Exception as exc:  # a bad folder name, restic missing, a timeout
+            results[str(repo)] = str(exc)
+            log.warning("restic unlock --remove-all %s failed: %s", repo, exc)
+        finally:
+            _startup_unlock_done(repo)
+
+    repos = list(repos)
+    if repos:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="restic-unlock") as pool:
+            list(pool.map(one, repos))
+    return results
+
+
+# Always left out of backups: the agent's temporary files and folders inside a server folder
+# (uploads in progress, staging folders of world imports and restores, imported archives).
+FIXED_EXCLUDES = (".mcpanel-tmp-*", ".mcpanel-import-*", ".mcpanel-world-*")
+
+
+class DumpStream:
+    """A running ``restic dump``: stdout is read by the caller, stderr drained into a bounded tail."""
+
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
+        assert proc.stdout is not None and proc.stderr is not None
+        self.proc = proc
+        self.stdout = proc.stdout
+        self._tail: deque[bytes] = deque(maxlen=STDERR_TAIL_LINES)
+        self.code: int | None = None  # restic's exit code once finished
+        _register(proc)
+        err = proc.stderr
+
+        def drain() -> None:
+            with contextlib.suppress(OSError, ValueError):
+                while line := err.readline(MAX_OUTPUT_LINE):
+                    self._tail.append(line[:MAX_STORED_LINE])
+
+        self._drainer = threading.Thread(target=drain, name="restic-dump-stderr", daemon=True)
+        self._drainer.start()
+
+    @property
+    def stderr(self) -> str:
+        return b"".join(self._tail).decode("utf-8", errors="replace")
+
+    def read(self, size: int) -> bytes:
+        if self.code is not None:  # finished (and its pipes closed): nothing more to read
+            return b""
+        return self.stdout.read(size)
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self.proc.wait(timeout=timeout)
+
+    def _close(self) -> None:
+        self._drainer.join(timeout=5)
+        for pipe in (self.proc.stdout, self.proc.stderr):
+            with contextlib.suppress(OSError):
+                pipe.close()  # type: ignore[union-attr]
+        _unregister(self.proc)
+
+    def finish(self, timeout: float = 60) -> int:
+        """restic's exit code once everything was read (stopped if it does not end in ``timeout``)."""
+        if self.code is None:
+            try:
+                code = self.proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = terminate(self.proc)
+            self._close()
+            self.code = code
+        return self.code
+
+    def abort(self) -> None:
+        """The client went away or reading failed: stop restic so that it removes its lock."""
+        if self.code is not None:
+            return
+        with contextlib.suppress(OSError):
+            self.proc.stdout.close()  # type: ignore[union-attr]
+        self.code = terminate(self.proc)
+        self._close()
 
 
 def restic_available(settings: Settings) -> str | None:
@@ -62,6 +281,12 @@ class Restic:
         self.binary = binary
 
     # -- plumbing -------------------------------------------------------------------
+    def _wait_for_startup_unlock(self) -> None:
+        key = str(self.repo)
+        with _startup_lock:
+            if key in _startup_pending:
+                _startup_lock.wait_for(lambda: key not in _startup_pending, timeout=UNLOCK_TIMEOUT + 30)
+
     def _password_file(self) -> Path:
         if self.settings.restic_password_file and self.settings.restic_password_file.exists():
             return self.settings.restic_password_file
@@ -100,7 +325,7 @@ class Restic:
             raise AgentError("No backup repository exists for this instance yet", "repo_missing", 404)
         raise AgentError(f"restic {action} failed: {msg}", "restic_failed", 500)
 
-    def run(
+    def _exec(
         self,
         args: list[str],
         *,
@@ -108,18 +333,70 @@ class Restic:
         cwd: Path | None = None,
         pass_fds: tuple[int, ...] = (),
     ) -> subprocess.CompletedProcess[str]:
-        proc = subprocess.run(
+        """Run restic and collect its output. After ``timeout`` it is stopped (SIGINT first, so
+        it removes its lock) and the answer is 504 ``restic_timeout``."""
+        proc = subprocess.Popen(
             [self.binary, *args],
             env=self._env(),
             stdin=subprocess.DEVNULL,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
+            errors="replace",
             cwd=cwd,
-            check=False,
             pass_fds=pass_fds,
         )
-        if proc.returncode not in (0, 3):  # 3 = backup completed but some files unreadable
+        _register(proc)
+        try:
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                stopper = threading.Thread(target=terminate, args=(proc,), daemon=True)
+                stopper.start()
+                proc.communicate()  # drains the pipes while restic shuts down
+                stopper.join()
+                raise AgentError(
+                    f"restic {args[0]} did not finish within {int(timeout or 0)} seconds and was stopped",
+                    "restic_timeout",
+                    504,
+                ) from None
+            except BaseException:
+                terminate(proc)
+                raise
+        finally:
+            _unregister(proc)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+    def unlock_stale(self) -> None:
+        """``restic unlock``: removes stale locks only (never raises)."""
+        try:
+            proc = self._exec(["unlock"], timeout=UNLOCK_TIMEOUT)
+        except Exception as exc:
+            log.warning("restic unlock of %s failed: %s", self.repo, exc)
+            return
+        log.warning(
+            "Repository %s was locked; restic unlock (stale locks only) exited with %s",
+            self.repo,
+            proc.returncode,
+        )
+
+    def run(
+        self,
+        args: list[str],
+        *,
+        timeout: float | None = 3600,
+        cwd: Path | None = None,
+        pass_fds: tuple[int, ...] = (),
+        ok_codes: tuple[int, ...] = (0, 3),  # 3 = backup completed but some files unreadable
+    ) -> subprocess.CompletedProcess[str]:
+        """Run a restic command; a locked repository (exit 11) is unlocked (stale locks) and the
+        command tried once more."""
+        self._wait_for_startup_unlock()
+        proc = self._exec(args, timeout=timeout, cwd=cwd, pass_fds=pass_fds)
+        if proc.returncode == EXIT_LOCKED:
+            self.unlock_stale()
+            proc = self._exec(args, timeout=timeout, cwd=cwd, pass_fds=pass_fds)
+        if proc.returncode not in ok_codes:
             self._raise_for(proc, proc.stderr, args[0])
         return proc
 
@@ -145,9 +422,11 @@ class Restic:
 
         stderr is drained concurrently into a bounded tail (restic blocks once a pipe it
         writes to is full, so reading one pipe to EOF and then the other can deadlock; a
-        mod can make restic print an error per file). The process is killed after
-        ``timeout`` seconds or if ``on_message`` raises. Returns (exit code, stderr tail).
+        mod can make restic print an error per file). The process is stopped (SIGINT, then
+        SIGTERM, then SIGKILL: see :func:`terminate`) after ``timeout`` seconds or if
+        ``on_message`` raises. Returns (exit code, stderr tail).
         """
+        self._wait_for_startup_unlock()
         proc = subprocess.Popen(
             args,
             env=self._env(),
@@ -159,6 +438,7 @@ class Restic:
             pass_fds=pass_fds,
         )
         assert proc.stdout is not None and proc.stderr is not None
+        _register(proc)
         stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         stderr_pipe = proc.stderr
 
@@ -171,8 +451,7 @@ class Restic:
 
         def kill_on_timeout() -> None:
             timed_out.set()
-            with contextlib.suppress(OSError):
-                proc.kill()
+            terminate(proc)
 
         drainer = threading.Thread(target=drain_stderr, name="restic-stderr", daemon=True)
         drainer.start()
@@ -191,19 +470,18 @@ class Restic:
                 if isinstance(msg, dict):
                     on_message(msg)
         except BaseException:
-            with contextlib.suppress(OSError):
-                proc.kill()
+            terminate(proc)
             raise
         finally:
             timer.cancel()
             try:
                 code = proc.wait(timeout=60)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                code = proc.wait()
+                code = terminate(proc)
             drainer.join(timeout=10)
             proc.stdout.close()
             stderr_pipe.close()
+            _unregister(proc)
         if timed_out.is_set():
             raise AgentError(
                 f"restic {action} did not finish within {int(timeout)} seconds and was stopped",
@@ -211,6 +489,16 @@ class Restic:
                 504,
             )
         return code, "".join(stderr_tail)
+
+    def _stream_json_retrying(
+        self, args: list[str], on_message: Callable[[dict[str, Any]], None], **kwargs: Any
+    ) -> tuple[int, str]:
+        """:meth:`_stream_json`; a locked repository (exit 11) is unlocked and the command tried once more."""
+        code, stderr = self._stream_json(args, on_message, **kwargs)
+        if code == EXIT_LOCKED:
+            self.unlock_stale()
+            code, stderr = self._stream_json(args, on_message, **kwargs)
+        return code, stderr
 
     # -- operations ------------------------------------------------------------------
     def backup(
@@ -221,12 +509,23 @@ class Restic:
         progress: Callable[[float, str], None] | None = None,
     ) -> dict[str, Any]:
         self.ensure_init()
-        args = [self.binary, "backup", "--json", "--host", "mcpanel", "--one-file-system"]
+        args = [
+            self.binary,
+            "backup",
+            "--json",
+            "--retry-lock",
+            RETRY_LOCK,
+            "--host",
+            "mcpanel",
+            "--one-file-system",
+        ]
         for t in tags:
             args += ["--tag", t]
         for ex in excludes:
             args += ["--exclude", ex]
-        args += ["--exclude", ".mcpanel-tmp-*", str(source)]
+        for ex in FIXED_EXCLUDES:
+            args += ["--exclude", ex]
+        args.append(str(source))
         summary: dict[str, Any] = {}
 
         def on_message(msg: dict[str, Any]) -> None:
@@ -239,7 +538,9 @@ class Restic:
             elif msg.get("message_type") == "summary":
                 summary = msg
 
-        code, stderr = self._stream_json(args, on_message, timeout=self.BACKUP_TIMEOUT, action="backup")
+        code, stderr = self._stream_json_retrying(
+            args, on_message, timeout=self.BACKUP_TIMEOUT, action="backup"
+        )
         if code not in (0, 3):
             self._raise_for(code, stderr, "backup")
         if not summary.get("snapshot_id"):
@@ -294,7 +595,7 @@ class Restic:
             elif msg.get("message_type") == "summary":
                 summary = msg
 
-        code, stderr = self._stream_json(
+        code, stderr = self._stream_json_retrying(
             args, on_message, timeout=self.RESTORE_TIMEOUT, action="restore", pass_fds=pass_fds
         )
         if code != 0:
@@ -304,7 +605,7 @@ class Restic:
     def forget(self, snapshot_ids: list[str], prune: bool = True) -> dict[str, Any]:
         if not snapshot_ids:
             return {"removed": []}
-        args = ["forget", *snapshot_ids]
+        args = ["forget", "--retry-lock", RETRY_LOCK, *snapshot_ids]
         if prune:
             args.append("--prune")
         self.run(args, timeout=3600)
@@ -313,16 +614,14 @@ class Restic:
     def check(self, read_data_subset: str | None = None) -> dict[str, Any]:
         if not self.initialized():
             raise AgentError("No backup repository exists for this instance yet", "repo_missing", 404)
-        args = ["check"]
+        args = ["check", "--retry-lock", RETRY_LOCK]
         if read_data_subset:
             args += ["--read-data-subset", read_data_subset]
-        proc = subprocess.run(
-            [self.binary, *args], env=self._env(), capture_output=True, text=True, timeout=7200, check=False
-        )
+        # Any exit code is a result ("ok" false) except a lock that stays after the unlock and
+        # retry (409 repo_locked) and a wrong password.
+        proc = self.run(args, timeout=7200, ok_codes=tuple(c for c in range(256) if c not in (11, 12)))
         ok = proc.returncode == 0
         output = (proc.stdout + proc.stderr).strip().splitlines()[-40:]
-        if proc.returncode == EXIT_LOCKED:
-            raise AgentError("Backup repository is locked", "repo_locked", 409)
         return {"ok": ok, "output": output}
 
     def stats(self) -> dict[str, Any]:
@@ -370,18 +669,67 @@ class Restic:
         out.sort(key=lambda e: (e["type"] != "directory", (e["name"] or "").lower()))
         return out
 
-    def dump(self, snapshot_id: str, rel_parts: list[str]) -> subprocess.Popen[bytes]:
-        """Stream a single file from a snapshot (caller reads stdout)."""
+    def node_type(self, snapshot_id: str, rel_parts: list[str]) -> str:
+        """``file``, ``directory``, ``symlink``, ... of one path in a snapshot (404 when it is not there)."""
         snap = self.snapshot(snapshot_id)
         target = "/".join([self._root_path(snap), *rel_parts])
-        return subprocess.Popen(
+        proc = self.run(["ls", "--json", snap["id"], target], timeout=600)
+        for line in proc.stdout.splitlines():
+            try:
+                node = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(node, dict)
+                and node.get("path") == target
+                and node.get("struct_type") != "snapshot"
+            ):
+                kind = node.get("type")
+                return {"dir": "directory"}.get(kind, kind or "other")
+        raise AgentError("That path does not exist in the backup", "not_found", 404)
+
+    def dump(self, snapshot_id: str, rel_parts: list[str]) -> DumpStream:
+        """Start streaming a single file from a snapshot (the caller reads it, see :class:`DumpStream`)."""
+        snap = self.snapshot(snapshot_id)
+        target = "/".join([self._root_path(snap), *rel_parts])
+        self._wait_for_startup_unlock()
+        proc = subprocess.Popen(
             [self.binary, "dump", snap["id"], target],
             env=self._env(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
-            # nobody reads stderr while stdout streams: a pipe would block restic once full
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,  # drained into a bounded tail by DumpStream
         )
+        return DumpStream(proc)
+
+    def open_dump(self, snapshot_id: str, rel_parts: list[str], chunk: int) -> tuple[DumpStream, bytes]:
+        """A dump of one regular file whose start is known to have worked: (stream, first chunk).
+
+        A folder is refused (restic would send a tar under the folder's name). When restic fails
+        before sending anything (a lock, a missing path, a read error) the error is raised here,
+        so the caller can answer with a proper status instead of an empty download. A locked
+        repository is unlocked (stale locks) and the dump tried once more.
+        """
+        kind = self.node_type(snapshot_id, rel_parts)
+        if kind != "file":
+            raise AgentError("Only files can be downloaded from a backup", "not_a_file", 400)
+        for attempt in range(2):
+            stream = self.dump(snapshot_id, rel_parts)
+            try:
+                first = stream.read(chunk)
+            except BaseException:
+                stream.abort()
+                raise
+            if first:
+                return stream, first
+            code = stream.finish()
+            if code == 0:
+                return stream, b""  # an empty file
+            if code == EXIT_LOCKED and attempt == 0:
+                self.unlock_stale()
+                continue
+            self._raise_for(code, stream.stderr, "dump")
+        raise AssertionError("unreachable")  # pragma: no cover
 
     def restore_path(
         self, snapshot_id: str, rel_parts: list[str], staging: Path, *, pass_fds: tuple[int, ...] = ()
@@ -396,8 +744,10 @@ class Restic:
         snap = self.snapshot(snapshot_id)
         parent = "/".join([self._root_path(snap), *rel_parts[:-1]])
         staging.mkdir(parents=True, exist_ok=False)
+        # the name is a pattern for restic: [ ] * ? and \\ are escaped so it matches only itself
+        include = f"/{glob_escape(rel_parts[-1])}"
         self.run(
-            ["restore", f"{snap['id']}:{parent}", "--target", str(staging), "--include", f"/{rel_parts[-1]}"],
+            ["restore", f"{snap['id']}:{parent}", "--target", str(staging), "--include", include],
             timeout=6 * 3600,
             pass_fds=pass_fds,
         )
@@ -408,7 +758,7 @@ class Restic:
 
     def unlock(self) -> None:
         if self.initialized():
-            self.run(["unlock"], timeout=60)
+            self.run(["unlock"], timeout=UNLOCK_TIMEOUT)
 
     def destroy(self) -> None:
         if self.repo.exists():

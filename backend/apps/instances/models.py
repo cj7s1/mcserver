@@ -200,6 +200,10 @@ class Schedule(models.Model):
     only_when_running = models.BooleanField(default=True)
     last_run_at = models.DateTimeField(null=True, blank=True)
     next_run_at = models.DateTimeField(null=True, blank=True)
+    # When the run due at next_run_at was first put off (the server was busy, did not fit into
+    # memory, or a missed backup waits for the server to settle after a start); scheduling
+    # tries it again every minute for DEFER_LIMIT from then. None: not put off.
+    deferred_at = models.DateTimeField(null=True, blank=True)
     last_result = models.CharField(max_length=300, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

@@ -25,6 +25,7 @@ from urllib.parse import urlencode
 
 from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
+from apps.core.streaming import read_bytes
 from apps.nodes.client import AgentClient
 
 from . import properties
@@ -147,12 +148,7 @@ def level_name(instance: Instance, client: AgentClient) -> tuple[str, str]:
     env_level = str((instance.env or {}).get("LEVEL") or "").strip()
     if env_level:
         return env_level, "env"
-    try:
-        raw = client.read_text(instance.id, "server.properties")["content"]
-    except ApiError as exc:
-        if exc.error_code not in ("not_found", "not_a_directory"):
-            raise
-        raw = ""
+    raw = properties.read_file(client, instance.id) or ""
     value = properties.parse(raw).get("level-name", "").strip()
     return (value, "server.properties") if value else (DEFAULT_LEVEL, "default")
 
@@ -244,12 +240,7 @@ def _blocker(code: str, message: str) -> dict[str, str]:
 
 def _read_properties(instance: Instance, client: AgentClient) -> str:
     """The text of server.properties; empty when the file does not exist (yet)."""
-    try:
-        return client.read_text(instance.id, "server.properties")["content"]
-    except ApiError as exc:
-        if exc.error_code != "not_found":
-            raise
-        return ""
+    return properties.read_file(client, instance.id) or ""
 
 
 def _reset_level(env: dict[str, Any], props: dict[str, str]) -> tuple[str, str, list[dict[str, str]]]:
@@ -330,9 +321,12 @@ def _world_location_blockers(instance: Instance, client: AgentClient, world_layo
         try:
             text = client.read_text(instance.id, "bukkit.yml")["content"]
         except ApiError as exc:
-            if exc.error_code != "not_found":
+            if exc.error_code == "not_utf8":  # an agent that decodes strictly: read the bytes leniently
+                text = read_bytes(client, instance.id, "bukkit.yml", 1024 * 1024).decode("utf-8", errors="replace")
+            elif exc.error_code != "not_found":
                 raise
-            text = ""
+            else:
+                text = ""
         for match in _WORLD_CONTAINER_RE.finditer(text):
             container = _yaml_scalar(match.group(1))
             if container not in ("", "."):

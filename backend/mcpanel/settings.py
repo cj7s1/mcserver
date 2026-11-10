@@ -124,6 +124,11 @@ TEMPLATES = [
 WSGI_APPLICATION = None
 ASGI_APPLICATION = "mcpanel.asgi.application"
 
+# Which process this is: mcpanel/asgi.py sets MCPANEL_PROCESS_ROLE=web before Django loads these
+# settings, so the web server (uvicorn) gets it in every layout (the single panel container's
+# supervisor child, the one-role "web" container); Celery workers and manage.py do not.
+PROCESS_ROLE = env("MCPANEL_PROCESS_ROLE", "") or ""
+
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
@@ -132,7 +137,11 @@ DATABASES = {
         "PASSWORD": read_secret("POSTGRES_PASSWORD", "mcpanel"),
         "HOST": env("POSTGRES_HOST", "localhost"),
         "PORT": env("POSTGRES_PORT", "5432"),
-        "CONN_MAX_AGE": int(env("POSTGRES_CONN_MAX_AGE", "60") or 60),
+        # No persistent connections in the web process: under ASGI every request runs in its own
+        # short-lived thread, so a kept connection is never reused and stays open until the garbage
+        # collector frees it (dozens of idle sessions, up to PostgreSQL's max_connections). Django's
+        # documentation says to disable them under ASGI. Workers keep theirs (long-lived threads).
+        "CONN_MAX_AGE": 0 if PROCESS_ROLE == "web" else int(env("POSTGRES_CONN_MAX_AGE", "60") or 60),
         "CONN_HEALTH_CHECKS": True,
         # Separate test databases for parallel test runs (e.g. several checkouts on one host):
         # MCPANEL_TEST_DB_NAME=test_mcpanel_<something>. Default: Django's test_<NAME>.
@@ -280,7 +289,12 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
 }
 CELERY_TASK_ALWAYS_EAGER = env_bool("MCPANEL_CELERY_EAGER", TESTING)
 CELERY_TASK_EAGER_PROPAGATES = False
-CELERY_TIMEZONE = TIME_ZONE
+# UTC, not TIME_ZONE: every beat entry is a plain interval, and Celery adds an interval to the
+# last run time as wall-clock time in its time zone. In a zone with daylight saving time the
+# tick that crosses the fall-back hour (02:00 back to 01:00) then lands an hour late, so beat
+# sent no reconcile, scheduler or watchdog tick for that whole hour. Cron schedules do not use
+# this: apps/instances/scheduling.py computes them in the servers' time zone itself.
+CELERY_TIMEZONE = "UTC"
 # Two queues with separate bindings: "celery" (default) carries jobs (apps.jobs.runner.run_job,
 # long and blocking), "periodic" the beat ticks and other short tasks. A worker started without
 # -Q consumes every queue listed here, so the stock `worker` command keeps working; a second,
@@ -366,7 +380,27 @@ MCPANEL_WEBHOOK_ALLOW_LAN = env_bool("MCPANEL_WEBHOOK_ALLOW_LAN", True)
 
 DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024
 FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+# The upload endpoints (apps/core/middleware.UPLOAD_PATH) accept bodies up to this size; every other
+# request, and every request without a signed-in session, at most MCPANEL_MAX_REQUEST_BYTES. Both
+# are enforced by mcpanel/asgi.py before Django reads the body (and by UploadLimitMiddleware).
 MCPANEL_MAX_UPLOAD_BYTES = int(env("MCPANEL_MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)) or 0)
+MCPANEL_MAX_REQUEST_BYTES = 25 * 1024 * 1024
+# A modpack's mods folder dropped on the Files page is one multipart request (Django's default: 100).
+DATA_UPLOAD_MAX_NUMBER_FILES = 1000
+# Request bodies in transit and uploaded files are spooled here (not in the container's /tmp at
+# large). Mount a volume or tmpfs here to keep big uploads out of the container's writable layer.
+# Importing the settings creates NOTHING: the image build imports them as root (collectstatic),
+# and a folder made then would belong to root and refuse the web process (uid 10001) every body
+# above FILE_UPLOAD_MAX_MEMORY_SIZE. The web process creates it at start, as its own user
+# (mcpanel/asgi.py, apps.core.uploads.ensure_upload_dir; also backend/container/entrypoint.sh),
+# and /api/health fails while it is not writable.
+FILE_UPLOAD_TEMP_DIR = env("MCPANEL_UPLOAD_TMP", "/tmp/mcpanel-uploads") or "/tmp/mcpanel-uploads"  # noqa: S108
+FILE_UPLOAD_HANDLERS = [
+    "django.core.files.uploadhandler.MemoryFileUploadHandler",
+    "django.core.files.uploadhandler.TemporaryFileUploadHandler",
+    # last: frees the request body's spool file once the multipart parser copied the files out
+    "apps.core.uploads.ReleaseRequestBodyHandler",
+]
 
 # --- Logging -------------------------------------------------------------------
 LOG_LEVEL = env("MCPANEL_LOG_LEVEL", "INFO") or "INFO"

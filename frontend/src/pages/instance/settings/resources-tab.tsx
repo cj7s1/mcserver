@@ -9,7 +9,9 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { formatMemoryMb } from "@/lib/format";
-import { useSystemInfo } from "@/lib/queries";
+import { MemoryCommitBar } from "@/components/MemoryCommitBar";
+import { useInstances, useSystemInfo } from "@/lib/queries";
+import { memoryCommitment } from "@/pages/library/server-utils";
 import type { Instance } from "@/lib/types";
 import {
   Advanced,
@@ -118,6 +120,11 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
     ? estimateContainerMb(current.memory_mb, Number.isFinite(current.memory_overhead_mb) ? current.memory_overhead_mb : 0, instance.content_kind)
     : null;
   const memChanged = changed.includes("memory_mb") || changed.includes("memory_overhead_mb");
+  // Other running servers on the same host (/system/info describes the default node only).
+  const instances = useInstances();
+  const sameHost = !system.data || system.data.node.id === instance.node;
+  const others =
+    instances.data && sameHost ? memoryCommitment(instances.data, { nodeId: instance.node, excludeId: instance.id }) : null;
   const preset = PRESETS.find((p) => p.value === current.jvm_flags_preset);
   const policy = POLICIES.find((p) => p.value === current.restart_policy);
   const err = (k: keyof Fields) => errors[k] ?? serverErrors[k] ?? null;
@@ -207,6 +214,13 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
               <p className="mt-0.5 text-sm font-medium tabular-nums">{hostMb ? formatMemoryMb(hostMb) : system.isLoading ? "…" : "Unknown"}</p>
             </div>
           </div>
+          {hostMb !== null && others && sameHost && !(containerMb !== null && containerMb > hostMb) && (
+            <MemoryCommitBar
+              otherRunningMb={others.runningMb}
+              addMb={memChanged && containerMb !== null ? containerMb : instance.container_memory_mb}
+              hostMb={hostMb}
+            />
+          )}
           {hostMb !== null && containerMb !== null && containerMb > hostMb && (
             <Notice tone="warning">
               The container limit ({formatMemoryMb(containerMb)}) is larger than the host's memory ({formatMemoryMb(hostMb)}). The

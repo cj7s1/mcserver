@@ -10,8 +10,13 @@ from rest_framework import serializers
 from apps.core.models import SystemSetting
 
 from . import properties
+from .capacity import container_limit_error
 from .models import Instance, Schedule, ServerType
 from .spec import env_override_error, restart_required
+
+# Upper bound of the memory a container gets above the Java heap (off-heap: metaspace, threads,
+# direct buffers). The automatic value is 30-40 % of the heap; more than this is a typo.
+MAX_MEMORY_OVERHEAD_MB = 32768
 
 ENV_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 # Shown instead of custom env values to users without instance.configure: values often carry
@@ -277,6 +282,30 @@ class InstanceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Memory must be between 512 MB and 256 GB")
         return value
 
+    def validate_memory_overhead_mb(self, value: int) -> int:
+        if not 0 <= value <= MAX_MEMORY_OVERHEAD_MB:
+            raise serializers.ValidationError(
+                f"The memory overhead must be between 0 (automatic) and {MAX_MEMORY_OVERHEAD_MB} MB"
+            )
+        return value
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        attrs = super().validate(attrs)
+        if self.instance is not None and attrs.keys() & {"memory_mb", "memory_overhead_mb"}:
+            probe = Instance(
+                server_type=self.instance.server_type,
+                memory_mb=attrs.get("memory_mb", self.instance.memory_mb),
+                memory_overhead_mb=attrs.get("memory_overhead_mb", self.instance.memory_overhead_mb),
+            )
+            if error := container_limit_error(self.instance.node, probe.container_memory_mb):
+                raise serializers.ValidationError({"memory_mb": [error]})
+        if self.instance is not None and attrs.get("cpu_limit"):
+            from .capacity import cpu_limit_error
+
+            if error := cpu_limit_error(self.instance.node, attrs["cpu_limit"]):
+                raise serializers.ValidationError({"cpu_limit": [error]})
+        return attrs
+
     def validate_restart_policy(self, value: str) -> str:
         if value not in RESTART_POLICIES:
             raise serializers.ValidationError(f"Must be one of {', '.join(RESTART_POLICIES)}")
@@ -384,6 +413,11 @@ class CreateInstanceSerializer(serializers.Serializer):
     # initial server.properties values
     server_properties = serializers.DictField(child=serializers.JSONField(), required=False)
     start = serializers.BooleanField(default=True)
+    allow_overcommit = serializers.BooleanField(
+        default=False,
+        help_text="With start: create and start it even when it does not fit into the node's memory next to the "
+        "servers running there (otherwise 409 insufficient_memory, with the numbers in details)",
+    )
     nightly_backup = serializers.BooleanField(
         default=False,
         help_text="Also create the default nightly backup schedule (skipped when the caller may not schedule backups)",
@@ -441,6 +475,17 @@ class CreateInstanceSerializer(serializers.Serializer):
                     )
             elif not attrs.get("modpack_version_id"):
                 raise serializers.ValidationError({"modpack_version_id": ["Choose a modpack release (releases are pinned)"]})
+        if attrs.get("memory_mb"):
+            from apps.nodes.models import Node
+
+            node = Node.objects.filter(pk=attrs["node"]).first() if attrs.get("node") else Node.default()
+            modpack = {"modrinth": "MODRINTH", "curseforge": "AUTO_CURSEFORGE", "ftb": "FTBA"}
+            probe = Instance(
+                server_type=attrs.get("server_type") or modpack.get(attrs.get("modpack_provider") or "", "VANILLA"),
+                memory_mb=attrs["memory_mb"],
+            )
+            if node is not None and (error := container_limit_error(node, probe.container_memory_mb)):
+                raise serializers.ValidationError({"memory_mb": [error]})
         return attrs
 
 

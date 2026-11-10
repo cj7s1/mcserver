@@ -41,20 +41,28 @@ export function sessionUserId(state: AuthState | undefined): number | null | und
   return state.authenticated && state.user ? state.user.id : null;
 }
 
+/** True when the cached auth state is shown although its last refetch failed (connection lost). */
+export function authStateStale({ state, error }: { state: AuthState | undefined; error: unknown }): boolean {
+  return !!error && !!state && !isMustChangePasswordError(error);
+}
+
 export type AuthGateView = "loading" | "error" | "setup" | "login" | "change-password" | "app";
 
 export function authGateView({
   state,
   isLoading,
-  error,
 }: {
   state: AuthState | undefined;
   isLoading: boolean;
+  /** Not used for the decision any more (see below); `authStateStale` tells whether to show a banner. */
   error: unknown;
 }): AuthGateView {
   if (isLoading) return "loading";
   if (state?.authenticated && state.user?.must_change_password) return "change-password";
-  if (error || !state) return "error";
+  // A failed background refetch keeps the cached state: only fail closed when there is none, so the
+  // pages (and their unsaved drafts) stay mounted while the panel is briefly unreachable. Real
+  // sign-outs arrive as a 200 with authenticated:false (or a 4401 socket close), not as an error.
+  if (!state) return "error";
   if (state.setup_required) return "setup";
   if (!state.authenticated || !state.user) return "login";
   return "app";

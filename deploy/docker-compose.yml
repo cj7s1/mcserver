@@ -122,7 +122,10 @@ services:
     # fixes (DEPLOYMENT.md, "Upgrading"). To pin an exact build use
     # postgres:16-alpine@sha256:<digest> instead.
     image: postgres:16-alpine
-    restart: unless-stopped
+    # always, not unless-stopped (panel, agent and postgres alike): Docker starts these again at its
+    # next start even after they were stopped through its API (an Unraid folder's Stop, the
+    # Appdata Backup plugin's stop-all), so the panel does not stay down across a reboot.
+    restart: always
     environment:
       TZ: ${TZ:-UTC}
       POSTGRES_DB: ${POSTGRES_DB:-mcpanel}
@@ -175,7 +178,7 @@ services:
     # Built here, never pulled: `docker compose pull` must not fetch an image of this name
     # from a registry (it would get the Docker socket).
     pull_policy: never
-    restart: unless-stopped
+    restart: always
     init: true
     # Root inside the container is required (Docker socket, chown of instance data);
     # see agent/Dockerfile. no-new-privileges still applies to everything it execs.
@@ -219,7 +222,7 @@ services:
     # One container for the web server, both Celery workers, the scheduler and Redis
     # (backend/container/entrypoint.sh, supervise.py). Migrations run before they start.
     command: ["all"]
-    restart: unless-stopped
+    restart: always
     <<: *panel-hardening
     environment: *panel-env
     ports:

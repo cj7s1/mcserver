@@ -12,7 +12,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .models import Job, JobStatus
-from .runner import INTERRUPTED_ERROR, finish, heartbeat_is_fresh, last_sign_of_life, run_job
+from .runner import INTERRUPTED_ERROR, finish, heartbeat_is_fresh, last_sign_of_life, run_job, settle_interrupted
 
 log = logging.getLogger(__name__)
 
@@ -51,8 +51,11 @@ def _fail_if(pk: Any, still_bad: Callable[[Job], bool], **kwargs: str) -> bool:
         job = Job.objects.select_for_update(skip_locked=True).filter(pk=pk).first()
         if job is None or not still_bad(job):
             return False
-        finish(job, JobStatus.FAILED, **kwargs)
-        return True
+        if not finish(job, JobStatus.FAILED, **kwargs):
+            return False
+    if kwargs.get("error_code") == "interrupted":
+        settle_interrupted(job)
+    return True
 
 
 @shared_task(name="apps.jobs.tasks.watchdog")

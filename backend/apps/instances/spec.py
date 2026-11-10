@@ -243,6 +243,16 @@ def image_for(java_version: int) -> str:
     return f"{repo}:{tag}"
 
 
+def current_image(instance: Instance) -> str:
+    """The runtime image a container of this server gets now: the image of its Java version in
+    the current runtime image channel (``image_for``). A change of the channel setting reaches an
+    existing server at its next start; ``apply_container`` stores what was used in ``image``."""
+    try:
+        return image_for(int(instance.java_version))
+    except (TypeError, ValueError):
+        return instance.image
+
+
 def build_env(instance: Instance) -> dict[str, str]:
     env: dict[str, str] = {}
     # advanced overrides first so managed keys always win
@@ -301,6 +311,10 @@ def build_env(instance: Instance) -> dict[str, str]:
         loader_key = LOADER_ENV.get(ServerType(st)) if st in ServerType.values else None
         if loader_key and instance.loader_version:
             env[loader_key] = instance.loader_version
+    # pack files the user disabled/deleted/replaced must not trigger a pack re-install (apps/content/packfiles.py)
+    from apps.content.packfiles import ignore_missing_env
+
+    env.update(ignore_missing_env(instance, env))
     return env
 
 
@@ -337,7 +351,7 @@ def build_spec(instance: Instance) -> dict[str, Any]:
         )
     spec: dict[str, Any] = {
         "name": instance.name,
-        "image": instance.image,
+        "image": current_image(instance),
         "env": build_env(instance),
         "memory_limit_mb": instance.container_memory_mb,
         "ports": ports,
@@ -366,8 +380,22 @@ def build_spec(instance: Instance) -> dict[str, Any]:
 CONTAINER_FORMAT = 2
 
 
+# Keys of the spec that only label the container (the agent writes the name into a label): a
+# rename must not make a server read restart-required, so they are not part of the hash.
+UNHASHED_KEYS = ("name",)
+
+
 def spec_hash(spec: dict[str, Any], container_format: int | None = None) -> str:
     """Hash of a spec as a container of ``container_format`` holds it (default: this release's)."""
+    return _hash({k: v for k, v in spec.items() if k not in UNHASHED_KEYS}, container_format)
+
+
+def legacy_spec_hash(spec: dict[str, Any], container_format: int | None = None) -> str:
+    """The hash releases before UNHASHED_KEYS stored: with the server's name in it."""
+    return _hash(spec, container_format)
+
+
+def _hash(spec: dict[str, Any], container_format: int | None) -> str:
     applied = CONTAINER_FORMAT if container_format is None else container_format
     # format 1 is the hash of the bare spec: what releases before the number stored
     hashed = spec if applied <= 1 else {**spec, "container_format": applied}
@@ -394,10 +422,25 @@ def current_spec_hash(instance: Instance) -> str:
 def spec_outdated(instance: Instance) -> bool:
     """True when the container this server last got was created from another configuration (or
     container format) than the current one. Says nothing about whether that container still
-    exists: the jobs ask the agent for that."""
+    exists: the jobs ask the agent for that.
+
+    A hash stored by a release that still hashed the name (``legacy_spec_hash``) is taken over
+    once when it matches the current configuration, so an upgrade alone does not make every
+    server read restart-required."""
     if not instance.container_spec_hash:
         return False
-    return instance.container_spec_hash != current_spec_hash(instance)
+    spec = build_spec(instance)
+    current = spec_hash(spec)
+    if instance.container_spec_hash == current:
+        return False
+    if instance.container_spec_hash == legacy_spec_hash(spec):
+        if instance.pk:
+            Instance.objects.filter(pk=instance.pk, container_spec_hash=instance.container_spec_hash).update(
+                container_spec_hash=current
+            )
+        instance.container_spec_hash = current
+        return False
+    return True
 
 
 def restart_required(instance: Instance) -> bool:

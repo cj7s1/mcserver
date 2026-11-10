@@ -90,11 +90,14 @@ def enqueue_power(
     warn_minutes: int = 0,
     warn_message: str = "",
     title: str | None = None,
+    allow_overcommit: bool = False,
 ) -> Job:
     """Queue start/stop/restart. With ``warn_minutes`` players are warned in game first.
 
     A warning job is enqueued non-exclusive and only takes the instance lock for its last
     seconds (see power_warnings). An immediate stop/restart supersedes a pending countdown.
+    ``allow_overcommit``: the job starts the server even when it does not fit into the node's
+    memory (``capacity``).
     """
     from apps.jobs.models import ACTIVE_STATUSES
 
@@ -119,15 +122,24 @@ def enqueue_power(
                 code="instance_busy",
                 details={"job_id": str(current.id), "kind": current.kind},
             )
+        params: dict[str, Any] = {"warn_minutes": warn, "warn_message": warn_message}
+        if allow_overcommit:
+            params["allow_overcommit"] = True
         return enqueue(
             action,
             title=f"{base_title} ({warn} min warning)",
             instance=instance,
             user=user,
-            params={"warn_minutes": warn, "warn_message": warn_message},
+            params=params,
             exclusive=False,
         )
-    job = enqueue(action, title=base_title, instance=instance, user=user)
+    job = enqueue(
+        action,
+        title=base_title,
+        instance=instance,
+        user=user,
+        params={"allow_overcommit": True} if allow_overcommit and action != "stop" else None,
+    )
     if countdown is not None:
         try:
             cancel_countdown(countdown.id, message=f"Superseded by '{base_title}'", notify_players=False)
@@ -144,7 +156,11 @@ def power(
     *,
     warn_minutes: int = 0,
     warn_message: str = "",
+    allow_overcommit: bool = False,
 ) -> Job | dict[str, Any]:
+    """A power action a user asked for. A start or restart that does not fit into the node's
+    memory is refused (409 ``insufficient_memory``, with the numbers in ``details``) unless
+    ``allow_overcommit``; a stop or kill never is."""
     if instance.archived_at:
         raise ConflictError("Unarchive this server before starting it", code="archived")
     if action == "kill":
@@ -156,8 +172,22 @@ def power(
 
         reconcile_instance(instance.id)
         return status
-    job = enqueue_power(instance, action, user=user, warn_minutes=warn_minutes, warn_message=warn_message)
+    allow_overcommit = bool(allow_overcommit) and action in ("start", "restart")
+    if action in ("start", "restart") and not allow_overcommit:
+        from . import capacity
+
+        capacity.admit(instance)
+    job = enqueue_power(
+        instance,
+        action,
+        user=user,
+        warn_minutes=warn_minutes,
+        warn_message=warn_message,
+        allow_overcommit=allow_overcommit,
+    )
     details: dict[str, Any] = {"job": str(job.id)}
+    if allow_overcommit:
+        details["allow_overcommit"] = True
     if job.params.get("warn_minutes"):
         details["warn_minutes"] = job.params["warn_minutes"]
         if job.params.get("warn_message"):

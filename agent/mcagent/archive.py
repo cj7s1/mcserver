@@ -456,6 +456,30 @@ def stream_zip(root: SafeRoot, rel: str | list[str], *, max_bytes: int = MAX_TOT
     return _zip_stream(root, files)
 
 
+ZIP_MIN_DATE = (1980, 1, 1, 0, 0, 0)  # the zip format cannot store earlier times
+ZIP_MAX_DATE = (2107, 12, 31, 23, 59, 58)
+ZIP_GET_POLL_SECONDS = 1.0
+
+
+def zip_date_time(mtime: float) -> tuple[int, int, int, int, int, int]:
+    """A file's local modification time as a zip timestamp, clamped to what zip can store
+    (like ``zipfile``'s ``strict_timestamps=False``): an old file must not fail the export."""
+    try:
+        stamp = tuple(time.localtime(mtime)[:6])
+    except (OverflowError, OSError, ValueError):
+        return ZIP_MIN_DATE
+    return min(max(stamp, ZIP_MIN_DATE), ZIP_MAX_DATE)  # type: ignore[return-value]
+
+
+def zip_name(arcname: str) -> str:
+    """The name in the zip: bytes that are not UTF-8 (old Latin-1 names) become U+FFFD."""
+    try:
+        arcname.encode("utf-8")
+        return arcname
+    except UnicodeEncodeError:
+        return arcname.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
 def _zip_stream(root: SafeRoot, files: list[tuple[str, str, os.stat_result]]) -> Iterator[bytes]:
     q: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=ZIP_QUEUE_CHUNKS)
     cancelled = threading.Event()
@@ -469,7 +493,7 @@ def _zip_stream(root: SafeRoot, files: list[tuple[str, str, os.stat_result]]) ->
                         raise _ConsumerGone
                     try:
                         with root.open_read(path) as (fh, _size):
-                            info = zipfile.ZipInfo(arcname, date_time=time.localtime(st.st_mtime)[:6])
+                            info = zipfile.ZipInfo(zip_name(arcname), date_time=zip_date_time(st.st_mtime))
                             info.compress_type = zipfile.ZIP_DEFLATED
                             info.external_attr = (stat.S_IFREG | 0o644) << 16
                             with zf.open(info, "w", force_zip64=st.st_size > 2**31) as out:
@@ -490,7 +514,17 @@ def _zip_stream(root: SafeRoot, files: list[tuple[str, str, os.stat_result]]) ->
     thread.start()
     try:
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=ZIP_GET_POLL_SECONDS)
+            except queue.Empty:
+                if thread.is_alive():
+                    continue
+                try:  # it may have queued its last item right before it ended
+                    item = q.get_nowait()
+                except queue.Empty:
+                    # the producer gave up (it saw no reader for ZIP_STALL_SECONDS) without an end
+                    # marker: end the response as failed instead of waiting forever
+                    raise AgentError("The zip stream stopped", "archive_failed", 500) from None
             if item is None:
                 return
             if isinstance(item, BaseException):

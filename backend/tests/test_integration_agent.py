@@ -30,6 +30,7 @@ from .integration_support import (
     Timer,
     backup_repo_dir,
     container_names,
+    disk,
     make_node,
     rcon,
     restic_available,
@@ -143,7 +144,7 @@ def test_vanilla_lifecycle_and_backup_restore(it_node, tracker):
             assert backup.files_count and backup.files_count > 10
             if DATA_ROOT:
                 # the repository is where the agent says it is: the check after the delete means something
-                assert backup_repo_dir(it_node, iid).is_dir(), backup_repo_dir(it_node, iid)
+                assert disk.is_dir(backup_repo_dir(it_node, iid)), backup_repo_dir(it_node, iid)
             timer.mark("online backup (save-off/save-all/restic/save-on)")
 
             _set_block(inst, "diamond_block")
@@ -170,8 +171,8 @@ def test_vanilla_lifecycle_and_backup_restore(it_node, tracker):
         assert not Instance.objects.filter(pk=iid).exists()
         assert client.status(iid) == {"exists": False, "operation": None}
         if DATA_ROOT:
-            assert not tracker.path("instances", str(iid)).exists()
-            assert not repo.exists(), repo
+            assert not disk.exists(tracker.path("instances", str(iid)))
+            assert not disk.exists(repo), repo
         assert container_names(iid) in ("", None)
         timer.mark("delete")
     finally:

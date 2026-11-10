@@ -424,14 +424,9 @@ class ZfsSnapshots:
         parent = self._parent_mount()["source"]
         name = _check_dataset(f"{parent}/mcpanel-{self.instance_id}")
         tmp = self.instance_dir.with_name(f"{self.instance_id}.mcpanel-convert")
-        if tmp.exists() or _exists(name):
-            raise AgentError(
-                f"A previous conversion was interrupted: remove the .mcpanel-convert folder and the dataset {name} "
-                "if it exists",
-                "convert_conflict",
-                409,
-            )
         host_tmp = self.settings.host_instances_dir / tmp.name
+        if os.path.lexists(tmp) or _exists(name):
+            self._clear_interrupted_convert(name, tmp, host_tmp)
         old = self.instance_dir.with_name(f"{self.instance_id}.mcpanel-preconvert-{int(time.time())}")
         moved = False
         try:
@@ -469,8 +464,50 @@ class ZfsSnapshots:
             raise
         with contextlib.suppress(OSError):
             tmp.rmdir()
+        result: dict[str, Any] = {"converted": True, "dataset": name}
         shutil.rmtree(old, ignore_errors=True)
-        return {"converted": True, "dataset": name}
+        if os.path.lexists(old):
+            log.warning("The folder before the conversion was not removed completely: %s", old)
+            result["warnings"] = [
+                "The server folder as it was before the conversion could not be removed completely; "
+                f"the rest is in {old}. It still uses disk space; delete it on the host"
+            ]
+            result["leftovers"] = [str(old)]
+        return result
+
+    def _clear_interrupted_convert(self, name: str, tmp: Path, host_tmp: Path) -> None:
+        """Remove what a conversion that was interrupted during its copy left: its dataset (still
+        mounted at the ``.mcpanel-convert`` folder, a partial copy: the server folder itself is
+        still a plain directory) and that folder. Anything that does not look exactly like that
+        is left alone (409 ``convert_conflict``)."""
+
+        def conflict(why: str) -> AgentError:
+            return AgentError(
+                f"A previous conversion was interrupted and what it left cannot be removed safely ({why}): "
+                f"remove the folder {tmp} and the dataset {name} if it exists",
+                "convert_conflict",
+                409,
+            )
+
+        if _exists(name):
+            if _prop(name, "mcpanel:instance") != str(self.instance_id):
+                raise conflict(f"the dataset {name} is not marked as this server's")
+            if _prop(name, "mountpoint") != str(host_tmp):
+                raise conflict(f"the dataset {name} is not mounted at {host_tmp}")
+            proc = _try(["destroy", name])  # without -r: refused if anything was made of it
+            if proc.returncode != 0:
+                raise conflict(_message(proc))
+            log.warning("Destroyed the dataset %s, left by an interrupted conversion", name)
+        if os.path.lexists(tmp):
+            from .snapshots import _discard, is_mount_point
+
+            if is_mount_point(tmp):
+                raise conflict(f"something is still mounted at {tmp}")
+
+            problem = _discard(tmp)
+            if problem:
+                raise conflict(problem)
+            log.warning("Removed %s, left by an interrupted conversion", tmp)
 
     # -- snapshots -----------------------------------------------------------------------
     def list(self) -> list[dict[str, Any]]:

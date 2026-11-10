@@ -76,7 +76,8 @@ export function CreateBackupDialog({
               <Archive className="size-4 text-muted-foreground" aria-hidden /> Create backup
             </DialogTitle>
             <DialogDescription>
-              Backs up the whole server folder (world, configs, mods/plugins). Only changed data is stored thanks to
+              Backs up the server folder (world, configs, mods/plugins), without the built-in exclusions (compressed old logs, crash
+              reports, caches, temporary files) and the backup policy's patterns. Only changed data is stored thanks to
               deduplication. The server is currently <strong>{running ? "running" : "not running"}</strong>.
             </DialogDescription>
           </DialogHeader>

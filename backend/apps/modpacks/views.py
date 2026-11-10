@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from drf_spectacular.utils import extend_schema
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -123,13 +125,33 @@ class InstanceModpackView(APIView):
         instance = get_instance_for(request.user, pk, "instance.view")
         if not instance.is_modpack:
             raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
+        if not instance.modpack_project_id:
+            # a CurseForge pack deployed by URL without an API key: its project is read from the
+            # runtime's install manifest (the reconciler does it once; try again here)
+            from .pinning import retry_pin
+
+            retry_pin(instance)
+        if not instance.modpack_project_id:
+            raise ApiError(
+                "The modpack project is not recorded yet. It is read from the server's install manifest once the "
+                "server has been started and installed the pack.",
+                code="project_not_recorded",
+                status_code=409,
+            )
         provider = get_provider(instance.modpack_provider)
         releases = provider.releases(instance.modpack_project_id)
         if request.query_params.get("include_prerelease") != "true":
             releases = [r for r in releases if r.get("version_type") in (None, "release")] or releases
         current = next((r for r in releases if r["id"] == instance.modpack_version_id), None)
-        # releases are sorted newest first by the provider adapters
-        newer = releases[: releases.index(current)] if current is not None else []
+        if current is not None:
+            # releases are sorted newest first by the provider adapters
+            newer = releases[: releases.index(current)]
+        else:
+            # the pinned release is not in the list (older than the files the provider lists, or a
+            # pre-release while those are hidden): look it up and compare release dates
+            current = _pinned_release(provider, instance)
+            published = str((current or {}).get("published") or "")
+            newer = [r for r in releases if published and str(r.get("published") or "") > published]
         from apps.backups.handlers import stored_on_current_node
 
         # a rollback restores in place, so only pre-update backups in this node's repository count
@@ -211,6 +233,13 @@ class InstanceModpackUpdateView(APIView):
             raise ApiError(
                 "This server is archived; unarchive it before updating and starting it", code="archived", status_code=409
             )
+        from apps.instances import capacity
+
+        # a stopped server started afterwards must fit into the node's memory (a running one is started
+        # again without the check: it ran when the job began)
+        overcommit = capacity.admit_request(
+            instance, starts=start and not capacity.runs_now(instance), allow_overcommit=request.data.get("allow_overcommit")
+        )
         job = enqueue(
             "modpack_update",
             title=f"Update {instance.modpack_name or instance.name}",
@@ -221,6 +250,7 @@ class InstanceModpackUpdateView(APIView):
                 "backup": bool(request.data.get("backup", SystemSetting.get("pre_update_backup"))),
                 "allow_minecraft_change": bool(request.data.get("allow_minecraft_change", False)),
                 "start": start,
+                **overcommit,
             },
         )
         audit.record(
@@ -231,6 +261,19 @@ class InstanceModpackUpdateView(APIView):
             details={"from": instance.modpack_version_id, "to": version_id},
         )
         return Response(JobSerializer(job).data, status=202)
+
+
+def _pinned_release(provider: Any, instance: Any) -> dict[str, Any] | None:
+    if not instance.modpack_version_id:
+        return None
+    try:
+        if instance.modpack_provider == "curseforge":
+            return provider.release(instance.modpack_project_id, instance.modpack_version_id)
+        if instance.modpack_provider == "modrinth":
+            return provider.release(instance.modpack_version_id)
+    except ApiError:
+        return None
+    return None
 
 
 def _is_uuid(value: str) -> bool:
@@ -274,3 +317,55 @@ class InstanceModpackRollbackView(APIView):
         )
         audit.record("modpack.rollback", request=request, instance=instance, target=instance, details={"backup": backup_id})
         return Response(JobSerializer(job).data, status=202)
+
+
+class InstanceModpackRemovedFilesView(APIView):
+    """The pack files the panel keeps the runtime from re-installing (apps/content/packfiles.py).
+
+    ``GET``: ``{"supported", "release", "paths", "applies"}``. ``supported`` is false for packs
+    that are not CurseForge/Modrinth packs (no record is ever made); ``applies`` says whether the
+    record belongs to the pinned release (after a pack update an old record is not used).
+    ``DELETE`` ("Let the pack reinstall them"): drops the record, audited; the container
+    configuration changes with it, so the next restart recreates the container and the runtime
+    installs the files again.
+    """
+
+    @staticmethod
+    def _answer(instance: Any) -> dict[str, Any]:
+        from apps.content import packfiles
+        from apps.instances.spec import restart_required
+
+        rec = packfiles.recorded(instance)
+        release = str(rec.get("release") or "")
+        pinned = str(instance.modpack_version_id or "")
+        return {
+            "supported": packfiles.applies(instance),
+            "release": release or None,
+            "paths": [p for p in rec.get("paths") or [] if isinstance(p, str)],
+            "applies": not (pinned and release and release != pinned),
+            "restart_required": restart_required(instance),
+        }
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from apps.core.permissions import get_instance_for
+
+        return Response(self._answer(get_instance_for(request.user, pk, "instance.view")))
+
+    @extend_schema(request=None, responses={200: dict})
+    def delete(self, request: Request, pk: str) -> Response:
+        from apps.audit import service as audit
+        from apps.content import packfiles
+        from apps.core.permissions import get_instance_for
+
+        instance = get_instance_for(request.user, pk, "instance.content")
+        dropped = packfiles.clear(instance)
+        paths = [p for p in dropped.get("paths") or [] if isinstance(p, str)]
+        audit.record(
+            "modpack.removed_files_cleared",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"count": len(paths), "paths": paths[:50], "release": dropped.get("release")},
+        )
+        return Response({**self._answer(instance), "cleared": paths})

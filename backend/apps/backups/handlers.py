@@ -11,7 +11,17 @@ from django.utils.dateparse import parse_datetime
 
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
-from apps.instances.handlers import apply_container, ensure_stopped, start_server
+from apps.instances.handlers import (
+    SOFTWARE_FIELDS,
+    Progress,
+    apply_container,
+    describe_software,
+    ensure_stopped,
+    put_back,
+    set_software,
+    software_state,
+    start_again,
+)
 from apps.instances.models import Instance
 from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.jobs.runner import JobContext, register
@@ -137,7 +147,8 @@ def run_backup(
         kind=kind,
         created_by=user,
         job=job,
-        meta={"node_id": instance.node_id, "node_name": instance.node.name},
+        # the software the files belong to: a restore puts it back with them (restore_job)
+        meta={"node_id": instance.node_id, "node_name": instance.node.name, "software": software_state(instance)},
     )
     try:
         op = client.create_backup(
@@ -301,14 +312,61 @@ def apply_retention(instance: Instance, ctx: JobContext) -> list[str]:
         now=timezone.now(),
     )
     ids = [b.snapshot_id for b in doomed if b.snapshot_id]
-    if not ids:
-        return []
-    ctx.progress(None, f"Retention: removing {len(ids)} old backup(s)")
     client = AgentClient(instance.node)
-    op = client.forget_backups(instance.id, ids, prune=True)
+    orphans = given_up_snapshots(instance, client)
+    if orphans:
+        ctx.log(
+            f"Retention: also removing {len(orphans)} snapshot(s) of backups the panel had given up on or deleted "
+            "(the agent finished or kept them after their job ended)"
+        )
+    if not ids and not orphans:
+        return []
+    ctx.check_cancelled()
+    ctx.progress(None, f"Retention: removing {len(ids) + len(orphans)} old backup(s)")
+    op = client.forget_backups(instance.id, ids + orphans, prune=True)
     client.wait_operation(op["id"], timeout=3 * 3600)
     Backup.objects.filter(pk__in=[b.pk for b in doomed]).update(status=BackupStatus.DELETED)
-    return ids
+    return ids + orphans
+
+
+def given_up_snapshots(instance: Instance, client: AgentClient) -> list[str]:
+    """Snapshots in this node's repository whose backup row is failed or deleted.
+
+    A backup the panel stopped waiting for (the agent was out of reach, the job was cut off and
+    ``settle_orphaned_backups`` gave up, or it was marked as failed) can still be finished by the
+    agent, and a deleted backup whose forget did not remove its snapshot stays in the repository.
+    Neither is ever offered for a restore, so retention removes them. Snapshots without a backup
+    row of this server (another panel's, or ones ``manage.py adopt_backups`` can take over) are
+    left alone. Best effort: [] when the repository cannot be listed.
+    """
+    try:
+        listed = client.list_backups(instance.id)
+    except ApiError as exc:
+        log.info(
+            "retention: the snapshots of %s cannot be listed (%s); none are pruned besides the old backups", instance.pk, exc
+        )
+        return []
+    by_row: dict[str, str] = {}
+    for snap in listed:
+        for tag in snap.get("tags") or []:
+            if str(tag).startswith("backup:") and snap.get("id"):
+                by_row[str(tag)[len("backup:") :]] = str(snap["id"])
+    if not by_row:
+        return []
+    ended = Backup.objects.filter(
+        instance=instance, pk__in=[k for k in by_row if _is_uuid(k)], status__in=(BackupStatus.FAILED, BackupStatus.DELETED)
+    ).exclude(job__status__in=ACTIVE_STATUSES)
+    return sorted(by_row[str(b.pk)] for b in ended)
+
+
+def _is_uuid(value: str) -> bool:
+    import uuid
+
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 @register("backup")
@@ -337,33 +395,143 @@ def backup_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     }
 
 
+# Failures of a restore operation that prove the server folder was not touched: restic restores
+# into a staging folder (or a hidden one inside a ZFS dataset), and only a finished restore is
+# swapped in. A failure after that (cleaning up the old folder) has another code.
+RESTORE_UNTOUCHED = frozenset(
+    {
+        "restic_failed",
+        "restic_missing",
+        "repo_locked",
+        "repo_missing",
+        "snapshot_not_found",
+        "invalid_snapshot",
+        "invalid_path",
+        "not_found",
+        "target_running",
+        "target_not_empty",
+        "instance_busy",
+    }
+)
+SNAPSHOT_ROLLBACK_UNTOUCHED = frozenset(
+    {"snapshot_not_found", "invalid_snapshot", "snapshots_unavailable", "not_subvolume", "must_stop", "instance_busy"}
+)
+CONVERT_UNTOUCHED = frozenset({"snapshots_unavailable", "must_stop", "instance_busy", "not_found"})
+
+
+def backup_software(backup: Backup) -> dict[str, Any] | None:
+    """The software state the backup's files belong to (``run_backup`` records it). Backups from
+    before that record only what an update changed: ``software_before`` (a software update) or
+    ``modpack_before`` (a modpack update)."""
+    meta = backup.meta or {}
+    for key in ("software", "software_before", "modpack_before"):
+        value = meta.get(key)
+        if isinstance(value, dict) and value:
+            return {k: v for k, v in value.items() if k in SOFTWARE_FIELDS}
+    return None
+
+
+def software_differs(backup: Backup, instance: Instance) -> dict[str, Any] | None:
+    """The backup's software state when it differs from the server's (the image aside: it follows
+    the Java version and the runtime image setting), else None."""
+    recorded = backup_software(backup)
+    if not recorded:
+        return None
+    current = software_state(instance)
+    if all(current.get(f) == v for f, v in recorded.items() if f != "image"):
+        return None
+    return recorded
+
+
 @register("restore")
 def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
-    """Restore a backup over the existing instance, after a safety backup."""
+    """Restore a backup over the existing instance, after a safety backup.
+
+    The files come back together with the software they belong to: when the backup was made with
+    other versions (a "Before update" backup), they are set back as well, and the container is
+    recreated before the server starts. A failure that left the files as they were starts a
+    server that was running again; after anything unclear it is left stopped.
+    """
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
     require_local_backup(backup, instance)
     client = AgentClient(instance.node)
-    was_running = ensure_stopped(instance, ctx)
+    was_running = False
+    progress = Progress(RESTORE_UNTOUCHED)
     safety = None
-    if job.params.get("pre_restore_backup", True):
-        ctx.progress(0.05, "Creating a safety backup of the current state")
-        safety = run_backup(
-            instance,
-            ctx,
-            name=f"Before restoring '{backup.name}'",
-            kind=BackupKind.PRE_RESTORE,
-            user=job.user,
-            span=(0.05, 0.45),
-            job=job,
-        )
-    ctx.progress(0.5, f"Restoring '{backup.name}'", force=True)
-    op = client.restore_backup(instance.id, backup.snapshot_id)
-    client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        if job.params.get("pre_restore_backup", True):
+            ctx.progress(0.05, "Creating a safety backup of the current state")
+            safety = run_backup(
+                instance,
+                ctx,
+                name=f"Before restoring '{backup.name}'",
+                kind=BackupKind.PRE_RESTORE,
+                user=job.user,
+                span=(0.05, 0.45),
+                job=job,
+            )
+        ctx.check_cancelled()
+        ctx.progress(0.5, f"Restoring '{backup.name}'", force=True)
+        progress.requested()
+        op = client.restore_backup(instance.id, backup.snapshot_id)
+        progress.running()
+        client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
+    except Exception as exc:
+        if progress.untouched(exc) and progress.stage != "safe":
+            ctx.log("The restore failed before the restored files were put in place: the server's files are unchanged")
+        _note_software_mismatch(exc, progress, backup, instance, ctx)
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=progress.untouched(exc))
+        raise
+    software = _restore_software(backup, instance, ctx)
     if was_running:
-        ctx.progress(0.92, "Starting server")
-        start_server(instance, ctx, span=(0.92, 0.07))
-    return {"restored": str(backup.id), "safety_backup": str(safety.id) if safety else None, "restarted": was_running}
+        start_again(job, instance, ctx, done="The backup was restored.", recreate=bool(software))
+    return {
+        "restored": str(backup.id),
+        "safety_backup": str(safety.id) if safety else None,
+        "restarted": was_running,
+        "software_restored": software,
+    }
+
+
+def _note_software_mismatch(exc: BaseException, progress: Progress, backup: Backup, instance: Instance, ctx: JobContext) -> None:
+    """A restore cut off by a panel stop after the request went out: the node finishes it, but the
+    step that sets the software back to the backup's (``_restore_software``) never runs. Say so in
+    the log and in the job's error, with what to do."""
+    from apps.jobs.runner import WorkerStopping
+
+    if not isinstance(exc, WorkerStopping) or progress.stage == "safe":
+        return
+    recorded = software_differs(backup, instance)
+    if recorded is None:
+        return
+    note = (
+        f"The restore of '{backup.name}' may have finished on the node, so the server's files may now be the backup's, "
+        f"made with {describe_software(recorded)}, while the server is still set to "
+        f"{describe_software(software_state(instance))}. Do not start it like this: restore the same backup again "
+        "(that also sets the software back), or set the versions in Settings → Software first."
+    )
+    ctx.log(f"warning: {note}")
+    exc.note = note
+
+
+def _restore_software(backup: Backup, instance: Instance, ctx: JobContext) -> dict[str, Any] | None:
+    """Set the server's software back to what the restored backup was made with (if it differs).
+    Returns {field: [old, new]} of what changed, or None."""
+    recorded = software_differs(backup, instance)
+    if recorded is None:
+        return None
+    before = describe_software(software_state(instance))
+    changes = set_software(instance, recorded)
+    if not changes:
+        return None
+    instance.refresh_from_db()
+    ctx.log(
+        f"The backup was made with {describe_software(software_state(instance))}; the server's software was set "
+        f"back to it (it was {before}), so the restored world is not opened by another version"
+    )
+    return {f: [old, new] for f, (old, new) in changes.items()}
 
 
 @register("restore_new")
@@ -388,6 +556,7 @@ def restore_new_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.05, 0.8))
     target.installed_at = timezone.now()
     target.save(update_fields=["installed_at"])
+    _restore_software(backup, target, ctx)  # the new server runs the software of the backup, not of its source today
     apply_container(target, ctx, start=False, span=(0.88, 0.98))
     return {"target_id": str(target.id)}
 
@@ -401,6 +570,7 @@ def delete_job(job: Job, ctx: JobContext) -> dict[str, Any]:
             ctx.log(f"The backup was stored on {_node_label(backup, instance)}; removing the record only")
         else:
             client = backup_agent(backup, instance)
+            ctx.check_cancelled()
             op = client.forget_backups(instance.id, [backup.snapshot_id], prune=True)
             client.wait_operation(op["id"], timeout=3 * 3600, on_progress=ctx.agent_progress(0.1, 0.8))
     backup.status = BackupStatus.DELETED
@@ -432,13 +602,21 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
     require_local_backup(backup, instance)
     client = AgentClient(instance.node)
-    was_running = ensure_stopped(instance, ctx)
-    ctx.progress(0.2, f"Restoring {job.params['path']} from '{backup.name}'", force=True)
-    op = client.backup_restore_path(instance.id, backup.snapshot_id, job.params["path"])
-    client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
+    was_running = False
+    progress = Progress(RESTORE_UNTOUCHED)
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        ctx.check_cancelled()
+        ctx.progress(0.2, f"Restoring {job.params['path']} from '{backup.name}'", force=True)
+        progress.requested()
+        op = client.backup_restore_path(instance.id, backup.snapshot_id, job.params["path"])
+        progress.running()
+        client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
+    except Exception as exc:
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=progress.untouched(exc))
+        raise
     if was_running:
-        ctx.progress(0.92, "Starting server")
-        start_server(instance, ctx, span=(0.92, 0.07))
+        start_again(job, instance, ctx, done=f"{job.params['path']} was restored.")
     return {"restored": job.params["path"], "backup": str(backup.id), "restarted": was_running}
 
 
@@ -540,21 +718,29 @@ def prune_scheduled_snapshots(
 def snapshot_restore(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     client = AgentClient(instance.node)
-    was_running = ensure_stopped(instance, ctx)
     name = job.params["name"]
-    ctx.progress(0.3, "Taking a safety snapshot of the current state", force=True)
-    op = client.create_snapshot(instance.id, f"before rollback to {name}"[:120], "none", "pre_restore")
-    client.wait_operation(op["id"], timeout=1800)
-    ctx.progress(0.6, f"Rolling back to snapshot {name}", force=True)
-    op = client.restore_snapshot(instance.id, name)
-    done = client.wait_operation(op["id"], timeout=3600)
+    was_running = False
+    progress = Progress(SNAPSHOT_ROLLBACK_UNTOUCHED)
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        ctx.progress(0.3, "Taking a safety snapshot of the current state", force=True)
+        op = client.create_snapshot(instance.id, f"before rollback to {name}"[:120], "none", "pre_restore")
+        client.wait_operation(op["id"], timeout=1800)
+        ctx.check_cancelled()
+        ctx.progress(0.6, f"Rolling back to snapshot {name}", force=True)
+        progress.requested()
+        op = client.restore_snapshot(instance.id, name)
+        progress.running()
+        done = client.wait_operation(op["id"], timeout=3600)
+    except Exception as exc:
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=progress.untouched(exc))
+        raise
     # ZFS rollbacks report tidy-up problems (e.g. a history dataset that could not be promoted).
     warnings = [str(w) for w in (done.get("result") or {}).get("warnings") or []]
     for warning in warnings:
         ctx.log(f"Warning: {warning}")
     if was_running:
-        ctx.progress(0.9, "Starting server")
-        start_server(instance, ctx, span=(0.9, 0.09))
+        start_again(job, instance, ctx, done=f"The server was rolled back to snapshot {name}.", span=(0.9, 0.09))
     return {"restored": name, "restarted": was_running, "warnings": warnings}
 
 
@@ -570,10 +756,19 @@ def snapshot_convert(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     client = AgentClient(instance.node)
     provider = (client.snapshots(instance.id).get("capability") or {}).get("provider")
-    was_running = ensure_stopped(instance, ctx)
-    ctx.progress(0.2, CONVERT_MESSAGES.get(provider, "Preparing the server folder for snapshots"), force=True)
-    op = client.convert_snapshots(instance.id)
-    done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
+    was_running = False
+    progress = Progress(CONVERT_UNTOUCHED)
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        ctx.check_cancelled()
+        ctx.progress(0.2, CONVERT_MESSAGES.get(provider, "Preparing the server folder for snapshots"), force=True)
+        progress.requested()
+        op = client.convert_snapshots(instance.id)
+        progress.running()
+        done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
+    except Exception as exc:
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=progress.untouched(exc))
+        raise
     if was_running:
-        start_server(instance, ctx, span=(0.92, 0.07))
+        start_again(job, instance, ctx, done="The server folder was converted.")
     return done.get("result") or {}

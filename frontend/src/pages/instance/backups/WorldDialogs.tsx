@@ -118,7 +118,7 @@ export function ReplaceWorldDialog({
               <li>{running ? "The server is stopped (players are disconnected)." : "The server stays stopped meanwhile."}</li>
               <li>
                 {safety
-                  ? "A safety backup of the whole server folder is taken first (“Before restore”)."
+                  ? "A safety backup of the server folder is taken first (“Before restore”)."
                   : "No safety backup is taken: the current world cannot be recovered afterwards."}
               </li>
               <li>

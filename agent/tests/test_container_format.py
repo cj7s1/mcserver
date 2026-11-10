@@ -61,7 +61,9 @@ def test_apply_result_reports_the_container_format(api, auth, monkeypatch):
     iid = uuid.uuid4()
     created = SimpleNamespace(reload=lambda: None)
     calls: list[str] = []
-    monkeypatch.setattr(docker_ops, "image_present", lambda _image: True)
+    monkeypatch.setattr(docker_ops, "client", lambda: (_ for _ in ()).throw(AssertionError("real Docker")))
+    monkeypatch.setattr(docker_ops, "local_image_id", lambda _image: "sha256:" + "ab" * 32)
+    monkeypatch.setattr(docker_ops, "remove_stale_replacement", lambda _iid: False)
     monkeypatch.setattr(docker_ops, "get_container", lambda _iid: None)
     monkeypatch.setattr(
         docker_ops, "create_container", lambda *_a, **_k: (calls.append("create"), created)[1]
@@ -74,6 +76,11 @@ def test_apply_result_reports_the_container_format(api, auth, monkeypatch):
         "container": {"exists": True, "created_here": True},
         "recreated": False,
         "container_format": docker_ops.CONTAINER_FORMAT,
+        "image_id_before": "sha256:" + "ab" * 32,  # what the tag pointed to (no container, no last run)
+        "image_id": None,
+        "pulled": False,
+        "images_removed": [],
+        "warnings": [],
     }
 
 

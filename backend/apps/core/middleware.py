@@ -76,6 +76,8 @@ class SecurityHeadersMiddleware:
                 response["Content-Security-Policy"] = API_CSP
             else:
                 response["Content-Security-Policy"] = self.spa_policy(request)
+        if not request.path.startswith(("/api/", "/ws/", "/static/")):
+            spa_cache_headers(request.path, response)
         return response
 
     @staticmethod
@@ -90,11 +92,30 @@ class SecurityHeadersMiddleware:
         return "; ".join(SPA_CSP).format(websocket=websocket)
 
 
-class UploadLimitMiddleware:
-    """Reject oversized request bodies before Django reads/spools them (HTTP 413).
+# Files of the Vite build whose name carries a content hash (assets/index-BxYz12_a.js): a new build
+# has new names, so they may be cached for good. index.html (and everything else WhiteNoise serves
+# from the build, e.g. favicon.svg) names them and must be revalidated, or a browser keeps loading
+# the previous build's chunks after an upgrade.
+HASHED_ASSET = re.compile(r"^/assets/[^/]+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$")
+IMMUTABLE = "public, max-age=31536000, immutable"
 
-    The limit is MCPANEL_MAX_UPLOAD_BYTES (default 2 GiB); chunked uploads without a
-    Content-Length are refused for the upload endpoints.
+
+def spa_cache_headers(path: str, response: HttpResponse) -> None:
+    if response.status_code not in (200, 304):
+        return
+    if HASHED_ASSET.match(path):
+        response["Cache-Control"] = IMMUTABLE
+    elif path in ("/", "/index.html") or response.get("Content-Type", "").startswith("text/html"):
+        response["Cache-Control"] = "no-cache"
+
+
+class UploadLimitMiddleware:
+    """Refuse oversized request bodies by their Content-Length (HTTP 413).
+
+    Under ASGI the binding limits are enforced earlier, before Django reads the body
+    (apps.core.asgi.RequestBodyLimit, wired in mcpanel/asgi.py); this middleware keeps the same
+    answer for other ways of serving Django (WSGI, the test client). The limit is
+    MCPANEL_MAX_UPLOAD_BYTES (default 2 GiB); uploads without a Content-Length are refused (411).
     """
 
     UPLOAD_HINTS = ("/files/upload", "/import", "/content/upload", "/world/replace")
