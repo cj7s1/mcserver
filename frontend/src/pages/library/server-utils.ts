@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/lib/api";
+import { loaderLabel, variantLabel } from "@/lib/games";
 import { sendPower, type PowerOutcome } from "@/lib/power";
 import { qk, useInvalidateInstance } from "@/lib/queries";
 import { RESTART_REQUIRED_NOTE } from "@/lib/restart-required";
@@ -79,31 +80,9 @@ export function statusRank(s: InstanceStatus): number {
   return STATUS_RANK[s] ?? 9;
 }
 
-const TYPE_LABELS: Record<string, string> = {
-  VANILLA: "Vanilla",
-  PAPER: "Paper",
-  PURPUR: "Purpur",
-  FOLIA: "Folia",
-  FABRIC: "Fabric",
-  QUILT: "Quilt",
-  FORGE: "Forge",
-  NEOFORGE: "NeoForge",
-  MODRINTH: "Modrinth modpack",
-  AUTO_CURSEFORGE: "CurseForge modpack",
-  FTBA: "FTB modpack",
-  CUSTOM: "Custom",
-};
-
-export function serverTypeLabel(type: string): string {
-  return TYPE_LABELS[type] ?? type.charAt(0) + type.slice(1).toLowerCase();
-}
-
-export function loaderLabel(loader: string): string {
-  if (!loader) return "—";
-  const known = TYPE_LABELS[loader.toUpperCase()];
-  if (known && !known.endsWith("modpack")) return known;
-  return loader.charAt(0).toUpperCase() + loader.slice(1);
-}
+/** Variant (server type) and loader labels live in lib/games.ts; these names stay for existing callers. */
+export const serverTypeLabel = variantLabel;
+export { loaderLabel };
 
 export function loaderText(i: Instance): string {
   return `${loaderLabel(i.loader)}${i.loader_version ? ` ${i.loader_version}` : ""}`;

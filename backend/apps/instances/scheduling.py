@@ -412,8 +412,10 @@ def execute(sched: Schedule) -> str:
         )
         return f"Queued job {job.id}"
     if sched.action == "command":
+        from apps import games
         from apps.nodes.client import AgentClient
 
+        games.for_instance(inst).require(inst, "console_commands")
         output = AgentClient(inst.node).command(inst.id, str(sched.payload.get("command", ""))[:1400])
         return f"OK: {output[:200]}"
     return f"Unknown action {sched.action}"

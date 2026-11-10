@@ -1,7 +1,8 @@
-import { Archive, Boxes, Cpu, FileCog, Settings2, TriangleAlert, Variable } from "lucide-react";
+import { Archive } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ComponentType } from "react";
 import { useSearchParams } from "react-router";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { defaultSettingsTab, SETTINGS_TABS, settingsTabs, type SettingsTabId } from "@/lib/sections";
 import { useInstanceContext } from "./InstanceLayout";
 import { UnsavedChangesDialog, useUnsavedChangesGuard } from "./files/use-unsaved-guard";
 import { DangerTab } from "./settings/danger-tab";
@@ -12,26 +13,25 @@ import { ResourcesTab } from "./settings/resources-tab";
 import { Notice, type TabProps } from "./settings/settings-ui";
 import { SoftwareTab } from "./settings/software-tab";
 
-type TabId = "properties" | "resources" | "software" | "environment" | "general" | "danger";
+type TabId = SettingsTabId;
 
-const TABS: { id: TabId; label: string; icon: ComponentType<{ className?: string }>; component: ComponentType<TabProps> }[] = [
-  { id: "properties", label: "Properties", icon: FileCog, component: PropertiesTab },
-  { id: "resources", label: "Resources & JVM", icon: Cpu, component: ResourcesTab },
-  { id: "software", label: "Software", icon: Boxes, component: SoftwareTab },
-  { id: "environment", label: "Environment", icon: Variable, component: EnvTab },
-  { id: "general", label: "General", icon: Settings2, component: GeneralTab },
-  { id: "danger", label: "Danger zone", icon: TriangleAlert, component: DangerTab },
-];
-
-function isTab(v: string | null): v is TabId {
-  return !!v && TABS.some((t) => t.id === v);
-}
+/** The page of each Settings tab; which tabs a server shows comes from the section registry. */
+const COMPONENTS: Record<TabId, ComponentType<TabProps>> = {
+  properties: PropertiesTab,
+  resources: ResourcesTab,
+  software: SoftwareTab,
+  environment: EnvTab,
+  general: GeneralTab,
+  danger: DangerTab,
+};
 
 export default function Settings() {
   const { instance, can } = useInstanceContext();
   const [params, setParams] = useSearchParams();
+  const TABS = settingsTabs(instance);
+  const defaultTab = defaultSettingsTab(instance);
   const requested = params.get("tab");
-  const tab: TabId = isTab(requested) ? requested : "properties";
+  const tab: TabId = TABS.some((t) => t.id === requested) ? (requested as TabId) : defaultTab;
   // Tabs are mounted on first visit and then kept (hidden) so unsaved edits survive switching.
   const [visited, setVisited] = useState<Set<TabId>>(() => new Set([tab]));
   const [dirty, setDirty] = useState<Partial<Record<TabId, boolean>>>({});
@@ -39,7 +39,7 @@ export default function Settings() {
 
   const reporters = useState(() => {
     const out = {} as Record<TabId, (d: boolean) => void>;
-    for (const t of TABS) out[t.id] = (d: boolean) => setDirty((prev) => (!!prev[t.id] === d ? prev : { ...prev, [t.id]: d }));
+    for (const t of SETTINGS_TABS) out[t.id] = (d: boolean) => setDirty((prev) => (!!prev[t.id] === d ? prev : { ...prev, [t.id]: d }));
     return out;
   })[0];
   const anyDirty = Object.values(dirty).some(Boolean);
@@ -55,13 +55,13 @@ export default function Settings() {
       setParams(
         (prev) => {
           const n = new URLSearchParams(prev);
-          if (v === "properties") n.delete("tab");
+          if (v === defaultTab) n.delete("tab");
           else n.set("tab", v);
           return n;
         },
         { replace: true },
       ),
-    [setParams],
+    [setParams, defaultTab],
   );
 
   return (
@@ -93,7 +93,7 @@ export default function Settings() {
                 className={t.id === "danger" ? "data-active:text-destructive" : undefined}
               >
                 <t.icon className="size-4" />
-                {t.label}
+                {t.label(instance)}
                 {dirty[t.id] && (
                   <span className="size-1.5 rounded-full bg-primary" aria-label="(unsaved changes)" role="img" />
                 )}
@@ -103,7 +103,7 @@ export default function Settings() {
         </div>
         {TABS.filter((t) => visited.has(t.id)).map((t) => (
           <TabsContent key={t.id} value={t.id} forceMount className="data-[state=inactive]:hidden">
-            <t.component instance={instance} can={can} onDirtyChange={reporters[t.id]} />
+            <TabPage id={t.id} instance={instance} can={can} onDirtyChange={reporters[t.id]} />
           </TabsContent>
         ))}
       </Tabs>
@@ -113,4 +113,9 @@ export default function Settings() {
       />
     </div>
   );
+}
+
+function TabPage({ id, ...props }: TabProps & { id: TabId }) {
+  const Page = COMPONENTS[id];
+  return <Page {...props} />;
 }

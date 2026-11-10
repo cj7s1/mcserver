@@ -7,6 +7,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatDateTime, formatMemoryMb, relativeTime } from "@/lib/format";
+import { gameLabel, MINECRAFT } from "@/lib/games";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { softwareLabel } from "../instance/InstanceLayout";
@@ -20,6 +21,12 @@ export interface ServerGroup {
 }
 
 const COLS = 8;
+
+/** The version column is named after the game ("Minecraft"), or "Version" when the list mixes games. */
+function versionHeading(groups: ServerGroup[]): string {
+  const labels = new Set(groups.flatMap((g) => g.items.map((i) => gameLabel(i))));
+  return labels.size > 1 ? "Version" : ([...labels][0] ?? gameLabel(MINECRAFT));
+}
 
 /** Compact list view. Groups render as collapsible <tbody> sections when `grouped` is set. */
 export function ServerTable({
@@ -40,7 +47,7 @@ export function ServerTable({
           <TableRow className="hover:bg-transparent">
             <TableHead className="pl-4">Server</TableHead>
             <TableHead className="hidden sm:table-cell">Status</TableHead>
-            <TableHead className="hidden sm:table-cell">Minecraft</TableHead>
+            <TableHead className="hidden sm:table-cell">{versionHeading(groups)}</TableHead>
             <TableHead className="hidden lg:table-cell">Loader</TableHead>
             <TableHead className="hidden text-right md:table-cell">Memory</TableHead>
             <TableHead className="hidden text-right md:table-cell">Port</TableHead>

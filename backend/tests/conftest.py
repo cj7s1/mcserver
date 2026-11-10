@@ -50,7 +50,12 @@ ALLOWED_FETCH_HOSTS = {
 # --------------------------------------------------------------------------------------
 # agent/mcagent/main.py FEATURES of the agent released with this panel (tests/test_contracts_2026_11_10.py
 # checks that the two agree).
-CURRENT_AGENT_FEATURES = ("retire", "pull_newer", "ping", "clone_level_name")
+CURRENT_AGENT_FEATURES = ("retire", "pull_newer", "ping", "clone_level_name", "games")
+# GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; multi-game phase 1
+# has Minecraft only, without variants)
+CURRENT_AGENT_GAMES: dict[str, dict[str, Any]] = {
+    "minecraft": {"variants": [], "images": ["itzg/minecraft-server"], "control": "minecraft-rcon"},
+}
 
 
 class FakeAgent:
@@ -121,6 +126,9 @@ class FakeAgent:
         # The default is the current agent's list (agent/mcagent/main.py FEATURES); tests of older
         # agents set fewer.
         self.features: list[str] = list(CURRENT_AGENT_FEATURES)
+        # GET /v1/info "games" (feature "games"): game -> {"variants", "images", "control"}. Tests
+        # add games to it; ``without_games()`` makes it an agent from before game profiles.
+        self.game_profiles: dict[str, dict[str, Any]] = copy.deepcopy(CURRENT_AGENT_GAMES)
         # Total RAM of the node as GET /v1/info reports it (docker.memory_bytes): memory admission
         self.memory_bytes: int | None = 16 * 1024**3
         # pull="newer" (feature "pull_newer"): image name -> the id the registry has for its tag
@@ -216,6 +224,16 @@ class FakeAgent:
         return [(a, k) for n, a, k in self.calls if n == name]
 
     # -- helpers for tests -------------------------------------------------------------
+    def without_games(self) -> None:
+        """An agent from before game profiles: no ``games`` feature, no ``games`` in its info. It
+        runs every spec as a Minecraft server (it ignores a spec's ``game``)."""
+        self.features = [f for f in self.features if f != "games"]
+        self.game_profiles = {}
+
+    def add_game(self, game: str, images: Iterable[str], *, variants: Iterable[str] = (), control: str | None = None) -> None:
+        """The agent has a runtime profile for ``game`` (GET /v1/info "games")."""
+        self.game_profiles[game] = {"variants": list(variants), "images": list(images), "control": control}
+
     def add_foreign_port(self, port: int, container: str = "other-app", protocol: str = "tcp") -> None:
         self.foreign_ports.append(
             {
@@ -433,7 +451,7 @@ class FakeAgent:
         return {"status": "ok", "docker": True, "version": "fake"}
 
     def info(self) -> dict[str, Any]:
-        return {
+        answer: dict[str, Any] = {
             "version": "fake",
             "features": list(self.features),
             "docker": {"server_version": "fake", "cpus": 4, "memory_bytes": self.memory_bytes},
@@ -441,6 +459,9 @@ class FakeAgent:
             "storage": {},
             "policy": {"allowed_images": ["itzg/minecraft-server"], "port_min": 1024, "port_max": 65535},
         }
+        if "games" in self.features:
+            answer["games"] = copy.deepcopy(self.game_profiles)
+        return answer
 
     def published_ports(self) -> list[dict[str, Any]]:
         used = [dict(p) for p in self.foreign_ports]
@@ -558,7 +579,15 @@ class FakeAgent:
     def apply(self, instance_id: Any, spec: dict[str, Any], *, start: bool = False, pull: str = "missing") -> dict[str, Any]:
         iid = str(instance_id)
         repo = str(spec.get("image", "")).rpartition(":")[0]
-        if repo not in ("itzg/minecraft-server", "docker.io/itzg/minecraft-server"):
+        game = spec.get("game") or "minecraft"
+        allowed = {"itzg/minecraft-server", "docker.io/itzg/minecraft-server"}
+        if "games" in self.features:
+            # the agent's runtime profiles: a game without one is refused, the image must be the game's own
+            if game not in self.game_profiles:
+                raise self._err(f"No runtime profile for the game '{game}'", "unknown_game", 400)
+            if game != "minecraft":
+                allowed = set(self.game_profiles[game].get("images") or [])
+        if repo not in allowed:
             raise self._err(f"Image repository '{repo}' is not in the agent allow-list", "image_not_allowed", 403)
         if pull not in ("missing", "always", "never") and not (pull == "newer" and "pull_newer" in self.features):
             # an agent's request schema: "newer" exists only with the feature

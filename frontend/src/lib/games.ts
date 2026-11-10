@@ -1,0 +1,190 @@
+/**
+ * What the UI knows about an instance's game: id and label, capabilities, memory model, and the
+ * labels and colours of its variants (server types). Panels with game definitions send `game`,
+ * `game_label`, `capabilities` and `memory_model` with every instance; an older panel sends none of
+ * them, and the instance is then a Minecraft server gated exactly as before (content_kind, is_modpack).
+ */
+import type { GameCapability, Instance, MemoryModel } from "./types";
+
+export const MINECRAFT = "minecraft";
+
+type GameFields = Pick<Instance, "game" | "game_label" | "capabilities" | "memory_model" | "content_kind" | "is_modpack">;
+
+/** Every capability a Minecraft server has, before the per-instance content/modpack rules. */
+const MINECRAFT_BASE: readonly GameCapability[] = [
+  "broadcast",
+  "console_commands",
+  "consistent_backups",
+  "diagnostics",
+  "eula",
+  "jvm",
+  "player_actions",
+  "players",
+  "properties",
+  "query",
+  "software_update",
+  "world_import_export",
+  "world_reset",
+];
+
+const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft" };
+
+export function gameId(i: Pick<Instance, "game">): string {
+  return i.game || MINECRAFT;
+}
+
+export function isMinecraft(i: Pick<Instance, "game">): boolean {
+  return gameId(i) === MINECRAFT;
+}
+
+/** Display name of a game id, or of an instance's game ("Minecraft"). */
+export function gameLabel(of: string | Pick<Instance, "game" | "game_label">): string {
+  if (typeof of !== "string" && of.game_label) return of.game_label;
+  const id = typeof of === "string" ? of || MINECRAFT : gameId(of);
+  return GAME_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/**
+ * The instance's capabilities: what the API sends, or (older panel, Minecraft) today's rules: every
+ * capability, `content` only for plugin and mod servers, `modpacks` only for modpack servers. An
+ * instance of another game without a list gets none (only panels with game definitions create them).
+ */
+export function instanceCapabilities(i: GameFields): ReadonlySet<GameCapability> {
+  if (i.capabilities) return new Set(i.capabilities);
+  if (!isMinecraft(i)) return new Set();
+  const caps = new Set<GameCapability>(MINECRAFT_BASE);
+  if (i.content_kind === "mods" || i.content_kind === "plugins") caps.add("content");
+  if (i.is_modpack) caps.add("modpacks");
+  return caps;
+}
+
+export function hasCapability(i: GameFields, cap: GameCapability): boolean {
+  return instanceCapabilities(i).has(cap);
+}
+
+export function hasCapabilities(i: GameFields, caps: readonly GameCapability[] | undefined): boolean {
+  if (!caps?.length) return true;
+  const have = instanceCapabilities(i);
+  return caps.every((c) => have.has(c));
+}
+
+export function memoryModel(i: Pick<Instance, "memory_model">): MemoryModel {
+  return i.memory_model ?? "jvm";
+}
+
+// --- variants (Minecraft server types) ------------------------------------------------------------
+
+const VARIANT_LABELS: Record<string, string> = {
+  VANILLA: "Vanilla",
+  PAPER: "Paper",
+  PURPUR: "Purpur",
+  FOLIA: "Folia",
+  FABRIC: "Fabric",
+  QUILT: "Quilt",
+  FORGE: "Forge",
+  NEOFORGE: "NeoForge",
+  MODRINTH: "Modrinth modpack",
+  AUTO_CURSEFORGE: "CurseForge modpack",
+  FTBA: "FTB modpack",
+  CUSTOM: "Custom",
+};
+
+const VARIANT_COLORS: Record<string, string> = {
+  VANILLA: "from-emerald-500/30 to-emerald-700/30 text-emerald-700 dark:text-emerald-300",
+  PAPER: "from-sky-500/30 to-sky-700/30 text-sky-700 dark:text-sky-300",
+  PURPUR: "from-violet-500/30 to-violet-700/30 text-violet-700 dark:text-violet-300",
+  FOLIA: "from-teal-500/30 to-teal-700/30 text-teal-700 dark:text-teal-300",
+  FABRIC: "from-amber-500/30 to-amber-700/30 text-amber-700 dark:text-amber-200",
+  QUILT: "from-fuchsia-500/30 to-fuchsia-700/30 text-fuchsia-700 dark:text-fuchsia-300",
+  FORGE: "from-orange-500/30 to-orange-800/30 text-orange-700 dark:text-orange-300",
+  NEOFORGE: "from-orange-400/30 to-red-700/30 text-orange-700 dark:text-orange-200",
+};
+
+const FALLBACK_COLOR = "from-zinc-500/30 to-zinc-700/30 text-zinc-700 dark:text-zinc-300";
+
+/** Known label of a variant id, or undefined (callers choose their own fallback). */
+export function knownVariantLabel(variant: string): string | undefined {
+  return VARIANT_LABELS[variant];
+}
+
+/** Label of a variant ("PAPER" -> "Paper"); unknown ids are capitalised ("SPONGE" -> "Sponge"). */
+export function variantLabel(variant: string): string {
+  return VARIANT_LABELS[variant] ?? variant.charAt(0) + variant.slice(1).toLowerCase();
+}
+
+/** Tailwind classes of a variant's icon gradient; grey for unknown variants. */
+export function variantColor(variant: string | undefined): string {
+  return VARIANT_COLORS[variant ?? ""] ?? FALLBACK_COLOR;
+}
+
+/** Label of a mod loader id ("neoforge" -> "NeoForge"); "—" when empty. */
+export function loaderLabel(loader: string): string {
+  if (!loader) return "—";
+  const known = VARIANT_LABELS[loader.toUpperCase()];
+  if (known && !known.endsWith("modpack")) return known;
+  return loader.charAt(0).toUpperCase() + loader.slice(1);
+}
+
+// --- memory -------------------------------------------------------------------------------------
+
+/**
+ * Container memory limit for a memory setting; mirrors Instance.container_memory_mb in the backend.
+ * jvm: heap + max(1536, 40 %) for modded servers, heap + max(768, 30 %) otherwise (off-heap
+ * headroom), or heap + `overheadMb` when one is set. plain: the setting is the limit (+ overhead).
+ */
+export function containerMemoryMb(memoryMb: number, opts: { model?: MemoryModel; modded?: boolean; overheadMb?: number } = {}): number {
+  const { model = "jvm", modded = false, overheadMb = 0 } = opts;
+  if (overheadMb) return memoryMb + overheadMb;
+  if (model !== "jvm") return memoryMb;
+  return memoryMb + (modded ? Math.max(1536, Math.floor(memoryMb * 0.4)) : Math.max(768, Math.floor(memoryMb * 0.3)));
+}
+
+/** Wording of the memory setting for a memory model (the Resources tab and the create wizard). */
+export interface MemoryWording {
+  /** Section description in the Resources tab. */
+  settingsDescription: string;
+  /** Section description in the create wizard. */
+  wizardDescription: string;
+  /** Label of the value ("Heap size (-Xmx)"). */
+  fieldLabel: string;
+  /** Short label for slider/value ("Heap"). */
+  shortLabel: string;
+  /** Accessible name of the slider. */
+  sliderLabel: string;
+  /** Number input label in the wizard ("Heap (MB)"). */
+  inputLabel: string;
+  /** What the container adds on top, after "heap + <n> " in the wizard. */
+  headroomFor: string;
+  /** Explains the automatic headroom (Resources → Advanced memory). */
+  autoOverheadHint: (modded: boolean) => string;
+  /** The rule as shown in the wizard ("30%, at least 768 MB"). */
+  autoOverheadRule: (modded: boolean) => string;
+}
+
+export function memoryWording(model: MemoryModel): MemoryWording {
+  if (model === "jvm") {
+    return {
+      settingsDescription:
+        "Java heap for the server. The container limit adds headroom for off-heap memory so the server is not OOM-killed.",
+      wizardDescription: "Java heap size. The container gets extra headroom for the JVM itself.",
+      fieldLabel: "Heap size (-Xmx)",
+      shortLabel: "Heap",
+      sliderLabel: "Heap size",
+      inputLabel: "Heap (MB)",
+      headroomFor: "for the JVM itself",
+      autoOverheadHint: (modded) => (modded ? "40% of heap, at least 1.5 GB for modded servers" : "30% of heap, at least 768 MB"),
+      autoOverheadRule: (modded) => (modded ? "mods: 40%, at least 1.5 GB" : "30%, at least 768 MB"),
+    };
+  }
+  return {
+    settingsDescription: "Memory limit of the server's container.",
+    wizardDescription: "Memory limit of the server's container.",
+    fieldLabel: "Memory limit",
+    shortLabel: "Memory",
+    sliderLabel: "Memory limit",
+    inputLabel: "Memory (MB)",
+    headroomFor: "extra",
+    autoOverheadHint: () => "no extra memory",
+    autoOverheadRule: () => "none",
+  };
+}

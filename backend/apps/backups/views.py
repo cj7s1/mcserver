@@ -8,6 +8,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps import games
 from apps.audit import service as audit
 from apps.core.errors import ApiError
 from apps.core.permissions import get_instance_for, require
@@ -16,8 +17,9 @@ from apps.instances.models import Instance, Source
 from apps.instances.serializers import InstanceSerializer
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
+from apps.nodes.client import AgentClient
 
-from .handlers import backup_agent, policy_for, repository_node_id, require_local_backup
+from .handlers import backup_agent, policy_for, repository_node_id, require_local_backup, require_same_game
 from .models import Backup, BackupStatus, RetentionPolicy
 
 
@@ -205,6 +207,7 @@ class BackupRestoreView(APIView):
         if backup.status != BackupStatus.SUCCEEDED or not backup.snapshot_id:
             raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
         require_local_backup(backup, instance)  # 409 backup_on_other_node now, not when the job runs
+        require_same_game(backup, instance)  # 409 backup_game_mismatch
         if request.data.get("confirm") is not True:
             raise ApiError("Restoring replaces the current server files. Confirm to continue.", code="confirmation_required")
         from apps.core.models import SystemSetting
@@ -231,12 +234,15 @@ class BackupRestoreNewView(APIView):
         # restic restores on the node whose repository holds the snapshot (after a migration that
         # can be the server's previous node), so the new server is created on that node
         repo_node = backup_agent(backup, source).node  # 409 backup_node_missing if it is gone
+        require_same_game(backup, source)  # the new server is of the source's game (409 backup_game_mismatch)
+        games.require_agent_support(source.game, AgentClient(repo_node))  # 409 agent_lacks_game
         name = str(request.data.get("name") or f"{source.name} (restored)")[:80]
         port = request.data.get("game_port")
         copy_fields = [
             "description",
             "icon_url",
             "group",
+            "game",
             "edition",
             "server_type",
             "minecraft_version",
@@ -365,6 +371,7 @@ class BackupRestorePathView(APIView):
         if backup.status != BackupStatus.SUCCEEDED or not backup.snapshot_id:
             raise ApiError("Only completed backups can be restored", code="not_restorable", status_code=409)
         require_local_backup(backup, instance)  # 409 backup_on_other_node now, not when the job runs
+        require_same_game(backup, instance)  # 409 backup_game_mismatch
         path = str(request.data.get("path") or "").strip("/")
         if not path:
             raise ApiError("Choose a file or folder to restore", code="invalid_path")

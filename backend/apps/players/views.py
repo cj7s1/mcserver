@@ -6,6 +6,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps import games
 from apps.audit import service as audit
 from apps.core.permissions import get_instance_for
 
@@ -22,11 +23,13 @@ class PlayersView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
+        games.for_instance(instance).require(instance, "players")
         return Response(service.lists(instance))
 
     @extend_schema(request=PlayerActionSerializer, responses={200: dict})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.players")
+        games.for_instance(instance).require(instance, "player_actions")
         ser = PlayerActionSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         d = ser.validated_data

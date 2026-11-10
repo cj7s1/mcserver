@@ -1,8 +1,11 @@
-"""Docker container lifecycle for Minecraft instances.
+"""Docker container lifecycle for game server instances.
 
 Only containers carrying the ``io.mcpanel.managed`` label are ever touched.
 All containers are created from an :class:`InstanceSpec`, which deliberately
-cannot express privileged mode, extra capabilities, devices or extra mounts.
+cannot express privileged mode, extra capabilities, devices or extra mounts: what the
+container gets beyond the spec comes from the runtime profile of its game
+(:mod:`mcagent.profiles`), and how the agent talks to the server from its control driver
+(:mod:`mcagent.drivers`). Minecraft is the only game in phase 1 of multi-game support.
 """
 
 from __future__ import annotations
@@ -28,10 +31,15 @@ from docker.errors import APIError, ImageNotFound, NotFound
 # arguments to the low-level API call; see create_container() for why it is used directly.
 from docker.models.containers import Container, _create_container_args
 
-from . import lastrun
+from . import drivers, lastrun, profiles
 from .config import Settings, get_settings
+from .drivers.minecraft import GAME_PORT, RCON_PORT, SAVE_BEFORE_STOP, STOP_COMMAND
+from .errors import AgentError
+from .profiles import LABEL_GAME, LABEL_VARIANT, RuntimeProfile
 from .rcon import RconError, RconUnavailable, run_command_sync
 from .schemas import InstanceSpec
+
+__all__ = ["GAME_PORT", "LABEL_GAME", "LABEL_VARIANT", "RCON_PORT", "AgentError"]
 
 log = logging.getLogger(__name__)
 
@@ -40,8 +48,8 @@ LABEL_INSTANCE = "io.mcpanel.instance"
 LABEL_NAME = "io.mcpanel.name"
 LABEL_SPEC_HASH = "io.mcpanel.spec-hash"
 LABEL_STOP_TIMEOUT = "io.mcpanel.stop-timeout"
-GAME_PORT = 25565
-RCON_PORT = 25575
+# GAME_PORT / RCON_PORT (Minecraft's) live in drivers/minecraft.py; LABEL_GAME / LABEL_VARIANT
+# (only on containers that are not Minecraft) in profiles/__init__.py.
 
 # How this agent turns a spec into a container, for what the spec itself does not show. The panel
 # keeps the same list (backend/apps/instances/spec.py, CONTAINER_FORMAT) and mixes the number the
@@ -56,13 +64,6 @@ CONTAINER_FORMAT = 2
 RCON_PROBE_TIMEOUT = 3.0  # connect + login: "does RCON answer quickly?"
 RCON_STOP_INTERVAL = 2.0  # between tries to deliver `stop` while `docker stop` is in progress
 RCON_STOP_COMMAND_TIMEOUT = 5.0  # waiting for the server's answer to `stop`
-
-
-class AgentError(Exception):
-    def __init__(self, message: str, code: str = "agent_error", status: int = 400) -> None:
-        super().__init__(message)
-        self.code = code
-        self.status = status
 
 
 _client_lock = threading.Lock()
@@ -142,9 +143,12 @@ def split_image(image: str) -> tuple[str, str]:
     return repo, tag
 
 
-def validate_image(settings: Settings, image: str) -> str:
+def validate_image(settings: Settings, image: str, profile: RuntimeProfile | None = None) -> str:
+    """``repository:tag`` of an image the profile (default: Minecraft's) allows."""
     repo, tag = split_image(image)
-    if repo not in settings.allowed_images:
+    profile = profile or profiles.get(profiles.DEFAULT_GAME)
+    assert profile is not None
+    if repo not in profiles.allowed_images(settings, profile):
         raise AgentError(
             f"Image repository '{repo}' is not in the agent allow-list", "image_not_allowed", 403
         )
@@ -231,7 +235,7 @@ def remove_superseded_images(
 ) -> list[str]:
     """Remove runtime images that nothing needs any more; returns the ids removed.
 
-    Only an image of an allow-listed repository (itzg/minecraft-server) that no longer has any
+    Only an image of an allow-listed repository (of any game) that no longer has any
     tag (its tag was moved to a newer pull: a dangling image) and that no container uses, running
     or not. A tagged image is never removed, and nothing is forced. Never raises.
 
@@ -242,7 +246,7 @@ def remove_superseded_images(
     repository for is judged by Docker's names alone.
     """
     removed: list[str] = []
-    allowed = set(settings.allowed_images)
+    allowed = profiles.all_allowed_images(settings)
     known = candidates if isinstance(candidates, dict) else dict.fromkeys(candidates)
     for image_id in sorted(i for i in known if i):
         try:
@@ -386,10 +390,30 @@ def label_safe_name(name: str) -> str:
     return name[:100].replace("=", "-")
 
 
+def _validate_env(profile: RuntimeProfile, spec: InstanceSpec, injected: dict[str, str]) -> None:
+    """The profile's environment policy, re-validated here (never rely on the panel). A key the
+    agent injects itself is not refused: the injected value replaces it."""
+    for key in spec.env:
+        if key in injected:
+            continue
+        reason = profile.env_error(key)
+        if reason is not None:
+            raise AgentError(reason, "env_not_allowed", 400)
+
+
+def _mount_source(settings: Settings, instance_id: UUID, subdir: str) -> str:
+    base = host_instance_dir(settings, instance_id)
+    return str(base if subdir in ("", ".") else base / subdir)
+
+
 def build_create_kwargs(
     settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str
 ) -> dict[str, Any]:
-    image = validate_image(settings, spec.image)
+    """The arguments of ``containers.create()``: what the spec asks for (validated) plus what the
+    runtime profile of its game fixes. For Minecraft exactly what the agent created before
+    multi-game support (tests/test_games_pins.py)."""
+    profile = profiles.for_spec(spec)
+    image = validate_image(settings, spec.image, profile)
     network = spec.network or settings.instance_network
     if network not in settings.effective_networks():
         raise AgentError(f"Network '{network}' is not permitted by agent policy", "network_not_allowed", 403)
@@ -397,27 +421,20 @@ def build_create_kwargs(
         raise AgentError(
             f"Memory limit exceeds agent maximum of {settings.max_memory_mb} MB", "memory_limit", 400
         )
+    injected = profile.injected_env(profile, settings, spec)
+    _validate_env(profile, spec, injected)
 
     env: dict[str, str] = dict(settings.runtime_extra_env)
     env.update(spec.env)
-    env.update(
-        {
-            "EULA": spec.env.get("EULA", "TRUE"),
-            "UID": str(settings.runtime_uid),
-            "GID": str(settings.runtime_gid),
-            "ENABLE_RCON": "true",
-            "RCON_PASSWORD": spec.rcon_password,
-            "RCON_PORT": str(RCON_PORT),
-            "SERVER_PORT": str(GAME_PORT),
-        }
-    )
+    env.update(injected)
 
     volumes: dict[str, dict[str, str]] = {
-        str(host_instance_dir(settings, instance_id)): {"bind": "/data", "mode": "rw"},
+        _mount_source(settings, instance_id, m.subdir): {"bind": m.container_path, "mode": "rw"}
+        for m in profile.mounts
     }
     if settings.runtime_ca_bundle:
         volumes[str(settings.runtime_ca_bundle)] = {"bind": "/mcpanel/certs/ca-bundle.crt", "mode": "ro"}
-    if settings.runtime_java_truststore:
+    if settings.runtime_java_truststore and profile.java_truststore:
         volumes[str(settings.runtime_java_truststore)] = {"bind": "/mcpanel/certs/cacerts", "mode": "ro"}
 
     ports: dict[str, Any] = {}
@@ -429,21 +446,25 @@ def build_create_kwargs(
                     "port_not_allowed",
                     403,
                 )
+            if (reason := profile.port_error(p.container_port, p.protocol)) is not None:
+                raise AgentError(reason, "port_not_allowed", 403)
             key = f"{p.container_port}/{p.protocol}"
             ports.setdefault(key, []).append((p.host_ip, p.host_port))
 
+    labels = {
+        LABEL_MANAGED: "true",
+        LABEL_INSTANCE: str(instance_id),
+        LABEL_NAME: label_safe_name(spec.name),
+        LABEL_SPEC_HASH: spec_hash,
+        LABEL_STOP_TIMEOUT: str(spec.stop_timeout),
+    }
+    labels.update(profiles.labels_for(spec))  # none for Minecraft
     kwargs: dict[str, Any] = {
         "image": image,
         "name": container_name(instance_id),
-        "hostname": f"mc-{instance_id.hex[:8]}",
+        "hostname": f"{profile.hostname_prefix}{instance_id.hex[:8]}",
         "environment": env,
-        "labels": {
-            LABEL_MANAGED: "true",
-            LABEL_INSTANCE: str(instance_id),
-            LABEL_NAME: label_safe_name(spec.name),
-            LABEL_SPEC_HASH: spec_hash,
-            LABEL_STOP_TIMEOUT: str(spec.stop_timeout),
-        },
+        "labels": labels,
         "volumes": volumes,
         "ports": ports,
         "network": network,
@@ -454,7 +475,7 @@ def build_create_kwargs(
             "Name": spec.restart_policy,
             **({"MaximumRetryCount": 3} if spec.restart_policy == "on-failure" else {}),
         },
-        "stop_signal": "SIGTERM",
+        "stop_signal": profile.stop_signal,
         # Docker's own stop timeout (Config.StopTimeout): what the server gets when Docker stops
         # it without the panel (host shutdown, daemon restart, `docker restart`); without it that
         # is Docker's default of 10 s. Capped by AGENT_SHUTDOWN_STOP_TIMEOUT because Unraid kills
@@ -463,26 +484,33 @@ def build_create_kwargs(
         # spec.stop_timeout themselves (kept in the stop-timeout label as the agent's default).
         # Not an argument of docker-py's containers.create(): create_container() takes it out.
         "stop_timeout": min(spec.stop_timeout, settings.shutdown_stop_timeout),
-        "stdin_open": True,
-        "tty": False,
+        "stdin_open": profile.stdin_open,
+        "tty": profile.tty,
         "detach": True,
         "security_opt": ["no-new-privileges:true"],
         "cap_drop": ["ALL"],
-        # The itzg entrypoint starts as root to fix ownership, then drops to UID/GID.
-        "cap_add": ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL"],
+        # Only what the profile's image needs (Minecraft: the itzg entrypoint starts as root to
+        # fix ownership, then drops to UID/GID).
+        "cap_add": list(profile.cap_add),
         "log_config": {
             "Type": "json-file",
             "Config": {"max-size": settings.log_max_size, "max-file": str(settings.log_max_files)},
         },
     }
+    if profile.user.kind == "fixed":
+        uid = settings.runtime_uid if profile.user.uid is None else profile.user.uid
+        gid = settings.runtime_gid if profile.user.gid is None else profile.user.gid
+        kwargs["user"] = f"{uid}:{gid}"
     hc = spec.healthcheck
-    kwargs["healthcheck"] = {
-        "test": ["CMD", "mc-health"],
-        "interval": hc.interval_s * 1_000_000_000,
-        "timeout": hc.timeout_s * 1_000_000_000,
-        "start_period": hc.start_period_s * 1_000_000_000,
-        "retries": hc.retries,
-    }
+    if profile.health.kind == "cmd":
+        kwargs["healthcheck"] = {
+            "test": ["CMD", *profile.health.argv],
+            "interval": hc.interval_s * 1_000_000_000,
+            "timeout": hc.timeout_s * 1_000_000_000,
+            "start_period": hc.start_period_s * 1_000_000_000,
+            "retries": hc.retries,
+        }
+    # kind "image": the image's own HEALTHCHECK applies (profiles.register refuses other kinds)
     if spec.cpu_limit:
         kwargs["nano_cpus"] = int(spec.cpu_limit * 1e9)
     return kwargs
@@ -778,7 +806,8 @@ def default_stop_timeout(c: Container) -> int:
 
 
 def flush_timeout(stop_timeout: int) -> float:
-    """How long ``save-all flush`` may take before a stop: half the stop timeout, 10 to 60 s."""
+    """How long the save before a stop (Minecraft: ``save-all flush``) may take: half the stop
+    timeout, 10 to 60 s."""
     return float(min(60, max(10, stop_timeout / 2)))
 
 
@@ -786,8 +815,11 @@ def flush_timeout(stop_timeout: int) -> float:
 class StopResult:
     """What a graceful stop did besides ``docker stop``; the panel logs it."""
 
-    flushed: bool = False  # the server answered `save-all flush` before the stop
-    stop_sent_via_rcon: bool = False  # the agent delivered `stop` itself (RCON was not up at first)
+    # The JSON keys are kept for every game (older panels read them): flushed = the server answered
+    # the driver's save before the stop (Minecraft: `save-all flush`); stop_sent_via_rcon = the
+    # agent delivered the stop command itself (RCON was not up at first); false without RCON.
+    flushed: bool = False
+    stop_sent_via_rcon: bool = False
     warnings: list[str] = field(default_factory=list)
     # Exit code of the run this stop ended: 0 = the server shut down by itself, anything else =
     # it was ended (137: Docker's SIGKILL at the timeout) or failed while stopping. None when
@@ -804,16 +836,17 @@ class StopResult:
         }
 
 
-def _flush_before_stop(target: tuple[str, int, str], bound: float, result: StopResult) -> bool:
-    """``save-all flush`` if RCON answers quickly. Returns whether RCON answered (accepted the login).
+def _flush_before_stop(
+    target: tuple[str, int, str], bound: float, result: StopResult, command: str = SAVE_BEFORE_STOP
+) -> bool:
+    """``command`` (Minecraft: ``save-all flush``) if RCON answers quickly. Returns whether RCON
+    answered (accepted the login). Used by the RCON drivers (drivers/rcon.py).
 
     Never raises: whatever goes wrong here is a warning and the stop goes on.
     """
     host, port, password = target
     try:
-        run_command_sync(
-            host, port, password, "save-all flush", timeout=bound, connect_timeout=RCON_PROBE_TIMEOUT
-        )
+        run_command_sync(host, port, password, command, timeout=bound, connect_timeout=RCON_PROBE_TIMEOUT)
     except RconUnavailable as exc:
         result.warnings.append(
             "The world was not flushed before the stop: RCON is not available "
@@ -821,7 +854,7 @@ def _flush_before_stop(target: tuple[str, int, str], bound: float, result: StopR
         )
         return False
     except RconError as exc:
-        result.warnings.append(f"save-all flush before the stop failed, the world may not be saved: {exc}")
+        result.warnings.append(f"{command} before the stop failed, the world may not be saved: {exc}")
         return True
     except Exception as exc:
         log.exception("Unexpected error while flushing the world before a stop")
@@ -833,6 +866,8 @@ def _flush_before_stop(target: tuple[str, int, str], bound: float, result: StopR
 
 class _RconStopCourier:
     """Delivers ``stop`` through the agent's own RCON client while ``docker stop`` is in progress.
+
+    (The command is the RCON driver's; Minecraft's is ``stop``.)
 
     For a server that had not opened RCON yet when the stop began: the itzg runner
     (mc-server-runner) tries ``rcon-cli stop`` once when it gets SIGTERM, and its console
@@ -848,9 +883,12 @@ class _RconStopCourier:
     again right after it).
     """
 
-    def __init__(self, container_id: str, name: str, target: tuple[str, int, str]) -> None:
+    def __init__(
+        self, container_id: str, name: str, target: tuple[str, int, str], command: str = STOP_COMMAND
+    ) -> None:
         self._container_id = container_id
         self._target = target
+        self._command = command
         self._done = threading.Event()
         self._lock = threading.Lock()
         self._sent = False
@@ -882,7 +920,7 @@ class _RconStopCourier:
                         host,
                         port,
                         password,
-                        "stop",
+                        self._command,
                         timeout=RCON_STOP_COMMAND_TIMEOUT,
                         connect_timeout=RCON_PROBE_TIMEOUT,
                     )
@@ -893,7 +931,9 @@ class _RconStopCourier:
                     # connection before it answers, so this counts as delivered.
                     with self._lock:
                         self._sent = True
-                        self._warning = f"stop was sent through RCON but the server did not confirm it: {exc}"
+                        self._warning = (
+                            f"{self._command} was sent through RCON but the server did not confirm it: {exc}"
+                        )
                     return
                 with self._lock:
                     self._sent = True
@@ -914,16 +954,13 @@ class _RconStopCourier:
 
 
 def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> StopResult:
-    """Stop a container the way the panel means it: save first, then stop, and make sure it arrives.
+    """Stop a container the way the panel means it, through the control driver of its game.
 
-    1. Running and RCON answers quickly: ``save-all flush``, waiting up to flush_timeout() for
-       the answer. Some modpacks abort their own shutdown save, so the stop must not be the
-       only save. A failure is a warning, never an error.
-    2. ``docker stop`` with the requested timeout. Always, also when the agent delivers the
-       stop command itself: it is what tells Docker the stop is intended, so the restart policy
-       does not start the server again.
-    3. If RCON did not answer in step 1, :class:`_RconStopCourier` delivers ``stop`` as soon as
-       it does, until the container has exited or ``docker stop`` has returned.
+    The driver saves first and makes sure the stop arrives where it can (Minecraft,
+    ``drivers.rcon.RconDriver.stop``: ``save-all flush`` when RCON answers quickly, then
+    ``docker stop``, and ``stop`` through RCON as soon as it answers when it did not at first); a
+    driver without a stop of its own gets a plain ``docker stop`` with the timeout. A failure to
+    save is a warning, never an error.
 
     A container that is not running is left alone. Docker errors of ``docker stop`` propagate.
     """
@@ -932,28 +969,8 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
     if c.status not in ("running", "restarting", "paused"):
         return result
     timeout = timeout or default_stop_timeout(c)
-    courier: _RconStopCourier | None = None
-    if c.status == "running":  # restarting / paused: no server that could answer
-        try:
-            target = _rcon_target(settings, c)
-        except AgentError as exc:
-            target = None
-            result.warnings.append(f"The world was not flushed before the stop: {exc}")
-        except Exception as exc:
-            # Whatever went wrong while reading the container's RCON address (e.g. a port entry
-            # Docker reports in a form describe() does not expect): `docker stop` still runs.
-            log.exception("Unexpected error while working out the RCON address of %s before a stop", c.name)
-            target = None
-            result.warnings.append(f"The world was not flushed before the stop: {type(exc).__name__}: {exc}")
-        if target is not None and not _flush_before_stop(target, flush_timeout(timeout), result):
-            courier = _RconStopCourier(c.id, c.name, target)
-    if courier is not None:
-        courier.start()
-    try:
+    if not drivers.for_container(c).stop(settings, c, timeout, result):
         c.stop(timeout=timeout)
-    finally:
-        if courier is not None:
-            courier.finish(result)
     result.exit_code = _stopped_exit_code(c)
     for warning in result.warnings:
         log.warning("Stopping %s: %s", c.name, warning)
@@ -1033,7 +1050,7 @@ def describe(c: Container) -> dict[str, Any]:
                 }
             )
     health_log = health.get("Log") or []
-    return {
+    described = {
         "exists": True,
         "id": c.id,
         "name": c.name,
@@ -1056,6 +1073,13 @@ def describe(c: Container) -> dict[str, Any]:
         "ports": ports,
         "created_at": attrs.get("Created"),
     }
+    # the game of a container that is not Minecraft (a Minecraft container has no such label)
+    labels = c.labels or {}
+    if labels.get(LABEL_GAME):
+        described["game"] = labels[LABEL_GAME]
+        if labels.get(LABEL_VARIANT):
+            described["variant"] = labels[LABEL_VARIANT]
+    return described
 
 
 def status(instance_id: UUID, settings: Settings | None = None) -> dict[str, Any]:
@@ -1252,68 +1276,44 @@ def count_log_lines(c: Container, tail: int) -> int:
     return count if last == b"\n" else count + 1
 
 
+def running_container(instance_id: UUID) -> Container:
+    """The server's container, reloaded and running; 409 ``not_running`` otherwise (a server without
+    a container is "not running" like one whose container is stopped)."""
+    c = get_container(instance_id)
+    if c is None:
+        raise AgentError("The server is not running", "not_running", 409)
+    try:
+        c.reload()
+    except NotFound as exc:
+        raise AgentError("The server is not running", "not_running", 409) from exc
+    if c.status != "running":
+        raise AgentError("The server is not running", "not_running", 409)
+    return c
+
+
 def rcon_endpoint(settings: Settings, instance_id: UUID) -> tuple[str, int, str]:
     """Return (host, port, password) for the instance's RCON listener.
 
     The password is read from the container's own configuration so it never has to
-    travel in agent API requests. A server without a container is "not running" like one
-    whose container is stopped.
+    travel in agent API requests. Where RCON listens and which variable holds the password is
+    the container's control driver's (Minecraft: 25575, ``RCON_PASSWORD``).
     """
-    c = get_container(instance_id)
-    if c is None:
-        raise AgentError("The server is not running", "not_running", 409)
-    try:
-        c.reload()
-    except NotFound as exc:
-        raise AgentError("The server is not running", "not_running", 409) from exc
-    if c.status != "running":
-        raise AgentError("The server is not running", "not_running", 409)
-    return _rcon_target(settings, c)
+    return _rcon_target(settings, running_container(instance_id))
 
 
 def game_endpoint(settings: Settings, instance_id: UUID) -> tuple[str, int]:
-    """(host, port) of the running server's game port as the agent reaches it (server list ping)."""
-    c = get_container(instance_id)
-    if c is None:
-        raise AgentError("The server is not running", "not_running", 409)
-    try:
-        c.reload()
-    except NotFound as exc:
-        raise AgentError("The server is not running", "not_running", 409) from exc
-    if c.status != "running":
-        raise AgentError("The server is not running", "not_running", 409)
-    info = describe(c)
-    if settings.rcon_mode == "published":
-        for p in info["ports"]:
-            if p["container_port"] == GAME_PORT and p["protocol"] == "tcp":
-                return "127.0.0.1", p["host_port"]
-        raise AgentError("The game port is not published", "ping_unavailable", 409)
-    if c.attrs.get("HostConfig", {}).get("NetworkMode") == "host":
-        return "127.0.0.1", GAME_PORT
-    if not info["ip_address"]:
-        raise AgentError("Container has no IP address", "ping_unavailable", 409)
-    return info["ip_address"], GAME_PORT
+    """(host, port) of the running server's status query as the agent reaches it (Minecraft: the
+    server list ping on the game port); 409 ``ping_unavailable`` for a game without one."""
+    c = running_container(instance_id)
+    return drivers.for_container(c).query_endpoint(settings, c)
 
 
 def _rcon_target(settings: Settings, c: Container) -> tuple[str, int, str]:
     """(host, port, password) from the attributes of a running container that was just reloaded."""
-    password = ""
-    for item in c.attrs.get("Config", {}).get("Env") or []:
-        if item.startswith("RCON_PASSWORD="):
-            password = item.split("=", 1)[1]
-    if not password:
-        raise AgentError("Container has no RCON password configured", "rcon_unavailable", 409)
-    info = describe(c)
-    if settings.rcon_mode == "published":
-        for p in info["ports"]:
-            if p["container_port"] == RCON_PORT:
-                return "127.0.0.1", p["host_port"], password
-        raise AgentError("RCON port is not published", "rcon_unavailable", 409)
-    if c.attrs.get("HostConfig", {}).get("NetworkMode") == "host":
-        return "127.0.0.1", RCON_PORT, password
-    if not info["ip_address"]:
-        raise AgentError("Container has no IP address", "rcon_unavailable", 409)
-    return info["ip_address"], RCON_PORT, password
+    driver = drivers.for_container(c)
+    if not isinstance(driver, drivers.RconDriver):
+        raise AgentError("This server's game has no RCON", "rcon_unavailable", 409)
+    return driver.endpoint(settings, c)
 
 
 def docker_info() -> dict[str, Any]:

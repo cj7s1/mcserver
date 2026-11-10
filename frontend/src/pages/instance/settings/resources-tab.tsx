@@ -9,6 +9,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { formatMemoryMb } from "@/lib/format";
+import { containerMemoryMb, memoryModel, memoryWording } from "@/lib/games";
 import { MemoryCommitBar } from "@/components/MemoryCommitBar";
 import { useInstances, useSystemInfo } from "@/lib/queries";
 import { memoryCommitment } from "@/pages/library/server-utils";
@@ -58,9 +59,8 @@ const POLICIES: { value: Instance["restart_policy"]; label: string; hint: string
 ];
 
 /** Mirrors Instance.container_memory_mb on the backend, for previewing unsaved values. */
-function estimateContainerMb(memory: number, overhead: number, contentKind: Instance["content_kind"]): number {
-  if (overhead) return memory + overhead;
-  return memory + (contentKind === "mods" ? Math.max(1536, Math.floor(memory * 0.4)) : Math.max(768, Math.floor(memory * 0.3)));
+function estimateContainerMb(memory: number, overhead: number, instance: Instance): number {
+  return containerMemoryMb(memory, { model: memoryModel(instance), modded: instance.content_kind === "mods", overheadMb: overhead });
 }
 
 function validate(f: Fields): Partial<Record<keyof Fields, string>> {
@@ -84,6 +84,8 @@ function validate(f: Fields): Partial<Record<keyof Fields, string>> {
 
 export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
   const canEdit = can("instance.configure");
+  const jvm = memoryModel(instance) === "jvm";
+  const wording = memoryWording(memoryModel(instance));
   const system = useSystemInfo();
   const patch = usePatchInstance(instance.id);
   const [draft, setDraft] = useState<Partial<Record<keyof Fields, unknown>>>({});
@@ -117,7 +119,7 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
   const sliderMax = Math.max(instance.memory_mb, Number.isFinite(current.memory_mb) ? current.memory_mb : 0, hostMb ? Math.floor(hostMb / 512) * 512 : 32768);
   const memValid = Number.isFinite(current.memory_mb) && !errors.memory_mb;
   const containerMb = memValid
-    ? estimateContainerMb(current.memory_mb, Number.isFinite(current.memory_overhead_mb) ? current.memory_overhead_mb : 0, instance.content_kind)
+    ? estimateContainerMb(current.memory_mb, Number.isFinite(current.memory_overhead_mb) ? current.memory_overhead_mb : 0, instance)
     : null;
   const memChanged = changed.includes("memory_mb") || changed.includes("memory_overhead_mb");
   // Other running servers on the same host (/system/info describes the default node only).
@@ -152,18 +154,18 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
             <MemoryStick className="size-4 text-muted-foreground" aria-hidden /> Memory
           </span>
         }
-        description="Java heap for the server. The container limit adds headroom for off-heap memory so the server is not OOM-killed."
+        description={wording.settingsDescription}
       >
         <div className="grid grid-cols-1 gap-5">
           <Field
             id="memory-mb"
-            label="Heap size (-Xmx)"
+            label={wording.fieldLabel}
             error={err("memory_mb")}
             aside={<span className="text-sm font-semibold tabular-nums">{memValid ? formatMemoryMb(current.memory_mb) : "—"}</span>}
           >
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               <Slider
-                aria-label="Heap size"
+                aria-label={wording.sliderLabel}
                 className="flex-1"
                 min={512}
                 max={sliderMax}
@@ -203,12 +205,14 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
                 )}
               </p>
             </div>
-            <div>
-              <p className="text-muted-foreground">Off-heap headroom</p>
-              <p className="mt-0.5 text-sm font-medium tabular-nums">
-                {current.memory_overhead_mb ? formatMemoryMb(current.memory_overhead_mb) : "Automatic"}
-              </p>
-            </div>
+            {jvm && (
+              <div>
+                <p className="text-muted-foreground">Off-heap headroom</p>
+                <p className="mt-0.5 text-sm font-medium tabular-nums">
+                  {current.memory_overhead_mb ? formatMemoryMb(current.memory_overhead_mb) : "Automatic"}
+                </p>
+              </div>
+            )}
             <div>
               <p className="text-muted-foreground">Host memory</p>
               <p className="mt-0.5 text-sm font-medium tabular-nums">{hostMb ? formatMemoryMb(hostMb) : system.isLoading ? "…" : "Unknown"}</p>
@@ -227,27 +231,29 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
               server may be killed by the kernel when memory runs out.
             </Notice>
           )}
-          <Advanced title="Advanced memory" description="Off-heap headroom">
-            <Field
-              id="memory-overhead"
-              label="Extra container memory above heap (MB)"
-              error={err("memory_overhead_mb")}
-              hint={`0 = automatic (${instance.content_kind === "mods" ? "40% of heap, at least 1.5 GB for modded servers" : "30% of heap, at least 768 MB"}). Raise it if the server is OOM-killed while the heap is not full.`}
-            >
-              <Input
+          {jvm && (
+            <Advanced title="Advanced memory" description="Off-heap headroom">
+              <Field
                 id="memory-overhead"
-                type="number"
-                inputMode="numeric"
-                min={0}
-                step={128}
-                className="w-36 tabular-nums"
-                value={numText("memory_overhead_mb")}
-                onChange={(e) => setNumber("memory_overhead_mb", e.target.value)}
-                disabled={disabled}
-                aria-invalid={!!err("memory_overhead_mb") || undefined}
-              />
-            </Field>
-          </Advanced>
+                label="Extra container memory above heap (MB)"
+                error={err("memory_overhead_mb")}
+                hint={`0 = automatic (${wording.autoOverheadHint(instance.content_kind === "mods")}). Raise it if the server is OOM-killed while the heap is not full.`}
+              >
+                <Input
+                  id="memory-overhead"
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={128}
+                  className="w-36 tabular-nums"
+                  value={numText("memory_overhead_mb")}
+                  onChange={(e) => setNumber("memory_overhead_mb", e.target.value)}
+                  disabled={disabled}
+                  aria-invalid={!!err("memory_overhead_mb") || undefined}
+                />
+              </Field>
+            </Advanced>
+          )}
         </div>
       </Section>
 

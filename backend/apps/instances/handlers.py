@@ -8,12 +8,12 @@ from typing import Any
 
 from django.utils import timezone
 
+from apps import games
 from apps.core.errors import ApiError, ConflictError
 from apps.jobs.models import Job
 from apps.jobs.runner import JobContext, register
 from apps.nodes.client import AgentClient, AgentError
 
-from . import properties
 from .models import DesiredState, Instance, Status
 from .reconcile import reconcile_instance
 from .spec import CONTAINER_FORMAT, applied_container_format, build_spec, spec_hash, spec_outdated
@@ -60,6 +60,8 @@ def apply_container(
         ctx.log("The server is archived: its container is created when it is next started")
         return {"skipped": "archived"}
     client = AgentClient(instance.node)
+    # a server of another game needs an agent with that game's runtime profile (409 agent_lacks_game)
+    games.require_agent_support(instance.game, client)
     if start and admit:
         admit_memory(instance, ctx, client)
     spec = build_spec(instance)
@@ -171,10 +173,8 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Create the data directory, write initial config, create the container and optionally start it."""
     instance = _instance(job)
     client = AgentClient(instance.node)
-    initial = job.params.get("server_properties") or {}
-    files: dict[str, str] = {}
-    if initial:
-        files["server.properties"] = properties.render(initial)
+    # initial config files of the game (Minecraft: server.properties from job.params["server_properties"])
+    files = games.for_instance(instance).initial_files(instance, job.params or {})
     ctx.progress(0.02, "Creating instance directory", force=True)
     client.prepare(instance.id, files)
     start = bool(job.params.get("start", True))
@@ -734,7 +734,8 @@ SOFTWARE_FIELDS = (
 
 
 def software_state(instance: Instance) -> dict[str, Any]:
-    return {f: getattr(instance, f) for f in SOFTWARE_FIELDS}
+    """The software record of a backup: ``game`` plus the game's fields (Minecraft: SOFTWARE_FIELDS)."""
+    return games.for_instance(instance).software_state(instance)
 
 
 def set_software(instance: Instance, state: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
@@ -759,6 +760,12 @@ def set_software(instance: Instance, state: dict[str, Any]) -> dict[str, tuple[A
 
 
 def describe_software(state: dict[str, Any]) -> str:
+    """The software of a record as text, e.g. "Paper 1.21.1 (loader 130) on Java 21" (no ``game``: Minecraft)."""
+    definition = games.get_or_none(state.get("game")) or games.get(games.DEFAULT_GAME)
+    return definition.describe_software(state)
+
+
+def describe_minecraft_software(state: dict[str, Any]) -> str:
     parts = [str(state.get("server_type") or "").title(), str(state.get("minecraft_version") or "")]
     if state.get("modpack_version_name") or state.get("modpack_version_id"):
         parts.append(f"(pack {state.get('modpack_version_name') or state.get('modpack_version_id')})")

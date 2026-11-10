@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArchiveRestore, ChevronRight, FolderOpen, PackageOpen, RefreshCw, SquareTerminal, TriangleAlert, Users } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronRight, PackageOpen, RefreshCw, TriangleAlert } from "lucide-react";
 import { Link } from "react-router";
 import { BackupNotice } from "@/components/BackupNotice";
 import { Section } from "@/components/PageHeader";
@@ -8,7 +7,8 @@ import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import { qk, useStats } from "@/lib/queries";
-import type { Instance, PermissionCode, Stats } from "@/lib/types";
+import { overviewShortcuts, sectionPath } from "@/lib/sections";
+import type { Instance, Stats } from "@/lib/types";
 import { useInstanceContext } from "./InstanceLayout";
 import { DiagnosticsCard } from "./overview/diagnostics";
 import { JobItem, useInstanceJobs } from "./overview/instance-jobs";
@@ -88,29 +88,24 @@ function RecentJobs({ instance, now }: { instance: Instance; now: number }) {
   );
 }
 
-const SHORTCUTS: { to: string; label: string; description: string; icon: ReactNode; perm?: PermissionCode }[] = [
-  { to: "console", label: "Console", description: "Live log output and commands", icon: <SquareTerminal />, perm: "instance.console" },
-  { to: "files", label: "Files", description: "Server folder; rotated logs in logs/", icon: <FolderOpen />, perm: "instance.files.read" },
-  { to: "backups", label: "Backups", description: "Snapshots and restore", icon: <ArchiveRestore />, perm: "instance.backup" },
-  { to: "players", label: "Players", description: "Whitelist, operators and bans", icon: <Users /> },
-];
-
-function Shortcuts({ instance, can }: { instance: Instance; can: (c: PermissionCode) => boolean }) {
-  const items = SHORTCUTS.filter((s) => !s.perm || can(s.perm));
+function Shortcuts({ instance }: { instance: Instance }) {
+  const items = overviewShortcuts(instance);
   return (
     <Section title="Quick links">
       <nav aria-label="Server shortcuts">
         <ul className="grid gap-2">
-          {items.map((s) => (
-            <li key={s.to}>
+          {items.map(({ section, description, icon: Icon }) => (
+            <li key={section.key}>
               <Link
-                to={`/servers/${instance.id}/${s.to}`}
+                to={sectionPath(instance, section)}
                 className="group flex items-center gap-3 rounded-lg border bg-background/40 px-3 py-2.5 outline-none transition-colors hover:bg-muted/60 focus-visible:ring-3 focus-visible:ring-ring/50"
               >
-                <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary/10 text-primary [&_svg]:size-4">{s.icon}</span>
+                <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary/10 text-primary [&_svg]:size-4">
+                  <Icon />
+                </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-medium">{s.label}</span>
-                  <span className="block truncate text-xs text-muted-foreground">{s.description}</span>
+                  <span className="block text-sm font-medium">{section.label(instance)}</span>
+                  <span className="block truncate text-xs text-muted-foreground">{description}</span>
                 </span>
                 <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" aria-hidden />
               </Link>
@@ -169,7 +164,7 @@ function OverviewContent() {
 
       <div className="grid gap-4 lg:grid-cols-3">
         <RecentJobs instance={instance} now={now} />
-        <Shortcuts instance={instance} can={can} />
+        <Shortcuts instance={instance} />
       </div>
     </div>
   );

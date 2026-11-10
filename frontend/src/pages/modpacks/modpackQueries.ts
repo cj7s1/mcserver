@@ -9,12 +9,14 @@
  *   GET /modpacks/{p}/projects/{id}/releases                  -> { releases: Release[] }
  *   GET /modpacks/{p}/projects/{id}/releases/{vid}            -> Release (with changelog)
  *   GET /modpacks/{p}/projects/{id}/releases/{vid}/resolve    -> ResolvedModpack
+ *   GET /catalog/games                                        -> GameInfo[] (panels with game definitions)
  *   GET /catalog/server-types | versions | loaders | java
  *   GET /system/ports                                         -> { range, in_use[], suggested }
  */
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ApiError, api } from "@/lib/api";
 import type {
+  GameInfo,
   JavaInfo,
   Project,
   Provider,
@@ -83,6 +85,7 @@ export const mpk = {
     ["modpacks", provider, "project", id, "releases", { prerelease }] as const,
   release: (provider: string, id: string, vid: string) => ["modpacks", provider, "project", id, "release", vid] as const,
   resolve: (provider: string, id: string, vid: string) => ["modpacks", provider, "project", id, "resolve", vid] as const,
+  games: ["catalog", "games"] as const,
   serverTypes: ["catalog", "server-types"] as const,
   versions: (st: string, snapshots: boolean) => ["catalog", "versions", st, { snapshots }] as const,
   loaders: (st: string, mc: string) => ["catalog", "loaders", st, mc] as const,
@@ -183,6 +186,27 @@ export function useResolveRelease(provider: Provider, projectId: string | null |
       ),
     enabled: !!projectId && !!versionId,
     staleTime: 5 * 60_000,
+    retry: retryTransient,
+  });
+}
+
+/**
+ * The games this panel can run (GET /catalog/games). An older panel has no such endpoint: the
+ * answer is then an empty list, and the wizard is the Minecraft wizard as before.
+ */
+export function useGames() {
+  return useQuery({
+    queryKey: mpk.games,
+    queryFn: async () => {
+      try {
+        const res = await api.get<GameInfo[] | { games: GameInfo[] }>("/catalog/games");
+        return Array.isArray(res) ? res : (res?.games ?? []);
+      } catch (e) {
+        if (e instanceof ApiError && (e.status === 404 || e.status === 405)) return [];
+        throw e;
+      }
+    },
+    staleTime: 60 * 60_000,
     retry: retryTransient,
   });
 }

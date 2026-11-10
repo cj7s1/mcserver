@@ -9,6 +9,7 @@ from apps.backups import views as backups
 from apps.catalog import views as catalog
 from apps.content import views as content
 from apps.core import views as core
+from apps.games import views as games
 from apps.instances import views as instances
 from apps.jobs import views as jobs
 from apps.metrics import views as metrics
@@ -101,6 +102,7 @@ api_patterns = [
     path("catalog/versions", catalog.GameVersionsView.as_view()),
     path("catalog/loaders", catalog.LoaderVersionsView.as_view()),
     path("catalog/java", catalog.JavaView.as_view()),
+    path("catalog/games", games.GameCatalogView.as_view()),
     path("modpacks/providers", modpacks.ProvidersView.as_view()),
     path("modpacks/<str:provider>/search", modpacks.SearchView.as_view()),
     path("modpacks/<str:provider>/projects/<str:project_id>", modpacks.ProjectView.as_view()),

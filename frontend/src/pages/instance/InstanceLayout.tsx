@@ -12,9 +12,11 @@ import { ConnectionLostBanner, ErrorState, LoadingState } from "@/components/Sta
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ApiError, errorMessage } from "@/lib/api";
+import { hasCapability, variantLabel } from "@/lib/games";
 import { sendPower } from "@/lib/power";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
 import { restartRequiredText } from "@/lib/restart-required";
+import { instanceSections, sectionPath } from "@/lib/sections";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ModpackUpdateBadge } from "./modpack/UpdateBadge";
@@ -31,9 +33,7 @@ export function useInstanceContext(): InstanceContext {
 
 export function softwareLabel(i: Instance): string {
   if (i.is_modpack) return `${i.modpack_name || "Modpack"} ${i.modpack_version_name}`.trim();
-  const type = i.server_type.charAt(0) + i.server_type.slice(1).toLowerCase();
-  const name = i.server_type === "NEOFORGE" ? "NeoForge" : type;
-  return `${name} ${i.minecraft_version}${i.loader_version ? ` · ${i.loader_version}` : ""}`;
+  return `${variantLabel(i.server_type)} ${i.minecraft_version}${i.loader_version ? ` · ${i.loader_version}` : ""}`;
 }
 
 function PowerControls({ instance, can }: InstanceContext) {
@@ -100,22 +100,6 @@ function PowerControls({ instance, can }: InstanceContext) {
   );
 }
 
-const TABS: { to: string; label: string; perm?: PermissionCode; when?: (i: Instance) => boolean }[] = [
-  { to: "", label: "Overview" },
-  { to: "console", label: "Console", perm: "instance.console" },
-  { to: "files", label: "Files", perm: "instance.files.read" },
-  { to: "content", label: "Mods", when: (i) => i.content_kind === "mods" },
-  { to: "content", label: "Plugins", when: (i) => i.content_kind === "plugins" },
-  { to: "modpack", label: "Modpack", when: (i) => i.is_modpack },
-  { to: "players", label: "Players" },
-  { to: "backups", label: "Backups", perm: "instance.backup" },
-  { to: "schedules", label: "Schedules" },
-  { to: "network", label: "Network" },
-  { to: "settings", label: "Settings" },
-  { to: "access", label: "Access", perm: "instance.access" },
-  { to: "activity", label: "Activity" },
-];
-
 export function InstanceLayout() {
   const { id } = useParams();
   const { pathname } = useLocation();
@@ -158,7 +142,8 @@ export function InstanceLayout() {
                 <ModpackUpdateBadge instance={instance} />
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
-                {softwareLabel(instance)} · Java {instance.java_version} · port {instance.game_port}
+                {softwareLabel(instance)}
+                {hasCapability(instance, "jvm") && ` · Java ${instance.java_version}`} · port {instance.game_port}
               </p>
             </div>
           </div>
@@ -182,11 +167,11 @@ export function InstanceLayout() {
       </div>
       <nav ref={tabsRef} className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
         <div className="flex min-w-max gap-1">
-          {TABS.filter((t) => (!t.perm || can(t.perm)) && (!t.when || t.when(instance))).map((t) => (
+          {instanceSections(instance).map((t) => (
             <NavLink
-              key={t.label}
-              to={t.to ? `/servers/${instance.id}/${t.to}` : `/servers/${instance.id}`}
-              end={!t.to}
+              key={t.key}
+              to={sectionPath(instance, t)}
+              end={!t.path}
               className={({ isActive }) =>
                 cn(
                   "border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground",
@@ -194,7 +179,7 @@ export function InstanceLayout() {
                 )
               }
             >
-              {t.label}
+              {t.label(instance)}
             </NavLink>
           ))}
         </div>

@@ -7,7 +7,8 @@ import { useAuth } from "@/hooks/use-auth";
 import { formatDateTime, formatMemoryMb, relativeTime } from "@/lib/format";
 import type { ConnectionInfo, Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { CopyButton, SERVER_TYPE_LABELS, capitalize } from "./overview-utils";
+import { gameLabel, knownVariantLabel } from "@/lib/games";
+import { CopyButton, capitalize } from "./overview-utils";
 
 const KIND_STYLE: Record<ConnectionInfo["addresses"][number]["kind"], { label: string; className: string; icon: ReactNode }> = {
   lan: { label: "LAN", className: "bg-sky-500/10 text-sky-700 dark:text-sky-300", icon: <House aria-hidden /> },
@@ -174,7 +175,7 @@ export function SoftwareCard({ instance: i, canConfigure }: { instance: Instance
     >
       {i.description && <p className="mb-3 text-sm text-muted-foreground">{i.description}</p>}
       <dl className="grid grid-cols-[minmax(6.5rem,auto)_1fr] gap-x-4 gap-y-2 text-sm">
-        <Row label="Server type">{SERVER_TYPE_LABELS[i.server_type] ?? i.server_type}</Row>
+        <Row label="Server type">{knownVariantLabel(i.server_type) ?? i.server_type}</Row>
         {i.is_modpack && (
           <Row label="Modpack">
             <div className="flex min-w-0 flex-wrap items-center gap-x-2">
@@ -197,7 +198,7 @@ export function SoftwareCard({ instance: i, canConfigure }: { instance: Instance
             </div>
           </Row>
         )}
-        <Row label="Minecraft">
+        <Row label={gameLabel(i)}>
           {i.minecraft_version || "—"} <span className="text-xs text-muted-foreground">{capitalize(i.edition)} edition</span>
         </Row>
         {hasLoader && (

@@ -7,6 +7,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps import games
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
 
@@ -123,7 +124,7 @@ class InstanceModpackView(APIView):
         from apps.core.permissions import get_instance_for
 
         instance = get_instance_for(request.user, pk, "instance.view")
-        if not instance.is_modpack:
+        if "modpacks" not in games.capabilities(instance):
             raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
         if not instance.modpack_project_id:
             # a CurseForge pack deployed by URL without an API key: its project is read from the
@@ -188,7 +189,7 @@ class InstanceModpackCheckView(APIView):
         from .updates import MANUAL_COOLDOWN, check_instance
 
         instance = get_instance_for(request.user, pk, "instance.view")
-        if not instance.is_modpack:
+        if "modpacks" not in games.capabilities(instance):
             raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
         current = ModpackUpdateCheck.objects.filter(instance=instance).first()
         if current is not None and current.checked_at and timezone.now() - current.checked_at < MANUAL_COOLDOWN:

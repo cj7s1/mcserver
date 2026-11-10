@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
+import { variantLabel } from "@/lib/games";
 import type { Project, ServerType } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -47,7 +48,6 @@ import {
   type FieldErrors,
   JAVA_VERSIONS,
   type StandardCategory,
-  TYPE_LABELS,
   type WizardState,
 } from "./wizardModel";
 
@@ -300,7 +300,7 @@ function StandardSoftware({
                       javaOverride: "",
                     })
                   }
-                  title={info?.label ?? TYPE_LABELS[t]}
+                  title={info?.label ?? variantLabel(t)}
                   description={info?.description}
                 />
               );
@@ -315,7 +315,7 @@ function StandardSoftware({
       )}
 
       <Section
-        title={`${TYPE_LABELS[d.serverType ?? "VANILLA"]} version`}
+        title={`${variantLabel(d.serverType ?? "VANILLA")} version`}
         description={types.length === 1 ? typeInfo?.description : undefined}
       >
         <div className="grid gap-4">

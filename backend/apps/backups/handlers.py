@@ -9,7 +9,8 @@ from typing import Any
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.core.errors import ApiError
+from apps import games
+from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.instances.handlers import (
     SOFTWARE_FIELDS,
@@ -427,8 +428,32 @@ def backup_software(backup: Backup) -> dict[str, Any] | None:
     for key in ("software", "software_before", "modpack_before"):
         value = meta.get(key)
         if isinstance(value, dict) and value:
-            return {k: v for k, v in value.items() if k in SOFTWARE_FIELDS}
+            return {k: v for k, v in value.items() if k in SOFTWARE_FIELDS or k == "game"}
     return None
+
+
+def backup_game(backup: Backup) -> str | None:
+    """The game the backup's files belong to; None when it recorded no software. Records from
+    before game definitions (no ``game``) are Minecraft's."""
+    recorded = backup_software(backup)
+    if recorded is None:
+        return None
+    return str(recorded.get("game") or games.DEFAULT_GAME)
+
+
+def require_same_game(backup: Backup, instance: Instance) -> None:
+    """Refuse to restore the files and software of one game's backup into a server of another game
+    (409 ``backup_game_mismatch``)."""
+    game = backup_game(backup)
+    current = instance.game or games.DEFAULT_GAME
+    if game is not None and game != current:
+        theirs, ours = games.get_or_none(game), games.get_or_none(current)
+        raise ConflictError(
+            f"This backup belongs to a {theirs.label if theirs else game} server and cannot be restored into a "
+            f"{ours.label if ours else current} server",
+            code="backup_game_mismatch",
+            details={"backup_game": game, "game": current},
+        )
 
 
 def software_differs(backup: Backup, instance: Instance) -> dict[str, Any] | None:
@@ -455,6 +480,7 @@ def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
     require_local_backup(backup, instance)
+    require_same_game(backup, instance)
     client = AgentClient(instance.node)
     was_running = False
     progress = Progress(RESTORE_UNTOUCHED)
@@ -519,6 +545,7 @@ def _note_software_mismatch(exc: BaseException, progress: Progress, backup: Back
 def _restore_software(backup: Backup, instance: Instance, ctx: JobContext) -> dict[str, Any] | None:
     """Set the server's software back to what the restored backup was made with (if it differs).
     Returns {field: [old, new]} of what changed, or None."""
+    require_same_game(backup, instance)  # (the views and jobs refuse it before anything is changed)
     recorded = software_differs(backup, instance)
     if recorded is None:
         return None
@@ -540,6 +567,7 @@ def restore_new_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     source = Instance.objects.select_related("node").get(pk=job.instance_id)
     target = Instance.objects.select_related("node").get(pk=job.params["target_id"])
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=source)
+    require_same_game(backup, target)
     client = backup_agent(backup, source)
     if target.node_id != client.node.pk:
         # the snapshot is in another node's repository (the source server was migrated since):
@@ -601,6 +629,7 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
     backup = Backup.objects.get(pk=job.params["backup_id"], instance=instance)
     require_local_backup(backup, instance)
+    require_same_game(backup, instance)
     client = AgentClient(instance.node)
     was_running = False
     progress = Progress(RESTORE_UNTOUCHED)

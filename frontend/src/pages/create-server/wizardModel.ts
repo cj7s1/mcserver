@@ -3,11 +3,14 @@
  * POST /instances/ payload (CreateInstanceSerializer in backend/apps/instances/serializers.py).
  */
 import { z } from "zod";
+import { containerMemoryMb, MINECRAFT } from "@/lib/games";
 import type {
+  GameInfo,
   Instance,
   Job,
   JavaInfo,
   Me,
+  MemoryModel,
   Project,
   Provider,
   Schedule,
@@ -25,7 +28,7 @@ import { validateImportArchive } from "./import/importModel";
 
 export type Category = "vanilla" | "plugins" | "mods" | "modpack" | "import";
 export type StandardCategory = "vanilla" | "plugins" | "mods";
-export type StepId = "type" | "software" | "resources" | "gameplay" | "review";
+export type StepId = "game" | "type" | "software" | "resources" | "gameplay" | "review";
 export type JvmPreset = "aikar" | "meowice" | "none";
 
 export const CATEGORY_TYPES: Record<StandardCategory, ServerType[]> = {
@@ -41,20 +44,6 @@ export const IMPORT_TYPES: ServerType[] = [
   ...CATEGORY_TYPES.mods,
 ];
 
-export const TYPE_LABELS: Record<string, string> = {
-  VANILLA: "Vanilla",
-  PAPER: "Paper",
-  PURPUR: "Purpur",
-  FOLIA: "Folia",
-  FABRIC: "Fabric",
-  QUILT: "Quilt",
-  FORGE: "Forge",
-  NEOFORGE: "NeoForge",
-  MODRINTH: "Modrinth modpack",
-  AUTO_CURSEFORGE: "CurseForge modpack",
-  FTBA: "FTB modpack",
-};
-
 export const STEPS: { id: StepId; label: string; short: string }[] = [
   { id: "type", label: "Server type", short: "Type" },
   { id: "software", label: "Software & version", short: "Software" },
@@ -62,6 +51,19 @@ export const STEPS: { id: StepId; label: string; short: string }[] = [
   { id: "gameplay", label: "Gameplay & advanced", short: "Gameplay" },
   { id: "review", label: "Review & deploy", short: "Review" },
 ];
+
+/** First step when the panel offers more than one game (GET /catalog/games). */
+export const GAME_STEP: (typeof STEPS)[number] = { id: "game", label: "Game", short: "Game" };
+
+/** The wizard's steps: today's Minecraft steps, after a Game step only when there is a choice of games. */
+export function wizardSteps(games: readonly Pick<GameInfo, "id">[] | undefined): typeof STEPS {
+  return games && games.length > 1 ? [GAME_STEP, ...STEPS] : STEPS;
+}
+
+/** Games the wizard can create servers of (per-game steps come later). */
+export function creatableGame(id: string): boolean {
+  return id === MINECRAFT;
+}
 
 export const JAVA_VERSIONS = [8, 11, 16, 17, 21, 25] as const;
 export const DEFAULT_MEMORY_STANDARD = 4096;
@@ -123,6 +125,8 @@ export interface EnvRow {
 }
 
 export interface WizardState {
+  /** Chosen on the Game step; null = not chosen (Minecraft when there is no Game step). */
+  game: string | null;
   category: Category | null;
   serverType: ServerType | null;
   /** null = use the catalog default (newest stable). */
@@ -190,6 +194,7 @@ export const CF_LOADER_LABELS: Record<CfLoader, string> = { forge: "Forge", neof
 
 export function initialState(): WizardState {
   return {
+    game: null,
     category: null,
     serverType: null,
     minecraftVersion: null,
@@ -245,6 +250,8 @@ export interface Derived {
   suggestedName: string;
   memoryMb: number;
   defaultMemoryMb: number;
+  /** Memory model of the chosen game; absent = "jvm" (Minecraft). */
+  memoryModel?: MemoryModel;
   /**
    * The heap was left at a default the wizard could not read: the panel's "Default memory" setting
    * needs system.settings. memory_mb is then omitted, so the backend applies that setting.
@@ -278,10 +285,11 @@ export function nightlyBackupAllowed(user: Pick<Me, "is_owner" | "permissions"> 
   return perms.includes("instance.schedules") && perms.includes("instance.backup");
 }
 
-/** Container memory limit for a heap size; mirrors Instance.container_memory_mb in the backend
- * (modded: heap + max(1536, 40%), others: heap + max(768, 30%) for off-heap memory). */
-export function containerLimitMb(memoryMb: number, modded: boolean): number {
-  return memoryMb + (modded ? Math.max(1536, Math.floor(memoryMb * 0.4)) : Math.max(768, Math.floor(memoryMb * 0.3)));
+/** Container memory limit for a memory setting; mirrors Instance.container_memory_mb in the backend
+ * (jvm, modded: heap + max(1536, 40%), others: heap + max(768, 30%) for off-heap memory). The formula
+ * is lib/games.ts containerMemoryMb. */
+export function containerLimitMb(memoryMb: number, modded: boolean, model: MemoryModel = "jvm"): number {
+  return containerMemoryMb(memoryMb, { model, modded });
 }
 
 /** Whether the wizard selection runs mods (modded loaders and modpacks). */
@@ -338,6 +346,11 @@ export function validateStep(
   state: WizardState,
   d: Derived,
 ): FieldErrors {
+  if (step === "game") {
+    if (!state.game) return { game: "Choose a game" };
+    if (!creatableGame(state.game)) return { game: "Servers of this game cannot be created with this panel version yet" };
+    return {};
+  }
   if (step === "type") {
     if (!state.category)
       return { category: "Choose what kind of server to create" };
@@ -534,6 +547,7 @@ export const CF_REF =
 /** Which step owns a (client or server) error key, used to jump to the first error. */
 export function stepForField(key: string): StepId {
   const k = key.split(".")[0];
+  if (k === "game") return "game";
   if (k === "category") return "type";
   if (
     [

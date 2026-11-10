@@ -1,0 +1,144 @@
+"""Minecraft (Java edition on itzg/minecraft-server): the first game definition.
+
+A wrapper around today's code, not a copy of it: the container spec is ``spec.build_minecraft_spec``
+(the exact dict and hash of the releases before game definitions), the config file is
+server.properties (``instances/properties.py``), the world model is ``instances/world.py``, the
+players are ``players/service.py``, the log analysis is ``instances/diagnostics.py``. The
+capabilities reproduce the gating that existed before: everything, except ``content`` for server
+types without mods or plugins (``Instance.content_kind`` "none") and ``modpacks`` for servers
+that are not modpack servers (``Instance.is_modpack``).
+"""
+
+from __future__ import annotations
+
+from types import ModuleType
+from typing import TYPE_CHECKING, Any
+
+from .base import CAPABILITIES, ConfigFile, GameDefinition, Variant
+
+if TYPE_CHECKING:
+    from apps.instances.models import Instance
+    from apps.nodes.client import AgentClient
+
+# The server types (the itzg TYPE values) are the variants; same labels as ServerType.
+VARIANTS = (
+    Variant("VANILLA", "Vanilla"),
+    Variant("PAPER", "Paper"),
+    Variant("PURPUR", "Purpur"),
+    Variant("FOLIA", "Folia"),
+    Variant("FABRIC", "Fabric"),
+    Variant("QUILT", "Quilt"),
+    Variant("FORGE", "Forge"),
+    Variant("NEOFORGE", "NeoForge"),
+    Variant("MODRINTH", "Modrinth modpack"),
+    Variant("AUTO_CURSEFORGE", "CurseForge modpack"),
+    Variant("FTBA", "Feed The Beast modpack"),
+    Variant("CUSTOM", "Custom server jar"),
+)
+
+
+class MinecraftDefinition(GameDefinition):
+    id = "minecraft"
+    label = "Minecraft"
+    variants = VARIANTS
+    profile = "minecraft"
+    control = "minecraft-rcon"
+    memory_model = "jvm"
+    capability_set = frozenset(CAPABILITIES)
+    stop_words = frozenset({"stop"})
+    flush_command = "save-all flush"
+    notes = (
+        "Java edition, run on the itzg/minecraft-server image.",
+        "Memory is the Java heap; the container gets extra room for off-heap memory.",
+    )
+
+    def default_memory_mb(self) -> int:
+        from apps.core.models import SystemSetting
+
+        return int(SystemSetting.get("default_memory_mb") or 4096)
+
+    def capabilities(self, instance: Instance | None = None) -> frozenset[str]:
+        if instance is None:
+            return self.capability_set
+        caps = set(self.capability_set)
+        if instance.content_kind == "none":
+            caps.discard("content")
+        if not instance.is_modpack:
+            caps.discard("modpacks")
+        return frozenset(caps)
+
+    def config_files(self) -> tuple[ConfigFile, ...]:
+        from apps.instances import properties
+
+        return (
+            ConfigFile(
+                path="server.properties",
+                codec="java-properties",
+                label="Server properties",
+                managed_keys=frozenset(properties.MANAGED_KEYS),
+                secret_keys=("rcon.password", "management-server-secret"),
+            ),
+        )
+
+    # -- container ---------------------------------------------------------------------------
+    def build_spec(self, instance: Instance) -> dict[str, Any]:
+        from apps.instances.spec import build_minecraft_spec
+
+        return build_minecraft_spec(instance)
+
+    def container_memory_mb(self, instance: Instance) -> int:
+        return instance.jvm_container_memory_mb
+
+    def initial_files(self, instance: Instance, params: dict[str, Any]) -> dict[str, str]:
+        from apps.instances import properties
+
+        initial = params.get("server_properties") or {}
+        return {"server.properties": properties.render(initial)} if initial else {}
+
+    # -- console -------------------------------------------------------------------------------
+    def normalise_command(self, text: str) -> str:
+        # RCON takes the command without the chat prefix the players type
+        return text.lstrip("/")
+
+    def broadcast(self, client: AgentClient, instance: Instance, text: str, *, message: str = "", color: str = "yellow") -> None:
+        from apps.instances.power_warnings import UNKNOWN_COMMAND, tellraw_command
+
+        out = client.command(instance.id, tellraw_command(text, message, color=color))
+        if out and UNKNOWN_COMMAND.search(out):
+            # very old or unusual servers without tellraw: fixed text only (no operator message,
+            # because `say` expands selectors such as @a)
+            client.command(instance.id, f"say {text}")
+
+    def online_players(self, instance: Instance) -> dict[str, Any]:
+        from apps.players.service import online_players
+
+        return online_players(instance)
+
+    def analyze_logs(self, instance: Instance, lines: list[str]) -> list[Any]:
+        from apps.instances.diagnostics import analyze_logs
+
+        return analyze_logs(instance, lines)
+
+    # -- worlds and players ----------------------------------------------------------------------
+    @property
+    def world_model(self) -> ModuleType:
+        from apps.instances import world
+
+        return world
+
+    @property
+    def players_service(self) -> ModuleType:
+        from apps.players import service
+
+        return service
+
+    # -- software record of backups ------------------------------------------------------------
+    def software_state(self, instance: Instance) -> dict[str, Any]:
+        from apps.instances.handlers import SOFTWARE_FIELDS
+
+        return {"game": self.id, **{f: getattr(instance, f) for f in SOFTWARE_FIELDS}}
+
+    def describe_software(self, state: dict[str, Any]) -> str:
+        from apps.instances.handlers import describe_minecraft_software
+
+        return describe_minecraft_software(state)

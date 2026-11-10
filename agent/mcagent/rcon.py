@@ -1,5 +1,9 @@
 """Minimal asynchronous Source RCON client (as implemented by Minecraft Java Edition).
 
+Generic over the game: the port, the password and the longest command a server accepts
+(``max_command_len``, Minecraft's limit by default) are the caller's; the control drivers in
+``mcagent.drivers`` supply them per game.
+
 The peer is the Minecraft process, which runs third-party code (mods, plugins), so it is
 treated as untrusted: packets, the total size of a (fragmented) response and the time a
 command may take are all bounded, and socket errors surface as :class:`RconError`.
@@ -35,11 +39,20 @@ class RconUnavailable(RconError):
 
 
 class RconClient:
-    def __init__(self, host: str, port: int, password: str, timeout: float = 5.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        password: str,
+        timeout: float = 5.0,
+        *,
+        max_command_len: int = MAX_COMMAND_LEN,
+    ) -> None:
         self.host = host
         self.port = port
         self.password = password
         self.timeout = timeout
+        self.max_command_len = max_command_len
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
 
@@ -114,7 +127,7 @@ class RconClient:
 
     async def command(self, command: str, timeout: float | None = None) -> str:
         """Run a command; the whole response (all fragments) must arrive within ``timeout``."""
-        if len(command.encode("utf-8")) > MAX_COMMAND_LEN:
+        if len(command.encode("utf-8")) > self.max_command_len:
             raise RconError("Command is too long for RCON")
         if "\n" in command or "\r" in command:
             raise RconError("Commands must be a single line")
@@ -149,13 +162,28 @@ class RconClient:
         return "".join(parts)
 
 
-async def run_command(host: str, port: int, password: str, command: str, timeout: float = 30.0) -> str:
-    async with RconClient(host, port, password) as client:
+async def run_command(
+    host: str,
+    port: int,
+    password: str,
+    command: str,
+    timeout: float = 30.0,
+    *,
+    max_command_len: int = MAX_COMMAND_LEN,
+) -> str:
+    async with RconClient(host, port, password, max_command_len=max_command_len) as client:
         return await client.command(command, timeout=timeout)
 
 
 def run_command_sync(
-    host: str, port: int, password: str, command: str, *, timeout: float = 30.0, connect_timeout: float = 5.0
+    host: str,
+    port: int,
+    password: str,
+    command: str,
+    *,
+    timeout: float = 30.0,
+    connect_timeout: float = 5.0,
+    max_command_len: int = MAX_COMMAND_LEN,
 ) -> str:
     """:func:`run_command` for worker threads: runs its own event loop, so never call it from one.
 
@@ -168,7 +196,7 @@ def run_command_sync(
     """
 
     async def _run() -> str:
-        client = RconClient(host, port, password, timeout=connect_timeout)
+        client = RconClient(host, port, password, timeout=connect_timeout, max_command_len=max_command_len)
         try:
             try:
                 async with asyncio.timeout(connect_timeout):

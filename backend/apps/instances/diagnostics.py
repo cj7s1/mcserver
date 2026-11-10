@@ -13,6 +13,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from apps import games
 from apps.core.errors import ApiError
 from apps.nodes.client import AgentClient, AgentError
 
@@ -279,7 +280,7 @@ def diagnose(instance: Instance, tail: int = 1500) -> dict[str, Any]:
         if exc.error_code != "no_container":
             log.info("diagnostics of %s: no console lines (%s: %s)", instance.pk, exc.error_code, exc.detail)
         lines = []
-    issues = analyze_logs(instance, lines)
+    issues = games.for_instance(instance).analyze_logs(instance, lines)  # Minecraft: analyze_logs
     run = status if exists else (status.get("last_run") or {})
     restarts = int(run.get("restart_count") or 0)
     if restarts >= 3 and instance.ready_at is None:

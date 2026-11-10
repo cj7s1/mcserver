@@ -176,8 +176,10 @@ class ContentContext:
 
 
 def context_for(instance: Instance, *, require_version: bool = True) -> ContentContext:
+    from apps import games
+
     kind = instance.content_kind
-    if kind == "none":
+    if "content" not in games.capabilities(instance) or kind == "none":
         raise ConflictError("This server type does not support mods or plugins", code="content_unsupported")
     if kind == "plugins":
         loaders = PLUGIN_LOADERS[instance.server_type]

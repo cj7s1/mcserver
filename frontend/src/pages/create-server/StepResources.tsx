@@ -10,6 +10,7 @@ import { errorMessage } from "@/lib/api";
 import { formatBytes, formatMemoryMb } from "@/lib/format";
 import { MemoryCommitBar } from "@/components/MemoryCommitBar";
 import { useInstances, useSystemInfo } from "@/lib/queries";
+import { memoryWording } from "@/lib/games";
 import { memoryCommitment } from "@/pages/library/server-utils";
 import { useNodePorts } from "./import/nodes";
 import { Advanced, describedBy, Field } from "./WizardBits";
@@ -64,7 +65,10 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
     Number.isFinite(d.memoryMb) ? d.memoryMb : 0,
   );
   const mem = d.memoryMb;
-  const limit = Number.isFinite(mem) ? containerLimitMb(mem, isModded(state, d)) : null;
+  const model = d.memoryModel ?? "jvm";
+  const wording = memoryWording(model);
+  const modded = isModded(state, d);
+  const limit = Number.isFinite(mem) ? containerLimitMb(mem, modded, model) : null;
   const overHost = limit !== null && hostMb !== null && limit > hostMb;
   const overPolicy = limit !== null && policyMax !== null && limit > policyMax;
   // Memory already promised to running servers on the same host (same figure as the Dashboard).
@@ -120,12 +124,12 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
         </Field>
       </Section>
 
-      <Section title="Memory" description="Java heap size. The container gets extra headroom for the JVM itself.">
+      <Section title="Memory" description={wording.wizardDescription}>
         <div className="grid gap-3">
           <div className="flex flex-wrap items-end gap-3">
             <div className="grid min-w-0 flex-1 basis-64 gap-1.5">
               <span id={`${uid}-mem-label`} className="text-sm font-medium">
-                Heap: <span className="tabular-nums">{Number.isFinite(mem) ? formatMemoryMb(mem) : "—"}</span>
+                {wording.shortLabel}: <span className="tabular-nums">{Number.isFinite(mem) ? formatMemoryMb(mem) : "—"}</span>
               </span>
               <MemorySlider
                 value={mem}
@@ -139,7 +143,7 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
               </div>
             </div>
             <div className="grid w-32 gap-1.5">
-              <Label htmlFor={`${uid}-mem`}>Heap (MB)</Label>
+              <Label htmlFor={`${uid}-mem`}>{wording.inputLabel}</Label>
               <Input
                 id={`${uid}-mem`}
                 type="number"
@@ -188,9 +192,11 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
                 <span className="text-muted-foreground">Container limit </span>
                 <span className="font-medium tabular-nums">{formatMemoryMb(limit)}</span>
               </div>
-              <div className="text-muted-foreground">
-                heap + {formatMemoryMb(limit - mem)} for the JVM itself ({isModded(state, d) ? "mods: 40%, at least 1.5 GB" : "30%, at least 768 MB"})
-              </div>
+              {model === "jvm" && (
+                <div className="text-muted-foreground">
+                  heap + {formatMemoryMb(limit - mem)} {wording.headroomFor} ({wording.autoOverheadRule(modded)})
+                </div>
+              )}
               {hostBytes && (
                 <div className="sm:text-right">
                   <span className="text-muted-foreground">Host memory </span>

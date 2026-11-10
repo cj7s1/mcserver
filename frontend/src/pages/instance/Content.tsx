@@ -10,6 +10,7 @@ import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api";
+import { gameLabel } from "@/lib/games";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { useInstanceContext } from "./InstanceLayout";
 import { BrowseContent } from "./content/BrowseContent";
@@ -176,7 +177,7 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
             </>
           }
         >
-          {noun.Many} were changed while the server is running. Minecraft only loads {noun.many} when the server starts.
+          {noun.Many} were changed while the server is running. {gameLabel(instance)} only loads {noun.many} when the server starts.
         </Notice>
       )}
       {canEdit && env.locked && <Notice tone="info">{env.locked}</Notice>}

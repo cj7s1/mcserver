@@ -339,6 +339,18 @@ def rcon_password(instance: Instance) -> str:
 
 
 def build_spec(instance: Instance) -> dict[str, Any]:
+    """The agent's container spec of the server, from its game definition (``apps.games``).
+
+    For Minecraft that is ``build_minecraft_spec``: exactly the dict (and so the hash) of the
+    releases before game definitions. It never gets a ``game`` or ``variant`` key, which would
+    make every existing server read restart-required."""
+    from apps import games
+
+    return games.for_instance(instance).build_spec(instance)
+
+
+def build_minecraft_spec(instance: Instance) -> dict[str, Any]:
+    """The Minecraft container spec (itzg/minecraft-server)."""
     ports = [{"container_port": 25565, "host_port": instance.game_port, "protocol": "tcp", "host_ip": instance.host_ip}]
     for extra in instance.extra_ports or []:
         ports.append(

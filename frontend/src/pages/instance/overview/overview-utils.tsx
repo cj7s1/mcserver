@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { copyText } from "@/lib/clipboard";
-import type { InstanceStatus, ServerType } from "@/lib/types";
+import type { InstanceStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** A clock that re-renders the caller every `intervalMs` (for uptimes and relative times). */
@@ -57,21 +57,6 @@ export const LIVE_STATUSES: InstanceStatus[] = ["running", "unhealthy", "startin
 
 /** Statuses where RCON is expected to accept commands. */
 export const COMMAND_STATUSES: InstanceStatus[] = ["running", "unhealthy"];
-
-export const SERVER_TYPE_LABELS: Record<ServerType, string> = {
-  VANILLA: "Vanilla",
-  PAPER: "Paper",
-  PURPUR: "Purpur",
-  FOLIA: "Folia",
-  FABRIC: "Fabric",
-  QUILT: "Quilt",
-  FORGE: "Forge",
-  NEOFORGE: "NeoForge",
-  MODRINTH: "Modrinth modpack",
-  AUTO_CURSEFORGE: "CurseForge modpack",
-  FTBA: "FTB modpack",
-  CUSTOM: "Custom",
-};
 
 export function capitalize(s: string): string {
   return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;

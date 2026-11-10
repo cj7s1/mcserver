@@ -30,6 +30,43 @@ export type ServerType =
   | "FTBA"
   | "CUSTOM";
 
+/**
+ * What a game (and an instance of it) supports; the UI shows a section only when its capabilities are
+ * present (backend/apps/games, design docs/design/GAME-DEFINITIONS.md 4.2). Strings the frontend does
+ * not know yet may arrive from a newer panel and are ignored.
+ */
+export type GameCapability =
+  | "console_commands"
+  | "broadcast"
+  | "players"
+  | "player_actions"
+  | "query"
+  | "consistent_backups"
+  | "world_reset"
+  | "world_import_export"
+  | "software_update"
+  | "content"
+  | "modpacks"
+  | "jvm"
+  | "eula"
+  | "properties"
+  | "diagnostics";
+
+/** "jvm": memory_mb is the Java heap and the container gets off-heap headroom; "plain": memory_mb is the container limit. */
+export type MemoryModel = "jvm" | "plain";
+
+/** One entry of GET /api/catalog/games. */
+export interface GameInfo {
+  id: string;
+  label: string;
+  variants: { id: string; label: string }[];
+  capabilities: GameCapability[];
+  memory_model: MemoryModel;
+  default_memory_mb: number;
+  /** What the owner should know (memory needed, what they have to provide): a list of sentences. */
+  notes: string[] | string;
+}
+
 export type PermissionCode =
   | "system.settings"
   | "system.users"
@@ -192,6 +229,14 @@ export interface Instance {
   updated_at: string;
   connection: ConnectionInfo;
   permissions: PermissionCode[];
+  /** Game id ("minecraft"). Absent from older panels: treat as Minecraft. */
+  game?: string;
+  /** Display name of the game ("Minecraft"). */
+  game_label?: string;
+  /** Sorted capability names of this instance. Absent from older panels: derived from content_kind/is_modpack (lib/games.ts). */
+  capabilities?: GameCapability[];
+  /** Absent from older panels: "jvm" (Minecraft). */
+  memory_model?: MemoryModel;
 }
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";

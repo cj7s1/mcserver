@@ -10,9 +10,11 @@ import { useAuth } from "@/hooks/use-auth";
 import { ApiError, api, errorMessage } from "@/lib/api";
 import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { formatMemoryMb } from "@/lib/format";
+import { MINECRAFT, variantLabel } from "@/lib/games";
 import { qk } from "@/lib/queries";
-import type { Provider, ServerType, SystemSettings } from "@/lib/types";
+import type { MemoryModel, Provider, ServerType, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { StepGame } from "./create-server/StepGame";
 import { StepGameplay } from "./create-server/StepGameplay";
 import { StepResources } from "./create-server/StepResources";
 import { softwareRows, StepReview } from "./create-server/StepReview";
@@ -45,17 +47,17 @@ import {
   nightlyBackupAllowed,
   SERVER_FIELD_MAP,
   type StandardCategory,
-  STEPS,
   type StepId,
   stepForField,
-  TYPE_LABELS,
   validateStep,
   type WizardState,
+  wizardSteps,
 } from "./create-server/wizardModel";
 import { describeCron } from "./instance/schedules/cron";
 import { loaderLabel } from "./modpacks/modpackMeta";
 import {
   mpk,
+  useGames,
   useGameVersions,
   useJavaInfo,
   useLoaderVersions,
@@ -85,6 +87,8 @@ function stateFromParams(sp: URLSearchParams): {
   step: StepId;
 } {
   const s = initialState();
+  // every deep link is a Minecraft one; the Game step (when there is one) starts out answered
+  s.game = MINECRAFT;
   const provider = sp.get("provider") as Provider | null;
   const project = sp.get("project");
   if (project && provider && PROVIDERS.includes(provider)) {
@@ -116,10 +120,16 @@ function stateFromParams(sp: URLSearchParams): {
     s.serverType = null;
     return { state: s, step: "software" };
   }
+  s.game = null;
   return { state: s, step: "type" };
 }
 
-function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemoryMb: number | null): Derived {
+function useDerived(
+  state: WizardState,
+  backupAllowed: boolean,
+  panelDefaultMemoryMb: number | null,
+  memoryModel: MemoryModel,
+): Derived {
   const isModpack = state.category === "modpack";
   const isImport = state.category === "import";
   const types = isImport
@@ -194,7 +204,7 @@ function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemo
           : isImport && state.importFile && nameFromArchive(state.importFile.name)
             ? nameFromArchive(state.importFile.name)
             : serverType && minecraftVersion
-            ? `${TYPE_LABELS[serverType]} ${minecraftVersion}`
+            ? `${variantLabel(serverType)} ${minecraftVersion}`
             : ""
     ).slice(0, 80);
     // Standard servers: the panel's "Default memory" setting when this user may read it; otherwise
@@ -210,7 +220,7 @@ function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemo
           ? `${resolved.name} ${resolved.version_name} · Minecraft ${resolved.minecraft_version} · ${loaderLabel(resolved.loader)}`
           : "Modpack"
         : serverType
-          ? `${isImport ? "Import · " : ""}${TYPE_LABELS[serverType]} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
+          ? `${isImport ? "Import · " : ""}${variantLabel(serverType)} ${minecraftVersion}${hasLoader ? ` · ${loaderVersion || "latest build"}` : ""}`
           : "";
     const nodeList = nodes.data ?? [];
     const nodeName =
@@ -233,6 +243,7 @@ function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemo
       suggestedName,
       memoryMb: state.memoryMb ?? defaultMemoryMb,
       defaultMemoryMb,
+      memoryModel,
       memoryIsPanelDefault,
       gamePort:
         state.gamePort ??
@@ -264,6 +275,7 @@ function useDerived(state: WizardState, backupAllowed: boolean, panelDefaultMemo
     state.name,
     state.memoryMb,
     panelDefaultMemoryMb,
+    memoryModel,
     state.gamePort,
     serverType,
     minecraftVersion,
@@ -291,8 +303,8 @@ function serverErrorsFrom(err: unknown): FieldErrors {
   return out;
 }
 
-function stepIndex(step: StepId): number {
-  return STEPS.findIndex((s) => s.id === step);
+function stepIndex(steps: ReturnType<typeof wizardSteps>, step: StepId): number {
+  return steps.findIndex((s) => s.id === step);
 }
 
 export default function CreateServer() {
@@ -303,7 +315,8 @@ export default function CreateServer() {
   const [init] = useState(() => stateFromParams(searchParams));
   const [state, setState] = useState<WizardState>(init.state);
   const [step, setStep] = useState<StepId>(init.step);
-  const [maxReached, setMaxReached] = useState(stepIndex(init.step));
+  /** The furthest step reached (the Stepper lets the user jump back up to it). */
+  const [reached, setReached] = useState<StepId>(init.step);
   const [attempted, setAttempted] = useState<Set<StepId>>(() => new Set());
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const headingRef = useRef<HTMLHeadingElement>(null);
@@ -316,7 +329,19 @@ export default function CreateServer() {
     retry: false,
   });
   const panelDefaultMb = Number(panelSettings.data?.values.default_memory_mb) || null;
-  const d = useDerived(state, nightlyBackupAllowed(user), panelDefaultMb);
+  const games = useGames();
+  // A Game step only when the panel offers a choice of games; with one game (or an older panel
+  // without the catalog) the wizard is the Minecraft wizard as before.
+  const steps = wizardSteps(games.data);
+  const hasGameStep = steps[0].id === "game";
+  const [gameStepShown, setGameStepShown] = useState(false);
+  if (hasGameStep && !gameStepShown) {
+    setGameStepShown(true);
+    if (state.game === null && step === "type") setStep("game");
+  }
+  const memoryModel = games.data?.find((g) => g.id === (state.game ?? MINECRAFT))?.memory_model ?? "jvm";
+  const d = useDerived(state, nightlyBackupAllowed(user), panelDefaultMb, memoryModel);
+  const maxReached = stepIndex(steps, reached);
   const nodes = useWizardNodes();
   const importer = useImportDeploy();
 
@@ -355,7 +380,7 @@ export default function CreateServer() {
 
   const goTo = (next: StepId) => {
     setStep(next);
-    setMaxReached((m) => Math.max(m, stepIndex(next)));
+    setReached((r) => (stepIndex(steps, next) > stepIndex(steps, r) ? next : r));
   };
 
   const next = () => {
@@ -364,13 +389,13 @@ export default function CreateServer() {
       setAttempted((a) => new Set(a).add(step));
       return;
     }
-    const idx = stepIndex(step);
-    if (idx < STEPS.length - 1) goTo(STEPS[idx + 1].id);
+    const idx = stepIndex(steps, step);
+    if (idx < steps.length - 1) goTo(steps[idx + 1].id);
   };
 
   const back = () => {
-    const idx = stepIndex(step);
-    if (idx > 0) setStep(STEPS[idx - 1].id);
+    const idx = stepIndex(steps, step);
+    if (idx > 0) setStep(steps[idx - 1].id);
   };
 
   const create = useMutation({
@@ -418,7 +443,7 @@ export default function CreateServer() {
         qc.invalidateQueries({ queryKey: mpk.ports });
       }
       setServerErrors(errs);
-      const first = STEPS.find((s) =>
+      const first = steps.find((s) =>
         Object.keys(errs).some((k) => stepForField(k) === s.id),
       );
       if (first && first.id !== step) setStep(first.id);
@@ -431,7 +456,7 @@ export default function CreateServer() {
       toast.error("This server could not be imported", { description: importProblem });
       return;
     }
-    for (const s of STEPS) {
+    for (const s of steps) {
       const errs = validateStep(s.id, state, d);
       if (Object.keys(errs).length) {
         setAttempted((a) => new Set(a).add(s.id));
@@ -458,7 +483,7 @@ export default function CreateServer() {
       loaderVersion: null,
       javaOverride: "",
     });
-    setMaxReached(0);
+    setReached("type");
     setAttempted(new Set());
   };
 
@@ -480,8 +505,8 @@ export default function CreateServer() {
     );
   }
 
-  const idx = stepIndex(step);
-  const isLast = idx === STEPS.length - 1;
+  const idx = stepIndex(steps, step);
+  const isLast = idx === steps.length - 1;
   const importMode = state.category === "import";
   const wide = step === "software" && d.isModpack;
   const showSummary = !wide && step !== "review" && !!state.category;
@@ -504,7 +529,7 @@ export default function CreateServer() {
     );
   }
   const stepTitle =
-    d.isModpack && step === "software" ? "Modpack & release" : STEPS[idx].label;
+    d.isModpack && step === "software" ? "Modpack & release" : steps[idx].label;
 
   return (
     <div className="grid grid-cols-[minmax(0,1fr)] gap-4 pb-2">
@@ -523,13 +548,14 @@ export default function CreateServer() {
         className="pb-0"
       />
       <Stepper
+        steps={steps}
         current={step}
         maxReached={maxReached}
         onGo={goTo}
         labels={stepLabels}
       />
       <h2 ref={headingRef} tabIndex={-1} className="sr-only">
-        Step {idx + 1} of {STEPS.length}: {stepTitle}
+        Step {idx + 1} of {steps.length}: {stepTitle}
       </h2>
 
       <div
@@ -539,6 +565,14 @@ export default function CreateServer() {
         )}
       >
         <div className="min-w-0">
+          {step === "game" && (
+            <StepGame
+              games={games.data ?? []}
+              game={state.game}
+              onChange={(g) => patch({ game: g })}
+              error={errors.game}
+            />
+          )}
           {step === "type" && (
             <StepType
               category={state.category}
@@ -584,7 +618,7 @@ export default function CreateServer() {
                 className="text-xs"
                 rows={[
                   ...softwareRows(state, d),
-                  ...(idx >= 2
+                  ...(idx >= stepIndex(steps, "resources")
                     ? ([
                         ...(d.nodeName ? [["Node", d.nodeName]] : []),
                         ["Name", d.name || "—"],

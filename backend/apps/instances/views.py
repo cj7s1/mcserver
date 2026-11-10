@@ -16,6 +16,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps import games
 from apps.accounts.models import InstanceAccess, Role
 from apps.accounts.permissions import INSTANCE_CODES
 from apps.audit import service as audit
@@ -78,6 +79,14 @@ class InstanceListView(APIView):
         node = Node.objects.filter(pk=data["node"]).first() if data.get("node") else Node.default()
         if node is None:
             raise ValidationError({"node": ["Unknown node"]})
+        game = data.get("game") or games.DEFAULT_GAME
+        if game != games.DEFAULT_GAME:
+            # the node's agent must have the game's runtime profile (409 agent_lacks_game) ...
+            games.require_agent_support(game, AgentClient(node))
+            # ... and only Minecraft servers can be created so far (multi-game phase 1)
+            raise ConflictError(
+                f"{games.get(game).label} servers cannot be created yet", code="unsupported_by_game", details={"game": game}
+            )
         fields: dict[str, Any] = {
             "name": data["name"],
             "description": data.get("description", ""),
@@ -407,6 +416,7 @@ class InstanceCloneView(APIView):
             "icon_url",
             "group",
             "node",
+            "game",
             "edition",
             "server_type",
             "minecraft_version",
@@ -433,6 +443,7 @@ class InstanceCloneView(APIView):
             "network",
         ]
         fields = {f: getattr(source, f) for f in copy_fields}
+        games.require_agent_support(source.game, AgentClient(source.node))  # 409 agent_lacks_game
         port = ser.validated_data.get("game_port")
         # One transaction: if the source is busy (409 instance_busy) the new record is rolled
         # back instead of being left behind as an empty orphan server.
@@ -520,9 +531,11 @@ class InstanceCommandView(APIView):
     @extend_schema(request=CommandSerializer, responses={200: dict})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.command")
+        definition = games.for_instance(instance)
+        definition.require(instance, "console_commands")
         ser = CommandSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        command = ser.validated_data["command"].lstrip("/")
+        command = definition.normalise_command(ser.validated_data["command"])
         if "\n" in command or "\r" in command:
             raise ValidationError({"command": ["Commands must be a single line"]})
         output = AgentClient(instance.node).command(instance.id, command)
@@ -551,12 +564,20 @@ def _restore_secrets(new_text: str, current: dict[str, str]) -> str:
     return properties.update(new_text, keep) if keep else new_text
 
 
+def _properties_file(instance: Instance) -> str:
+    """The server.properties file of the game (409 unsupported_by_game without the editor)."""
+    definition = games.for_instance(instance)
+    definition.require(instance, "properties")
+    return definition.config_files()[0].path
+
+
 class PropertiesView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
+        path = _properties_file(instance)
         client = AgentClient(instance.node)
-        raw = properties.read_file(client, instance.id)
+        raw = properties.read_file(client, instance.id, path)
         exists = raw is not None
         raw = redact_properties(raw or "")
         values = properties.parse(raw)
@@ -574,10 +595,11 @@ class PropertiesView(APIView):
     @extend_schema(request=dict, responses={200: dict})
     def patch(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.configure")
+        path = _properties_file(instance)
         changes = request.data.get("values") if isinstance(request.data, dict) else None
         raw_text = request.data.get("raw") if isinstance(request.data, dict) else None
         client = AgentClient(instance.node)
-        current = properties.read_file(client, instance.id) or ""
+        current = properties.read_file(client, instance.id, path) or ""
         before = properties.parse(current)
         if raw_text is not None:
             if not isinstance(raw_text, str) or len(raw_text) > 512 * 1024:
@@ -602,7 +624,7 @@ class PropertiesView(APIView):
                 raise ValidationError({"values": [str(exc)]}) from exc
             new_text = properties.update(current, validated)
             changed_keys = sorted(validated)
-        client.write_text(instance.id, "server.properties", new_text)
+        client.write_text(instance.id, path, new_text)
         audit.record(
             "instance.properties_updated",
             request=request,
@@ -972,7 +994,7 @@ class ScheduleListView(APIView):
     @extend_schema(request=ScheduleSerializer, responses={201: ScheduleSerializer})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.schedules")
-        ser = ScheduleSerializer(data=request.data)
+        ser = ScheduleSerializer(data=request.data, context={"instance": instance})
         ser.is_valid(raise_exception=True)
         require_schedule_action(request.user, instance, ser.validated_data["action"], ser.validated_data.get("payload"))
         sched = ser.save(instance=instance)
@@ -1202,6 +1224,7 @@ class WorldView(APIView):
         from . import world
 
         instance = get_instance_for(request.user, pk, "instance.files.read")
+        games.for_instance(instance).require(instance, "world_import_export")
         flush = world.may_flush(request.user, instance)
         data = world.describe(instance, AgentClient(instance.node), flush=flush)
         perms = request.user.instance_permissions(instance.pk)
@@ -1239,6 +1262,7 @@ class WorldReplaceView(APIView):
 
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
+        games.for_instance(instance).require(instance, "world_import_export")
         data = request.data
         if not _flag(data.get("confirm")):
             raise ApiError(
@@ -1383,6 +1407,7 @@ class WorldResetView(APIView):
 
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
+        games.for_instance(instance).require(instance, "world_reset")
         return Response(world.reset_plan(instance, AgentClient(instance.node)))
 
     @extend_schema(request=WorldResetSerializer, responses={202: JobSerializer})
@@ -1391,6 +1416,7 @@ class WorldResetView(APIView):
 
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
+        games.for_instance(instance).require(instance, "world_reset")
         ser = WorldResetSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
@@ -1459,6 +1485,7 @@ class DiagnosticsView(APIView):
         from .diagnostics import diagnose
 
         instance = get_instance_for(request.user, pk, "instance.console")
+        games.for_instance(instance).require(instance, "diagnostics")
         return Response(diagnose(instance))
 
 
@@ -1508,6 +1535,7 @@ class SoftwareUpdateView(APIView):
         from apps.catalog.providers import game_versions, loader_versions, version_key
 
         instance = get_instance_for(request.user, pk, "instance.configure")
+        games.for_instance(instance).require(instance, "software_update")
         if instance.is_modpack:
             raise ApiError("Modpack servers are updated through the modpack release picker", code="use_modpack_update")
         if instance.archived_at:
@@ -1607,13 +1635,15 @@ class FilesArchiveView(APIView):
             raise ValidationError({"path": ["At most 8 folders can be downloaded at once"]})
         client = AgentClient(instance.node)
         flushed = False
+        flush_command = games.for_instance(instance).flush_command
         if (
             request.query_params.get("flush") == "true"
+            and flush_command
             and instance.status in ("running", "unhealthy")
             and world.may_flush(request.user, instance)  # a console command: not for read-only file access
         ):
             try:
-                client.command(instance.id, "save-all flush", timeout=120)
+                client.command(instance.id, flush_command, timeout=120)
                 flushed = True
             except ApiError:
                 pass  # not running after all / RCON not ready: download what is on disk

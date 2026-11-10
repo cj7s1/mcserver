@@ -5,6 +5,7 @@ import { ServerIcon } from "@/components/ServerIcon";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Progress } from "@/components/ui/progress";
 import { formatDateTime, formatMemoryMb, relativeTime } from "@/lib/format";
+import { gameLabel } from "@/lib/games";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { softwareLabel } from "../instance/InstanceLayout";
@@ -45,7 +46,7 @@ export function ServerCard({ instance }: { instance: Instance }) {
 
       <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
         <div className="min-w-0">
-          <dt className="text-muted-foreground">Minecraft</dt>
+          <dt className="text-muted-foreground">{gameLabel(instance)}</dt>
           <dd className="truncate font-medium tabular-nums">{instance.minecraft_version || "—"}</dd>
         </div>
         <div className="min-w-0">

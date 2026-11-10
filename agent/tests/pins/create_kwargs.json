@@ -1,0 +1,1500 @@
+{
+ "vanilla": {
+  "spec_hash": "7b58d4ca84dbad7c",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "7b58d4ca84dbad7c",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "paper_extra_ports": {
+  "spec_hash": "ced9af39b9390461",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "PAPER",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.8",
+    "PAPER_BUILD": "61",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Paper with Dynmap",
+    "io.mcpanel.spec-hash": "ced9af39b9390461",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ],
+    "8123/tcp": [
+     [
+      "0.0.0.0",
+      25600
+     ]
+    ],
+    "24454/udp": [
+     [
+      "192.168.1.5",
+      25601
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "fabric": {
+  "spec_hash": "0cbc96f3f9bf22d9",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "FABRIC",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.1",
+    "FABRIC_LOADER_VERSION": "0.16.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "0cbc96f3f9bf22d9",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "4096m",
+   "memswap_limit": "4096m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "forge_old_java": {
+  "spec_hash": "68f94d50c70522d2",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java8",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "FORGE",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.12.2",
+    "FORGE_VERSION": "14.23.5.2860",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "68f94d50c70522d2",
+    "io.mcpanel.stop-timeout": "120"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "modrinth_pack": {
+  "spec_hash": "4cdefa26f61b606d",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "MODRINTH",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "MODRINTH_MODPACK": "5FFgwNNP",
+    "MODRINTH_VERSION": "kmmVnf3k",
+    "VERSION": "1.21.1",
+    "MODRINTH_LOADER": "fabric",
+    "MODRINTH_IGNORE_MISSING_FILES": "mods/old.jar\nconfig/x.toml",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Cobblemon",
+    "io.mcpanel.spec-hash": "4cdefa26f61b606d",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "8192m",
+   "memswap_limit": "8192m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "curseforge_pack": {
+  "spec_hash": "39cac9309010dd42",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "AUTO_CURSEFORGE",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "CF_SLUG": "all-the-mods-10",
+    "CF_FILE_ID": "6487543",
+    "CF_API_KEY": "$2a$10$not-a-real-key",
+    "CF_DOWNLOADS_REPO": "/data/downloads",
+    "CF_IGNORE_MISSING_FILES": "mods/removed.jar",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "ATM10",
+    "io.mcpanel.spec-hash": "39cac9309010dd42",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "12288m",
+   "memswap_limit": "12288m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "ftb_pack": {
+  "spec_hash": "a91da496189ace21",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "FTBA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "FTB_MODPACK_ID": "126",
+    "FTB_MODPACK_VERSION_ID": "100155",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "a91da496189ace21",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "imported": {
+  "spec_hash": "a0067ac969acce03",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "PAPER",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.20.4",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Imported world",
+    "io.mcpanel.spec-hash": "a0067ac969acce03",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "on-failure",
+    "MaximumRetryCount": 3
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "user_env_and_eula": {
+  "spec_hash": "4d989909b0355fa6",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "false",
+    "TYPE": "PAPER",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "MOTD": "Hello",
+    "DIFFICULTY": "hard",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "4d989909b0355fa6",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "jvm_flags": {
+  "spec_hash": "5384634284423832",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "PURPUR",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.4",
+    "JVM_OPTS": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
+    "USE_AIKAR_FLAGS": "true",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "5384634284423832",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "cpu_limit": {
+  "spec_hash": "161fe126213b7f86",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "LATEST",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "161fe126213b7f86",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   },
+   "nano_cpus": 2500000000
+  }
+ },
+ "pinned_channel": {
+  "spec_hash": "69bf3eeb65d3483c",
+  "kwargs": {
+   "image": "itzg/minecraft-server:2025.10.1-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "69bf3eeb65d3483c",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "no_env_restart_no": {
+  "spec_hash": "aae114ea8cbc9af3",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "aae114ea8cbc9af3",
+    "io.mcpanel.stop-timeout": "5"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {},
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 5,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "custom_healthcheck_network": {
+  "spec_hash": "f15a571d0a91eb0d",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "f15a571d0a91eb0d",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mc_extra",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 30000000000,
+    "timeout": 10000000000,
+    "start_period": 600000000000,
+    "retries": 3
+   }
+  }
+ },
+ "host_network": {
+  "spec_hash": "db2b76746e0b0542",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "db2b76746e0b0542",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {},
+   "network": "host",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "proxy_and_certs": {
+  "spec_hash": "a92959ada4e10ae6",
+  "kwargs": {
+   "image": "itzg/minecraft-server:stable-java21",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "HTTPS_PROXY": "user",
+    "NO_PROXY": "localhost",
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "VERSION": "1.21.10",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "a92959ada4e10ae6",
+    "io.mcpanel.stop-timeout": "60"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    },
+    "/etc/ssl/ca.crt": {
+     "bind": "/mcpanel/certs/ca-bundle.crt",
+     "mode": "ro"
+    },
+    "/etc/ssl/cacerts": {
+     "bind": "/mcpanel/certs/cacerts",
+     "mode": "ro"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 4096,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 25,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "50m",
+     "max-file": "3"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ },
+ "docker_io_long_stop": {
+  "spec_hash": "1bf7e5d74342c711",
+  "kwargs": {
+   "image": "docker.io/itzg/minecraft-server:java25",
+   "name": "mcpanel-5e1f0c2a7b3d",
+   "hostname": "mc-5e1f0c2a",
+   "environment": {
+    "EULA": "TRUE",
+    "TYPE": "VANILLA",
+    "MEMORY": "2048M",
+    "STOP_DURATION": "40",
+    "CREATE_CONSOLE_IN_PIPE": "true",
+    "TZ": "Europe/Berlin",
+    "UID": "99",
+    "GID": "100",
+    "ENABLE_RCON": "true",
+    "RCON_PASSWORD": "pinned-rcon-password-0123456789",
+    "RCON_PORT": "25575",
+    "SERVER_PORT": "25565"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "5e1f0c2a-7b3d-4e8f-9a01-23456789abcd",
+    "io.mcpanel.name": "Survival",
+    "io.mcpanel.spec-hash": "1bf7e5d74342c711",
+    "io.mcpanel.stop-timeout": "900"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/5e1f0c2a-7b3d-4e8f-9a01-23456789abcd": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "25565/tcp": [
+     [
+      "0.0.0.0",
+      25565
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "2560m",
+   "memswap_limit": "2560m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "unless-stopped"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": true,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "CMD",
+     "mc-health"
+    ],
+    "interval": 10000000000,
+    "timeout": 5000000000,
+    "start_period": 120000000000,
+    "retries": 6
+   }
+  }
+ }
+}

@@ -175,6 +175,26 @@ class AgentClient:
     def supports(self, feature: str) -> bool:
         return feature in self.features()
 
+    def games(self, *, refresh: bool = False) -> dict[str, dict[str, Any]]:
+        """The games this node's agent has runtime profiles for (``games`` of GET /v1/info:
+        ``{game: {"variants", "images", "control"}}``), cached per node like ``features``.
+        Empty for an agent without the ``games`` feature (it runs Minecraft only) and for an agent
+        that cannot be asked right now (not remembered)."""
+        from django.core.cache import cache
+
+        key = f"agent-games:{self.node.pk}:{self.base}"
+        cached = None if refresh else cache.get(key)
+        if cached is not None:
+            return dict(cached)
+        try:
+            reported = self.info().get("games")
+        except ApiError as exc:
+            log.debug("could not read the games of the agent at %s: %s", self.base, exc)
+            return {}
+        found = {str(k): (v if isinstance(v, dict) else {}) for k, v in reported.items()} if isinstance(reported, dict) else {}
+        cache.set(key, found, FEATURES_TTL if found else FEATURES_MISSING_TTL)
+        return found
+
     def published_ports(self) -> list[dict[str, Any]]:
         return self._json("GET", "/v1/ports")["ports"]
 

@@ -1,5 +1,5 @@
 /** Shared test fixtures (not used by product code). */
-import type { Instance, WorldResetFolder, WorldResetPlan } from "@/lib/types";
+import type { GameCapability, Instance, WorldResetFolder, WorldResetPlan } from "@/lib/types";
 
 export function makeInstance(over: Partial<Instance> = {}): Instance {
   return {
@@ -115,4 +115,30 @@ export function makeBukkitResetPlan(over: Partial<WorldResetPlan> = {}): WorldRe
     running: true,
     ...over,
   });
+}
+
+/**
+ * The fields a panel with game definitions adds to a Minecraft instance, written out the way the
+ * backend states the rule (backend contract, MinecraftDefinition.capabilities): every capability,
+ * `content` only when content_kind is set, `modpacks` only for modpack servers.
+ */
+export function withGameFields(i: Instance): Instance {
+  const caps: GameCapability[] = [
+    "broadcast",
+    "console_commands",
+    "consistent_backups",
+    "diagnostics",
+    "eula",
+    "jvm",
+    "player_actions",
+    "players",
+    "properties",
+    "query",
+    "software_update",
+    "world_import_export",
+    "world_reset",
+  ];
+  if (i.content_kind !== "none") caps.push("content");
+  if (i.is_modpack) caps.push("modpacks");
+  return { ...i, game: "minecraft", game_label: "Minecraft", capabilities: caps.sort(), memory_model: "jvm" };
 }

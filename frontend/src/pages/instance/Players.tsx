@@ -6,6 +6,7 @@ import { ErrorState, LoadingState } from "@/components/States";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
+import { gameLabel } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
 import { OnlinePlayers } from "./players/OnlinePlayers";
 import { PlayerLists } from "./players/PlayerLists";
@@ -66,7 +67,7 @@ export default function Players() {
         <Section
           className="min-w-0 lg:col-span-2 lg:col-start-1 lg:row-start-1"
           title="Player lists"
-          description="Minecraft accounts allowed, promoted or banned on this server"
+          description={`${gameLabel(instance)} accounts allowed, promoted or banned on this server`}
           actions={
             <div className="flex items-center gap-2">
               <Switch id="players-show-heads" size="sm" checked={showHeads} onCheckedChange={setShowHeads} />
@@ -80,7 +81,7 @@ export default function Players() {
             <PlayerLists instanceId={instance.id} data={data} canManage={canManage} showHeads={showHeads} />
             <div className="grid gap-1 border-t pt-3 text-xs text-muted-foreground">
               <p>
-                These are Minecraft players, not panel users. Panel logins and their permissions are managed separately
+                These are {gameLabel(instance)} players, not panel users. Panel logins and their permissions are managed separately
                 {can("instance.access") ? (
                   <>
                     {" "}

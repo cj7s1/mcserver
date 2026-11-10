@@ -12,7 +12,8 @@ import {
 import type { ServerType } from "@/lib/types";
 import { useServerTypes } from "../../modpacks/modpackQueries";
 import { describedBy, Field } from "../WizardBits";
-import { CATEGORY_TYPES, type Derived, type FieldErrors, TYPE_LABELS, type WizardState } from "../wizardModel";
+import { variantLabel } from "@/lib/games";
+import { CATEGORY_TYPES, type Derived, type FieldErrors, type WizardState } from "../wizardModel";
 
 const GROUPS: { label: string; types: ServerType[] }[] = [
   { label: "Vanilla", types: CATEGORY_TYPES.vanilla },
@@ -55,7 +56,7 @@ export function ImportSoftware({
                 <SelectLabel>{g.label}</SelectLabel>
                 {g.types.map((t) => (
                   <SelectItem key={t} value={t}>
-                    {serverTypes.data?.find((s) => s.id === t)?.label ?? TYPE_LABELS[t]}
+                    {serverTypes.data?.find((s) => s.id === t)?.label ?? variantLabel(t)}
                   </SelectItem>
                 ))}
               </SelectGroup>

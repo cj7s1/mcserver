@@ -30,6 +30,7 @@ from typing import Any
 from django.db import transaction
 from django.utils import timezone
 
+from apps import games
 from apps.core.errors import ApiError, ConflictError
 from apps.jobs import runner
 from apps.jobs.models import ACTIVE_STATUSES, Job, JobStatus
@@ -50,6 +51,7 @@ MESSAGE_MAX = 100
 RUNNING_STATUSES = ("running", "starting", "unhealthy")
 _FORMATTING = re.compile(r"§.?")
 _UNKNOWN_COMMAND = re.compile(r"unknown|incorrect|not found", re.I)
+UNKNOWN_COMMAND = _UNKNOWN_COMMAND  # the Minecraft definition's tellraw -> say fallback (apps/games/minecraft.py)
 _UNREACHABLE = object()
 
 
@@ -183,6 +185,8 @@ class PowerCountdown:
         self.instance = instance
         self.action = action
         self.client = AgentClient(instance.node)
+        # (a game this panel does not know has no in-game messages)
+        self.definition = games.get_or_none(instance.game) or games.GameDefinition()
         self.minutes = int((job.params or {}).get("warn_minutes") or 0)
         self.message = clean_message((job.params or {}).get("warn_message"))
         self.marks = warning_marks(self.minutes)
@@ -207,6 +211,10 @@ class PowerCountdown:
     # -- internals -------------------------------------------------------------------------
     def _countdown(self) -> dict[str, Any] | None:
         if not self.marks:
+            return None
+        if not self.definition.has(self.instance, "broadcast"):
+            label = self.definition.label or self.instance.game
+            self.ctx.log(f"{label} servers cannot show in-game messages; {self._doing()} without a warning")
             return None
         if not self._running():
             self.ctx.log("The server is not running, so no warning is needed")
@@ -257,27 +265,20 @@ class PowerCountdown:
             return True
 
     def _players(self) -> Any:
-        from apps.players.service import online_players
-
+        if not self.definition.has(self.instance, "players"):
+            return None  # unknown: warn anyway
         try:
-            return online_players(self.instance).get("online")  # None = output not understood
+            return self.definition.online_players(self.instance).get("online")  # None = output not understood
         except ApiError:
             return _UNREACHABLE
 
     def _send(self, text: str, *, color: str = "yellow") -> bool:
         try:
-            out = self.client.command(self.instance.id, tellraw_command(text, self.message, color=color))
+            # Minecraft: tellraw, or `say` on servers without it (apps/games/minecraft.py)
+            self.definition.broadcast(self.client, self.instance, text, message=self.message, color=color)
         except ApiError as exc:
             self.ctx.log(f"Could not send the in-game message: {exc.detail}")
             return False
-        if out and _UNKNOWN_COMMAND.search(out):
-            # very old or unusual servers without tellraw: fixed text only (no operator message,
-            # because `say` expands selectors such as @a)
-            try:
-                self.client.command(self.instance.id, f"say {text}")
-            except ApiError as exc:
-                self.ctx.log(f"Could not send the in-game message: {exc.detail}")
-                return False
         return True
 
     def _warn(self, seconds: int, *, progress: float) -> None:

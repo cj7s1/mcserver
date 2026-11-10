@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { formatBytes, formatMemoryMb } from "@/lib/format";
+import { variantLabel } from "@/lib/games";
 import { loaderLabel, providerLabel } from "../modpacks/modpackMeta";
 import { SummaryList } from "./WizardBits";
 import {
@@ -17,7 +18,6 @@ import {
   type FieldErrors,
   serverProperties,
   type StepId,
-  TYPE_LABELS,
   type WizardState,
 } from "./wizardModel";
 
@@ -87,7 +87,7 @@ export function softwareRows(
   const rows: [ReactNode, ReactNode][] = [
     [
       "Type",
-      `${CATEGORY_LABELS[state.category]}${d.serverType && state.category !== "vanilla" ? ` · ${TYPE_LABELS[d.serverType]}` : ""}`,
+      `${CATEGORY_LABELS[state.category]}${d.serverType && state.category !== "vanilla" ? ` · ${variantLabel(d.serverType)}` : ""}`,
     ],
     ["Minecraft", d.minecraftVersion || "Not chosen"],
   ];

@@ -49,9 +49,15 @@ def player_count(instance: Instance, client: AgentClient) -> dict[str, Any] | No
     cannot ping (no ``ping`` feature). A ping lists at most a sample of the names (Minecraft
     sends up to 12), so the player history of a busy server misses some names.
     """
-    from apps.players.service import NAME_RE, online_players
+    from apps import games
+    from apps.players.service import NAME_RE
 
-    if client.supports(PING_FEATURE):
+    definition = games.get_or_none(getattr(instance, "game", None))
+    if definition is None:
+        return None
+    caps = definition.capabilities(instance)
+    # the agent's ping is the Minecraft Server List Ping (capability "query")
+    if "query" in caps and client.supports(PING_FEATURE):
         try:
             answer = client.ping(instance.id)
         except ApiError as exc:
@@ -64,8 +70,10 @@ def player_count(instance: Instance, client: AgentClient) -> dict[str, Any] | No
             if isinstance(name, str) and NAME_RE.match(name.strip()) and name.strip() not in names:
                 names.append(name.strip())
         return {"online": answer.get("online"), "max": answer.get("max"), "players": names}
+    if "players" not in caps:
+        return None
     try:
-        return online_players(instance)
+        return definition.online_players(instance)
     except ApiError:
         return None
 

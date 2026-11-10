@@ -36,7 +36,20 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketState
 
-from . import __version__, backups, docker_ops, hashcache, lastrun, maintenance, netguard, slp, storage, tls
+from . import (
+    __version__,
+    backups,
+    docker_ops,
+    drivers,
+    hashcache,
+    lastrun,
+    maintenance,
+    netguard,
+    profiles,
+    slp,
+    storage,
+    tls,
+)
 from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
@@ -105,7 +118,10 @@ TEXT_LIMIT = 5 * 1024 * 1024
 #               and images_removed (superseded runtime images it removed)
 #   ping        GET /instances/{id}/ping: server list ping (players online, max, sample, version, motd)
 #   clone_level_name  clone takes level_name and layout and leaves out exactly that world
-FEATURES = ["retire", "pull_newer", "ping", "clone_level_name"]
+#   games       the spec takes game/variant (absent = minecraft) and selects a runtime profile; GET
+#               /v1/info lists the profiles under "games"; a spec of a game without a profile is
+#               refused with 400 unknown_game
+FEATURES = ["retire", "pull_newer", "ping", "clone_level_name", "games"]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
 LIFECYCLE_LOCK_WAIT = 60.0
@@ -365,7 +381,7 @@ def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
 
 
 def _spec_hash(spec: Any) -> str:
-    return hashlib.sha256(json.dumps(spec.model_dump(mode="json"), sort_keys=True).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(spec.hash_payload(), sort_keys=True).encode()).hexdigest()[:16]
 
 
 # --- health / host -------------------------------------------------------------------
@@ -409,6 +425,8 @@ async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
             "runtime_uid": settings.runtime_uid,
             "runtime_gid": settings.runtime_gid,
         },
+        # the runtime profiles: {game: {"variants": [...], "images": [...], "control": driver}}
+        "games": profiles.info(settings),
     }
 
 
@@ -516,7 +534,8 @@ async def apply_spec(
     (``image_id``), whether a pull succeeded (``pulled``), and lists superseded runtime images it
     removed (``images_removed``) and ``warnings``.
     """
-    image = docker_ops.validate_image(settings, body.spec.image)
+    profile = profiles.for_spec(body.spec)  # 400 unknown_game
+    image = docker_ops.validate_image(settings, body.spec.image, profile)
     docker_ops.build_create_kwargs(settings, instance_id, body.spec, "validate")  # validate before queuing
     registry.assert_lifecycle_allowed(instance_id)
 
@@ -748,6 +767,8 @@ async def ping(instance_id: UUID, settings: Settings = Depends(get_settings)) ->
     ``version``, ``motd`` (plain text) and ``latency_ms``. 409 ``not_running`` without a running
     container, 504 ``ping_timeout`` after 5 s, 502 ``ping_failed`` when it does not answer the
     protocol (still starting)."""
+    # the container's driver says where its query listens (409 ping_unavailable without one); the
+    # query itself is the server list ping, the only one there is so far (Minecraft's)
     host, port = await run_in_threadpool(docker_ops.game_endpoint, settings, instance_id)
     try:
         return await asyncio.wait_for(slp.ping(host, port, timeout=PING_TIMEOUT), PING_TIMEOUT)
@@ -770,9 +791,10 @@ async def disk(instance_id: UUID, settings: Settings = Depends(get_settings)) ->
 async def command(
     instance_id: UUID, body: CommandRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    host, port, password = await run_in_threadpool(docker_ops.rcon_endpoint, settings, instance_id)
+    """One console command through the container's control driver (Minecraft: RCON); its output."""
+    c = await run_in_threadpool(docker_ops.running_container, instance_id)
     try:
-        output = await run_command(host, port, password, body.command, timeout=body.timeout)
+        output = await drivers.for_container(c).command(settings, c, body.command, body.timeout)
     except RconError as exc:
         raise AgentError(str(exc), "rcon_failed", 502) from exc
     return {"output": output}
@@ -2237,31 +2259,60 @@ def _clear_saving_marker(settings: Settings, instance_id: UUID) -> None:
         _saving_marker(settings, instance_id).unlink()
 
 
+def _sender_with_timeout(settings: Settings, instance_id: UUID, timeout: float) -> drivers.Send:
+    """Like :func:`_sender`, every command bounded by ``timeout`` instead of the driver's own
+    (the recovery loop and the shutdown hook)."""
+    return lambda command, _timeout: _rcon(settings, instance_id, command, timeout)
+
+
+def _sender(settings: Settings, instance_id: UUID) -> drivers.Send:
+    """The channel the saving pause sends its commands over (RCON drivers: :func:`_rcon`)."""
+    return lambda command, timeout: _rcon(settings, instance_id, command, timeout)
+
+
 @contextlib.contextmanager
 def _world_saving_paused(
     settings: Settings, instance_id: UUID, consistency: str, op: Operation, what: str, progress: float
 ) -> Iterator[_SavingState]:
-    """``save-off`` + ``save-all flush`` on a running server for the duration of the block.
+    """World saving paused on a running server for the duration of the block, the way its game
+    does it (the container's control driver; Minecraft: ``save-off`` + ``save-all flush``, and
+    ``save-on`` afterwards).
 
-    Once ``save-off`` has been sent (even if its reply was lost), ``save-on`` is sent when the
-    block ends, whatever happens: a failed flush, ``consistency=require`` refusing to go on,
-    an exception or timeout in the block. With ``require`` a failed pause raises
+    Once the first pause command has been sent (even if its reply was lost), saving is resumed
+    when the block ends, whatever happens: a failed flush, ``consistency=require`` refusing to go
+    on, an exception or timeout in the block. With ``require`` a failed pause raises
     ``consistency_failed``; with ``auto`` it only adds a warning. If the process ends inside the
-    block, the marker file makes the next agent (or this one's shutdown hook) send ``save-on``.
+    block, the marker file makes the next agent (or this one's shutdown hook) resume saving.
+    A driver that cannot pause but can save gets a save before the copy (no marker: nothing to
+    resume); one that can do neither makes the copy inconsistent.
     """
-    state = _SavingState(running=bool(docker_ops.status(instance_id).get("running")))
+    status = docker_ops.status(instance_id)
+    state = _SavingState(running=bool(status.get("running")))
+    driver = drivers.for_status(status)
     save_off_sent = False
+    send = _sender(settings, instance_id)
+
+    def send_pausing(command: str, timeout: float) -> None:
+        nonlocal save_off_sent
+        if not save_off_sent:
+            with _saving_lock(instance_id):
+                _paused_here.add(instance_id)
+                _mark_saving_paused(settings, instance_id)
+            save_off_sent = True
+        send(command, timeout)
+
+    def report(step: int, message: str) -> None:
+        op.update(progress + 0.02 * step, message)
+
     try:
         if state.running and consistency != "none":
             try:
-                op.update(progress, "Pausing world saving (save-off)")
-                with _saving_lock(instance_id):
-                    _paused_here.add(instance_id)
-                    _mark_saving_paused(settings, instance_id)
-                save_off_sent = True
-                _rcon(settings, instance_id, "save-off", 30)
-                op.update(progress + 0.02, "Flushing world to disk (save-all flush)")
-                _rcon(settings, instance_id, "save-all flush", 300)
+                if driver.can_pause_saving:
+                    driver.pause_saving(send_pausing, report)
+                elif driver.can_save:
+                    driver.save(send, report)
+                else:
+                    raise AgentError("this server's game cannot save on request", "save_unsupported", 409)
                 time.sleep(SAVE_SETTLE_SECONDS)
                 state.paused = True
             except Exception as exc:  # RCON, Docker (container gone meanwhile) or socket errors
@@ -2274,26 +2325,34 @@ def _world_saving_paused(
     finally:
         if save_off_sent:
             try:
-                _resume_saving(settings, instance_id, state.warnings)
+                _resume_saving(settings, instance_id, state.warnings, driver)
             finally:
                 with _saving_lock(instance_id):
                     _paused_here.discard(instance_id)
 
 
-def _resume_saving(settings: Settings, instance_id: UUID, warnings: list[str]) -> None:
-    """Send save-on (retrying); never raises, so it cannot mask the block's own error.
+def _resume_saving(
+    settings: Settings, instance_id: UUID, warnings: list[str], driver: drivers.ControlDriver | None = None
+) -> None:
+    """Resume saving (Minecraft: ``save-on``), retrying; never raises, so it cannot mask the
+    block's own error.
 
     The marker is removed once it worked; after a failure it stays, and the periodic recovery
     (:func:`_recover_saving`) keeps trying."""
+    if driver is None:
+        try:
+            driver = drivers.for_status(docker_ops.status(instance_id))
+        except Exception:  # Docker not reachable: the container's labels cannot be read
+            driver = drivers.for_labels({})
     for attempt in range(SAVE_ON_ATTEMPTS):
         try:
-            _rcon(settings, instance_id, "save-on", 30)
+            driver.resume_saving(_sender(settings, instance_id))
             _clear_saving_marker(settings, instance_id)
             return
         except Exception as exc:
             if attempt == SAVE_ON_ATTEMPTS - 1:
                 log.error("Could not re-enable world saving on %s: %s", instance_id, exc)
-                warnings.append(f"FAILED to re-enable world saving (save-on): {exc}")
+                warnings.append(f"FAILED to re-enable world saving ({driver.resume_label}): {exc}")
                 return
             time.sleep(SAVE_ON_RETRY_SECONDS)
 
@@ -2325,23 +2384,29 @@ def _recover_saving(settings: Settings, *, timeout: float = 30.0) -> int:
             if instance_id in _paused_here:
                 continue
             try:
-                running = bool(docker_ops.status(instance_id).get("running"))
+                status = docker_ops.status(instance_id)
             except Exception as exc:  # Docker not reachable (yet)
                 log.debug("Saving recovery of %s: cannot read the container state: %s", instance_id, exc)
                 left += 1
                 continue
-            if not running:
+            driver = drivers.for_status(status)
+            if not status.get("running") or not driver.can_pause_saving:
+                # saving is on when it starts again; a container of a game that cannot pause
+                # (replaced meanwhile) has nothing to resume
                 _clear_saving_marker(settings, instance_id)
                 continue
             try:
-                _rcon(settings, instance_id, "save-on", timeout)
+                driver.resume_saving(_sender_with_timeout(settings, instance_id, timeout))
             except Exception as exc:
-                log.warning("World saving of %s is still paused; save-on failed: %s", instance_id, exc)
+                log.warning(
+                    "World saving of %s is still paused; %s failed: %s", instance_id, driver.resume_label, exc
+                )
                 left += 1
                 continue
             _clear_saving_marker(settings, instance_id)
             log.warning(
-                "Re-enabled world saving (save-on) on %s: a backup or snapshot was interrupted while it was paused",
+                "Re-enabled world saving (%s) on %s: a backup or snapshot was interrupted while it was paused",
+                driver.resume_label,
                 instance_id,
             )
     return left
@@ -2363,10 +2428,13 @@ def _resume_all_saving(settings: Settings, timeout: float) -> None:
 
         def one(iid: UUID = instance_id) -> None:
             try:
-                running = bool(docker_ops.status(iid).get("running"))
-                if running:
-                    _rcon(settings, iid, "save-on", timeout)
-                    log.warning("Re-enabled world saving (save-on) on %s before the agent exits", iid)
+                status = docker_ops.status(iid)
+                driver = drivers.for_status(status)
+                if status.get("running") and driver.can_pause_saving:
+                    driver.resume_saving(_sender_with_timeout(settings, iid, timeout))
+                    log.warning(
+                        "Re-enabled world saving (%s) on %s before the agent exits", driver.resume_label, iid
+                    )
                 _clear_saving_marker(settings, iid)
             except Exception as exc:
                 log.warning("Could not re-enable world saving on %s before the agent exits: %s", iid, exc)

@@ -75,6 +75,9 @@ class Instance(models.Model):
     node = models.ForeignKey("nodes.Node", on_delete=models.PROTECT, related_name="instances")
 
     # --- software --------------------------------------------------------------------
+    # The game definition (apps/games); server_type is the variant within the game. db_default:
+    # after a rollback to a release without the column it is still there and must not break new rows.
+    game = models.CharField(max_length=32, default="minecraft", db_default="minecraft")
     edition = models.CharField(max_length=10, default="java")
     server_type = models.CharField(max_length=20, choices=ServerType.choices, default=ServerType.VANILLA)
     minecraft_version = models.CharField(max_length=40, default="LATEST")
@@ -175,6 +178,18 @@ class Instance(models.Model):
 
     @property
     def container_memory_mb(self) -> int:
+        """The container's memory limit, by the game's memory model (Minecraft: ``jvm``)."""
+        if self.game and self.game != "minecraft":
+            from apps import games
+
+            definition = games.get_or_none(self.game)
+            if definition is not None:
+                return definition.container_memory_mb(self)
+        return self.jvm_container_memory_mb
+
+    @property
+    def jvm_container_memory_mb(self) -> int:
+        """Memory model ``jvm``: ``memory_mb`` is the Java heap, the container gets heap + overhead."""
         # Off-heap memory (metaspace, threads, GC, direct buffers) grows with mod count: a
         # 311-mod Forge pack used ~1.3 GB above a 6 GB heap in testing, so leave generous room.
         if self.memory_overhead_mb:

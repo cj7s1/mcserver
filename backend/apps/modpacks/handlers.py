@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from apps import games
 from apps.backups.handlers import RESTORE_UNTOUCHED, require_local_backup, run_backup
 from apps.backups.models import Backup, BackupKind, BackupStatus
 from apps.catalog.providers import resolve_java
@@ -48,7 +49,7 @@ def current_pin(instance: Instance) -> dict[str, Any]:
 
 def plan_update(instance: Instance, version_id: str) -> dict[str, Any]:
     """Resolve a target release and describe the change (no side effects)."""
-    if not instance.is_modpack or not instance.modpack_provider:
+    if "modpacks" not in games.capabilities(instance) or not instance.modpack_provider:
         raise ApiError("This server is not a modpack server", code="not_modpack", status_code=409)
     resolved = get_provider(instance.modpack_provider).resolve_modpack(instance.modpack_project_id, version_id)
     if str(resolved["project_id"]) != str(instance.modpack_project_id):

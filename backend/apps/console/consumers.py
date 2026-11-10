@@ -133,13 +133,16 @@ async def _run_command(user: Any, instance: Any, command: str) -> str:
     return output
 
 
-def is_stop_command(command: str) -> bool:
-    """``stop`` typed in the console (any case, with leading slashes and surrounding blanks).
+def is_stop_command(command: str, definition: Any = None) -> bool:
+    """A stop word of the server's game typed in the console (Minecraft: ``stop``, any case, with
+    leading slashes and surrounding blanks; ``definition`` defaults to Minecraft's).
 
     Sent over RCON it makes the server exit, and Docker's restart policy then starts it again at
     once: the server is not stopped, it restarts. The console runs the panel's Stop instead.
     """
-    return command.strip().lstrip("/").strip().lower() == "stop"
+    from apps import games
+
+    return (definition or games.get(games.DEFAULT_GAME)).is_stop_command(command)
 
 
 def _enqueue_stop(user: Any, instance: Any) -> Any:
@@ -333,11 +336,18 @@ class ConsoleConsumer(_GuardedConsumer):
         if "instance.command" not in self.perms:
             await self._send({"type": "command_result", "id": req_id, "ok": False, "error": "You may not send commands"})
             return
-        command = str(content.get("command", "")).strip().lstrip("/")
+        from apps import games
+
+        definition = games.get_or_none(getattr(self.instance, "game", None))
+        if definition is None or not definition.has(self.instance, "console_commands"):
+            error = f"{definition.label if definition else 'This game'} servers have no console commands"
+            await self._send({"type": "command_result", "id": req_id, "ok": False, "error": error, "code": "unsupported_by_game"})
+            return
+        command = definition.normalise_command(str(content.get("command", "")).strip())
         if not command or len(command) > 1400 or "\n" in command or "\r" in command:
             await self._send({"type": "command_result", "id": req_id, "ok": False, "error": "Invalid command"})
             return
-        if is_stop_command(command):
+        if is_stop_command(command, definition):
             await self._stop(req_id, command)
             return
         try:

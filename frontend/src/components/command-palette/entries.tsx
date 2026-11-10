@@ -3,28 +3,11 @@
  * per-server power actions. Pure functions of the user's permissions and the instance list, so the
  * palette never offers something the backend would refuse (the backend still enforces everything).
  */
-import {
-  CalendarClock,
-  DatabaseBackup,
-  FolderOpen,
-  History,
-  Info,
-  Network,
-  Package,
-  Play,
-  Plug,
-  Puzzle,
-  RotateCw,
-  Settings,
-  ShieldCheck,
-  Square,
-  Terminal,
-  Users,
-  type LucideIcon,
-} from "lucide-react";
+import { Play, RotateCw, Square, type LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { StatusDot, statusLabel } from "@/components/StatusBadge";
 import { hasPerm } from "@/lib/queries";
+import { type InstanceSection, instanceSections, sectionPath } from "@/lib/sections";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { isRunningLike, serverTypeLabel, type PowerAction } from "@/pages/library/server-utils";
 
@@ -83,45 +66,11 @@ export function navEntries(groups: readonly PaletteNavGroup[], can: (code: Permi
     .filter((g) => g.entries.length > 0);
 }
 
-export interface ServerSection {
-  key: string;
-  /** Path below /servers/<id>; "" is the overview. */
-  path: string;
-  label: (i: Instance) => string;
-  icon: (i: Instance) => LucideIcon;
-  perm?: PermissionCode;
-  when?: (i: Instance) => boolean;
-  aliases: string[];
-  /** Shown for the current server even before the user types. */
-  primary?: boolean;
-}
-
-/** Same visibility rules as the tabs in src/pages/instance/InstanceLayout.tsx. */
-export const SERVER_SECTIONS: readonly ServerSection[] = [
-  { key: "overview", path: "", label: () => "Overview", icon: () => Info, aliases: ["status", "summary", "diagnostics"], primary: true },
-  { key: "console", path: "console", label: () => "Console", icon: () => Terminal, perm: "instance.console", aliases: ["terminal", "logs", "command", "rcon"], primary: true },
-  { key: "files", path: "files", label: () => "Files", icon: () => FolderOpen, perm: "instance.files.read", aliases: ["file manager", "config", "upload"], primary: true },
-  {
-    key: "content",
-    path: "content",
-    label: (i) => (i.content_kind === "plugins" ? "Plugins" : "Mods"),
-    icon: (i) => (i.content_kind === "plugins" ? Plug : Puzzle),
-    when: (i) => i.content_kind === "mods" || i.content_kind === "plugins",
-    aliases: ["mods", "plugins", "content", "modrinth", "hangar"],
-    primary: true,
-  },
-  { key: "modpack", path: "modpack", label: () => "Modpack", icon: () => Package, when: (i) => i.is_modpack, aliases: ["update", "rollback", "pack"] },
-  { key: "players", path: "players", label: () => "Players", icon: () => Users, aliases: ["whitelist", "operators", "ops", "bans", "kick"] },
-  { key: "backups", path: "backups", label: () => "Backups", icon: () => DatabaseBackup, perm: "instance.backup", aliases: ["restore", "snapshots", "restic"], primary: true },
-  { key: "schedules", path: "schedules", label: () => "Schedules", icon: () => CalendarClock, aliases: ["cron", "automation", "timer"] },
-  { key: "network", path: "network", label: () => "Network", icon: () => Network, aliases: ["ports", "address", "connect", "ip"] },
-  { key: "settings", path: "settings", label: () => "Settings", icon: () => Settings, aliases: ["properties", "memory", "java", "configure", "software"], primary: true },
-  { key: "access", path: "access", label: () => "Access", icon: () => ShieldCheck, perm: "instance.access", aliases: ["permissions", "users", "grants"] },
-  { key: "activity", path: "activity", label: () => "Activity", icon: () => History, aliases: ["jobs", "history", "audit"] },
-];
+/** The server sections (registry in src/lib/sections.ts, shared with the server tabs). */
+export type ServerSection = InstanceSection;
 
 export function serverPath(i: Pick<Instance, "id">, section: Pick<ServerSection, "path">): string {
-  return section.path ? `/servers/${i.id}/${section.path}` : `/servers/${i.id}`;
+  return sectionPath(i, section);
 }
 
 export function softwareHint(i: Instance): string {
@@ -151,9 +100,9 @@ export function serverEntry(i: Instance): PaletteEntry {
 
 /** The pages of one server the user may open (overview included). */
 export function serverSectionEntries(i: Instance, opts: { primaryOnly?: boolean } = {}): PaletteEntry[] {
-  return SERVER_SECTIONS.filter(
-    (s) => (!s.perm || hasPerm(i.permissions, s.perm)) && (!s.when || s.when(i)) && (!opts.primaryOnly || s.primary),
-  ).map((s) => {
+  return instanceSections(i)
+    .filter((s) => !opts.primaryOnly || s.primary)
+    .map((s) => {
     const label = s.label(i);
     const Icon = s.icon(i);
     return {

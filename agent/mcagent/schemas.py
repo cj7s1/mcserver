@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+GAME_ID_PATTERN = r"^[a-z0-9-]{1,32}$"
 IMAGE_TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 # Environment keys that the agent owns and refuses to let callers override. The RCON
 # password travels in ``rcon_password``; RCON_PASSWORD_FILE would silently replace it
@@ -61,6 +62,21 @@ class InstanceSpec(BaseModel):
     stop_timeout: int = Field(default=60, ge=5, le=900)
     rcon_password: str = Field(min_length=8, max_length=128)
     healthcheck: HealthcheckSpec = Field(default_factory=HealthcheckSpec)
+    # The runtime profile (mcagent.profiles): absent = Minecraft, which is what every panel before
+    # multi-game support sends, and what a current panel sends for a Minecraft server. Unknown
+    # games are refused with 400 unknown_game when the spec is applied.
+    game: str = Field(default="minecraft", pattern=GAME_ID_PATTERN)
+    variant: str | None = Field(default=None, pattern=GAME_ID_PATTERN)
+
+    def hash_payload(self) -> dict[str, Any]:
+        """What the agent's spec-hash label is made of: the spec as JSON, without ``game`` and
+        ``variant`` for a Minecraft spec, so the label of a Minecraft container stays what it was
+        before the fields existed."""
+        data = self.model_dump(mode="json")
+        if data.get("game") == "minecraft" and data.get("variant") is None:
+            data.pop("game", None)
+            data.pop("variant", None)
+        return data
 
     @field_validator("env")
     @classmethod

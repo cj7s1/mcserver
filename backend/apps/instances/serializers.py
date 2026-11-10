@@ -7,6 +7,7 @@ from typing import Any
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from apps import games
 from apps.core.models import SystemSetting
 
 from . import properties
@@ -99,6 +100,13 @@ class InstanceSerializer(serializers.ModelSerializer):
         "or the caller lacks instance.backup"
     )
     backup_schedules = serializers.SerializerMethodField(help_text="Number of enabled schedules whose action is a backup")
+    game_label = serializers.SerializerMethodField(help_text="Display name of the server's game")
+    capabilities = serializers.SerializerMethodField(
+        help_text="Features this server has (apps/games: console_commands, broadcast, players, ..., sorted)"
+    )
+    memory_model = serializers.SerializerMethodField(
+        help_text="jvm: memory_mb is the Java heap (the container gets more); plain: memory_mb is the container limit"
+    )
 
     class Meta:
         model = Instance
@@ -110,6 +118,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "group",
             "node",
             "node_name",
+            "game",
+            "game_label",
             "edition",
             "server_type",
             "minecraft_version",
@@ -120,6 +130,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "source",
             "content_kind",
             "is_modpack",
+            "capabilities",
+            "memory_model",
             "modpack_provider",
             "modpack_project_id",
             "modpack_slug",
@@ -190,6 +202,19 @@ class InstanceSerializer(serializers.ModelSerializer):
                 "java_version",
             )
         ]
+
+    def get_game_label(self, obj: Instance) -> str:
+        definition = games.get_or_none(obj.game)
+        return definition.label if definition is not None else obj.game
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_capabilities(self, obj: Instance) -> list[str]:
+        return sorted(games.capabilities(obj))
+
+    @extend_schema_field(serializers.ChoiceField(choices=list(games.MEMORY_MODELS)))
+    def get_memory_model(self, obj: Instance) -> str:
+        definition = games.get_or_none(obj.game)
+        return definition.memory_model if definition is not None else "plain"
 
     def get_restart_required(self, obj: Instance) -> bool:
         try:
@@ -423,6 +448,14 @@ class CreateInstanceSerializer(serializers.Serializer):
         help_text="Also create the default nightly backup schedule (skipped when the caller may not schedule backups)",
     )
     node = serializers.IntegerField(required=False, help_text="Node id (default node when omitted)")
+    game = serializers.CharField(
+        max_length=32, required=False, default="minecraft", help_text="Game id from GET /api/catalog/games (default minecraft)"
+    )
+
+    def validate_game(self, value: str) -> str:
+        if games.get_or_none(value) is None:
+            raise serializers.ValidationError(f"Unknown game; choose one of {', '.join(games.ids())}")
+        return value
 
     def validate_accept_eula(self, value: bool) -> bool:
         if not value:
@@ -446,6 +479,8 @@ class CreateInstanceSerializer(serializers.Serializer):
         return {k: v for k, v in validated.items() if v is not None}
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        if attrs.get("game", games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            return attrs  # the create view refuses other games (phase 1): no Minecraft checks for them
         if attrs["mode"] == "standard":
             if not attrs.get("server_type"):
                 raise serializers.ValidationError({"server_type": ["Choose a server type"]})
@@ -540,10 +575,15 @@ class ScheduleSerializer(serializers.ModelSerializer):
         action = attrs.get("action") or getattr(self.instance, "action", None)
         payload = attrs.get("payload", getattr(self.instance, "payload", {})) or {}
         if action == "command":
+            # the server's game decides whether it has console commands and how they are written
+            instance = self.context.get("instance") or getattr(self.instance, "instance", None)
+            definition = games.for_instance(instance) if instance is not None else games.get(games.DEFAULT_GAME)
+            if instance is not None and not definition.has(instance, "console_commands"):
+                raise serializers.ValidationError({"action": [f"{definition.label} servers have no console commands"]})
             cmd = str(payload.get("command", "")).strip()
             if not cmd or len(cmd) > 1400 or "\n" in cmd:
                 raise serializers.ValidationError({"payload": ["A single-line command is required"]})
-            payload["command"] = cmd.lstrip("/")
+            payload["command"] = definition.normalise_command(cmd)
             attrs["payload"] = payload
         if action in ("restart", "stop") and isinstance(payload, dict):
             from .power_warnings import validate_message, validate_warn_minutes

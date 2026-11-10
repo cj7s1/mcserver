@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
 import { api, ApiError, errorMessage } from "@/lib/api";
+import { gameLabel } from "@/lib/games";
 import { qk, useInvalidateInstance, useSystemInfo } from "@/lib/queries";
 import type { Instance, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -264,7 +265,7 @@ export default function Network() {
         </p>
       )}
 
-      <Section title="Game port & bind address" description="The host side of the Docker port mapping for Minecraft (TCP).">
+      <Section title="Game port & bind address" description={`The host side of the Docker port mapping for ${gameLabel(instance)} (TCP).`}>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="grid content-start gap-1.5">
             <Label htmlFor="net-game-port">Host port</Label>
