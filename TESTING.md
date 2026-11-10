@@ -4,9 +4,9 @@
 
 | Suite | Command | Needs | What it covers |
 |---|---|---|---|
-| Backend unit + API | `cd backend && uv run pytest -q -m "not integration"` | Postgres + Redis | state machine, retention, properties, spec/env builder, catalog parsing, ports, permission matrix, auth/CSRF/setup, permission enforcement through the API (scenario 8), validation, job locks, content manager, diagnostics signatures, crash-loop tracking, notifications, metrics, mrpack preflight |
-| Backend integration | `cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m integration` (+ the btrfs variables below) | running agent(s) + Docker + internet | see "Integration tests" below: vanilla lifecycle + backup/restore, backup browser + single-path restore, Paper + Modrinth plugin, zip import, btrfs snapshots over a TLS-pinned node |
-| Agent | `cd agent && uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test` for the real btrfs tests) | — (restic/btrfs tests skip without them) | symlink/traversal-safe file ops, archive extraction (zip-slip, links, bombs), spec/security policy, auth, fetch allow-list, storage parsing, real restic backup/ls/dump/restore-path, real btrfs snapshots (incl. deleting a server purges its snapshots) |
+| Backend unit + API | `cd backend && uv run pytest -q -m "not integration"` | Postgres + Redis | state machine, retention, properties, spec/env builder, catalog parsing, ports, permission matrix, auth/CSRF/setup, permission enforcement through the API (scenario 8), validation, job locks, content manager, diagnostics signatures, crash-loop tracking, notifications, metrics, mrpack preflight, world replace and world reset (plan and blockers, the job with its safety-backup checks and failure handling, and `test_world_reset_contract.py`, which compares names, fields and error codes with the agent and frontend sources) |
+| Backend integration | `cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m integration` (+ the btrfs variables below) | running agent(s) + Docker + internet | see "Integration tests" below: vanilla lifecycle + backup/restore, backup browser + single-path restore, Paper + Modrinth plugin, zip import, btrfs snapshots over a TLS-pinned node, world reset |
+| Agent | `cd agent && uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test` for the real btrfs tests) | — (restic/btrfs tests skip without them) | symlink/traversal-safe file ops, archive extraction (zip-slip, links, bombs), spec/security policy, auth, fetch allow-list, storage parsing, real restic backup/ls/dump/restore-path, real btrfs snapshots (incl. deleting a server purges its snapshots), world replace and world reset on a real filesystem (which folders count as a world, undo on failure, leftovers) |
 | Frontend | `cd frontend && npx tsc -b && npm run lint && npm run build && npx vitest run` | — | type safety, lint, build, component tests |
 | Browser | Playwright scripts used during development (see DEVELOPMENT_STATUS.md) | dev server + API | every route at desktop and mobile widths, console errors, layout |
 
@@ -33,7 +33,7 @@ MCPANEL_IT_BTRFS_FINGERPRINT="$FP" uv run pytest -q -m integration -s
 
 | Variable | Default | Used by |
 |---|---|---|
-| `MCPANEL_IT_AGENT_URL` | — (skip) | agent, backup browser, content, import tests |
+| `MCPANEL_IT_AGENT_URL` | — (skip) | agent, backup browser, content, import, world reset tests |
 | `MCPANEL_IT_AGENT_TOKEN` | `dev-agent-token` | same |
 | `MCPANEL_IT_AGENT_DATA_ROOT` | `/srv/mcpanel-dev` | on-disk checks (removal, ownership); empty skips them |
 | `MCPANEL_IT_READY_TIMEOUT` | `360` | seconds to wait for a server to become healthy |
@@ -47,6 +47,7 @@ MCPANEL_IT_BTRFS_FINGERPRINT="$FP" uv run pytest -q -m integration -s
 | `test_integration_backup_browse.py` | no | backup of a stopped server, browse 3 levels + binary download through the API, `restore-path` of one file (siblings untouched) and of a deleted folder, ownership, audit | ~17 s |
 | `test_integration_import.py` | no | `POST /instances/<id>/import` of a zipped server folder: top folder stripped, files byte-identical, `../` entry and symlink skipped, archive removed, `installed_at` set, everything owned by the runtime uid/gid | ~3 s |
 | `test_integration_snapshots.py` | no | pinned TLS (wrong fingerprint refused before the token is sent); install creates a subvolume; snapshot → modify → rollback (safety snapshot holds the pre-rollback state) → delete snapshots; deleting a server removes its remaining snapshots | ~10 s |
+| `test_integration_world_reset.py` | test 1: vanilla 1.20.4, ports 25600-25650 (three starts); test 2: no | through `GET` / `POST /api/instances/<id>/world/reset`. Test 1: reset of a running server with a new seed, safety backup and "stop if running" (new seed reported by `seed` and stored in level.dat, placed block gone, old world with its seed in the “Before restore” snapshot, no `.mcpanel-world-old-*` folder, ops.json / eula.txt / other folders unchanged, server.properties changed only in `level-seed`), then a reset of the stopped server with the seed kept and no backup. Test 2: Paper-style folders written through the file API: three folders deleted, datapacks and per-world config carried over, the snapshot holds all three, a folder that is no world is refused by the panel and by the agent. Without restic on the agent the safety-backup parts are skipped | not measured: written 2026-11-09, not yet run against a real agent |
 
 ## Acceptance scenarios: verification log
 
@@ -70,6 +71,8 @@ Extra verified flows (R): FTB StoneBlock 3 (FTBA, pinned version), multi-node, s
 Java 17 → 21 and a pre-update backup, webhook notifications, Docker Compose deployment smoke test.
 Also automated (I) since 2026-11-06: btrfs snapshot/rollback over a TLS-pinned node, import an existing server
 from a zip, Modrinth plugin install on Paper.
+Reset world (2026-11-09) is at level **U** only: its integration test (`test_integration_world_reset.py`) is
+written but has not been run against a real agent yet; see DEVELOPMENT_STATUS.md → "Reset world".
 
 ## Heavy tests
 

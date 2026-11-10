@@ -119,7 +119,14 @@ def run_backup(
     consistency: str = "auto",
     job: Job | None = None,
     excludes: list[str] | None = None,
+    policy_excludes: bool = True,
 ) -> Backup:
+    """Take a restic backup of the server folder and record it.
+
+    ``policy_excludes=False`` leaves out the exclusion patterns of the server's backup policy
+    (users edit them freely, so they could leave the very data out that a safety backup is
+    for); the built-in ``DEFAULT_EXCLUDES`` and ``excludes`` always apply.
+    """
     client = AgentClient(instance.node)
     policy = policy_for(instance)
     backup = Backup.objects.create(
@@ -136,7 +143,7 @@ def run_backup(
             str(backup.id),
             tags=[f"kind:{kind}"],
             consistency=consistency,
-            excludes=DEFAULT_EXCLUDES + list(policy.excludes or []) + list(excludes or []),
+            excludes=DEFAULT_EXCLUDES + (list(policy.excludes or []) if policy_excludes else []) + list(excludes or []),
         )
         done = client.wait_operation(
             op["id"], timeout=6 * 3600, interval=1.5, on_progress=ctx.agent_progress(span[0], span[1] - span[0])

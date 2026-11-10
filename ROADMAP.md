@@ -72,6 +72,7 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] In-game countdown warnings before restart/stop (manual + scheduled, cancellable, lock only for the last 10 s) — unit-tested only
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
 - [x] World import / export (replace from an archive with safety backup + rollback; zip export incl. Bukkit dimension folders)
+- [x] Reset world (Settings → Danger zone: deletes the world folders so the server generates a new one; typed server name, safety backup that is checked to hold the world, optional new seed, datapacks / per-world config carried over) — unit-tested only
 - [x] Software (non-modpack) version update workflow with automatic pre-update backup
 
 ## Phase 8 — Unraid

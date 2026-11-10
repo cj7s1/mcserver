@@ -185,6 +185,14 @@ class WorldReplaceRequest(BaseModel):
     delete_archive: bool = False
 
 
+class WorldResetRequest(BaseModel):
+    confirm: UUID  # must equal the instance id, a deliberate second key (as DeleteDataRequest)
+    level_name: str = Field(min_length=1, max_length=200)
+    layout: Literal["vanilla", "bukkit"]
+    expect: list[str] = Field(min_length=1, max_length=3)  # the world folders the user confirmed
+    keep: list[Literal["datapacks", "config"]] = Field(default_factory=list, max_length=2)
+
+
 class RestorePathRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 

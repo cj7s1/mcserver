@@ -108,10 +108,10 @@ function WorldBody({ world, instanceId, busy }: { world: WorldInfo; instanceId: 
           {w}
         </Notice>
       ))}
-      {/* while a replacement runs, its upload and staging folders are expected */}
+      {/* while a replacement or reset runs, its upload and staging folders are expected */}
       {!busy && world.leftovers.length > 0 && (
         <Notice tone="warn">
-          An interrupted world replacement left{" "}
+          An interrupted world replacement or reset left{" "}
           {world.leftovers.map((l, i) => (
             <span key={l}>
               {i > 0 && ", "}

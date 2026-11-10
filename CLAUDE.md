@@ -63,6 +63,7 @@ cd backend && MCPANEL_IT_AGENT_URL=http://127.0.0.1:8700 uv run pytest -q -m int
 | Import / export (archives) | `apps/instances/views.py` (Import/Extract/Archive) | `archive.py` |
 | Power warnings / update checks | `apps/instances/power_warnings.py` (in-game countdown before restart/stop), `apps/modpacks/{updates,tasks}.py` (periodic modpack update checks) | (RCON via `rcon.py`) |
 | World import / export (level-name, Bukkit dims, replace + rollback) | `apps/instances/{world,views,handlers}.py` (`world_replace` job) | `world.py` |
+| World reset (plan + blockers, verified safety backup, seed, delete + undo; UI: Settings → Danger zone, `frontend/src/pages/instance/settings/reset-world-*`) | `apps/instances/world.py` (`reset_plan`), `views.py` (`WorldResetView`), `handlers.py` (`world_reset` job); contract tests `tests/test_world_reset_contract.py` | `world.py` (`classify`, `reset`), `POST /world/reset` |
 | Metrics + player history | `apps/metrics` | `/stats` |
 | Notifications | `apps/notifications` | — |
 | Nodes (multi-host) | `apps/nodes` | one agent per host |

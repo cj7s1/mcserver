@@ -21,7 +21,8 @@ pick a release, choose RAM and a port, and deploy.
   ("Update available" badge, optional notification); updates are explicit, take a pre-update backup, and
   can be rolled back.
 - **Lifecycle:** install, start, graceful stop, restart, kill, recreate (keeps world data), clone, import
-  an existing server from an archive, archive, and delete with typed confirmation. Status comes from real
+  an existing server from an archive, archive, reset the world (the server generates a new one; a safety
+  backup is taken and checked first), and delete with typed confirmation. Status comes from real
   health checks. Crash loops are detected and stopped, and a diagnosis names the likely cause (missing
   mods, wrong Java version, out of memory and so on).
 - **Console:** live log streaming and RCON commands over WebSockets, with history and filtering.

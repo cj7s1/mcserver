@@ -1,6 +1,8 @@
 # Development status
 
-_Last updated: 2026-11-06 (session 2: SpigotMC source, mods-listing speed-up, integration coverage, btrfs
+_Last updated: 2026-11-09 (reset world: implemented and unit-tested, not yet run against a real agent or
+server; see "Reset world" below). Before that: 2026-11-06 (session 2: SpigotMC source, mods-listing
+speed-up, integration coverage, btrfs
 delete fix, Unraid simulation, modpack update checks, restart warnings, security-audit fixes, ZFS snapshot
 provider, world import/export). Previous: 2026-11-03, end of
 session 1._ Keep this file honest. Implemented,
@@ -20,6 +22,19 @@ and the worker+beat. All tests pass on `main` of this branch:
 | `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 154 tests in 26 files (2026-11-06, after the audit follow-ups) |
 | `ruff check` / `ruff format --check` | clean (backend, agent) |
 | Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack (before `worker-periodic` was added; since then only `docker compose config -q` was run) |
+
+### Suites with reset world (branch `feature/reset-world`, 2026-11-09)
+
+Run on a development machine that has no restic, btrfs or zfs binaries and no running agent, so this
+does not replace the table above (the sandbox runs with real restic and btrfs):
+
+| Suite | Result |
+|---|---|
+| `backend: pytest -q -m "not integration"` | **981 passed**, 1 skipped (the SPA check: frontend not built), 9 integration tests deselected |
+| `agent: pytest -q` | **648 passed, 19 skipped** (the restic, btrfs and ZFS-restore tests skip without the binaries) |
+| `frontend: npx tsc -b && npm run lint && npx vitest run && npm run build` | clean (45 lint warnings, as before), **226 tests in 29 files** |
+| `ruff check` / `ruff format --check` | clean (backend, agent) |
+| `backend: … -m integration` | **not run** (needs a running agent + Docker). This includes the new `test_integration_world_reset.py`, which has never run against a real agent |
 
 ### Integration coverage added 2026-11-06 (and a bug it found)
 
@@ -173,6 +188,9 @@ was attempted). Still not verified: a real restricted account on the backend, an
   replaced world (Paper migrating a singleplayer world's `DIM-1` into `world_nether`): unit-tested with the fake
   agent only. Worlds above the panel upload limit (`MCPANEL_MAX_UPLOAD_BYTES`, 2 GiB) must be copied into the
   server folder first and chosen with “From the server folder”.
+* **Reset world** (2026-11-09): unit-tested with the simulated agent and on a real filesystem only. No real
+  agent, Docker, restic or Minecraft server has run it, and the dialog was not opened against a live panel.
+  Details and the list of what is assumed are in "Reset world" below.
 * World replace on Paper with a custom `world-container` (bukkit.yml / `--world-container`): the panel looks for
   the world in the server folder root only, so it would install a world there that Paper ignores (nothing is
   deleted). A dropped connection to the agent while a long replace runs fails the job (the agent keeps
@@ -188,6 +206,90 @@ is written; a running `world_replace` job can only be marked failed with `instan
 server's current node (tagged with its `node_id`, like every backup). The world staging folders
 (`.mcpanel-world-*`) are handled through SafeRoot inside the server folder, so they work unchanged on btrfs
 subvolumes and ZFS datasets.
+
+### Reset world (2026-11-09, branch `feature/reset-world`)
+
+Status: **implemented + unit-tested. NOT yet run against a real agent, Docker, restic or a Minecraft
+server**, and not opened in a browser against a live panel.
+
+What exists:
+
+* **UI:** Settings → Danger zone → "Reset world…" (`frontend/src/pages/instance/settings/reset-world-dialog.tsx`,
+  `reset-world-model.ts`, `reset-world-api.ts`, the row in `danger-tab.tsx`). Step 1 shows the plan (the
+  folders that are deleted with their size, what is kept, why a reset is refused) and takes the options:
+  seed (random, keep the current setting, custom), carry-overs (datapacks; `serverconfig` and
+  `paper-world.yml`), safety backup. Step 2 lists what happens in order and asks for the server's name.
+  It needs `instance.restore` + `instance.files.write`, as replacing the world does.
+* **Panel:** `GET /api/instances/<id>/world/reset` (the plan) and `POST` (queues the exclusive job
+  `world_reset`; audit `instance.world_reset` without the seed value; status "Restoring"). Code:
+  `apps/instances/world.py` (`reset_plan`, `is_live`, `write_seed` / `restore_seed`,
+  `verify_world_in_backup`), `views.py` (`WorldResetView`), `handlers.py` (`world_reset`);
+  `run_backup(policy_excludes=False)` in `apps/backups/handlers.py`.
+* **Agent:** `POST /v1/instances/<id>/world/reset` (operation `world_reset`, which blocks power
+  actions), `GET /world?sizes=false`, and `classify` / `keepable` / `reset` in `mcagent/world.py`.
+
+What keeps it from deleting the wrong thing:
+
+* Only folders that look like a world are deleted (a `level.dat`, `session.lock`, `region` … among the
+  direct entries). Anything else at a world path refuses the whole reset (`not_a_world`,
+  `not_a_directory`).
+* The request carries the folders the dialog showed. The view, the job and the agent each compare them
+  with what they find (`world_changed`).
+* Setups in which the world folder cannot be told for certain are refused: a `level-name` with spaces
+  around it or an empty one, a `LEVEL` variable that differs from server.properties (server not started
+  since) or is set but empty, Paper's `world-container`, world arguments in `EXTRA_ARGS`.
+* "Running" is the container state (running or restarting), never the panel status, so a crash-looping
+  server is stopped first.
+* The safety backup ignores the server's own backup exclusions. The job stops, with nothing deleted,
+  when restic reported warnings or the snapshot does not list the entries that make each folder a world.
+* The agent moves the folders into `.mcpanel-world-old-*` first and moves them back on any failure. Its
+  error code says whether the world was touched. After a failure that left the world as it was, the seed
+  is put back and a server that was running is started again. After anything unclear (the move back
+  failed, the agent was unreachable, the operation was lost) the server is left stopped.
+* A job that was marked as failed meanwhile does nothing more to the server.
+
+Verified, all without a real server:
+
+* Agent: `tests/test_world_reset.py` (125 tests: the reset on a real temporary filesystem, and the
+  route with a faked Docker status).
+* Backend: `tests/test_world_reset_api.py` (111 tests with the simulated agent) and
+  `tests/test_world_reset_contract.py` (8 tests that read the agent and frontend sources and compare
+  names, request and result fields and error codes across the three layers).
+* Frontend: model, dialog and danger-tab tests in jsdom with a mocked API. The session that built the
+  dialog also reports one headless-Chromium pass at 390 px and 1280 px against mocked responses; its
+  harness was temporary and is not in the repository.
+* One-off checks during integration, not in the repository: 61 folder layouts gave identical results,
+  errors and resulting trees in the real `mcagent.world.info` / `reset` and in the simulated agent of
+  the backend tests; and the code of `test_integration_world_reset.py` ran to the end against the
+  simulated agent plus a small stand-in for a vanilla server.
+
+Not verified:
+
+* `backend/tests/test_integration_world_reset.py` (real agent, Docker, restic, vanilla 1.20.4) is written
+  and has not been run.
+* restic: the backup without the server's exclusions and `restic ls` of each world folder. What `ls`
+  returns for a path that is not in a snapshot is not known; an empty listing and an error both stop the
+  job before anything is deleted.
+* Docker: whether a container in restart back-off reports `running` or `restarting` (both count as
+  running here).
+* Minecraft, Paper and the runtime image: that a world folder holding only `datapacks/` or
+  `serverconfig/` yields a new world with those in use; that Paper reads a kept `paper-world.yml`;
+  whether a modpack installer brings a pack-provided world back (`CF_SET_LEVEL_FROM`: warning only);
+  what the runtime writes for an empty `LEVEL` or `SEED` variable (both count as set); the folder layout
+  of Paper 26.1+.
+* The dialog in a browser against a live panel, and anything on Unraid.
+
+Known limits:
+
+* The main world only: `level-name` and, on Bukkit-layout servers, its `_nether` and `_the_end`
+  folders. Other worlds (Multiverse) and plugin data outside the world folder are not touched.
+* Agent and panel must be updated together. With an older agent the plan reports `agent_outdated`.
+* The file-manager routes are not blocked while the agent operation runs (as for world replace).
+* On a server whose backups were never used, the safety backup of a reset is the first restic run: take
+  one manual backup first.
+* Only the reset checks its safety backup (no user exclusions, no warnings, world present). Restore,
+  world replace and software update still take theirs with the server's exclusions and accept restic
+  warnings.
 
 ### Security-audit integration follow-ups (2026-11-06, unit-tested; not yet browser-checked)
 
@@ -319,12 +421,15 @@ console or 5xx errors. Not re-run after the audit: the `-m integration` suite an
 
 ## Next recommended tasks (in order)
 
-1. Re-run the integration suite and the production compose stack (incl. `worker-periodic`) on the
+1. Run `backend/tests/test_integration_world_reset.py` against a real agent with restic, then one reset
+   by hand through the dialog (running Paper server, safety backup on) and record both under "Reset
+   world".
+2. Re-run the integration suite and the production compose stack (incl. `worker-periodic`) on the
    current branch; browser pass over the audit-touched screens (properties redaction, schedules
    permissions, backups on other nodes, nodes dialog, roles matrix) and the restart-warning dialog.
-2. Validate on real Unraid hardware (docs/QUICKSTART-UNRAID.md), including `MCPANEL_SETUP_TOKEN`.
-3. ZFS on a real pool (only fake-`zfs` unit tests so far; check `:rshared` visibility on Unraid).
-4. CurseForge per-mod search (needs a key); run one real restart with a warning and watch the chat.
+3. Validate on real Unraid hardware (docs/QUICKSTART-UNRAID.md), including `MCPANEL_SETUP_TOKEN`.
+4. ZFS on a real pool (only fake-`zfs` unit tests so far; check `:rshared` visibility on Unraid).
+5. CurseForge per-mod search (needs a key); run one real restart with a warning and watch the chat.
 
 ## Environment notes (cloud sandbox)
 

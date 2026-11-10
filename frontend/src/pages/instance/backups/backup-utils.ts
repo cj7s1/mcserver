@@ -69,7 +69,7 @@ export const KIND_INFO: Record<Backup["kind"], { label: string; className: strin
   pre_restore: {
     label: "Before restore",
     className: "bg-violet-500/10 text-violet-700 dark:text-violet-300",
-    hint: "Safety backup taken automatically before a restore or a world replacement changed the server files.",
+    hint: "Safety backup taken automatically before a restore, a world replacement or a world reset changed the server files.",
   },
   pre_update: {
     label: "Before update",

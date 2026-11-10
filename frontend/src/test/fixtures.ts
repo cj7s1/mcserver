@@ -1,5 +1,5 @@
 /** Shared test fixtures (not used by product code). */
-import type { Instance } from "@/lib/types";
+import type { Instance, WorldResetFolder, WorldResetPlan } from "@/lib/types";
 
 export function makeInstance(over: Partial<Instance> = {}): Instance {
   return {
@@ -62,4 +62,57 @@ export function makeInstance(over: Partial<Instance> = {}): Instance {
     modpack_update: null,
     ...over,
   };
+}
+
+export function makeResetFolder(over: Partial<WorldResetFolder> = {}): WorldResetFolder {
+  return {
+    role: "overworld",
+    path: "world",
+    state: "world",
+    markers: ["level.dat", "region", "session.lock"],
+    keepable: {},
+    bytes: 3 * 1024 * 1024,
+    files: 42,
+    modified: 1_793_000_000,
+    ...over,
+  };
+}
+
+/** A stopped vanilla server with one world folder, no seed set, safety backups on. */
+export function makeResetPlan(over: Partial<WorldResetPlan> = {}): WorldResetPlan {
+  return {
+    level_name: "world",
+    level_name_source: "server.properties",
+    layout: "vanilla",
+    folders: [makeResetFolder()],
+    delete: ["world"],
+    can_reset: true,
+    blockers: [],
+    seed: { value: "", source: "unset" },
+    level_type: "",
+    running: false,
+    pre_restore_backup_default: true,
+    safety_backup_keep_days: 14,
+    backup_exclusions: 0,
+    leftovers: [],
+    warnings: [],
+    ...over,
+  };
+}
+
+/** A running Paper server (the example of the spec): three folders, datapacks and per-world config to carry over. */
+export function makeBukkitResetPlan(over: Partial<WorldResetPlan> = {}): WorldResetPlan {
+  return makeResetPlan({
+    level_name: "bruh",
+    layout: "bukkit",
+    folders: [
+      makeResetFolder({ path: "bruh", keepable: { datapacks: ["datapacks"], config: ["paper-world.yml"] }, bytes: 1024 ** 3 }),
+      makeResetFolder({ role: "nether", path: "bruh_nether", markers: ["DIM-1", "level.dat"], keepable: { config: ["paper-world.yml"] }, bytes: 512 * 1024 ** 2 }),
+      makeResetFolder({ role: "end", path: "bruh_the_end", markers: ["DIM1", "level.dat"], bytes: 512 * 1024 ** 2 }),
+    ],
+    delete: ["bruh", "bruh_nether", "bruh_the_end"],
+    seed: { value: "-4172144997902289642", source: "server.properties" },
+    running: true,
+    ...over,
+  });
 }

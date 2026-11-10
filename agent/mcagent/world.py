@@ -1,4 +1,4 @@
-"""World import/export: describe the world folders and replace them from an archive.
+"""World import/export/reset: describe the world folders, replace them from an archive, delete them.
 
 A Java Edition world is a folder with a ``level.dat`` (gzip-compressed NBT). Where the
 nether and the end live depends on the server software:
@@ -13,12 +13,18 @@ same filesystem, so every later step is an atomic rename), finds the world in it
 the current world folders aside, renames the new ones into place and only then deletes
 the old ones. If any rename fails the new folders are taken out again and the old ones
 are put back. Every path goes through :class:`SafeRoot` (no ``..``, no symlinks).
+
+``reset`` deletes the world so the server generates a new one on its next start. It only
+deletes folders that look like a world (see :func:`classify`), moves them aside first
+(atomic renames that are undone on any failure) and deletes them afterwards. Every failure
+is an :class:`AgentError` whose code says whether the world was touched.
 """
 
 from __future__ import annotations
 
+import contextlib
 import secrets
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from . import archive as archive_mod
@@ -55,6 +61,24 @@ FREE_SPACE_MARGIN = 128 * 1024 * 1024
 MAX_SEARCH_DEPTH = 3
 # Folders some archivers add next to the real content (macOS Finder: resource forks); never a world.
 IGNORED_ARCHIVE_DIRS = frozenset({"__MACOSX"})
+# What a world reset can carry over into the new world:
+# keep option -> role -> ((entry name inside that world folder, required type), ...).
+# Keep in sync with backend/apps/instances/world.py RESET_KEEP.
+RESET_KEEP: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {
+    "datapacks": {"overworld": (("datapacks", "directory"),)},
+    "config": {
+        "overworld": (("serverconfig", "directory"), ("paper-world.yml", "file")),
+        "nether": (("paper-world.yml", "file"),),
+        "end": (("paper-world.yml", "file"),),
+    },
+}
+# Every entry name RESET_KEEP can carry over: a folder with nothing else in it has no world (yet).
+KEEPABLE_NAMES = frozenset({"datapacks", "serverconfig", "paper-world.yml"})
+# A direct entry with one of these names makes a folder a world folder (Java Edition, every
+# layout, including the "dimensions" folder of 26.1+ worlds).
+WORLD_MARKERS = frozenset(
+    {"level.dat", "level.dat_old", "session.lock", "uid.dat", "region", "DIM-1", "DIM1", "dimensions"}
+)
 
 
 def level_parts(level_name: str) -> list[str]:
@@ -122,8 +146,57 @@ def _kind(root: SafeRoot, rel: str) -> str | None:
         raise
 
 
-def info(root: SafeRoot, level_name: str, layout: str) -> dict:
-    """Which world folders exist, whether they hold a level.dat, and how big they are."""
+def _state(root: SafeRoot, rel: str, kind: str | None) -> tuple[str, frozenset[str]]:
+    """(state, names of the direct entries) of a would-be world folder of type ``kind``."""
+    if kind is None:
+        return "missing", frozenset()
+    if kind != "directory":
+        return "not_a_directory", frozenset()
+    names = frozenset(e.name for e in root.list(rel))
+    if not names:
+        return "empty", names
+    if names & WORLD_MARKERS:
+        return "world", names
+    return ("pending" if names <= KEEPABLE_NAMES else "unknown"), names
+
+
+def classify(root: SafeRoot, rel: str) -> str:
+    """What is at a world path. Links are never followed.
+
+    * ``missing``: nothing there (or a parent is a file or a link);
+    * ``not_a_directory``: a file, a link or something else;
+    * ``empty``: a folder without entries;
+    * ``world``: a folder with at least one :data:`WORLD_MARKERS` name among its direct entries;
+    * ``pending``: a folder that only holds :data:`KEEPABLE_NAMES` entries, which is what a reset
+      that carried something over leaves until the server generates the new world;
+    * ``unknown``: any other folder. It is never deleted by :func:`reset`.
+    """
+    return _state(root, rel, _kind(root, rel))[0]
+
+
+def keepable(root: SafeRoot, role: str, rel: str) -> dict[str, list[str]]:
+    """Keep option -> entry names in the world folder ``rel`` that a reset would carry over.
+
+    Only entries of the right type count, a folder only if it is not empty, a link never.
+    """
+    out: dict[str, list[str]] = {}
+    for key, roles in RESET_KEEP.items():
+        for name, kind in roles.get(role, ()):
+            path = f"{rel}/{name}"
+            if _kind(root, path) != kind:
+                continue
+            if kind == "directory" and not root.list(path):
+                continue
+            out.setdefault(key, []).append(name)
+    return out
+
+
+def info(root: SafeRoot, level_name: str, layout: str, *, sizes: bool = True) -> dict:
+    """Which world folders exist, what they are (see :func:`classify`) and how big they are.
+
+    ``sizes=False`` skips walking the folders: ``bytes`` and ``files`` are 0 and ``modified``
+    is None then.
+    """
     parts = level_parts(level_name)
     folders = []
     total = 0
@@ -137,24 +210,32 @@ def info(root: SafeRoot, level_name: str, layout: str) -> dict:
             "bytes": 0,
             "files": 0,
             "modified": None,
+            "state": "missing",
+            "markers": [],
+            "keepable": {},
         }
         kind = _kind(root, rel)
         entry["type"] = kind
+        state, names = _state(root, rel, kind)
+        entry.update(state=state, markers=sorted(names & WORLD_MARKERS))
+        if state == "world":
+            entry["keepable"] = keepable(root, role, rel)
         if kind == "directory":
             entry["exists"] = True
             entry["has_level_dat"] = _kind(root, f"{rel}/level.dat") == "file"
-            newest = root.stat(rel).modified
-            size = count = 0
-            for _path, st in root.walk_files(rel, max_depth=64):
-                size += st.st_size
-                count += 1
-                newest = max(newest, st.st_mtime)
-            entry.update(bytes=size, files=count, modified=newest)
+            if sizes:
+                newest = root.stat(rel).modified
+                size = count = 0
+                for _path, st in root.walk_files(rel, max_depth=64):
+                    size += st.st_size
+                    count += 1
+                    newest = max(newest, st.st_mtime)
+                entry.update(bytes=size, files=count, modified=newest)
+                total += size
             if role == "overworld":
                 entry["dimensions"] = [
                     r for r, d in VANILLA_DIMENSIONS.items() if _kind(root, f"{rel}/{d}") == "directory"
                 ]
-            total += size
         folders.append(entry)
     try:
         leftovers = sorted(e.name for e in root.list("") if e.name.startswith(STAGING_PREFIX))
@@ -406,3 +487,190 @@ def replace(
                 root.delete(staging, recursive=True)
             except (PathError, OSError):
                 pass
+
+
+@dataclass
+class _ResetPlan:
+    level_name: str
+    present: list[tuple[str, str]] = field(default_factory=list)  # (role, path) of the folders with a world
+    carry: dict[str, list[str]] = field(default_factory=dict)  # role -> entries carried over
+    skipped: list[str] = field(default_factory=list)  # folders without a world: left as they are
+
+
+def _reset_plan(
+    root: SafeRoot, level_name: str, layout: str, expect: Iterable[str], keep: Iterable[str]
+) -> _ResetPlan:
+    """The checks of :func:`reset` (they only read): what is moved aside, carried over and skipped."""
+    parts = level_parts(level_name)
+    if layout not in ("vanilla", "bukkit"):
+        raise AgentError("layout must be 'vanilla' or 'bukkit'", "invalid_layout", 400)
+    keys: list[str] = []
+    for key in keep:
+        if not isinstance(key, str) or key not in RESET_KEEP:
+            raise AgentError(f"Unknown keep option {key!r}", "invalid_keep", 400)
+        if key not in keys:
+            keys.append(key)
+    plan = _ResetPlan(level_name="/".join(parts))
+    for role, dest in world_paths(parts, layout):
+        state = classify(root, dest)
+        if state == "missing":
+            continue
+        if state == "not_a_directory":
+            raise AgentError(
+                f"'{dest}' is not a folder (a file or a link); move it away or fix level-name in "
+                "server.properties. Nothing was changed.",
+                "not_a_directory",
+                409,
+            )
+        if state == "unknown":
+            raise AgentError(
+                f"'{dest}' does not look like a Minecraft world (no level.dat, session.lock or region folder "
+                "in it), so it was not deleted. Check level-name in server.properties, or delete the folder on "
+                "the Files page. Nothing was changed.",
+                "not_a_world",
+                409,
+            )
+        if state != "world":  # empty, or only what an earlier reset carried over: no world in it yet
+            plan.skipped.append(dest)
+            continue
+        plan.present.append((role, dest))
+        available = keepable(root, role, dest)
+        names = [name for key in keys for name in available.get(key, [])]
+        if names:
+            plan.carry[role] = names
+    found = [dest for _role, dest in plan.present]
+    if sorted(expect) != sorted(found):
+        now = ", ".join(f"'{dest}'" for dest in found) or "none"
+        raise AgentError(
+            "The world folders are not the ones that were confirmed for this reset "
+            f"(the world folders are now: {now}). Nothing was changed.",
+            "world_changed",
+            409,
+        )
+    return plan
+
+
+def _undo_reset(root: SafeRoot, journal: list[tuple[str, str, str]], aside: str) -> list[str]:
+    """Put back what :func:`reset` moved, last step first. Returns what went wrong (empty: all is back)."""
+    problems: list[str] = []
+    for action, a, b in reversed(journal):
+        try:
+            if action == "rename":
+                root.rename(b, a)
+            else:
+                root.delete(a)  # rmdir: only ever the empty folder made for the carry-overs
+        except Exception as exc:
+            problems.append(f"{a}: {exc}")
+    if problems:
+        return problems
+    # Every recorded step is undone, so the aside folder must be empty. If it is not, a step
+    # that failed had moved something after all: that part of the world is still in there.
+    try:
+        left = sorted(e.name for e in root.list(aside))
+    except PathError as exc:
+        return [] if exc.code == "not_found" else [f"{aside}: {exc}"]
+    except OSError as exc:
+        return [f"{aside}: {exc}"]
+    if left:
+        return [f"{aside}: still holds {', '.join(left)}"]
+    with contextlib.suppress(PathError, OSError):
+        root.delete(aside)
+    return []
+
+
+def reset(
+    root: SafeRoot,
+    level_name: str,
+    layout: str,
+    *,
+    expect: Iterable[str],
+    keep: Iterable[str] = (),
+    progress: Callable[[float, str], None] | None = None,
+) -> dict:
+    """Delete the world folders of ``level_name``; the server generates a new world on its next start.
+
+    Only folders that :func:`classify` calls a ``world`` are deleted, and only if they are exactly
+    the folders in ``expect`` (what the user confirmed). ``keep`` names :data:`RESET_KEEP` options
+    that are carried over into a new, otherwise empty world folder. The result lists the folders
+    that were ``deleted``, the entries that were ``kept`` and the folders that were ``skipped``
+    because they exist but hold no world (``empty`` or ``pending``).
+
+    Every failure is an :class:`AgentError`. The codes ``invalid_level_name``, ``invalid_layout``,
+    ``invalid_keep``, ``not_a_directory``, ``not_a_world``, ``world_changed`` and
+    ``world_reset_failed`` mean that nothing was changed; ``world_rollback_failed`` means that the
+    old world (or a part of it) is in the aside folder named in the message. Once the folders are
+    moved aside the reset has happened: a failure to delete them is a warning with ``leftover``.
+    (An interrupt such as ``KeyboardInterrupt`` is passed on after everything is put back.)
+    """
+
+    def report(value: float, message: str) -> None:
+        if progress:
+            progress(value, message)
+
+    aside = f"{STAGING_PREFIX}old-{secrets.token_hex(6)}"
+    # --- checks: nothing is changed here, and every failure says so ---------------------
+    try:
+        plan = _reset_plan(root, level_name, layout, expect, keep)
+        result: dict = {
+            "level_name": plan.level_name,
+            "layout": layout,
+            "deleted": [],
+            "kept": [],
+            "skipped": plan.skipped,
+            "leftover": None,
+            "warnings": [],
+        }
+        if not plan.present:
+            return result
+        report(0.05, "Moving the world aside")
+        root.mkdir(aside)
+    except AgentError:
+        raise
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            root.delete(aside)  # rmdir: mkdir can fail after it made the (empty) folder
+        raise AgentError(
+            f"The world could not be checked ({exc}). Nothing was changed.", "world_reset_failed", 500
+        ) from exc
+    # --- move aside and carry over: any failure is undone -------------------------------
+    journal: list[tuple[str, str, str]] = []  # ("rename", original, moved to) | ("mkdir", path, "")
+    kept: list[str] = []
+    try:
+        for role, dest in plan.present:
+            root.rename(dest, f"{aside}/{role}")
+            journal.append(("rename", dest, f"{aside}/{role}"))
+        for role, dest in plan.present:
+            if role not in plan.carry:
+                continue
+            report(0.15, "Carrying over what is kept")
+            root.mkdir(dest)
+            journal.append(("mkdir", dest, ""))
+            for name in plan.carry[role]:
+                root.rename(f"{aside}/{role}/{name}", f"{dest}/{name}")
+                journal.append(("rename", f"{aside}/{role}/{name}", f"{dest}/{name}"))
+                kept.append(f"{dest}/{name}")
+    except BaseException as exc:
+        problems = _undo_reset(root, journal, aside)
+        if problems:
+            raise AgentError(
+                f"Resetting the world failed ({exc}) and the world could not be put back completely "
+                f"({'; '.join(problems)}). It is kept in the folder '{aside}'.",
+                "world_rollback_failed",
+                500,
+            ) from exc
+        if not isinstance(exc, Exception):
+            raise  # KeyboardInterrupt / SystemExit: everything is back, let it through
+        raise AgentError(
+            f"The world could not be moved aside ({exc}). Nothing was changed.", "world_reset_failed", 500
+        ) from exc
+    # --- point of no return: the server folder has no world (or only what was kept) -----
+    result.update(deleted=[dest for _role, dest in plan.present], kept=kept)
+    report(0.3, "Deleting the old world")
+    try:
+        root.delete(aside, recursive=True)
+    except Exception as exc:  # whatever it is, the reset itself has happened
+        result["leftover"] = aside
+        result["warnings"].append(
+            f"The old world could not be deleted completely ({exc}); what is left of it is in '{aside}'"
+        )
+    return result

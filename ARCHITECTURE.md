@@ -79,7 +79,10 @@ Pterodactyl's panel/Wings and is what will let us add remote nodes later.
 <instance dir>/.mcpanel-tmp-*            -> restore-path and ZFS in-place restore/clone staging, opened by fd
                                            (excluded from backups; removed afterwards)
 <instance dir>/.mcpanel-world-{upload,new,old}-* -> world replace: uploaded archive, extracted world, old world
-                                           (inside the instance so every swap is a rename; removed afterwards)
+                                           (inside the instance so every swap is a rename; removed afterwards).
+                                           World reset: the world folders are moved into .mcpanel-world-old-*
+                                           (one sub-folder per role) before they are deleted, so a failure
+                                           can move them back; a folder left behind holds the old world
 <data root>/trash/                       -> deletes are renamed here first, then removed
 <data root>/agent/                       -> restic password (if generated) and cache
 <data root>/agent/cache/file-hashes/     -> persistent file-digest cache for /files/hashes (AGENT_CACHE_ROOT; rebuildable)

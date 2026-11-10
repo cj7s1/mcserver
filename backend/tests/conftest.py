@@ -18,10 +18,12 @@ import os
 os.environ.setdefault("MCPANEL_TESTING", "1")
 
 import copy
+import fnmatch
 import hashlib
 import io
 import itertools
 import json
+import re
 import time
 import uuid
 import zipfile
@@ -84,11 +86,13 @@ class FakeAgent:
         "fetch_file",
         "world_info",
         "world_replace",
+        "world_reset",
         "list_backups",
         "create_backup",
         "restore_backup",
         "forget_backups",
         "check_backups",
+        "backup_files",
         "snapshots",
         "create_snapshot",
         "delete_snapshot",
@@ -114,11 +118,18 @@ class FakeAgent:
         self.commands: list[tuple[str, str]] = []
         # method name -> exception raised by that client method
         self.failures: dict[str, Exception] = {}
+        # method name -> callable(*args, **kwargs) run before the simulated method (and before an
+        # injected failure): lets a test change state in the middle of a job
+        self.hooks: dict[str, Callable[..., Any]] = {}
         # operation kind -> (message, code): the agent operation is reported as failed
         self.failed_operations: dict[str, tuple[str, str]] = {}
         # optional callable(instance_id, command) -> output | None (None = default output)
         self.command_handler: Callable[[str, str], str | None] | None = None
         self.start_healthy = True
+        # restic exit code 3 ("some files could not be read"): the backup succeeds with these warnings
+        self.backup_warnings: list[str] = []
+        # world reset: deleting the old world fails after it was moved aside (a warning plus "leftover")
+        self.world_reset_delete_error: str | None = None
 
     # -- wiring ------------------------------------------------------------------------
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,6 +149,9 @@ class FakeAgent:
 
         def method(_client: Any, *args: Any, **kwargs: Any) -> Any:
             self.calls.append((name, args, kwargs))
+            hook = self.hooks.get(name)
+            if hook is not None:
+                hook(*args, **kwargs)
             exc = self.failures.get(name)
             if exc is not None:
                 raise exc
@@ -251,7 +265,12 @@ class FakeAgent:
         )
 
     def _set_exited(self, c: dict[str, Any], exit_code: int) -> None:
-        c.update(status="exited", running=False, exit_code=exit_code, finished_at=self._now())
+        c.update(status="exited", running=False, restarting=False, exit_code=exit_code, finished_at=self._now())
+
+    @staticmethod
+    def _live(c: dict[str, Any]) -> bool:
+        """Running, or in Docker's restart loop (docker_ops.stop / kill and the world reset route)."""
+        return bool(c.get("running") or c.get("restarting") or c.get("status") == "restarting")
 
     @staticmethod
     def _parts(path: str | None) -> list[str]:
@@ -454,7 +473,7 @@ class FakeAgent:
 
     def stop(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
         c = self._container(str(instance_id))
-        if c["running"]:
+        if self._live(c):
             self._set_exited(c, 0)
         return self.status(instance_id)
 
@@ -464,7 +483,7 @@ class FakeAgent:
 
     def kill(self, instance_id: Any) -> dict[str, Any]:
         c = self._container(str(instance_id))
-        if c["running"]:
+        if self._live(c):
             self._set_exited(c, 137)
         return self.status(instance_id)
 
@@ -762,6 +781,36 @@ class FakeAgent:
 
     # -- worlds (agent/mcagent/world.py semantics, zip archives only) --------------------
     WORLD_DIMENSIONS = {"nether": ("_nether", "DIM-1"), "end": ("_the_end", "DIM1")}
+    WORLD_RESERVED_FOLDERS = frozenset(
+        {
+            "mods",
+            "plugins",
+            "config",
+            "defaultconfigs",
+            "libraries",
+            "logs",
+            "crash-reports",
+            "versions",
+            "cache",
+            "kubejs",
+            "scripts",
+            "resourcepacks",
+            "downloads",
+            "backups",
+            "server.properties",
+        }
+    )
+    # world reset: keep option -> role -> ((entry name in that world folder, required type), ...)
+    WORLD_RESET_KEEP: dict[str, dict[str, tuple[tuple[str, str], ...]]] = {
+        "datapacks": {"overworld": (("datapacks", "directory"),)},
+        "config": {
+            "overworld": (("serverconfig", "directory"), ("paper-world.yml", "file")),
+            "nether": (("paper-world.yml", "file"),),
+            "end": (("paper-world.yml", "file"),),
+        },
+    }
+    WORLD_KEEPABLE_NAMES = frozenset({"datapacks", "serverconfig", "paper-world.yml"})
+    WORLD_MARKERS = frozenset({"level.dat", "level.dat_old", "session.lock", "uid.dat", "region", "DIM-1", "DIM1", "dimensions"})
 
     def _world_paths(self, level_name: str, layout: str) -> list[tuple[str, str]]:
         parts = self._parts(level_name)
@@ -771,31 +820,186 @@ class FakeAgent:
                 out.append((role, "/".join([*parts[:-1], parts[-1] + suffix])))
         return out
 
-    def world_info(self, instance_id: Any, level_name: str, layout: str) -> dict[str, Any]:
+    def _level_parts(self, level_name: str) -> list[str]:
+        """agent/mcagent/world.py level_parts: validate ``level-name`` and split it."""
+        from apps.nodes.client import AgentError
+
+        if not isinstance(level_name, str) or not level_name.strip():
+            raise self._err("The world folder name is empty", "invalid_level_name", 400)
+        if "\\" in level_name or len(level_name) > 200:
+            raise self._err(f"Unsupported world folder name {level_name!r}", "invalid_level_name", 400)
+        try:
+            parts = self._parts(level_name)
+        except AgentError as exc:
+            raise self._err(f"Invalid world folder name {level_name!r}: {exc.detail}", "invalid_level_name", 400) from None
+        if not parts or len(parts) > 4 or any(p.startswith(".") or any(ord(ch) < 32 for ch in p) for p in parts):
+            raise self._err(f"Invalid world folder name {level_name!r}", "invalid_level_name", 400)
+        if parts[0].lower() in self.WORLD_RESERVED_FOLDERS:
+            raise self._err(
+                f"'{level_name}' is a server folder, not a world folder; fix level-name in server.properties",
+                "invalid_level_name",
+                400,
+            )
+        return parts
+
+    def _world_state(self, root: dict[str, Any], rel: str) -> tuple[str, set[str]]:
+        """agent/mcagent/world.py classify: (state, names of the direct entries)."""
+        kind = self._kind(root, rel)
+        if kind is None:
+            return "missing", set()
+        if kind != "directory":
+            return "not_a_directory", set()
+        names = {p.rsplit("/", 1)[-1] for p in self._children(root, rel)}
+        if not names:
+            return "empty", names
+        if names & self.WORLD_MARKERS:
+            return "world", names
+        return ("pending" if names <= self.WORLD_KEEPABLE_NAMES else "unknown"), names
+
+    def _world_keepable(self, root: dict[str, Any], role: str, rel: str) -> dict[str, list[str]]:
+        """agent/mcagent/world.py keepable: keep option -> entries a reset would carry over."""
+        out: dict[str, list[str]] = {}
+        for key, roles in self.WORLD_RESET_KEEP.items():
+            for name, kind in roles.get(role, ()):
+                path = f"{rel}/{name}"
+                if self._kind(root, path) != kind:
+                    continue
+                if kind == "directory" and not self._children(root, path):
+                    continue
+                out.setdefault(key, []).append(name)
+        return out
+
+    def world_info(self, instance_id: Any, level_name: str, layout: str, *, sizes: bool = True) -> dict[str, Any]:
         root = self.fs.get(str(instance_id)) or {"files": {}, "dirs": set(), "mtime": {}}
+        level = "/".join(self._level_parts(level_name))
         folders, total = [], 0
-        for role, rel in self._world_paths(level_name, layout):
-            exists = self._kind(root, rel) == "directory"
-            files = {p: v for p, v in root["files"].items() if p.startswith(rel + "/")} if exists else {}
-            size = sum(len(v) for v in files.values())
+        for role, rel in self._world_paths(level, layout):
+            kind = self._kind(root, rel)
+            exists = kind == "directory"
+            state, names = self._world_state(root, rel)
             entry: dict[str, Any] = {
                 "role": role,
                 "path": rel,
                 "exists": exists,
-                "type": "directory" if exists else None,
-                "has_level_dat": f"{rel}/level.dat" in root["files"],
-                "bytes": size,
-                "files": len(files),
-                "modified": max((root["mtime"].get(p, 0.0) for p in files), default=None),
+                "type": kind,
+                "has_level_dat": exists and f"{rel}/level.dat" in root["files"],
+                "bytes": 0,
+                "files": 0,
+                "modified": None,
+                "state": state,
+                "markers": sorted(names & self.WORLD_MARKERS),
+                "keepable": self._world_keepable(root, role, rel) if state == "world" else {},
             }
+            if exists and sizes:  # sizes=False skips the walk over every file of the world
+                files = {p: v for p, v in root["files"].items() if p.startswith(rel + "/")}
+                size = sum(len(v) for v in files.values())
+                entry.update(bytes=size, files=len(files), modified=max((root["mtime"].get(p, 0.0) for p in files), default=None))
+                total += size
             if role == "overworld" and exists:
                 entry["dimensions"] = [
                     r for r, (_s, dim) in self.WORLD_DIMENSIONS.items() if self._kind(root, f"{rel}/{dim}") == "directory"
                 ]
-            total += size
             folders.append(entry)
         leftovers = sorted(d for d in root["dirs"] if "/" not in d and d.startswith(".mcpanel-world-"))
-        return {"level_name": level_name, "layout": layout, "folders": folders, "total_bytes": total, "leftovers": leftovers}
+        return {"level_name": level, "layout": layout, "folders": folders, "total_bytes": total, "leftovers": leftovers}
+
+    def world_reset(
+        self, instance_id: Any, *, level_name: str, layout: str, expect: list[str], keep: list[str]
+    ) -> dict[str, Any]:
+        """POST /world/reset: a refusal before the operation raises; what happens after it is the
+        operation's result (``failed_operations["world_reset"]`` injects a failed one)."""
+        iid = str(instance_id)
+        if (  # WorldResetRequest: FastAPI answers 422
+            layout not in ("vanilla", "bukkit")
+            or not 1 <= len(level_name) <= 200
+            or not 1 <= len(expect) <= 3
+            or len(keep) > 2
+            or any(k not in self.WORLD_RESET_KEEP for k in keep)
+        ):
+            raise self._err("Request validation failed", "agent_validation_error", 422)
+        parts = self._level_parts(level_name)
+        if self._live(self.containers.get(iid, {})):
+            raise self._err("Stop the server before resetting its world", "must_stop", 409)
+        if failed := self._injected("world_reset", iid):
+            return failed
+        return self._world_reset(iid, parts, layout, list(expect), list(dict.fromkeys(keep)))
+
+    def _world_reset(self, iid: str, parts: list[str], layout: str, expect: list[str], keep: list[str]) -> dict[str, Any]:
+        """agent/mcagent/world.py reset: only folders that look like a world, and only the expected ones."""
+
+        def fail(message: str, code: str) -> dict[str, Any]:
+            return self._op("world_reset", iid, error=(message, code))
+
+        root = self.fs.get(iid) or {"files": {}, "dirs": set(), "mtime": {}}
+        level = "/".join(parts)
+        present: list[tuple[str, str]] = []
+        carry: dict[str, list[str]] = {}
+        skipped: list[str] = []
+        for role, dest in self._world_paths(level, layout):
+            state, _names = self._world_state(root, dest)
+            if state == "missing":
+                continue
+            if state == "not_a_directory":
+                return fail(
+                    f"'{dest}' is not a folder (a file or a link); move it away or fix level-name in "
+                    "server.properties. Nothing was changed.",
+                    "not_a_directory",
+                )
+            if state == "unknown":
+                return fail(
+                    f"'{dest}' does not look like a Minecraft world (no level.dat, session.lock or region folder "
+                    "in it), so it was not deleted. Check level-name in server.properties, or delete the folder on "
+                    "the Files page. Nothing was changed.",
+                    "not_a_world",
+                )
+            if state != "world":  # empty, or only what an earlier reset carried over
+                skipped.append(dest)
+                continue
+            present.append((role, dest))
+            available = self._world_keepable(root, role, dest)
+            names = [name for key in keep for name in available.get(key, [])]
+            if names:
+                carry[role] = names
+        found = [dest for _role, dest in present]
+        if sorted(expect) != sorted(found):
+            now = ", ".join(f"'{dest}'" for dest in found) or "none"
+            return fail(
+                "The world folders are not the ones that were confirmed for this reset "
+                f"(the world folders are now: {now}). Nothing was changed.",
+                "world_changed",
+            )
+        result: dict[str, Any] = {
+            "level_name": level,
+            "layout": layout,
+            "deleted": [],
+            "kept": [],
+            "skipped": skipped,
+            "leftover": None,
+            "warnings": [],
+        }
+        if not present:
+            return self._op("world_reset", iid, result)
+        aside = f".mcpanel-world-old-{uuid.uuid4().hex[:12]}"
+        self.mkdir(iid, aside)
+        for role, dest in present:
+            self.rename(iid, dest, f"{aside}/{role}")
+        for role, dest in present:
+            if role not in carry:
+                continue
+            self.mkdir(iid, dest)
+            for name in carry[role]:
+                self.rename(iid, f"{aside}/{role}/{name}", f"{dest}/{name}")
+                result["kept"].append(f"{dest}/{name}")
+        result["deleted"] = found
+        if self.world_reset_delete_error:  # past the point of no return: a warning, never an error
+            result["leftover"] = aside
+            result["warnings"].append(
+                f"The old world could not be deleted completely ({self.world_reset_delete_error}); "
+                f"what is left of it is in '{aside}'"
+            )
+        else:
+            self.delete_files(iid, [aside], recursive=True)
+        return self._op("world_reset", iid, result)
 
     def world_replace(
         self, instance_id: Any, *, archive: str, level_name: str, layout: str, delete_archive: bool = False
@@ -963,6 +1167,24 @@ class FakeAgent:
         return self._op("import", str(instance_id), {"converted": True})
 
     # -- backups -----------------------------------------------------------------------
+    @staticmethod
+    def _excluded(rel: str, patterns: list[str]) -> bool:
+        """restic ``--exclude`` for the patterns the panel sends: plain names and ``*`` globs.
+
+        A pattern is matched against whole path components and may match at any depth; a match
+        on a folder leaves out everything inside it. A pattern with a leading ``/`` is anchored
+        at the filesystem root and so never matches inside the server folder. ``**`` is not simulated.
+        """
+        comps = rel.split("/")
+        for pattern in patterns:
+            pat = [part for part in pattern.split("/") if part]
+            if not pat or pattern.startswith("/") or "**" in pat:
+                continue
+            for end in range(len(pat), len(comps) + 1):
+                if all(fnmatch.fnmatchcase(c, part) for c, part in zip(comps[end - len(pat) : end], pat, strict=True)):
+                    return True
+        return False
+
     def list_backups(self, instance_id: Any) -> list[dict[str, Any]]:
         return [{k: v for k, v in s.items() if k != "tree"} for s in self.repos.get(str(instance_id), [])]
 
@@ -981,6 +1203,11 @@ class FakeAgent:
             paused = True
         snap_id = hashlib.sha256(f"{iid}:{backup_id}:{time.time_ns()}".encode()).hexdigest()
         tree = copy.deepcopy(self.fs[iid])
+        patterns = [*(excludes or []), ".mcpanel-tmp-*"]  # the agent always adds its own temporary files
+        for key in ("files", "mtime"):
+            for path in [path for path in tree[key] if self._excluded(path, patterns)]:
+                del tree[key][path]
+        tree["dirs"] = {path for path in tree["dirs"] if not self._excluded(path, patterns)}
         self.repos.setdefault(iid, []).append(
             {
                 "id": snap_id,
@@ -1006,7 +1233,7 @@ class FakeAgent:
                 "data_added": total,
                 "total_bytes_processed": total,
                 "total_duration": 0.01,
-                "warnings": [],
+                "warnings": list(self.backup_warnings),
                 "consistent": paused or not running,
             },
         )
@@ -1033,6 +1260,30 @@ class FakeAgent:
             return failed
         self.repos[iid] = [s for s in self.repos.get(iid, []) if s["id"] not in snapshot_ids]
         return self._op("forget", iid, {"removed": list(snapshot_ids)})
+
+    def backup_files(self, instance_id: Any, snapshot_id: str, path: str = "") -> dict[str, Any]:
+        """Restic.ls: the direct children of a folder in a snapshot (a path that is not in it lists nothing)."""
+        if not re.fullmatch(r"[a-f0-9]{8,64}", snapshot_id):
+            raise self._err("Request validation failed", "agent_validation_error", 422)
+        snap = next((s for s in self.repos.get(str(instance_id), []) if s["id"].startswith(snapshot_id)), None)
+        if snap is None:
+            raise self._err("Backup snapshot not found", "snapshot_not_found", 404)
+        tree = snap["tree"]
+        rel = "/".join(self._parts(path))
+        entries = []
+        if self._kind(tree, rel) == "directory":
+            for child in self._children(tree, rel):
+                kind = self._kind(tree, child)
+                entries.append(
+                    {
+                        "name": child.rsplit("/", 1)[-1],
+                        "path": child,
+                        "type": kind,
+                        "size": len(tree["files"][child]) if kind == "file" else 0,
+                        "modified": None,
+                    }
+                )
+        return {"path": rel, "entries": entries}
 
     def check_backups(self, instance_id: Any, read_data_subset: str | None = None) -> dict[str, Any]:
         iid = str(instance_id)

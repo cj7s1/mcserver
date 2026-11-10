@@ -316,10 +316,12 @@ class AgentClient:
         )["operation"]
 
     # -- worlds --------------------------------------------------------------------------
-    def world_info(self, instance_id: UUID, level_name: str, layout: str) -> dict[str, Any]:
-        return self._json(
-            "GET", f"/v1/instances/{instance_id}/world", params={"level_name": level_name, "layout": layout}, timeout=120
-        )
+    def world_info(self, instance_id: UUID, level_name: str, layout: str, *, sizes: bool = True) -> dict[str, Any]:
+        """The world folders and their state; ``sizes=False`` skips measuring them (no walk over every file)."""
+        params = {"level_name": level_name, "layout": layout}
+        if not sizes:
+            params["sizes"] = "false"
+        return self._json("GET", f"/v1/instances/{instance_id}/world", params=params, timeout=120)
 
     def world_replace(
         self, instance_id: UUID, *, archive: str, level_name: str, layout: str, delete_archive: bool = False
@@ -328,6 +330,25 @@ class AgentClient:
             "POST",
             f"/v1/instances/{instance_id}/world/replace",
             json={"archive": archive, "level_name": level_name, "layout": layout, "delete_archive": delete_archive},
+        )["operation"]
+
+    def world_reset(
+        self, instance_id: UUID, *, level_name: str, layout: str, expect: list[str], keep: list[str]
+    ) -> dict[str, Any]:
+        """Delete the world folders ``expect`` (the agent refuses if they are not exactly the world).
+
+        ``confirm`` repeats the instance id in the body, as for ``delete_data``.
+        """
+        return self._json(
+            "POST",
+            f"/v1/instances/{instance_id}/world/reset",
+            json={
+                "confirm": str(instance_id),
+                "level_name": level_name,
+                "layout": layout,
+                "expect": list(expect),
+                "keep": list(keep),
+            },
         )["operation"]
 
     # -- backups -------------------------------------------------------------------------

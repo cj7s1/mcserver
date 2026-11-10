@@ -13,6 +13,8 @@ export const qk = {
   files: (id: string, path: string) => ["instances", id, "files", path] as const,
   backups: (id: string) => ["instances", id, "backups"] as const,
   world: (id: string) => ["instances", id, "world"] as const,
+  // the plan of the "Reset world" dialog; a sibling of qk.world (not below it), so each is invalidated on its own
+  worldReset: (id: string) => ["instances", id, "world-reset"] as const,
   schedules: (id: string) => ["instances", id, "schedules"] as const,
   players: (id: string) => ["instances", id, "players"] as const,
   content: (id: string) => ["instances", id, "content"] as const,

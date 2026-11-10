@@ -63,6 +63,7 @@ export const ABANDON_PERMISSIONS: Record<string, readonly PermissionCode[]> = {
   modpack_update: ["instance.content"],
   modpack_rollback: ["instance.content", "instance.restore"],
   world_replace: ["instance.restore", "instance.files.write"],
+  world_reset: ["instance.restore", "instance.files.write"],
 };
 
 /**

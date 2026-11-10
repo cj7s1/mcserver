@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import os
 import time
 import uuid
 import zipfile
@@ -353,11 +354,75 @@ def test_info_reports_folders_sizes_and_leftovers(sr, inst):
     assert not roles["end"]["exists"]
     assert data["total_bytes"] == len(LEVEL_DAT) + 3
     assert data["leftovers"] == [".mcpanel-world-old-abc"]
+    # what a reset would do with each folder
+    assert roles["overworld"]["state"] == "world"
+    assert roles["overworld"]["markers"] == ["DIM-1", "level.dat", "region"]
+    assert roles["overworld"]["keepable"] == {}
+    assert (roles["nether"]["state"], roles["nether"]["markers"], roles["nether"]["keepable"]) == (
+        "empty",
+        [],
+        {},
+    )
+    assert (roles["end"]["state"], roles["end"]["markers"], roles["end"]["keepable"]) == ("missing", [], {})
 
 
 def test_info_without_server_folder(tmp_path):
     data = world.info(SafeRoot(tmp_path / "missing"), "world", "vanilla")
     assert data["folders"][0]["exists"] is False and data["leftovers"] == []
+    assert data["folders"][0]["state"] == "missing"
+
+
+def test_info_without_sizes_reports_state_markers_and_keepable(sr, inst, monkeypatch, tmp_path):
+    old_world(inst)
+    (inst / "world" / "session.lock").write_text("")
+    (inst / "world" / "datapacks").mkdir()
+    (inst / "world" / "datapacks" / "terra.zip").write_text("dp")
+    (inst / "world" / "serverconfig").mkdir()  # empty: nothing to carry over
+    (inst / "world" / "paper-world.yml").write_text("a: 1")
+    old_world(inst, "world_nether")
+    (inst / "world_nether" / "paper-world.yml").write_text("b: 2")
+    (inst / "world_nether" / "datapacks").mkdir()  # datapacks only count in the overworld folder
+    (inst / "world_nether" / "datapacks" / "x.zip").write_text("dp")
+    (inst / "world_the_end").mkdir()
+    (inst / "world_the_end" / "paper-world.yml").write_text("c: 3")  # what an earlier reset carried over
+    measured = world.info(sr, "world", "bukkit")
+
+    def no_walk(self, rel="", *, max_depth=12):
+        raise AssertionError("sizes=False must not walk the world")
+
+    monkeypatch.setattr(SafeRoot, "walk_files", no_walk)
+    data = world.info(sr, "world", "bukkit", sizes=False)
+    roles = {f["role"]: f for f in data["folders"]}
+    assert roles["overworld"]["state"] == "world"
+    assert roles["overworld"]["markers"] == ["level.dat", "region", "session.lock"]
+    assert roles["overworld"]["keepable"] == {"datapacks": ["datapacks"], "config": ["paper-world.yml"]}
+    assert roles["nether"]["state"] == "world" and roles["nether"]["markers"] == ["level.dat", "region"]
+    assert roles["nether"]["keepable"] == {"config": ["paper-world.yml"]}
+    assert (roles["end"]["state"], roles["end"]["markers"], roles["end"]["keepable"]) == ("pending", [], {})
+    for folder in data["folders"]:
+        assert (folder["bytes"], folder["files"], folder["modified"]) == (0, 0, None)
+        assert folder["exists"] is True and folder["type"] == "directory"
+    assert data["total_bytes"] == 0 and roles["overworld"]["has_level_dat"] is True
+    # apart from the measurements the answer is the same
+    unmeasured = {"bytes", "files", "modified"}
+    assert [{k: v for k, v in f.items() if k not in unmeasured} for f in data["folders"]] == [
+        {k: v for k, v in f.items() if k not in unmeasured} for f in measured["folders"]
+    ]
+    assert measured["folders"][0]["files"] == 5 and measured["total_bytes"] > 0
+
+
+def test_info_states_of_folders_that_are_not_worlds(sr, inst, tmp_path):
+    (inst / "world").write_text("a file")
+    (inst / "world_nether" / "web").mkdir(parents=True)  # some other folder
+    (inst / "world_nether" / "web" / "index.html").write_text("x")
+    os.symlink(tmp_path, inst / "world_the_end")
+    for sizes in (True, False):
+        roles = {f["role"]: f for f in world.info(sr, "world", "bukkit", sizes=sizes)["folders"]}
+        assert (roles["overworld"]["state"], roles["overworld"]["type"]) == ("not_a_directory", "file")
+        assert (roles["nether"]["state"], roles["nether"]["exists"]) == ("unknown", True)
+        assert (roles["end"]["state"], roles["end"]["type"]) == ("not_a_directory", "symlink")
+        assert all(f["markers"] == [] and f["keepable"] == {} for f in roles.values())
+        assert not roles["overworld"]["exists"] and not roles["end"]["exists"]
 
 
 # --- HTTP API ------------------------------------------------------------------------------------
@@ -413,6 +478,28 @@ def test_api_world_replace_and_info(api, auth, agent_settings, stopped):
     assert op["result"]["installed"] == ["world"]
     assert (d / "world" / "region" / "r.0.0.mca").read_text() == "new"
     assert not (d / "up.zip").exists()
+
+
+def test_api_world_info_sizes_parameter(api, auth, agent_settings):
+    iid, d = _instance(agent_settings)
+    old_world(d)
+    url = f"/v1/instances/{iid}/world"
+    full = api.get(url, params={"level_name": "world"}, headers=auth).json()["folders"][0]
+    assert (full["files"], full["bytes"]) == (2, len(LEVEL_DAT) + 3) and full["modified"] is not None
+    quick = api.get(url, params={"level_name": "world", "sizes": "false"}, headers=auth).json()
+    assert quick["total_bytes"] == 0
+    assert (quick["folders"][0]["files"], quick["folders"][0]["bytes"], quick["folders"][0]["modified"]) == (
+        0,
+        0,
+        None,
+    )
+    for folder in (full, quick["folders"][0]):
+        assert (folder["state"], folder["markers"], folder["keepable"]) == (
+            "world",
+            ["level.dat", "region"],
+            {},
+        )
+    assert api.get(url, params={"sizes": "maybe"}, headers=auth).status_code == 422
 
 
 def test_api_refuses_an_archive_inside_the_world(api, auth, agent_settings, stopped):

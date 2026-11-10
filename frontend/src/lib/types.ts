@@ -584,6 +584,52 @@ export interface WorldInfo {
   archive_suffixes: string[];
 }
 
+/** What a world reset can carry over into the new world (backend apps/instances/world.py RESET_KEEP). */
+export type WorldResetKeep = "datapacks" | "config";
+
+/** keep: server.properties is not touched; random: level-seed is cleared; custom: level-seed is set. */
+export type WorldResetSeedMode = "keep" | "random" | "custom";
+
+/** One world folder in a reset plan (agent/mcagent/world.py info() with classify() and keepable()). */
+export interface WorldResetFolder {
+  role: "overworld" | "nether" | "end";
+  path: string;
+  /** only `world` folders are deleted; `pending` holds nothing but carry-overs of an earlier reset */
+  state: "missing" | "empty" | "world" | "pending" | "unknown" | "not_a_directory";
+  /** the entries that make it a world (level.dat, region, session.lock, ...) */
+  markers: string[];
+  /** keep option -> entry names inside this folder that can be carried over */
+  keepable: Partial<Record<WorldResetKeep, string[]>>;
+  bytes: number;
+  files: number;
+  /** unix seconds of the newest file */
+  modified: number | null;
+}
+
+/** GET /instances/{id}/world/reset (backend apps/instances/world.py reset_plan() + WorldResetView). */
+export interface WorldResetPlan {
+  level_name: string;
+  level_name_source: "env" | "server.properties" | "default";
+  layout: "vanilla" | "bukkit";
+  folders: WorldResetFolder[];
+  /** paths of the folders a reset deletes (the ones in state `world`); sent back as `folders` on POST */
+  delete: string[];
+  can_reset: boolean;
+  blockers: { code: string; message: string }[];
+  /** the seed the next world would get: SEED in the environment wins over level-seed in server.properties */
+  seed: { value: string; source: "env" | "server.properties" | "unset" };
+  level_type: string;
+  /** the container is running or restarting (not instance.status, which is "failed" in a crash loop) */
+  running: boolean;
+  pre_restore_backup_default: boolean;
+  /** 0: safety backups are pruned by the next backup run */
+  safety_backup_keep_days: number;
+  /** the server's own backup exclusion patterns, which the safety backup of a reset ignores */
+  backup_exclusions: number;
+  leftovers: string[];
+  warnings: string[];
+}
+
 export interface ContentItem {
   filename: string;
   enabled: boolean;

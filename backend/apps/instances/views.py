@@ -33,6 +33,7 @@ from . import power_warnings, properties, services
 from .models import Instance, Schedule, Source
 from .serializers import CreateInstanceSerializer, InstanceSerializer, ScheduleSerializer
 from .spec import image_for
+from .world import RESET_KEEP, SEED_MODES
 
 TEXT_EDIT_LIMIT = 5 * 1024 * 1024
 
@@ -1030,6 +1031,136 @@ class WorldReplaceView(APIView):
                 "size": size,
                 "level_name": level,
                 "uploaded": uploaded,
+                "pre_restore_backup": pre,
+                "stop_if_running": stop,
+            },
+        )
+        return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class WorldResetSerializer(serializers.Serializer):
+    confirm_name = serializers.CharField(
+        max_length=200, trim_whitespace=False, help_text="The server's name, typed to confirm (compared exactly)"
+    )
+    folders = serializers.ListField(
+        child=serializers.CharField(max_length=300, trim_whitespace=False),
+        min_length=1,
+        max_length=3,
+        help_text="The world folders shown in the dialog: the plan's 'delete' list",
+    )
+    stop_if_running = serializers.BooleanField(default=False)
+    pre_restore_backup = serializers.BooleanField(
+        required=False, allow_null=True, default=None, help_text="Take a safety backup first (default: the panel setting)"
+    )
+    seed_mode = serializers.ChoiceField(choices=list(SEED_MODES), default="keep")
+    seed = serializers.CharField(
+        required=False, allow_blank=True, max_length=1000, help_text="level-seed for seed_mode 'custom' (1-200 characters)"
+    )
+    keep = serializers.ListField(
+        child=serializers.ChoiceField(choices=list(RESET_KEEP)),
+        required=False,
+        max_length=2,
+        help_text="What to carry over into the new world (default: both)",
+    )
+
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        from . import world
+
+        if attrs["seed_mode"] == "custom":
+            try:
+                attrs["seed"] = world.validate_seed(attrs.get("seed", ""))
+            except ApiError as exc:
+                raise serializers.ValidationError({"seed": [str(exc.detail)]}) from exc
+        else:
+            attrs["seed"] = ""  # only a custom seed is ever stored
+        attrs["keep"] = [k for k in RESET_KEEP if k in attrs.get("keep", RESET_KEEP)]
+        return attrs
+
+
+class WorldResetView(APIView):
+    """Reset the world: delete the world folders so the server generates a new world on its next start.
+
+    ``GET`` returns the plan: the folders that would be deleted (with their size), what can be
+    carried over, the current seed setting and the reasons a reset is refused (``blockers``).
+    ``POST`` queues the ``world_reset`` job: stop (only with ``stop_if_running``), safety backup
+    (``pre_restore_backup``, default: the panel setting), optional seed change, delete, start again
+    if the server was running.
+
+    Both need ``instance.restore`` *and* ``instance.files.write``, as replacing the world does.
+    The request must repeat the server's name (``confirm_name``) and the folders the dialog
+    showed (``folders``); a reset is refused with 409 ``world_changed`` when those are no longer
+    the world folders.
+    """
+
+    parser_classes = [JSONParser]
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from . import world
+
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        require(request.user, "instance.files.write", instance)
+        return Response(world.reset_plan(instance, AgentClient(instance.node)))
+
+    @extend_schema(request=WorldResetSerializer, responses={202: JobSerializer})
+    def post(self, request: Request, pk: str) -> Response:
+        from . import world
+
+        instance = get_instance_for(request.user, pk, "instance.restore")
+        require(request.user, "instance.files.write", instance)
+        ser = WorldResetSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        if data["confirm_name"] != instance.name:
+            raise ApiError("Type the server name exactly to confirm resetting its world", code="confirmation_required")
+        if instance.archived_at:
+            raise ConflictError("Unarchive the server first", code="archived")
+        plan = world.reset_plan(instance, AgentClient(instance.node), sizes=False)
+        world.raise_reset_blocker(plan)
+        if sorted(data["folders"]) != sorted(plan["delete"]):
+            raise ConflictError(
+                "The world folders are not the ones this reset was confirmed for (they are now: "
+                f"{', '.join(plan['delete'])}). Check what would be deleted and confirm again.",
+                code="world_changed",
+                details={"delete": plan["delete"]},
+            )
+        stop = data["stop_if_running"]
+        if plan["running"] and not stop:
+            raise ConflictError(
+                "The server is running. Confirm that it may be stopped while the world is reset.", code="must_stop"
+            )
+        world.check_seed_env(instance, data["seed_mode"])
+        pre = data["pre_restore_backup"]
+        if pre is None:
+            pre = bool(SystemSetting.get("pre_restore_backup"))
+        job = enqueue(
+            "world_reset",
+            title=f"Reset world of {instance.name}",
+            instance=instance,
+            user=request.user,
+            params={
+                "level_name": plan["level_name"],
+                "layout": plan["layout"],
+                "folders": plan["delete"],
+                "seed_mode": data["seed_mode"],
+                "seed": data["seed"],
+                "keep": data["keep"],
+                "pre_restore_backup": pre,
+                "stop_if_running": stop,
+            },
+        )
+        # the seed itself is not recorded (it stays in the job's parameters, which the API does not expose)
+        audit.record(
+            "instance.world_reset",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={
+                "level_name": plan["level_name"],
+                "layout": plan["layout"],
+                "folders": plan["delete"],
+                "seed_mode": data["seed_mode"],
+                "keep": data["keep"],
                 "pre_restore_backup": pre,
                 "stop_if_running": stop,
             },

@@ -227,7 +227,7 @@ export default function Backups() {
           <p>
             <Pin className="mr-1 inline size-3" aria-hidden />
             Pin a backup to keep it forever. “Before restore” and “Before update” safety backups are created automatically
-            (also before a world is replaced).
+            (also before a world is replaced or reset).
           </p>
         </div>
         <div className="grid content-start gap-1.5">

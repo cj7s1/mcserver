@@ -60,6 +60,7 @@ from .schemas import (
     SnapshotRequest,
     StopRequest,
     WorldReplaceRequest,
+    WorldResetRequest,
     WriteTextRequest,
 )
 
@@ -1021,12 +1022,16 @@ async def world_info(
     instance_id: UUID,
     level_name: str = Query("world", min_length=1, max_length=200),
     layout: Literal["vanilla", "bukkit"] = "vanilla",
+    sizes: bool = True,
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    """The world folders of ``level_name`` (with bukkit-style dimension folders), with sizes."""
+    """The world folders of ``level_name`` (with bukkit-style dimension folders) and their state.
+
+    ``sizes=false`` skips measuring the folders (no walk over every file of the world).
+    """
     from . import world
 
-    return await run_in_threadpool(world.info, _root(settings, instance_id), level_name, layout)
+    return await run_in_threadpool(world.info, _root(settings, instance_id), level_name, layout, sizes=sizes)
 
 
 @app.post("/v1/instances/{instance_id}/world/replace", dependencies=[Depends(require_token)])
@@ -1072,6 +1077,57 @@ async def world_replace(
                     root.delete(body.archive)
 
     op = registry.start("world_replace", [instance_id], _do)
+    return {"operation": op.as_dict()}
+
+
+def _container_live(status: dict[str, Any]) -> bool:
+    """Running, or in a restart loop: Docker starts such a container again by itself."""
+    return bool(status.get("running") or status.get("restarting") or status.get("status") == "restarting")
+
+
+@app.post("/v1/instances/{instance_id}/world/reset", dependencies=[Depends(require_token)])
+async def world_reset(
+    instance_id: UUID, body: WorldResetRequest, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    """Delete the world so the server generates a new one on its next start (server must be stopped).
+
+    Only folders that look like a world are deleted, and only if they are exactly the folders in
+    ``expect``. They are moved aside first (undone on any failure) and deleted afterwards. A failed
+    operation's error code says whether the world was touched (see ``world.reset``).
+    """
+    from . import world
+
+    if body.confirm != instance_id:
+        raise AgentError("Confirmation id does not match", "confirmation_mismatch", 400)
+    world.level_parts(body.level_name)  # refuse bad names before starting an operation
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    if _container_live(status):
+        raise AgentError("Stop the server before resetting its world", "must_stop", 409)
+    root = _root(settings, instance_id)
+
+    def _do(op: Operation) -> dict[str, Any]:
+        # Checked again now that the operation blocks power actions: a start that slipped in between
+        # the check above and the registration would otherwise run on a world being deleted.
+        try:
+            live = _container_live(docker_ops.status(instance_id))
+        except Exception as exc:
+            raise AgentError(
+                f"The state of the server's container could not be checked ({exc}). Nothing was changed.",
+                "world_reset_failed",
+                503,
+            ) from exc
+        if live:
+            raise AgentError("Stop the server before resetting its world", "must_stop", 409)
+        return world.reset(
+            root,
+            body.level_name,
+            body.layout,
+            expect=body.expect,
+            keep=body.keep,
+            progress=lambda p, m: op.update(p, m),
+        )
+
+    op = registry.start("world_reset", [instance_id], _do)
     return {"operation": op.as_dict()}
 
 

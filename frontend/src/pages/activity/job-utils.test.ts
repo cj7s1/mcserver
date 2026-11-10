@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canAbandonJob, isJobActive, jobDurationLabel } from "./job-utils";
+import { ABANDON_PERMISSIONS, canAbandonJob, isJobActive, jobDurationLabel } from "./job-utils";
 
 describe("canAbandonJob", () => {
   const control = ["instance.view", "instance.control"];
@@ -26,6 +26,12 @@ describe("canAbandonJob", () => {
     expect(canAbandonJob(job("delete"), { instance: control })).toBe(false);
     expect(canAbandonJob(job("world_replace"), { instance: ["instance.restore"] })).toBe(false);
     expect(canAbandonJob(job("world_replace"), { instance: ["instance.restore", "instance.files.write"] })).toBe(true);
+    // a world reset needs the two permissions that start it; instance.delete is neither needed nor enough
+    expect(canAbandonJob(job("world_reset"), { instance: ["instance.restore"] })).toBe(false);
+    expect(canAbandonJob(job("world_reset"), { instance: ["instance.files.write"] })).toBe(false);
+    expect(canAbandonJob(job("world_reset"), { instance: ["instance.delete", "instance.control"] })).toBe(false);
+    expect(canAbandonJob(job("world_reset"), { instance: ["instance.restore", "instance.files.write"] })).toBe(true);
+    expect(canAbandonJob(job("world_reset"), { global: ["instance.restore", "instance.files.write"] })).toBe(false);
     // panel-wide codes come from the global role
     expect(canAbandonJob(job("migrate"), { instance: ["instance.configure", "system.nodes"] })).toBe(false);
     expect(canAbandonJob(job("migrate"), { instance: ["instance.configure"], global: ["system.nodes"] })).toBe(true);
@@ -33,6 +39,11 @@ describe("canAbandonJob", () => {
     // unknown kinds need system.settings, which may always abandon
     expect(canAbandonJob(job("something_new"), { instance: control })).toBe(false);
     expect(canAbandonJob(job("restore"), { instance: [], global: ["system.settings"] })).toBe(true);
+  });
+
+  it("mirrors the backend entry for world jobs", () => {
+    expect(ABANDON_PERMISSIONS.world_reset).toEqual(["instance.restore", "instance.files.write"]);
+    expect(ABANDON_PERMISSIONS.world_reset).toEqual(ABANDON_PERMISSIONS.world_replace);
   });
 
   it("needs system.settings for jobs without a server", () => {

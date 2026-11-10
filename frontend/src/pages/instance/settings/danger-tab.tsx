@@ -1,7 +1,7 @@
-/** Recreate, clone, move to another node, archive/unarchive and permanent delete. */
+/** Recreate, clone, move to another node, archive/unarchive, world reset and permanent delete. */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Archive, ArchiveRestore, ArrowRightLeft, Copy, Loader2, RefreshCcw, Trash2 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { Archive, ArchiveRestore, ArrowRightLeft, Copy, Eraser, Loader2, RefreshCcw, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -18,6 +18,8 @@ import type { Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useMigrationOutcome, useNodes } from "./migrate-api";
 import { MigrateDialog } from "./migrate-dialog";
+import { useWorldResetOutcome } from "./reset-world-api";
+import { ResetWorldDialog } from "./reset-world-dialog";
 import { Field, fieldErrorsOf, InlineField, Notice, parseNum, type TabProps } from "./settings-ui";
 
 const LIVE = ["running", "starting", "unhealthy", "restarting", "stopping"];
@@ -175,6 +177,8 @@ export function DangerTab({ instance, can }: TabProps) {
   const [jobId, setJobId] = useState<string | null>(null);
   const [cloneOpen, setCloneOpen] = useState(false);
   const [migrateOpen, setMigrateOpen] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const resetButton = useRef<HTMLButtonElement>(null);
   const live = LIVE.includes(instance.status);
   const busy = !!instance.active_job;
   const archived = !!instance.archived_at;
@@ -183,10 +187,15 @@ export function DangerTab({ instance, can }: TabProps) {
   const canDelete = can("instance.delete");
   const canClone = auth.can("instance.create") && can("instance.files.read");
   const canMigrate = canConfigure && auth.can("system.nodes");
+  // the same two permissions as "Replace world" on the Backups page; instance.delete is not needed
+  const canResetWorld = can("instance.restore") && can("instance.files.write");
   const nodes = useNodes(canMigrate);
   const otherNodes = (nodes.data ?? []).filter((n) => n.id !== instance.node);
   const job = useJob(jobId);
   useMigrationOutcome(job.data, instance.id);
+  useWorldResetOutcome(job.data, instance.id);
+  // a reset that failed or was cancelled can leave the server stopped for a manual check: its log says what was done
+  const showJobLog = job.data?.kind === "world_reset" && (job.data.status === "failed" || job.data.status === "cancelled");
 
   const action = useMutation({
     mutationFn: (kind: "recreate" | "archive") => api.post<Job>(`/instances/${instance.id}/${kind}`),
@@ -206,18 +215,18 @@ export function DangerTab({ instance, can }: TabProps) {
     onError: (err) => toast.error(errorMessage(err)),
   });
 
-  if (!canConfigure && !canDelete && !canClone) {
+  if (!canConfigure && !canDelete && !canClone && !canResetWorld) {
     return (
       <EmptyState
         title="No actions available"
-        description="Recreating, cloning, archiving and deleting need the Configure, Create servers or Delete permissions."
+        description="Recreating, cloning, archiving and deleting need the Configure, Create servers or Delete permissions. Resetting the world needs the Restore backups and Write files permissions."
       />
     );
   }
 
   return (
     <div className="grid grid-cols-1 gap-4">
-      {jobId && <JobProgress jobId={jobId} />}
+      {jobId && <JobProgress jobId={jobId} showLog={showJobLog} />}
       <section className="overflow-hidden rounded-xl border bg-card text-card-foreground">
         <div className="border-b px-4 py-3">
           <h2 className="text-sm font-semibold">Maintenance</h2>
@@ -291,13 +300,13 @@ export function DangerTab({ instance, can }: TabProps) {
         </div>
       </section>
 
-      {canDelete && (
+      {(canDelete || canResetWorld) && (
         <section className="overflow-hidden rounded-xl border border-destructive/40 bg-card text-card-foreground">
           <div className="border-b border-destructive/30 px-4 py-3">
             <h2 className="text-sm font-semibold text-destructive">Danger zone</h2>
           </div>
           <div className="divide-y">
-            {archived ? (
+            {!canDelete ? null : archived ? (
               <ActionRow
                 title="Unarchive server"
                 description="Bring the server back to the active list. Its container is recreated on the next start."
@@ -336,46 +345,63 @@ export function DangerTab({ instance, can }: TabProps) {
                 }
               />
             )}
-            <ActionRow
-              danger
-              title="Delete permanently"
-              description="Deletes the container, all server files including worlds, and every backup of this server. This cannot be undone."
-              action={
-                <ConfirmDialog
-                  trigger={
-                    <Button variant="destructive" size="sm" disabled={busy}>
-                      <Trash2 /> Delete…
-                    </Button>
-                  }
-                  title={`Delete ${instance.name} permanently?`}
-                  destructive
-                  confirmLabel="Delete forever"
-                  confirmText={instance.name}
-                  description={
-                    <div className="grid grid-cols-1 gap-2">
-                      <p>This removes, with no way to recover them:</p>
-                      <ul className="list-disc space-y-0.5 pl-5">
-                        <li>the container{live ? " (the running server is stopped)" : ""}</li>
-                        <li>all files: worlds, configs, mods and plugins</li>
-                        <li>all backups of this server</li>
-                      </ul>
-                      <p>If you might need it again, archive it instead or download what you need first.</p>
-                    </div>
-                  }
-                  onConfirm={async () => {
-                    try {
-                      await api.delete<Job>(`/instances/${instance.id}`, { confirm_name: instance.name });
-                      toast.success(`Deleting ${instance.name}. This continues in the background.`);
-                      qc.invalidateQueries({ queryKey: qk.instances });
-                      qc.invalidateQueries({ queryKey: qk.jobs });
-                      navigate("/servers");
-                    } catch (err) {
-                      toast.error(errorMessage(err));
+            {canResetWorld && (
+              <ActionRow
+                title="Reset world"
+                description={
+                  archived
+                    ? "Not available while the server is archived. Unarchive it first."
+                    : "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. A safety backup is taken first unless you turn it off."
+                }
+                action={
+                  <Button ref={resetButton} variant="destructive" size="sm" onClick={() => setResetOpen(true)} disabled={busy || archived}>
+                    <Eraser /> Reset world…
+                  </Button>
+                }
+              />
+            )}
+            {canDelete && (
+              <ActionRow
+                danger
+                title="Delete permanently"
+                description="Deletes the container, all server files including worlds, and every backup of this server. This cannot be undone."
+                action={
+                  <ConfirmDialog
+                    trigger={
+                      <Button variant="destructive" size="sm" disabled={busy}>
+                        <Trash2 /> Delete…
+                      </Button>
                     }
-                  }}
-                />
-              }
-            />
+                    title={`Delete ${instance.name} permanently?`}
+                    destructive
+                    confirmLabel="Delete forever"
+                    confirmText={instance.name}
+                    description={
+                      <div className="grid grid-cols-1 gap-2">
+                        <p>This removes, with no way to recover them:</p>
+                        <ul className="list-disc space-y-0.5 pl-5">
+                          <li>the container{live ? " (the running server is stopped)" : ""}</li>
+                          <li>all files: worlds, configs, mods and plugins</li>
+                          <li>all backups of this server</li>
+                        </ul>
+                        <p>If you might need it again, archive it instead or download what you need first.</p>
+                      </div>
+                    }
+                    onConfirm={async () => {
+                      try {
+                        await api.delete<Job>(`/instances/${instance.id}`, { confirm_name: instance.name });
+                        toast.success(`Deleting ${instance.name}. This continues in the background.`);
+                        qc.invalidateQueries({ queryKey: qk.instances });
+                        qc.invalidateQueries({ queryKey: qk.jobs });
+                        navigate("/servers");
+                      } catch (err) {
+                        toast.error(errorMessage(err));
+                      }
+                    }}
+                  />
+                }
+              />
+            )}
           </div>
         </section>
       )}
@@ -389,6 +415,18 @@ export function DangerTab({ instance, can }: TabProps) {
           live={live}
           onOpenChange={(o) => !o && setMigrateOpen(false)}
           onStarted={(j) => {
+            setJobId(j.id);
+            invalidate(instance.id);
+          }}
+        />
+      )}
+      {resetOpen && (
+        <ResetWorldDialog
+          instance={instance}
+          returnFocusRef={resetButton}
+          onClose={() => setResetOpen(false)}
+          onStarted={(j) => {
+            qc.setQueryData(qk.job(j.id), j);
             setJobId(j.id);
             invalidate(instance.id);
           }}

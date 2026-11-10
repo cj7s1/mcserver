@@ -282,6 +282,27 @@ Then open **Schedules** and add, for example:
 Restoring is one click on a backup. The panel takes a safety backup of the current state first
 unless you turn that off. You can also browse a backup and restore a single file or folder.
 
+### Starting over with a new world
+
+To throw the world away and let the server generate a new one, open **Settings → Danger zone** and
+click **Reset world…**. The dialog lists the world folders that will be deleted with their size, lets
+you choose the seed (a random one, the current setting, or your own) and can carry the datapacks
+over. You confirm by typing the server's name. The panel then:
+
+1. stops the server if it is running,
+2. takes a safety backup of the whole server folder and checks that the world is in it (if the backup
+   fails or does not hold the world, nothing is deleted),
+3. deletes the world folders,
+4. starts the server again if it was running. It generates the new world while it starts.
+
+Settings, mods, plugins, the whitelist, operators and your backups are kept. Player inventories and
+positions are part of the world and go with it. Data that plugins keep outside the world folder (live
+maps, land claims, homes) is not reset. To get the old world back, restore the “Before restore”
+backup from the **Backups** page.
+
+Make the test backup above before your first reset: the safety backup uses the same backup storage,
+and a reset with the safety backup turned off cannot be undone.
+
 ## 11. Everyday settings
 
 **Settings** holds memory, Java version, JVM flags, server properties and software updates.

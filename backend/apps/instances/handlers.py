@@ -569,3 +569,223 @@ def world_replace(job: Job, ctx: JobContext) -> dict[str, Any]:
         "safety_backup": safety_id,
         "restarted": was_running,
     }
+
+
+def _log_after_cancel(job: Job, ctx: JobContext, line: str) -> None:
+    """Add a last line to the log of a job that was marked as failed while its handler ran."""
+    job.refresh_from_db(fields=["log"])  # keep what the abandon request wrote
+    ctx.log(line)
+
+
+def _reset_refused(exc: ApiError) -> bool:
+    """Whether a failed agent request proves that the agent did not do what it was asked.
+
+    Only an error the agent itself reported does. A 5xx answer without an agent error code came
+    from something in between (a proxy, a crashed request handler), and an unreachable agent
+    gave no answer at all: the agent may be resetting the world (or have written the file) anyway.
+    """
+    from apps.nodes.client import AgentError
+
+    return isinstance(exc, AgentError) and not (exc.agent_status >= 500 and exc.error_code == "agent_error")
+
+
+@register("world_reset")
+def world_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
+    """Delete the world so the server generates a new one: stop, safety backup, seed, delete, start again.
+
+    Nothing is deleted unless the folders are still the ones the user confirmed and the safety
+    backup (when requested) finished without warnings and holds them. The agent moves the world
+    folders aside before deleting them and reports whether a failure touched the world: after a
+    failure that left the world as it was, the seed is put back and a server that was running
+    is started again; after anything else the server is left stopped, because Minecraft would
+    generate a new world wherever the old one is missing.
+    """
+    from apps.backups.handlers import run_backup
+    from apps.backups.models import BackupKind
+    from apps.jobs.runner import JobCancelled
+    from apps.nodes.client import AgentError
+
+    from . import world
+
+    instance = _instance(job)
+    client = AgentClient(instance.node)
+    p = job.params
+    seed_mode = p.get("seed_mode", "keep")
+    keep = list(p.get("keep") or [])
+    was_running = False
+    submitted = False  # the reset request was sent: only the agent's own answer says what happened
+    started = False  # the agent accepted it and runs the operation
+    previous_seed: str | None = None
+    seed_unconfirmed = False  # the request that sets level-seed is out: only its answer says whether it was written
+    safety_id = None
+    try:
+        if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
+            raise ConflictError("This server is archived; unarchive it before resetting its world", code="archived")
+        plan = world.reset_plan(instance, client, sizes=False)
+        world.raise_reset_blocker(plan)
+        level, world_layout, folders = plan["level_name"], plan["layout"], plan["delete"]
+        if level != p["level_name"] or world_layout != p["layout"] or sorted(folders) != sorted(p["folders"]):
+            raise ConflictError(
+                f"The world folders changed since this reset was confirmed (they are now: {', '.join(folders)}; "
+                f"confirmed: {', '.join(p['folders'])}). Open the dialog again and check what would be deleted.",
+                code="world_changed",
+            )
+        world.check_seed_env(instance, seed_mode)
+        ctx.log(
+            f"World folder: {level} (from {plan['level_name_source']}); layout: {world_layout}; deleting: {', '.join(folders)}"
+        )
+        for warning in plan["warnings"]:
+            ctx.log(f"warning: {warning}")
+        if world.is_live(client.status(instance.id)):
+            if not p.get("stop_if_running"):
+                raise ConflictError("The server is running. Confirm that it may be stopped to reset the world.", code="must_stop")
+            ctx.progress(0.02, "Stopping server", force=True)
+            client.stop(instance.id, timeout=instance.stop_timeout)
+            reconcile_instance(instance.id)
+            was_running = True
+        if p.get("pre_restore_backup", True):
+            ctx.progress(0.05, "Creating a safety backup of the current state", force=True)
+            safety = run_backup(
+                instance,
+                ctx,
+                name=f"Before resetting the world '{level}'",
+                kind=BackupKind.PRE_RESTORE,
+                user=job.user,
+                span=(0.05, 0.6),
+                job=job,
+                # the server's own backup exclusions could leave the world out of its safety backup
+                policy_excludes=False,
+            )
+            safety_id = str(safety.id)
+            if safety.warnings:
+                raise ConflictError(
+                    "The safety backup finished with warnings (see the log of this job), so it may not hold the whole "
+                    "world, and nothing was deleted.",
+                    code="safety_backup_incomplete",
+                )
+            ctx.progress(0.61, "Checking that the safety backup holds the world", force=True)
+            world.verify_world_in_backup(
+                instance, client, safety.snapshot_id, [f for f in plan["folders"] if f["state"] == "world"]
+            )
+        else:
+            ctx.log("No safety backup was requested")
+        try:
+            ctx.check_cancelled()
+        except JobCancelled:
+            _log_after_cancel(
+                job,
+                ctx,
+                "This job was marked as failed before the world was touched: nothing was deleted"
+                + (", and the server was left stopped." if was_running else "."),
+            )
+            raise
+        if seed_mode in ("random", "custom"):
+            seed = world.validate_seed(p.get("seed", "")) if seed_mode == "custom" else ""
+            seed_unconfirmed = True
+            previous_seed = world.write_seed(instance, client, seed)
+            seed_unconfirmed = False
+            if previous_seed is not None:
+                ctx.log(
+                    "Set level-seed in server.properties" if seed else "Cleared level-seed in server.properties (random seed)"
+                )
+        ctx.progress(0.65, f"Resetting the world '{level}'", force=True)
+        # Set before the request: if it times out or the connection drops, the agent may have started
+        # the reset anyway, so only an error the agent itself reported proves the world is untouched.
+        submitted = True
+        op = client.world_reset(instance.id, level_name=level, layout=world_layout, expect=folders, keep=keep)
+        started = True
+        done = client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.65, 0.27))
+    except ApiError as exc:
+        # Compensation acts on the server, so it needs the lock: a job that was marked as failed
+        # meanwhile no longer owns the server and does nothing more.
+        try:
+            ctx.check_cancelled()
+        except JobCancelled:
+            _log_after_cancel(
+                job,
+                ctx,
+                f"This job was marked as failed, and then the reset failed ({exc.detail}). Nothing more was done: "
+                + (
+                    "the server was not started again and server.properties was left as it is. Check the world "
+                    "folder before starting the server."
+                    if submitted
+                    else "the world was not touched" + (", and the server was left stopped." if was_running else ".")
+                ),
+            )
+            raise
+        if not submitted:
+            untouched = True
+        elif not started:
+            untouched = _reset_refused(exc)
+        else:
+            untouched = isinstance(exc, AgentError) and exc.error_code in world.WORLD_RESET_UNTOUCHED
+        if not untouched:
+            _set_desired(instance, DesiredState.STOPPED)
+            ctx.log(
+                "The reset may be incomplete, so the server was left stopped and server.properties was left as it is. "
+                "Check the Files page: a '.mcpanel-world-old-…' folder may hold the previous world"
+                + (", and the safety backup taken by this job can be restored." if safety_id else ".")
+            )
+            raise
+        if previous_seed is not None:
+            try:
+                world.restore_seed(instance, client, previous_seed)
+                ctx.log("Put level-seed in server.properties back to its previous value")
+            except ApiError as seed_exc:
+                ctx.log(f"Could not put level-seed in server.properties back to its previous value: {seed_exc.detail}")
+        elif seed_unconfirmed and not _reset_refused(exc):
+            # the previous value is not known here, so there is nothing to put back
+            ctx.log(
+                "Setting level-seed in server.properties failed without an answer from the agent, so the file may "
+                "already hold the new seed. Check level-seed before the server generates a new world."
+            )
+        if was_running:
+            try:
+                client.start(instance.id)
+                ctx.log("The world is unchanged; the server was started again")
+            except ApiError as start_exc:
+                ctx.log(f"Could not start the server again: {start_exc.detail}")
+        detail = str(exc.detail).removesuffix("Nothing was changed.").rstrip()
+        raise ApiError(
+            f"The world was not changed. {detail}", code=exc.error_code, status_code=exc.status_code, details=exc.details
+        ) from exc
+    result = done.get("result") or {}
+    deleted = list(result.get("deleted") or [])
+    ctx.log(f"Deleted: {', '.join(deleted) or 'nothing'}")
+    if result.get("kept"):
+        ctx.log(f"Carried over: {', '.join(result['kept'])}")
+    if result.get("skipped"):
+        ctx.log(f"Left as they are (no world in them): {', '.join(result['skipped'])}")
+    for warning in result.get("warnings") or []:
+        ctx.log(f"warning: {warning}")
+    if was_running:
+        try:
+            ctx.check_cancelled()
+        except JobCancelled:
+            _log_after_cancel(
+                job, ctx, "The world was reset. This job was marked as failed meanwhile, so the server was left stopped."
+            )
+            raise
+        ctx.progress(0.93, "Starting server")
+        try:
+            client.start(instance.id)
+        except ApiError as exc:
+            # the job fails, but say clearly that the world itself was reset
+            raise ApiError(
+                f"The world was reset, but the server could not be started again: {exc.detail}",
+                code=exc.error_code,
+                status_code=exc.status_code,
+            ) from exc
+    return {
+        "level_name": level,
+        "layout": world_layout,
+        "deleted": deleted,
+        "kept": result.get("kept", []),
+        "skipped": result.get("skipped", []),
+        "seed_mode": seed_mode,
+        "seed_changed": previous_seed is not None,
+        "leftover": result.get("leftover"),
+        "warnings": result.get("warnings", []),
+        "safety_backup": safety_id,
+        "restarted": was_running,
+    }

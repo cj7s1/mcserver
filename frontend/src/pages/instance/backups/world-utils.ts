@@ -4,8 +4,8 @@ import { api } from "@/lib/api";
 import { qk } from "@/lib/queries";
 import type { WorldFolder, WorldInfo } from "@/lib/types";
 
-/** Job kinds of the world section (backend apps/instances/handlers.py). */
-export const WORLD_JOB_KINDS = ["world_replace"];
+/** Job kinds of the world section (backend apps/instances/handlers.py); a reset is started from Settings → Danger zone. */
+export const WORLD_JOB_KINDS = ["world_replace", "world_reset"];
 
 export const isWorldJob = (kind: string | null | undefined) => !!kind && WORLD_JOB_KINDS.includes(kind);
 

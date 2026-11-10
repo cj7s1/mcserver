@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorldFolder } from "@/lib/types";
-import { dimensionsSummary, isArchiveName, isWorldJob, replacedFolders } from "./world-utils";
+import { BACKUP_JOB_KINDS } from "./backup-utils";
+import { dimensionsSummary, isArchiveName, isWorldJob, replacedFolders, WORLD_JOB_KINDS } from "./world-utils";
 
 const folder = (role: WorldFolder["role"], path: string, exists: boolean, extra: Partial<WorldFolder> = {}): WorldFolder => ({
   role,
@@ -26,8 +27,14 @@ describe("world helpers", () => {
 
   it("recognises world jobs", () => {
     expect(isWorldJob("world_replace")).toBe(true);
+    expect(isWorldJob("world_reset")).toBe(true);
     expect(isWorldJob("restore")).toBe(false);
     expect(isWorldJob(undefined)).toBe(false);
+  });
+
+  it("lets the Backups page adopt a running world reset and report it in the World section", () => {
+    expect(WORLD_JOB_KINDS).toEqual(["world_replace", "world_reset"]);
+    expect(BACKUP_JOB_KINDS).toEqual(expect.arrayContaining(["world_replace", "world_reset"]));
   });
 
   it("summarises where the dimensions live", () => {
