@@ -10,9 +10,13 @@
 #   -> a run whose `docker compose up` fails after the old workers were removed does not finish:
 #      a second run refuses, `run --resume` finishes it with the rollback point of the old version
 #   -> the new layout, the account and the setting are still there, no old container left
-#   -> rollback: the old layout and the old images again, schema changes undone, data still there
-#   -> run again
+#   -> rollback: the old layout and the old images again, schema changes undone, data still there.
+#      While its `docker compose up` replaces the containers the terminal is closed (SIGHUP to the
+#      whole process group): the rollback still finishes
+#   -> run again, with the terminal closed in the same way: the switch still finishes
 #   -> the way back without undoing migrations: restore-db with the dump of that run, then rollback
+#   -> restore-db once more, after that finished rollback: the commands it prints start the old
+#      layout again
 #
 #   upgrade-rehearsal.sh SITE NEW_REV [URL]
 #
@@ -70,6 +74,43 @@ WRAPPER
     (cd "$DEPLOY" && PATH="$SHIM:$PATH" FAIL_NEXT_UP="$SHIM/fail-next-up" REAL_DOCKER="$real" ./scripts/upgrade.sh "$@")
 }
 
+# upgrade.sh the way it runs in a terminal that is then closed: in a session of its own, and when
+# its output shows that `docker compose up` has begun to replace the containers, the whole process
+# group gets SIGHUP. It must finish all the same: prints its output, returns its exit status.
+#   upgrade_in_a_terminal_that_closes WHAT-up-PRINTS-LAST ARGS...
+upgrade_in_a_terminal_that_closes() {
+    local last="$1" out="$SHIM/terminal.out" wrapper deadline=$((SECONDS + 1200)) code after left
+    shift
+    : >"$out"
+    # The wrapper only catches the signal, to report the exit status: a signal that is caught is
+    # back at its default in upgrade.sh (one that is ignored would stay ignored there).
+    # shellcheck disable=SC2016 # expanded by the wrapper
+    setsid bash -c 'trap : HUP; cd "$0" && ./scripts/upgrade.sh "$@"; echo "### upgrade.sh exit=$?"' "$DEPLOY" "$@" >>"$out" 2>&1 &
+    wrapper=$!
+    until grep -q -E 'Container [^ ]+-agent-1 +Recreated' "$out"; do
+        if ! kill -0 "$wrapper" 2>/dev/null; then
+            cat "$out"
+            die "upgrade.sh $* ended before docker compose up replaced a container"
+        fi
+        [ "$SECONDS" -lt "$deadline" ] || die "upgrade.sh $* did not get to docker compose up"
+        sleep 0.05
+    done
+    kill -HUP -- "-$wrapper" || die "could not signal the process group of upgrade.sh"
+    echo "### SIGHUP sent to the process group $wrapper" >>"$out"
+    wait "$wrapper"
+    cat "$out"
+    # the signal came while `docker compose up` was at work: its last lines were written after it
+    after=$(sed -n '/^### SIGHUP sent/,$p' "$out")
+    grep -q -E "$last" <<<"$after" || die "the signal came after docker compose up had ended: nothing was tried"
+    code=$(sed -n 's/^### upgrade.sh exit=//p' "$out" | tail -n 1)
+    [ -n "$code" ] || die "the wrapper of upgrade.sh did not report an exit status"
+    # no container under the temporary name of a replacement, none that was made and not started
+    left=$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}={{.State}}' | grep -E '^[0-9a-f]{12}_|=(created|exited|dead)$' | tr '\n' ' ')
+    [ -z "$left" ] || die "containers are left half replaced or not started: $left"
+    return "$code"
+}
+newest_log() { find "$DEPLOY" -maxdepth 1 -name 'upgrade-log-*.log' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-; }
+
 state() { sed -n "s/^$1=//p" "$STATE" | head -n 1; }
 rollback_point() { grep -E '^(FROM_REV|IMAGE|MIGRATION)=' "$STATE"; }
 services() { dc ps --services --status running | sort | tr '\n' ' '; }
@@ -103,6 +144,7 @@ nothing_was_recorded() { # a refused run left no trace
     [ "$(services)" = "$OLD_SERVICES" ] || die "$1: the refused run changed the layout"
     [ ! -e "$STATE" ] || die "$1: the refused run wrote a state file"
     [ -z "$(find "$DEPLOY" -maxdepth 1 -name 'upgrade-backup-*')" ] || die "$1: the refused run dumped the database"
+    [ -z "$(find "$DEPLOY" -maxdepth 1 -name 'upgrade-log-*')" ] || die "$1: the refused run wrote a log"
     [ "$(docker image inspect -f '{{.Id}}' "$PANEL_IMAGE_NAME")" = "$OLD_PANEL_IMAGE" ] || die "$1: $PANEL_IMAGE_NAME no longer is the old image"
     [ "$(panel_image)" = "$OLD_PANEL_IMAGE" ] || die "$1: the panel container was replaced"
 }
@@ -237,15 +279,23 @@ done
 [ "$NEW_SERVICES" != "$OLD_SERVICES" ] || die "the layout did not change"
 ok "new layout: $NEW_SERVICES (was: $OLD_SERVICES)"
 [ "$(stat -c %a "$STATE")" = 600 ] || die "upgrade-state.env is not mode 600"
-for file in "$DEPLOY"/upgrade-backup-*.sql "$DEPLOY"/upgrade-backup-*.env; do
+for file in "$DEPLOY"/upgrade-backup-*.sql "$DEPLOY"/upgrade-backup-*.env "$DEPLOY"/upgrade-log-*.log; do
     [ "$(stat -c %a "$file")" = 600 ] || die "$file is not mode 600"
 done
+log=$(newest_log)
+grep -q '^==> Done$' "$log" || die "the log of the resumed run ($log) does not say how it ended"
+tail -n 1 "$log" | grep -q 'exit status 0$' || die "the last line of $log is not the exit status"
 grep -q "accounts_user" "$DEPLOY"/upgrade-backup-*.sql || die "the database dump looks empty"
 ! grep -q "^COPY public.django_session .*$USERNAME" "$DEPLOY"/upgrade-backup-*.sql || die "the dump holds login sessions"
 [ -z "$(g status --porcelain)" ] || die "git status is not clean: $(g status --porcelain)"
 ok "git sees none of the script's files (state, dump and .env copy are ignored)"
 data_is_there "new layout"
-upgrade status || die "status failed after the upgrade"
+status=$(upgrade status) || die "status failed after the upgrade"
+printf '%s\n' "$status"
+case "$status" in
+    *"Log:          $log"*"exit status 0"*) ok "status names the log of the last run and how it ended" ;;
+    *) die "status does not name the log $log with its exit status" ;;
+esac
 
 say "6b. Redis as its own container and back, without a build (run --no-build): the rollback point stays"
 point=$(rollback_point)
@@ -264,8 +314,11 @@ expect_services "$NEW_SERVICES"
 ok "back to $NEW_SERVICES, no redis container, the rollback point is unchanged"
 data_is_there "Redis inside the panel container again"
 
-say "7. rollback"
-upgrade rollback || die "upgrade.sh rollback failed"
+say "7. rollback; the terminal is closed while docker compose up brings the old layout back"
+upgrade_in_a_terminal_that_closes 'Container [^ ]+-panel-1 +(Started|Healthy)' rollback || die "upgrade.sh rollback did not finish after its terminal was closed"
+[ "$(state STATUS)" = rolled-back ] || die "the state should be 'rolled-back', it is '$(state STATUS)'"
+tail -n 1 "$(newest_log)" | grep -q 'exit status 0$' || die "the log of the rollback does not end with the exit status 0"
+ok "the rollback finished without its terminal (the log says so: $(newest_log))"
 the_old_version_runs "rollback"
 if [ "$MIGRATES" = 1 ]; then
     pending=$(dc exec -T panel python manage.py showmigrations --plan | grep -c '\[ \]')
@@ -275,9 +328,12 @@ if [ "$MIGRATES" = 1 ]; then
 fi
 data_is_there "after the rollback"
 
-say "8. upgrade again"
+say "8. upgrade again; the terminal is closed while docker compose up replaces the containers"
 g checkout -q "$BRANCH" || die "cannot switch back to $BRANCH"
-upgrade run --with-migrations || die "the second upgrade failed"
+upgrade_in_a_terminal_that_closes 'Container [^ ]+-panel-1 +Started' run --with-migrations || die "the second upgrade did not finish after its terminal was closed"
+[ "$(state STATUS)" = "done" ] || die "the state should be 'done', it is '$(state STATUS)'"
+grep -q '^==> Done$' "$(newest_log)" || die "the log of the run does not say that it finished"
+ok "the switch finished without its terminal (the log says so: $(newest_log))"
 expect_services "$NEW_SERVICES"
 data_is_there "new layout, second time"
 tags=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^mcpanel-rollback/')
@@ -297,7 +353,12 @@ upgrade restore-db "$dump"
 code=$?
 [ "$code" = 2 ] || die "restore-db without --yes should only say what it would do (exit 2), got $code"
 [ "$(sql "SELECT count(*) FROM pg_database WHERE datname LIKE '%before_restore%'")" = 0 ] || die "restore-db without --yes changed the databases"
-upgrade restore-db "$dump" --yes || die "restore-db failed"
+restored=$(upgrade restore-db "$dump" --yes) || die "restore-db failed"
+printf '%s\n' "$restored"
+case "$restored" in
+    *"./scripts/upgrade.sh rollback"*) ok "restore-db names the rollback as the next step (the upgrade is what is deployed)" ;;
+    *) die "restore-db does not name the rollback as the next step" ;;
+esac
 [ "$(sql "SELECT count(*) FROM pg_database WHERE datname LIKE '%before_restore%'")" = 1 ] || die "the database as it was should be kept under another name"
 applied_old=$(sql "SELECT count(*) FROM django_migrations")
 if [ "$MIGRATES" = 1 ]; then
@@ -308,6 +369,32 @@ ok "the dump is the database now ($applied_old migrations applied, the upgraded 
 upgrade rollback || die "rollback after restore-db failed"
 the_old_version_runs "rollback after restore-db"
 data_is_there "after restore-db and rollback"
+g checkout -q "$BRANCH" || die "cannot switch back to $BRANCH"
+
+say "10. restore-db after that finished rollback: the commands it prints start the old layout again"
+# The source tree is the new version again (the script is back), the old version is deployed.
+refusal=$(upgrade restore-db "$dump" --yes 2>&1)
+code=$?
+[ "$code" = 2 ] || die "restore-db should refuse (exit 2) while the old layout uses the database, got $code"
+stop=$(sed -n 's/^ *\(docker compose stop [a-z -]*\)$/\1/p' <<<"$refusal")
+[ -n "$stop" ] || die "restore-db does not print the command that stops the other services: $refusal"
+printf '$ %s\n' "$stop"
+(cd "$DEPLOY" && bash -c "$stop") >/dev/null 2>&1 || die "the command restore-db printed failed: $stop"
+restored=$(upgrade restore-db "$dump" --yes) || die "restore-db after the rollback failed"
+printf '%s\n' "$restored"
+case "$restored" in *"upgrade.sh rollback"*) die "restore-db names a rollback although the last upgrade is rolled back already" ;; esac
+next=$(sed -n 's/^ \{6\}\(cd .* && docker compose up -d\)$/\1/p' <<<"$restored")
+[ -n "$next" ] || die "restore-db does not print the command that starts the stack again"
+case "$next" in
+    *"git checkout --detach $OLD_REV && cd deploy && docker compose up -d") ;;
+    *) die "the command restore-db prints does not check out the deployed revision first: $next" ;;
+esac
+printf '\n$ %s\n' "$next"
+bash -c "$next" || die "the command restore-db printed failed"
+dc up -d --wait --wait-timeout 300 >/dev/null 2>&1 || die "the old layout is not healthy after the command restore-db printed"
+the_old_version_runs "restore-db after the rollback, then the command it printed"
+data_is_there "after restore-db and the command it printed"
+[ "$(sql "SELECT count(*) FROM pg_database WHERE datname LIKE '%before_restore%'")" = 2 ] || die "both earlier databases should be kept under other names"
 g checkout -q "$BRANCH" || die "cannot switch back to $BRANCH"
 
 say "REHEARSAL PASSED"

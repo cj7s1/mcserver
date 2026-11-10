@@ -12,10 +12,12 @@ MCPANEL_UPGRADE_SCRIPT=/path/to/another/upgrade.sh runs these tests against that
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -50,6 +52,8 @@ OLD_MIGRATIONS = {
 UPGRADE_MIGRATIONS = {"instances": "0003_resume_after_boot", "jobs": "0002_job_heartbeat_at", "nodes": "0002_node_tls"}
 NEW_MIGRATIONS = {**OLD_MIGRATIONS, **UPGRADE_MIGRATIONS}
 DID_NOT_FINISH = "the last run did not finish"
+# the name Compose gives the replacement of a container until the old one is gone
+TEMP_PANEL = "0123456789ab_mcpanel-panel-1"
 
 
 def compose_file(services: tuple[str, ...]) -> str:
@@ -98,7 +102,7 @@ class Site:
     def _build_checkout(self) -> None:
         self.deploy.mkdir(parents=True)
         self.git("init", "-q", "-b", "main")
-        (self.root / ".gitignore").write_text("deploy/.env\ndeploy/*.env\ndeploy/*.sql\ndeploy/*.sql.part\n")
+        (self.root / ".gitignore").write_text("deploy/.env\ndeploy/*.env\ndeploy/*.sql\ndeploy/*.sql.part\n*.log\n")
         (self.deploy / "docker-compose.yml").write_text(compose_file(OLD_SERVICES))
         for app, name in OLD_MIGRATIONS.items():
             self._migration(app, name)
@@ -184,6 +188,72 @@ class Site:
         """service -> image id"""
         return {row.split("|")[1]: row.split("|")[5] for row in self.read("containers")}
 
+    def container_names(self) -> list[str]:
+        rows = [row.split("|") for row in self.read("containers")]
+        return sorted(row[7] if len(row) > 7 else f"mcpanel-{row[1]}-1" for row in rows)
+
+    def container_states(self) -> dict[str, str]:
+        """container name -> state"""
+        rows = [row.split("|") for row in self.read("containers")]
+        return {(row[7] if len(row) > 7 else f"mcpanel-{row[1]}-1"): row[2] for row in rows}
+
+    def logs(self) -> list[Path]:
+        """the logs of run / rollback / restore-db, oldest first"""
+        return sorted(self.deploy.glob("upgrade-log-*.log"), key=lambda path: path.stat().st_mtime_ns)
+
+    @contextlib.contextmanager
+    def started(self, *args: str):
+        """The script in a session of its own, like a command typed into a terminal. Whatever the
+        test does with it, nothing of it stays behind: a stand-in `docker compose` that waits (the
+        toggles hang_up and hang_check) may be in a session of its own, where a kill of the
+        script's process group does not get to it, so it is let go as well."""
+        process = subprocess.Popen(
+            ["./scripts/upgrade.sh", *args],
+            cwd=self.deploy,
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            yield process
+        finally:
+            self.toggle("release")
+            if process.poll() is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate(timeout=30)
+
+    def wait_for_event(self, event: str, what: str) -> None:
+        deadline = time.monotonic() + 60
+        while event not in self.events() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert event in self.events(), what
+
+    def half_recreate_the_panel(self) -> None:
+        """A switch whose `docker compose up` was cut off while it replaced the panel container
+        (a kill, a host that went down): the agent is made again and not started, the old panel is
+        stopped, and its replacement exists under Compose's temporary name, never started."""
+        self.toggle("fail_up")
+        assert self.upgrade("run", "--with-migrations").returncode == 1
+        self.toggle("fail_up", False)
+        assert self.status() == "switching"
+        names = self.images()
+        rows = []
+        for row in self.read("containers"):
+            fields = row.split("|")
+            if fields[1] == "agent":
+                fields[2], fields[5], fields[6] = "created", names["mcpanel/agent:local"], "-"
+            if fields[1] == "panel":
+                fields[2], fields[6] = "exited", "unhealthy"
+                new = ["n1", "panel", "created", "False", "mcpanel/panel:local", names["mcpanel/panel:local"], "-", TEMP_PANEL]
+                rows.append("|".join(new))
+            rows.append("|".join(fields))
+        self.write("containers", rows)
+        self.forget_events()
+
     def migrations(self) -> dict[str, str]:
         return dict(line.split(" ", 1) for line in self.read("migs"))
 
@@ -246,6 +316,12 @@ class Site:
         assert self.migrations() == OLD_MIGRATIONS
         assert self.head() == self.old
 
+    def assert_old_version_runs_but_tree_is_new(self) -> None:
+        running = self.containers()
+        assert tuple(sorted(running)) == OLD_SERVICES
+        assert running["panel"] == OLD_PANEL and running["agent"] == OLD_AGENT and self.migrations() == OLD_MIGRATIONS
+        assert set(self.container_states().values()) == {"running"}
+
     def assert_new_version_runs(self, revision: str | None = None) -> None:
         running = self.containers()
         assert tuple(sorted(running)) == NEW_SERVICES
@@ -272,7 +348,7 @@ def site(tmp_path: Path) -> Site:
 # --- the plain way: run, rollback, run again ------------------------------------------------------
 def test_run_then_rollback_then_run_again(site):
     plan = site.upgrade("dry-run")
-    assert plan.returncode == 0 and not site.state_file.exists()
+    assert plan.returncode == 0 and not site.state_file.exists() and not site.logs()
     assert "database migrations in this version (run needs --with-migrations)" in plan.stdout and not site.events()
     # the command it ends with is the one that works
     assert plan.stdout.rstrip().endswith("Nothing was changed. To do it: ./scripts/upgrade.sh run --with-migrations")
@@ -290,12 +366,28 @@ def test_run_then_rollback_then_run_again(site):
     site.assert_rollback_point_is_the_old_version()
     assert oct(site.state_file.stat().st_mode & 0o777) == "0o600"
     assert site.events("RM ") == ["RM beat", "RM redis", "RM worker", "RM worker-periodic"]
+    # the summary names the images of the containers that run now
+    assert "mcpanel/panel:local: panel-old -> panel-new-" in done.stdout
+    assert "redis:7-alpine: redis-old -> no running container uses it any more" in done.stdout
+    # what it printed is in a log as well: mode 600, named when it starts to change things and by `status`
+    (log,) = site.logs()
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    text = log.read_text().splitlines()
+    assert text[0].startswith("# pid ") and "| ./scripts/upgrade.sh run --with-migrations | started " in text[0]
+    assert text[-1].startswith("# ended ") and text[-1].endswith("exit status 0")
+    assert f"Log: {log}" in done.stdout and "==> Done" in text and "  to go back: ./scripts/upgrade.sh rollback" in text
+    assert [line for line in text if line.startswith("  from:")]  # the plan, printed before the log began, is in it
+    assert " Container up (fake)" in text  # ... and what docker compose wrote
+    status = site.upgrade("status")
+    assert f"Log:          {log}" in status.stdout and "exit status 0" in status.stdout
+    assert site.logs() == [log]  # status and dry-run write none
     site.forget_events()
 
     back = site.upgrade("rollback")
     assert back.returncode == 0, back.both
     site.assert_old_version_runs()
     assert site.status() == "rolled-back"
+    assert len(site.logs()) == 2 and "==> Rolled back" in site.logs()[-1].read_text()
     # every app's migrations were undone, not only the first one's: `docker compose run` reads its
     # standard input to the end, which was the rest of the list
     assert sorted(site.events("UNMIGRATE ")) == [
@@ -313,9 +405,18 @@ def test_run_then_rollback_then_run_again(site):
     assert "gone from disk" in back.stdout and "git checkout main" in back.stdout
     # ... and how to upgrade again, with the option that upgrade needs
     assert "git checkout main && cd deploy && ./scripts/upgrade.sh run --with-migrations" in back.stdout
+    # ... and which checkout this is, and in which one a plain `docker compose up -d` is safe
+    words = " ".join(back.stdout.split())
+    assert f"is now at the old version, {site.old[:12]}, as a detached HEAD" in words
+    assert "in this checkout 'docker compose up -d' and the other docker compose commands are safe" in words
+    assert "do NOT run 'docker compose up -d' in that checkout" in words
+    assert f"git checkout --detach {site.old[:12]}" in words
 
     site.git("checkout", "-q", "main")
     assert "./scripts/upgrade.sh run --with-migrations" in site.upgrade("rollback").stderr  # (rolled back already)
+    # the tree is the new version again while the old one runs: status says which checkout fits
+    status = " ".join(site.upgrade("status").stdout.split())
+    assert "do not run 'docker compose up -d' here" in status and f"git checkout --detach {site.old[:12]}" in status
     same = site.upgrade("dry-run", "--no-build")
     assert "--no-build: the images stay as they are" in same.stdout and "rebuilt" not in same.stdout
     site.next_second()
@@ -335,7 +436,7 @@ def test_run_no_build_applies_the_configuration_and_leaves_the_rollback_point_al
     applied = site.upgrade("run", "--no-build")
     assert applied.returncode == 0, applied.both
     assert site.state_file.read_text() == before
-    assert [event.split()[0] for event in site.events()] == ["UP"]  # no pull, no build, no dump, no tag
+    assert [event.split()[0] for event in site.events()] == ["UP-ENV", "UP"]  # no pull, no build, no dump, no tag
     site.assert_new_version_runs()
 
 
@@ -459,7 +560,7 @@ def test_run_without_with_migrations_refuses_before_it_records_or_builds_anythin
     assert "To do it:" in refused.stderr and "./scripts/upgrade.sh run --with-migrations" in refused.stderr
     # literally nothing: no state file, no dump, no tag, no pull, no build
     assert not site.state_file.exists() and not site.events() and not site.rollback_tags()
-    assert not list(site.deploy.glob("upgrade-backup-*"))
+    assert not list(site.deploy.glob("upgrade-backup-*")) and not site.logs()
     assert not [call for call in site.read("calls.log") if " pull" in call or " build" in call]
     # the options of the refused command are part of the one it names
     refused = site.upgrade("run", "--no-pull", "--timeout", "60", "--from", site.old)
@@ -587,6 +688,9 @@ def test_rollback_stops_nothing_when_a_migration_cannot_be_undone_and_names_the_
     assert len(site.events("RESTORE ")) == 1 and "keep-public" in site.events("RESTORE ")[0]
     assert "mcpanel_before_restore_" in restored.stdout and "dropdb" in restored.stdout
     assert site.migrations() == OLD_MIGRATIONS  # the dump is from before the upgrade
+    # the upgrade is still the deployed version: the next step is the rollback
+    assert "to finish going back" in restored.stdout and "      ./scripts/upgrade.sh rollback" in restored.stdout
+    assert "==> Loading the dump" in site.logs()[-1].read_text()
     back = site.upgrade("rollback")
     assert back.returncode == 0, back.both
     site.assert_old_version_runs()
@@ -673,44 +777,320 @@ def test_no_loop_reads_the_state_file_through_a_pipe_it_may_leave_early():
     assert not [line for line in code if "< <(state_all" in line]
 
 
-@pytest.mark.parametrize("signal_name", ["SIGHUP", "SIGTERM"])
-def test_a_closed_terminal_during_the_switch_is_recorded_as_unfinished(site, signal_name):
+def finish(process: subprocess.Popen[str], timeout: float = 60) -> str:
+    output, _ = process.communicate(timeout=timeout)
+    return output
+
+
+# --- gate, defect 1a: a closed terminal after the switch began does not end the work ------------------
+def test_a_closed_terminal_during_the_switch_does_not_stop_the_run(site):
     site.toggle("hang_up")
-    process = subprocess.Popen(
-        ["./scripts/upgrade.sh", "run", "--with-migrations"],
-        cwd=site.deploy,
-        env=site.env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        deadline = time.monotonic() + 60
-        while "UP-WAIT" not in site.events() and time.monotonic() < deadline:
-            time.sleep(0.05)
-        assert "UP-WAIT" in site.events(), "the run never got to `docker compose up`"
-        os.killpg(process.pid, getattr(signal, signal_name))  # the whole session, like a terminal that closes
-        output, _ = process.communicate(timeout=30)
-    finally:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+    with site.started("run", "--with-migrations") as process:
+        site.wait_for_event("UP-WAIT", "the run never got to `docker compose up`")
+        os.killpg(process.pid, signal.SIGHUP)  # the whole process group, like a terminal that closes
+        time.sleep(0.5)
+        assert process.poll() is None, "the hangup ended the run"
+        assert site.status() == "switching"
+        # ... and what it started is still there: `docker compose up` goes on
+        site.toggle("release")
+        output = finish(process)
+    assert process.returncode == 0, output
+    assert site.status() == "done" and "INTERRUPTED" not in site.state()
+    site.assert_new_version_runs()
+    site.assert_rollback_point_is_the_old_version()
+    # docker compose ran where the hangup of the terminal does not get to it: in a session of its
+    # own, and with the signal ignored as well
+    assert site.events("UP-ENV") == ["UP-ENV own-session hup-ignored"]
+    # how it ended is in the log, whatever became of the terminal
+    (log,) = site.logs()
+    text = log.read_text()
+    assert "==> Done" in text and text.splitlines()[-1].endswith("exit status 0")
+    assert not (site.deploy / "nohup.out").exists()
+
+
+def test_without_setsid_nohup_keeps_docker_compose_alive(site):
+    """A setsid that cannot wait (not the one of util-linux): the script falls back to nohup."""
+    (site.bin / "setsid").write_text("#!/bin/sh\necho \"setsid: invalid option -- 'w'\" >&2\nexit 1\n")
+    (site.bin / "setsid").chmod(0o755)
+    site.toggle("hang_up")
+    with site.started("run", "--with-migrations") as process:
+        site.wait_for_event("UP-WAIT", "the run never got to `docker compose up`")
+        os.killpg(process.pid, signal.SIGHUP)
+        time.sleep(0.5)
+        assert process.poll() is None, "the hangup ended the run"
+        site.toggle("release")
+        output = finish(process)
+    assert process.returncode == 0, output
+    assert site.status() == "done"
+    site.assert_new_version_runs()
+    assert site.events("UP-ENV") == ["UP-ENV callers-session hup-ignored"]
+    assert not (site.deploy / "nohup.out").exists() and "nohup:" not in output
+
+
+def test_a_closed_terminal_during_the_rollback_does_not_stop_it(site):
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    site.forget_events()
+    site.toggle("hang_up")
+    with site.started("rollback") as process:
+        site.wait_for_event("UP-WAIT", "the rollback never got to `docker compose up`")
+        os.killpg(process.pid, signal.SIGHUP)
+        time.sleep(0.5)
+        assert process.poll() is None, "the hangup ended the rollback"
+        site.toggle("release")
+        output = finish(process)
+    assert process.returncode == 0, output
+    assert site.status() == "rolled-back" and "INTERRUPTED" not in site.state()
+    site.assert_old_version_runs()
+    assert site.events("UP-ENV") == ["UP-ENV own-session hup-ignored"]
+    assert len(site.events("UNMIGRATE ")) == 3
+    assert "==> Rolled back" in site.logs()[-1].read_text()
+
+
+def test_while_a_run_is_still_at_work_no_second_command_starts(site):
+    """The run goes on without its terminal, so the owner may come back while it is still at work."""
+    site.toggle("hang_up")
+    with site.started("run", "--with-migrations") as process:
+        site.wait_for_event("UP-WAIT", "the run never got to `docker compose up`")
+        os.killpg(process.pid, signal.SIGHUP)
+        before = site.state_file.read_text()
+        (log,) = site.logs()
+        status = site.upgrade("status")
+        assert f"STILL AT WORK (pid {process.pid})" in status.stdout and f"tail -f {log}" in status.stdout
+        assert "still at work on it" in status.stdout and "DID NOT FINISH" not in status.stdout
+        for command in (("run", "--resume"), ("rollback",), ("run", "--no-build")):
+            refused = site.upgrade(*command)
+            assert refused.returncode == 2, refused.both
+            assert "still at work" in refused.stderr and f"tail -f {log}" in refused.stderr
+        assert "'run' would refuse now: another command" in site.upgrade("dry-run").stdout
+        assert site.state_file.read_text() == before and site.logs() == [log]
+        assert site.events("UP-WAIT") == ["UP-WAIT"]  # nothing else got to docker compose
+        site.toggle("release")
+        output = finish(process)
+    assert process.returncode == 0, output
+    site.assert_new_version_runs()
+    status = site.upgrade("status")
+    assert "STILL AT WORK" not in status.stdout and "exit status 0" in status.stdout
+
+
+def test_a_kill_during_the_switch_is_recorded_as_unfinished(site):
+    site.toggle("hang_up")
+    with site.started("run", "--with-migrations") as process:
+        site.wait_for_event("UP-WAIT", "the run never got to `docker compose up`")
+        os.killpg(process.pid, signal.SIGTERM)
+        # docker compose is in a session of its own: it finishes, and then the script ends
+        site.toggle("release")
+        output = finish(process)
     site.toggle("hang_up", False)
-    assert process.returncode == 128 + getattr(signal, signal_name), output
+    assert process.returncode == 128 + signal.SIGTERM, output
     state = site.state()
     assert state["STATUS"] == ["switching"]
-    assert len(state["INTERRUPTED"]) == 1 and state["INTERRUPTED"][0].startswith(f"{signal_name} at ")
+    assert len(state["INTERRUPTED"]) == 1 and state["INTERRUPTED"][0].startswith("SIGTERM at ")
     assert "Switching over" in state["INTERRUPTED"][0]
     site.assert_rollback_point_is_the_old_version()
+    assert site.logs()[-1].read_text().splitlines()[-1].endswith("exit status 143")
     status = site.upgrade("status")
-    assert "DID NOT FINISH" in status.stdout and f"interrupted by {signal_name}" in status.stdout
+    assert "DID NOT FINISH" in status.stdout and "interrupted by SIGTERM" in status.stdout
+    assert "exit status 143" in status.stdout
     refused = site.upgrade("run", "--with-migrations")
-    assert refused.returncode == 2 and DID_NOT_FINISH in refused.stderr and f"interrupted by {signal_name}" in refused.stderr
+    assert refused.returncode == 2 and DID_NOT_FINISH in refused.stderr and "interrupted by SIGTERM" in refused.stderr
     resumed = site.upgrade("run", "--resume")
     assert resumed.returncode == 0, resumed.both
     assert "INTERRUPTED" not in site.state() and site.status() == "done"
     site.assert_rollback_point_is_the_old_version()
+
+
+# --- gate, defect 1b: what an interrupted `docker compose up` left half-made --------------------------
+def test_rollback_after_a_half_recreated_panel_works_at_the_first_attempt(site):
+    site.half_recreate_the_panel()
+    back = site.upgrade("rollback")
+    assert back.returncode == 0, back.both
+    site.assert_old_version_runs()
+    assert site.status() == "rolled-back"
+    assert f"removed {TEMP_PANEL} (created)" in back.stdout
+    assert site.events("RM ") == [f"RM {TEMP_PANEL}"] and not site.events("UP-HALF")
+    assert len(site.events("UP ")) == 1
+
+
+def test_resume_after_a_half_recreated_panel_works_at_the_first_attempt(site):
+    site.half_recreate_the_panel()
+    resumed = site.upgrade("run", "--resume", "--timeout", "20")
+    assert resumed.returncode == 0, resumed.both
+    site.assert_new_version_runs()
+    assert site.status() == "done"
+    assert site.container_names() == ["mcpanel-agent-1", "mcpanel-panel-1", "mcpanel-postgres-1"]
+    assert set(site.container_states().values()) == {"running"}
+    assert f"RM {TEMP_PANEL}" in site.events("RM ") and not site.events("UP-HALF")
+    site.assert_rollback_point_is_the_old_version()
+
+
+def test_a_replacement_that_runs_under_its_temporary_name_gets_the_proper_name(site):
+    """What two `up`s on top of a half-recreated panel leave: the replacement runs, still under its temporary name."""
+    site.half_recreate_the_panel()
+    rows = []
+    for row in site.read("containers"):
+        fields = row.split("|")
+        if fields[1] == "panel" and len(fields) > 7:
+            fields[2], fields[6] = "running", "healthy"
+        rows.append("|".join(fields))
+    site.write("containers", rows)  # the stopped original is still there
+    resumed = site.upgrade("run", "--resume")
+    assert resumed.returncode == 0, resumed.both
+    assert site.events("RM ")[0] == "RM panel" and site.events("RENAME ") == [f"RENAME {TEMP_PANEL} -> mcpanel-panel-1"]
+    assert "removed the stopped container mcpanel-panel-1 (exited)" in resumed.stdout
+    assert f"renamed {TEMP_PANEL} to mcpanel-panel-1" in resumed.stdout
+    assert site.container_names() == ["mcpanel-agent-1", "mcpanel-panel-1", "mcpanel-postgres-1"]
+    site.assert_new_version_runs()
+
+
+# --- gate, defect 1c: `up` ends without an error and a service is not started --------------------------
+def test_up_that_leaves_the_panel_unstarted_is_tried_once_more(site):
+    site.write("panel_not_started", ["1"])
+    done = site.upgrade("run", "--with-migrations")
+    assert done.returncode == 0, done.both
+    assert "did not start: panel(created). Once more:" in done.stdout
+    assert len(site.events("UP ")) == 2
+    site.assert_new_version_runs()
+    assert site.status() == "done"
+
+
+def test_up_that_leaves_the_panel_unstarted_twice_fails_at_once_and_says_so(site):
+    site.write("panel_not_started", ["always"])
+    began = time.monotonic()
+    failed = site.upgrade("run", "--with-migrations", timeout=60)  # the wait for healthy would take 300 s
+    assert time.monotonic() - began < 30
+    assert failed.returncode == 1, failed.both
+    message = " ".join(failed.stderr.split())
+    assert "docker compose up ended without an error, twice, and still did not start: panel(created)" in message
+    assert "./scripts/upgrade.sh rollback" in message and "./scripts/upgrade.sh run --resume" in message
+    assert "not healthy" not in failed.both and "Waiting for the services" not in failed.stdout
+    assert site.status() == "switching" and len(site.events("UP ")) == 2
+    (site.fake / "panel_not_started").unlink()
+    resumed = site.upgrade("run", "--resume")
+    assert resumed.returncode == 0, resumed.both
+    site.assert_new_version_runs()
+
+
+def test_the_summary_names_the_images_of_the_running_containers(site):
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    agent = site.containers()["agent"]
+    site.next_second()
+    # the next build gives both images new ids, and Compose leaves the agent container as it is
+    site.toggle("rebuild_ids")
+    site.toggle("keep_agent")
+    again = site.upgrade("run", "--no-pull")
+    assert again.returncode == 0, again.both
+    assert site.containers()["agent"] == agent and site.images()["mcpanel/agent:local"] != agent
+    summary = again.stdout[again.stdout.index("==> Done") :]
+    assert "mcpanel/agent:local: unchanged (" in summary  # the container that runs, not what the name points at
+    assert "mcpanel/panel:local: panel-new-" in summary and "mcpanel/panel:local: unchanged" not in summary
+    assert site.state()["DEPLOYED_PANEL_IMAGE"] == [site.containers()["panel"]]
+
+
+# --- gate, defect 2: restore-db says what fits the state of the last run -------------------------------
+def test_restore_db_after_a_finished_rollback_names_the_checkout_and_the_command_that_fit(site):
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    dump = site.state()["BACKUP_SQL"][0]
+    assert site.upgrade("rollback").returncode == 0
+    site.git("checkout", "-q", "main")  # the script is back: the tree is the new version, the old one runs
+    site.stop_services(*[name for name in OLD_SERVICES if name != "postgres"])
+    restored = site.upgrade("restore-db", dump, "--yes")
+    assert restored.returncode == 0, restored.both
+    words = " ".join(restored.stdout.split())
+    assert "The last upgrade was rolled back" in words and f"({site.old[:12]})" in words
+    # not the rollback (it is done), and not `docker compose up -d` with the compose file of the new version
+    assert "upgrade.sh rollback" not in words
+    assert "do NOT run 'docker compose up -d' in this checkout" in words
+    command = f"cd {site.root} && git checkout --detach {site.old} && cd deploy && docker compose up -d"
+    assert f"      {command}\n" in restored.stdout
+    # ... followed to the letter
+    followed = subprocess.run(["bash", "-c", command], env=site.env, capture_output=True, text=True, check=False)
+    assert followed.returncode == 0, followed.stderr
+    site.assert_old_version_runs()
+    assert set(site.container_states().values()) == {"running"}
+
+
+def test_restore_db_after_a_run_that_did_not_finish_names_both_ways_out(site):
+    unhealthy_run(site)
+    dump = site.state()["BACKUP_SQL"][0]
+    site.stop_services("agent", "panel")
+    restored = site.upgrade("restore-db", dump, "--yes")
+    assert restored.returncode == 0, restored.both
+    assert "do NOT run 'docker compose up -d' now" in restored.stdout
+    assert "./scripts/upgrade.sh rollback " in restored.stdout and "./scripts/upgrade.sh run --resume " in restored.stdout
+    back = site.upgrade("rollback")
+    assert back.returncode == 0, back.both
+    site.assert_old_version_runs()
+
+
+# --- gate, defect 4: status never reads a container that does not run ----------------------------------
+def test_status_does_not_take_a_container_that_was_only_made_for_the_running_panel(site):
+    site.half_recreate_the_panel()
+    status = site.upgrade("status")
+    assert status.returncode == 0, status.both
+    assert "Deployed:     the panel is not running" in status.stdout
+    assert "label of the running panel image" not in status.stdout
+    assert "DID NOT FINISH" in status.stdout and f"{TEMP_PANEL} created" in " ".join(status.stdout.split())
+
+
+def test_status_names_the_deployed_revision_after_a_run_that_ended_before_the_switch(site):
+    site.toggle("fail_build")
+    assert site.upgrade("run", "--with-migrations").returncode == 1
+    status = site.upgrade("status")
+    line = next(line for line in status.stdout.splitlines() if line.startswith("Deployed:"))
+    assert site.old[:7] in line and "by the run that ended before the switch" in line and "unknown" not in line
+    assert "do not run 'docker compose up -d' here" in " ".join(status.stdout.split())
+
+
+def test_status_of_a_stopped_stack_says_that_the_panel_is_not_running(site):
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    site.stop_services("agent", "panel")
+    status = site.upgrade("status")
+    line = next(line for line in status.stdout.splitlines() if line.startswith("Deployed:"))
+    assert "the panel is not running" in line and site.new[:7] in line and "label of the running" not in line
+
+
+# --- gate, defect 5: an interruption while output goes into a file is still said -------------------------
+def test_an_interruption_during_the_migration_check_is_said_and_logged(site):
+    site.toggle("hang_check")
+    with site.started("run", "--with-migrations") as process:
+        site.wait_for_event("CHECK-WAIT", "the run never got to the migration check")
+        os.killpg(process.pid, signal.SIGHUP)  # before the switch a closed terminal still ends the run
+        output = finish(process, timeout=30)
+    site.toggle("hang_check", False)
+    assert process.returncode == 128 + signal.SIGHUP, output
+    said = "upgrade: interrupted by SIGHUP during: Database migrations of the new version. What is left to do: ./scripts/upgrade.sh status"
+    assert said in output
+    for name in ("mcpanel/panel:local", "mcpanel/agent:local"):
+        assert f"upgrade: {name} points at the image it had before this run again" in output
+    assert site.images()["mcpanel/panel:local"] == OLD_PANEL and site.status() == "started"
+    assert site.state()["INTERRUPTED"][0].startswith("SIGHUP at ")
+    text = site.logs()[-1].read_text()
+    assert said in text and text.splitlines()[-1].endswith("exit status 129")
+    site.assert_old_version_runs_but_tree_is_new()
+    done = site.upgrade("run")  # goes on with the recorded rollback point
+    assert done.returncode == 0, done.both
+    site.assert_new_version_runs()
+
+
+@pytest.mark.skipif(not shutil.which("shellcheck"), reason="needs shellcheck (the CI job `docker` runs it as well)")
+def test_shellcheck_has_nothing_to_say_about_the_deployment_scripts():
+    scripts = [
+        REPO / "deploy" / "scripts" / "generate-secrets.sh",
+        SCRIPT,
+        REPO / "backend" / "container" / "entrypoint.sh",
+        REPO / ".github" / "scripts" / "panel-acceptance.sh",
+        REPO / ".github" / "scripts" / "upgrade-rehearsal.sh",
+        REPO / "deploy" / "unraid" / "stopping_docker",
+    ]
+    result = subprocess.run(["shellcheck", *map(str, scripts)], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stdout
+    hook = subprocess.run(
+        ["shellcheck", "--exclude=SC2016", str(REPO / "deploy" / "unraid" / "install-hook.sh")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert hook.returncode == 0, hook.stdout
 
 
 # --- finding 6: exited server containers ----------------------------------------------------------------
@@ -722,8 +1102,8 @@ def test_dry_run_and_run_say_that_exited_server_containers_will_be_removed(site)
     for result in (site.upgrade("dry-run"), site.upgrade("run", "--with-migrations")):
         assert result.returncode == 0, result.both
         text = " ".join(result.stdout.split())
-        assert "this host has 7 exited Minecraft server container(s)" in text
-        assert "the panel removes these 7 container(s)" in text and "last 2,000 console lines" in text
+        assert "this host has 7 exited Minecraft server containers." in text
+        assert "the panel removes these 7 containers." in text and "last 2,000 console lines" in text
         assert "started from the panel" in text
         assert "MCPANEL_RETIRE_STOPPED_CONTAINERS=false" in text and "BEFORE the run" in text
         assert "manage.py retire_stopped_containers --dry-run" in text
@@ -743,8 +1123,18 @@ def test_the_notice_depends_on_the_setting_in_env(site, env_line, notice, kept):
     with (site.deploy / ".env").open("a") as fh:
         fh.write(env_line + "\n")
     out = site.upgrade("dry-run").stdout
-    assert ("the panel removes these 7 container(s)" in out) is notice
-    assert ("7 exited server container(s) on this host are kept" in out) is kept
+    assert ("the panel removes these 7 containers." in out) is notice
+    assert ("7 exited server containers are kept on this host" in out) is kept
+
+
+def test_the_notice_about_one_exited_server_container_is_a_sentence(site):
+    site.write("servers", ["s1|exited", "s3|running"])
+    text = " ".join(site.upgrade("dry-run").stdout.split())
+    assert "this host has 1 exited Minecraft server container. A stopped server" in text
+    assert "the panel removes this container. World data" in text and "container(s)" not in text
+    with (site.deploy / ".env").open("a") as fh:
+        fh.write("MCPANEL_RETIRE_STOPPED_CONTAINERS=false\n")
+    assert "1 exited server container is kept on this host" in site.upgrade("dry-run").stdout
 
 
 def test_no_notice_without_exited_server_containers(site):

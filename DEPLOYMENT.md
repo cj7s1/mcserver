@@ -1,11 +1,17 @@
 # Deployment
 
 MCPanel runs as a Docker Compose stack on one Linux Docker host. For Unraid specifics, read
-[docs/UNRAID.md](docs/UNRAID.md) as well.
+[docs/UNRAID.md](docs/UNRAID.md) as well, and
+[docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md) for what happens to running servers at array
+stop, reboot and shutdown.
 
 ## Requirements
 
 * Docker Engine 24+ with the Compose v2 plugin (`docker compose version`).
+* BuildKit (`docker buildx version` must print a version). The panel and agent images are built on
+  your host, and their Dockerfiles use `RUN --mount` and `COPY --chmod`, which only BuildKit
+  understands. A host that has built these images before has it.
+* `bash` and `git` (the upgrade script uses both).
 * x86_64 or arm64. Large modpacks need 8–12 GB RAM per server plus about 2 GB for the stack.
 * Outbound HTTPS to Mojang, Modrinth, CurseForge, FTB, the itzg mirrors and Docker Hub.
 
@@ -78,17 +84,88 @@ What to expect from it:
 * **Healthy** means: the database and the cache answer, all five processes run, both workers
   answered a ping in the last 2 minutes and the reconcile task ran in the last 3 minutes.
 * `docker compose stop panel` / `restart panel` / `down` give running jobs up to 110 seconds to
-  finish. A job that needs longer is cut off and shown as failed ("interrupted") a few minutes
-  later; check that server before you retry. So restart the panel when the Activity page is empty.
+  finish. A job that needs longer is cut off. The panel marks it as failed ("interrupted") after
+  5 minutes without a sign of life, checked every 2 minutes, so about 6 minutes later (measured:
+  6 min 9 s). Until then its server stays locked; **Mark as failed** on the Activity page
+  releases it sooner. Check that server before you retry. So restart the panel when the Activity
+  page is empty.
 * Restarting the panel container empties Redis. Jobs that were still waiting are sent again at the
   start. Lost: webhook notifications that were waiting for a retry or were queued in the last
   seconds before the stop, and the crash-loop counters (they start counting again).
 * The panel log is capped at 5 x 20 MB. The scheduler and the periodic worker only log warnings
   and errors and the 10-second ticks are not logged, so that is months of requests and jobs.
+* `/api/health` (no login needed) reports the database and cache checks, `components` (the state
+  of each of the five processes) and `tick_age_seconds` (how long ago the last 10-second
+  reconcile run started).
 
-The agent creates Minecraft containers itself (named `mcpanel-<id>`, label `io.mcpanel.managed=true`)
-on the `mcpanel_instances` network. Because Compose doesn't manage them, `docker compose down` does
-**not** stop running servers. Stop them in the panel first if you want everything down.
+### Minecraft server containers
+
+The agent creates the Minecraft containers itself (named `mcpanel-<first 12 characters of the
+server id>`, label `io.mcpanel.managed=true`) on the `mcpanel_instances` network. Because Compose
+doesn't manage them, `docker compose down` does **not** stop running servers. Stop them in the
+panel first if you want everything down.
+
+A stopped server has no container:
+
+* **Stop** (or Kill) in the panel stops the server. 10 to 20 seconds later the panel removes the
+  exited container. Before the container goes, the agent saves a record of that run: exit code,
+  out-of-memory flag, restart count, start and end time and the last 2,000 console lines. The
+  Console page of a stopped server shows those lines. World data is in the server folder and is
+  not touched.
+* **Start** creates a new container from the current settings and starts it. `docker ps -a`
+  (and Unraid's Docker tab) therefore has no entry for a stopped server, and a stopped server
+  can only be started from the panel.
+* A server that died or stopped by itself while it was meant to run keeps its container, so
+  that you can see what happened. Its page then offers **Start** and **Stop**; Stop marks it as
+  stopped, and the container is removed like any other.
+* If the record cannot be saved, the container stays and the audit log gets
+  `instance.container_retire_failed` (at most once an hour per server).
+
+Settings and commands:
+
+| What | How |
+|---|---|
+| Keep exited containers, as before this feature | `MCPANEL_RETIRE_STOPPED_CONTAINERS=false` in `.env`, then `./scripts/upgrade.sh run --no-build`. Empty or `true` is the default (containers are removed). |
+| List what would be removed, without removing anything | `docker compose exec panel python manage.py retire_stopped_containers --dry-run` |
+| Remove the containers of all stopped servers once, also while the setting is `false` | `docker compose exec panel python manage.py retire_stopped_containers` (`--node <name>` for one node) |
+
+Because a stopped server holds no container, nothing keeps its `itzg/minecraft-server` image on
+the host. If you remove that image (`docker image prune -a`, Unraid's "orphan image" rows), the
+next start downloads it again, which needs internet access and can bring a newer build of the
+same tag. The start job says so in its log when the build changed.
+
+### Stopping servers
+
+* **Stop** and **Restart** in the panel: the agent first asks the server to save
+  (`save-all flush`), then runs `docker stop` with the server's stop timeout (server settings,
+  default 90 s). The job log says whether the world was saved.
+* A stop during start-up, before the server accepts commands, still arrives: the agent
+  delivers `stop` as soon as the server accepts an RCON login, and every server runs with
+  `CREATE_CONSOLE_IN_PIPE=true`, so the runtime can also hand the stop to the server's console.
+* When Docker stops a server on its own (host shutdown, restart of the Docker service, a plain
+  `docker stop` or `docker restart` without a time), the server gets
+  min(its stop timeout, `AGENT_SHUTDOWN_STOP_TIMEOUT`) seconds, 20 by default. The agent is not
+  involved then, so there is no `save-all flush` first. Keep 20 on Unraid
+  (docs/UNRAID-SHUTDOWN.md explains why).
+* A container created before this behaviour existed has no such timeout (Docker's default of
+  10 s applies). The panel shows **restart required** for it; its next start or restart recreates
+  the container. World data is not touched.
+
+On Unraid, install the shutdown hook so that servers are saved and stopped through the panel
+before Docker stops: [docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md).
+
+### Backups are not automatic unless a schedule exists
+
+* The create wizard has **Nightly backup** switched on: it adds a backup schedule that runs
+  once a day between 03:01 and 04:59 panel time, at a minute derived from the server's id, also
+  while the server is stopped.
+* A server without that schedule (made by an older version, or with the switch turned off) is
+  only backed up by hand. The dashboard, the server list and the server's Overview and Backups
+  pages show **No backup yet**, or **Last backup N days ago** once the newest backup is older
+  than 7 days.
+* `docker compose exec panel python manage.py ensure_backup_schedules --dry-run` lists the
+  servers without an enabled backup schedule; without `--dry-run` it adds the nightly schedule
+  to each of them. Archived servers are skipped. Running it twice changes nothing.
 
 ### Redis as its own container (optional)
 
@@ -159,8 +236,8 @@ docker compose -f docker-compose.node.yml --env-file node.env up -d --build
 docker compose -f docker-compose.node.yml --env-file node.env exec agent python -m mcagent fingerprint
 ```
 
-Then register it on the **panel host** (a Nodes screen in the UI is planned; the API
-`POST /api/nodes` does the same):
+Then register it. In the panel: **System → Nodes → Add node** (name, agent URL, agent token,
+certificate fingerprint). Or on the **panel host** (the API `POST /api/nodes` does the same):
 
 ```bash
 cd mcserver/deploy
@@ -202,80 +279,268 @@ Notes:
 cd mcserver && git pull
 cd deploy
 ./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
-./scripts/upgrade.sh run
+./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
 
-`upgrade.sh` needs only bash, docker with the compose plugin and git. `run` does this, and stops
-with a message if a step fails (before step 6 the old version is still running, untouched):
+The dry run ends with `Nothing was changed. To do it: ...`. Use the command it prints. When the new
+version changes the database schema, that command is `./scripts/upgrade.sh run --with-migrations`,
+and a plain `run` refuses before it changes anything. **The version that brought the single panel
+container changes the schema** (one migration), so the first upgrade to it needs
+`--with-migrations`.
 
-1. Refuses while a job is queued or running (it asks the database). `--force` skips this.
-2. Records the rollback point: the git revision that is deployed, the image of every running
-   container (tagged `mcpanel-rollback/<name>:<time>` so that no prune removes it) and the state of
-   the database migrations.
-3. Dumps the database without login sessions to `deploy/upgrade-backup-<time>.sql` and copies
-   `.env` next to it (both mode 600, the newest three are kept).
+Building the images takes several minutes. A terminal session that is closed during the build
+ends the run, and nothing was changed: run it again. From the switch on (step 6 below) the script
+does not need the terminal any more: it ignores the hangup, starts `docker compose` out of its
+reach, finishes the switch and ends as it would have. `rollback` and `restore-db` do the same
+from their first change on. What such a command printed is in `deploy/upgrade-log-<time>.log`;
+after you are back, `./scripts/upgrade.sh status` names that log and says whether the command is
+still at work and how it ended. While it is at work, another `run`, `rollback` or `restore-db`
+refuses. Ctrl-C and a kill still end the script ("A run that did not finish" below).
+
+`upgrade.sh` needs only bash, docker with the compose plugin and git. Running Minecraft servers
+are not touched by an upgrade or a rollback: they are not part of the Compose project. The panel
+is away for under a minute.
+
+| Command | What it does |
+|---|---|
+| `./scripts/upgrade.sh status` | Changes nothing. Shows the revision of the source tree and the revision that is deployed (read from the panel container that runs; without one it says that the panel is not running), a warning when the two differ, whether the git remote has newer commits, every container of the stack with state, health and image, the processes inside the panel container, queued and running jobs, the log of the last `run`, `rollback` or `restore-db` with how it ended (or `STILL AT WORK`), and the rollback point (with `IS GONE` next to a saved image that was deleted). |
+| `./scripts/upgrade.sh dry-run` | Changes nothing. Shows what `run` would do: from which revision to which, the containers that would be stopped and removed, new database migrations, the notice about stopped servers (below), whether jobs would make `run` refuse, and the output of `docker compose --dry-run up`. Ends with the exact `run` command. |
+| `./scripts/upgrade.sh run` | Builds the version of the source tree and switches to it (steps below). |
+| `./scripts/upgrade.sh rollback` | Goes back to the revision and the images from before the last `run`. `rollback --dry-run` only shows what it would do. |
+| `./scripts/upgrade.sh restore-db <file>` | Puts a database dump of an earlier `run` back. Only for the case that `rollback` cannot undo a migration. It ends with the commands that start the stack again. |
+
+### What `run` does
+
+It stops with a message if a step fails. Until step 6 nothing is switched: a run that ends before
+it points the image names back at the old images, and the old version keeps running.
+
+1. Refuses a version that changes the database schema unless `--with-migrations` was given. It
+   compares the migration files of the two revisions, before anything is recorded, dumped, pulled
+   or built. Then it refuses while a job is queued or running (it asks the database; `--force`
+   skips this check).
+2. Records the rollback point: the git revision that is deployed, the image of every container
+   of the stack (each tagged `mcpanel-rollback/<name>:<time>`) and the state of the database
+   migrations.
+3. Dumps the database without login sessions and copies `.env` next to the dump.
 4. Pulls the upstream images (`postgres`) and rebuilds panel and agent on fresh base images
    (`docker compose build --pull`), so security fixes of the base images and of Redis arrive.
-5. Refuses if the new version changes the database schema, unless you pass `--with-migrations`
-   (the dry run lists the migration files).
-6. Stops and removes the containers of services the new version no longer has, then
-   `docker compose up -d --remove-orphans`.
-7. Waits until every service is healthy, checks that no container of an older layout is left and
-   prints what changed.
+5. Asks the new image whether it changes the database schema, and refuses here if it does
+   although step 1 saw no new migration file (unless `--with-migrations`).
+6. Checks for jobs once more. Stops the containers of services the new version no longer has
+   (up to 2 minutes, all at once) and removes them, then `docker compose up -d --remove-orphans`.
+   Before the `up` it removes what an earlier `up` that was cut off left half replaced (below).
+   If `up` ends without an error and a service still has no started container, it runs `up` once
+   more and then stops with a message that names the service, instead of waiting for it.
+7. Waits until every service is running and healthy (300 seconds, `--timeout` changes it), checks
+   that no container of an older layout is left and that exactly one scheduler runs, and prints
+   what changed: per image name the image of the rollback point and the image of the container
+   that runs now. The rollback tags of the upgrade before this one are dropped.
 
-`./scripts/upgrade.sh status` shows what runs, which revision it was built from, the processes
-inside the panel container, queued and running jobs and the rollback point.
+Options:
+
+| Option | For | Meaning |
+|---|---|---|
+| `--with-migrations` | `run` | The new version may change the database schema. |
+| `--force` | `run`, `rollback` | Do not refuse because of queued or running jobs. Running jobs get 2 minutes and are marked failed after that. |
+| `--resume` | `run` | Continue a run that did not finish, with its rollback point. |
+| `--from <rev>` | `run`, `dry-run` | The git revision that is deployed now, if the script cannot tell (below). |
+| `--no-pull` | `run` | Build with the base images already on this host (no internet needed). |
+| `--no-build` | `run`, `dry-run` | Only apply a change of `.env` or of the compose files: no pull, no build, no database dump, and the rollback point stays as it is. |
+| `--no-backup` | `run` | Skip the database dump. |
+| `--timeout <seconds>` | `run`, `rollback` | How long to wait for healthy (default 300). |
+| `--dry-run` | `rollback` | Only show what it would do. |
+| `--yes` | `restore-db` | Do it. Without it the command only says what it would do. |
+
+### Files the script writes
+
+All in `deploy/`, mode 600 and ignored by git. Keep the folder on persistent storage and do not
+share it.
+
+| File | Content |
+|---|---|
+| `upgrade-state.env` | The rollback point and the state of the last run. Do not edit it. |
+| `upgrade-backup-<time>.sql` | The database dump of step 3: users (password hashes), server definitions, schedules, backup metadata and the encrypted secrets. Login sessions are left out. |
+| `upgrade-backup-<time>.env` | A copy of `.env` from the same moment. Its `MCPANEL_SECRET_KEY` decrypts the secrets in the dump, so the two files together are as sensitive as the running panel. |
+| `upgrade-log-<time>.log` | Everything a `run`, `rollback` or `restore-db` printed, the output of `docker compose` included, with the exit status in its last line. It is written from the first change of that command on (with what was printed before); a command that refuses or only shows something leaves none. |
+
+The newest three dumps are kept; older ones are deleted with their `.env` copy. To write the dumps
+somewhere else, start the script with `MCPANEL_UPGRADE_BACKUP_DIR=<folder>` set. The newest ten
+logs are kept.
+
+The states in `upgrade-state.env` (`status` shows the current one):
+
+| State | Meaning | What to do |
+|---|---|---|
+| `started` | The rollback point is recorded and nothing was switched. The run ended between step 2 and step 6 (a failed build, a job that started meanwhile, a closed terminal). The old version is running. | `run` again. It goes on with the recorded rollback point and makes no new one. |
+| `switching` | The switch began and did not finish (`docker compose up` failed, the new version did not become healthy, the script was killed). The stack may be half old, half new. If `status` says `STILL AT WORK`, the run is going on without its terminal: wait for it. | `rollback` to go back, or `run --resume` to go on. |
+| `done` | The last run finished. | Nothing. `rollback` is possible. |
+| `rolling-back` | A rollback began and did not finish. | `rollback` again to finish it, or `run --resume` to go forward again. |
+| `rolled-back` | The last run was rolled back. The old version runs; the source tree is at its revision (detached HEAD) until you check out your branch again. | `git checkout <your branch>`, then `run` to upgrade again. In the branch checkout do not run `docker compose up -d` by hand ("Rollback" below). |
+
+### A run that did not finish
+
+Run `./scripts/upgrade.sh status`. It names the state and what to run next. If the run was ended
+by Ctrl-C, a kill or, before the switch, a closed terminal, it also says when and during which
+step, and the log it names ends with the exit status. A plain `run` never makes a new rollback
+point on top of an unfinished run, so the way back to the version from before the upgrade is
+kept. In the states `switching` and `rolling-back` a plain `run` refuses until you chose
+`rollback` or `run --resume`.
+
+A `docker compose up` that is cut off while it replaces a container (a `kill -9`, a host that
+goes down) leaves the replacement behind under the temporary name Compose gives it
+(`<12 hex digits>_mcpanel-panel-1`, state `created`) next to the stopped container it was to
+replace. `rollback` and `run --resume` remove such a leftover before their own
+`docker compose up`, so each of them works at the first attempt. The script itself can no longer
+cause this through a closed terminal or Ctrl-C: from the switch on `docker compose` runs in a
+session of its own (`setsid`), out of reach of both, and the script acts on Ctrl-C or a kill only
+when the `docker compose` command that is running has ended. (On a host without `setsid` it uses
+`nohup`, which keeps the hangup away but not Ctrl-C.)
+
+### The deployed revision (`--from`)
 
 The rollback point needs the git revision that is running now. Images built by this script carry
-it as a label. The first time (images built by hand) the script takes the revision the checkout
-was at before your last `git pull`, checks that its compose file has exactly the services that
-are running, and says so (`from: ... [assumed ...]` in the dry run). If that is not what you were
-running, pass it: `./scripts/upgrade.sh run --from <revision>`.
+it as the label `io.mcpanel.revision`. The first time (images built by hand, no label) the script
+takes the revision the checkout was at before your last `git pull`, checks that its compose file
+has exactly the services that have containers now, and says so (`from: ... [assumed ...]` in the
+dry run). Check that line. If it is wrong, or the script says it cannot tell (after two pulls in
+a row, for example), pass the revision: `./scripts/upgrade.sh run --from <revision>` plus the
+other options the dry run named. To find it:
 
-`./scripts/upgrade.sh rollback` takes the last `run` back: it checks out the recorded revision
-(the checkout is then on a detached HEAD), points the image names back at the saved images, undoes
-the database migrations of the upgrade and brings that layout up. To upgrade again later:
-`git checkout <your branch>`, then `./scripts/upgrade.sh run`.
+```bash
+# an image built by this script carries the revision; an image built by hand prints nothing useful
+docker inspect -f '{{index .Config.Labels "io.mcpanel.revision"}}' mcpanel-panel-1
+# otherwise: the commit the checkout was at before you pulled
+git reflog -n 20     # lines "pull: Fast-forward"; the entry below the first pull since the last deployment
+```
 
-Running Minecraft servers are not touched by an upgrade or a rollback: they are not part of the
-Compose project. The panel is away for under a minute. The script keeps the images of one
-rollback point; older builds that nothing refers to any more show up as `<none>` in
-`docker images` and go away with `docker image prune`.
+### Rollback
 
-Run `./scripts/upgrade.sh run` at least monthly even without new commits: it rebuilds on current
-base images. On additional nodes: `docker compose -f docker-compose.node.yml --env-file node.env build
---pull`, then `... up -d`. The certificate (and so the pin) survives upgrades because it lives in the
-data directory.
+`./scripts/upgrade.sh rollback` takes the last `run` back. In this order it:
 
-Do not upgrade with a plain `docker compose up -d --build`: it never removes containers of services
-that no longer exist. Coming from the layout with separate `worker` and `beat` containers, the new
-panel container notices them, logs how to fix it and refuses to start; `./scripts/upgrade.sh run`
-(or `docker compose up -d --remove-orphans`) removes them. `docker compose pull` only fetches
-`postgres`: the panel and agent images are built on your host and are never pulled from a registry.
+1. checks that the saved images still exist and that the source tree has no local changes
+   (commit or stash them first);
+2. asks the upgraded version whether every database migration of the upgrade can be undone, and
+   stops nothing if one cannot (it then prints the `restore-db` commands). It also refuses
+   while jobs are queued or running (`--force` skips that);
+3. stops everything but the database (up to 2 minutes) and undoes those migrations. The data
+   stays; only what was written into columns the old version does not have is lost;
+4. checks out the recorded revision (the checkout is then on a detached HEAD);
+5. points the image names back at the saved images and brings the old layout up, without
+   building (with the same care as step 6 of `run`: leftovers of an `up` that was cut off are
+   removed first, and a service that was not started is a failure at once).
+
+From step 3 on a closed terminal does not stop the rollback; its log is
+`deploy/upgrade-log-<time>.log`.
+
+Not undone: `.env` (the copy next to the dump shows what it was), what the panel wrote to the
+database since the upgrade, and the containers of stopped servers that the new version removed
+(the old version creates one at the next Start).
+
+After the checkout the script itself may be gone from disk, because older revisions do not have
+it. It finishes from memory and tells you. `git checkout <your branch>` brings it back; to
+upgrade again later run the command the rollback printed at its end (`git checkout <your branch>`,
+then `./scripts/upgrade.sh run`, with `--with-migrations` if the first run needed it).
+
+Which checkout you are on matters after a rollback, and the rollback says so in its last lines:
+
+* Right after it the source tree is at the old revision (a detached HEAD). It fits what runs:
+  `docker compose up -d` and the other `docker compose` commands are safe there.
+* After `git checkout <your branch>` the tree is the new version while the old one runs. Do
+  **not** run `docker compose up -d` in that checkout: it would start the new compose file on the
+  old images, and the panel would not start. Use `./scripts/upgrade.sh` there. `status` prints a
+  warning whenever the source tree and the deployed version differ and names the checkout that
+  fits what runs (`git checkout --detach <revision>`).
+
+If you use the Unraid shutdown hook, remove it before you stay on a version without it
+(docs/UNRAID-SHUTDOWN.md).
+
+### Rollback images: do not prune them
+
+The rollback point is only usable while its images exist. They have no container, so:
+
+* a plain `docker image prune` keeps them (they are tagged);
+* `docker image prune -a`, `docker system prune -a` and Unraid's removal of "orphan image" rows
+  delete them. `status` then shows `IS GONE (rollback is not possible)`.
+
+The script keeps the images of one rollback point and drops the tags of the one before it after
+a successful `run`. Images that no name refers to any more show up as `<none>` in `docker images`
+and go away with `docker image prune`.
+
+### `restore-db`
+
+`./scripts/upgrade.sh restore-db upgrade-backup-<time>.sql --yes` loads a dump written by step 3
+of `run` into a new, empty database and, when all of it went in, swaps the two. The
+database as it was is kept under the name `<database>_before_restore_<time>`, and the command
+prints how to remove it. Everything but the database container must be stopped first; the command
+names the `docker compose stop ...` line. Everything the panel wrote after the dump was taken is
+not in it, and everybody has to log in again.
+
+The stack is still stopped then. `restore-db` ends with the commands that start it again, and
+they depend on where the last run ended (the state in `upgrade-state.env`):
+
+| State | What `restore-db` prints as the next step |
+|---|---|
+| `done` (the upgrade is deployed) | `./scripts/upgrade.sh rollback`, to finish going back. `docker compose up -d` instead keeps the upgraded version: the panel applies the migrations of the upgrade to the restored database when it starts. |
+| `switching`, `rolling-back` | `./scripts/upgrade.sh rollback` or `./scripts/upgrade.sh run --resume`. Not `docker compose up -d`: the stack is half old, half new. |
+| `rolled-back`, `started` (the version from before the upgrade is deployed) | If the source tree is at that revision: `docker compose up -d`. Otherwise (the usual case, because the script only exists in the newer tree): `cd <source> && git checkout --detach <old revision> && cd deploy && docker compose up -d`. A plain `docker compose up -d` in the newer tree would start the new compose file on the old images. |
+| no state file | `docker compose up -d` |
+
+### Stopped servers at the first upgrade
+
+A stopped server needs no container any more ("Minecraft server containers" above). On a host
+that still has exited server containers, `dry-run` and `run` say how many there are. With the
+default setting the new panel removes them within seconds of its first start; world data is not
+touched and the last 2,000 console lines of each are kept. To look first, add
+`MCPANEL_RETIRE_STOPPED_CONTAINERS=false` to `.env` **before** the run. After the upgrade
+`docker compose exec panel python manage.py retire_stopped_containers --dry-run` lists what would
+be removed. Remove the line again and run `./scripts/upgrade.sh run --no-build` to turn the
+automatic removal on.
+
+Every server that is running during the upgrade shows **restart required** afterwards, although
+none of its settings changed: its container was made by the older version ("Stopping servers"
+above). Restart it when it suits you.
+
+### Other things to know
+
+* Run `./scripts/upgrade.sh run` at least monthly even without new commits: it rebuilds on current
+  base images.
+* Additional nodes: `docker compose -f docker-compose.node.yml --env-file node.env build --pull`,
+  then `... up -d`. The certificate (and so the pin) survives upgrades because it lives in the
+  data directory. Update the agents together with the panel. While a node's agent is older than
+  the panel, the containers of stopped servers on that node are kept and its servers keep showing
+  "restart required". This mix of versions is handled in the code and has not been run.
+* Do not upgrade with a plain `docker compose up -d --build`: it never removes containers of
+  services that no longer exist. Coming from the layout with separate `worker` and `beat`
+  containers, the new panel container notices them, logs how to fix it and refuses to start;
+  `./scripts/upgrade.sh run` (or `docker compose up -d --remove-orphans`) removes them.
+* `docker compose pull` only fetches `postgres`: the panel and agent images are built on your host
+  and are never pulled from a registry.
+* Migrations run automatically when `panel` starts, before its processes do.
 
 **Coming from the 7-container layout** (`panel`, `worker`, `worker-periodic`, `beat`, `agent`,
-`postgres`, `redis`): the same commands. If you want to take it in two steps, put the two lines from
-"Redis as its own container" into `.env` before the first `run` (4 containers: `redis` stays), and
-remove them a week or so later and run `./scripts/upgrade.sh run --no-build` (3 containers).
-`./scripts/upgrade.sh rollback` still leads back to the 7 containers after that, because
-`--no-build` keeps the rollback point. The old Redis volume (`mcpanel_redis_data`) is kept; remove
-it when you are sure you will not roll back: `docker volume rm mcpanel_redis_data`.
+`postgres`, `redis`): the same commands, with `--with-migrations`. `run` removes the four
+containers that are no longer needed; `rollback` leads back to the 7 containers. If you want to
+take it in two steps, put the two lines from "Redis as its own container" into `.env` before the
+first `run` (4 containers: `redis` stays), and remove them a week or so later and run
+`./scripts/upgrade.sh run --no-build` (3 containers). `./scripts/upgrade.sh rollback` still leads
+back to the 7 containers after that, because `--no-build` keeps the rollback point. The old Redis
+volume (`mcpanel_redis_data`) is kept; remove it when you are sure you will not roll back:
+`docker volume rm mcpanel_redis_data`.
 
 The compose file uses a tag for the database (`postgres:16-alpine`), which moves to new patch
 releases when it is pulled. To pin an exact build instead, put a digest in a
 `docker-compose.override.yml`, e.g. `services: {postgres: {image: "postgres:16-alpine@sha256:<digest>"}}`,
 taking the digest from `docker image inspect --format '{{index .RepoDigests 0}}' postgres:16-alpine`
 after a pull. Update the digest yourself on every upgrade; a pinned image never gets security fixes
-on its own. Don't change the Postgres major version (16) without a dump and restore. The panel image
-is built from `python:3.13-slim-trixie` and `redis:7.4`: a rebuild brings their fixes, never a new
-Debian release or Redis major by surprise.
-
-Migrations run automatically when `panel` starts, before its processes do.
+on its own. Don't change the Postgres major version (16) without a dump and restore. The panel
+and agent images are built from `python:3.13-slim-trixie`, the panel also from `redis:7.4`: a
+rebuild brings their fixes, never a new Debian release or Redis major by surprise.
 
 ## Backing up the panel itself
 
 * **Database:** it holds users (password hashes), server definitions, schedules, backup metadata and
-  the encrypted secrets. Dump it into a private directory, not a network share:
+  the encrypted secrets. `./scripts/upgrade.sh run` dumps it into `deploy/` at every upgrade. To
+  take a dump at any other time, write it into a private directory, not a network share:
 
   ```bash
   cd mcserver/deploy
@@ -306,6 +571,10 @@ Migrations run automatically when `panel` starts, before its processes do.
 | Jobs never run | `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status`: `worker` and `beat` must be running; `docker compose logs --tail 200 panel \| grep -F '[worker]'`. Stuck jobs can be marked failed in Activity. |
 | `panel` is "unhealthy" | `docker inspect -f '{{range .State.Health.Log}}{{.Output}}{{end}}' mcpanel-panel-1` names the process and the reason. |
 | `panel` restarts in a loop after an upgrade, log says "containers of the previous layout are still running" | `./scripts/upgrade.sh run` (or `docker compose up -d --remove-orphans`). |
+| A stopped server has no entry in `docker ps -a` | Expected: a stopped server has no container ("Minecraft server containers" above). Start it in the panel. |
+| A server shows "restart required" although nothing was changed | Its container was made by an older MCPanel version. The next start or restart recreates it; world data is kept. |
+| A server stays "busy" after the panel container was stopped during a job | The job is marked as failed about 6 minutes later, or at once with **Mark as failed** on the Activity page. |
+| `./scripts/upgrade.sh run` says the last run did not finish | `./scripts/upgrade.sh status` names the state and the two commands to choose from ("A run that did not finish" above). |
 
 Logs: `docker compose logs -f panel agent`. Each server's own log is in its console and in
 `logs/` in the file manager.

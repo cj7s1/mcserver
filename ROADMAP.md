@@ -43,7 +43,12 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Integrity check (`restic check --read-data-subset`)
 - [x] Pre-update backups (modpack updates)
 - [x] Backup end-to-end validation on a real server (API + worker + restic)
-- [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules)
+- [x] Backup safeguards: "No backup yet" / "Last backup N days ago" notice, "Nightly backup" on by default in the
+      create wizard, `manage.py ensure_backup_schedules` for servers that have no schedule
+- [ ] restic on an Unraid array share (the owner's backup folder was still empty on 2026-11-09)
+- [x] Btrfs snapshot provider (subvolumes, rollback, convert, schedules); works without `CAP_SYS_ADMIN`
+      (file-by-file delete when the kernel refuses `btrfs subvolume delete`) — verified on a real btrfs
+      filesystem in a QEMU guest, [ ] not yet on an Unraid pool
 - [x] ZFS snapshot provider (dataset per server, clone+promote rollback that keeps newer snapshots, convert,
       delete with dependency checks) — unit-tested against a fake `zfs` only; [ ] verify on a real ZFS pool
 - [x] Backup browser (list/download/restore single path) incl. UI
@@ -72,29 +77,45 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] In-game countdown warnings before restart/stop (manual + scheduled, cancellable, lock only for the last 10 s) — unit-tested only
 - [x] Import an existing server folder/archive (upload + extract with safe extraction)
 - [x] World import / export (replace from an archive with safety backup + rollback; zip export incl. Bukkit dimension folders)
-- [x] Reset world (Settings → Danger zone: deletes the world folders so the server generates a new one; typed server name, safety backup that is checked to hold the world, optional new seed, datapacks / per-world config carried over) — unit-tested only
+- [x] Reset world (Settings → Danger zone: deletes the world folders so the server generates a new one; typed server name, safety backup that is checked to hold the world, optional new seed, datapacks / per-world config carried over) — run end to end on real vanilla servers on a desktop (browser and integration tests); Paper and modpack servers unit-tested only
 - [x] Software (non-modpack) version update workflow with automatic pre-update backup
 
-## Phase 8 — Unraid
+## Phase 8 — Unraid and operations
 - [x] Compose deployment, UID/GID mapping (`MC_UID`/`MC_GID`), persistent paths
 - [x] Storage capability detection (fs type, Unraid shfs warning, btrfs/zfs presence)
+- [x] Three containers instead of seven: one panel container with a supervisor (Redis, web, worker, periodic
+      worker, scheduler), `/api/health` with components and tick age; Redis as its own container stays possible
+- [x] `deploy/scripts/upgrade.sh`: status, dry-run, run, rollback, restore-db (database dump, rollback images)
+- [x] A stopped server has no container (last-run record with the last 2,000 console lines)
+- [x] Stop safety: world saved before every stop, stop during start-up delivered, Docker stop timeout of 20 s
+- [x] Unraid shutdown hook (`deploy/unraid/`): servers stopped through the panel before Docker stops and
+      started again after boot, one per minute
+- [~] Validated on real Unraid: an earlier version (seven containers) has run on the owner's Unraid 7.3.4 server
+      since 2026-11-07. [ ] The five items above have only run on a Linux desktop with real Docker: upgrade the
+      server, then do the check in docs/UNRAID-SHUTDOWN.md
+- [ ] Memory check at start (the dashboard shows "Memory reserved", but a start is never refused or warned
+      about when the running servers plus the new one exceed the host's RAM)
 - [ ] Unraid Community Applications template (XML)
-- [ ] docs/UNRAID.md validated on real Unraid  [!] needs real hardware
 
 ## Multi-node
 - [x] Node model + management API, per-node tokens, server creation on a chosen node (verified with a 2nd agent)
-- [x] TLS + certificate pinning for remote agents, agent-only node compose, `add_node` command — [ ] Node admin UI
+- [x] TLS + certificate pinning for remote agents, agent-only node compose, `add_node` command, Nodes section
+      on the System page
+- [x] Agents report `features` and a container format, so a newer panel works with an older agent —
+      [ ] not run with mixed versions
 
 ## Phase 9 — UX refinement
 - [x] Command palette (Ctrl+K / Cmd+K: navigation, servers + pages, permission-aware Start/Stop/Restart with confirmation, theme, recents) and keyboard shortcuts (`?`, `g d`, `g s`, `g m`, `g a`, `c`; single-key shortcuts can be switched off)
-- [x] Notifications (webhooks/Discord) for crashes, failed backups — [ ] admin UI
+- [x] Notifications (webhooks/Discord) for crashes, failed backups, with a Notifications section on the System page
 - [x] Player activity history + metrics history (1-min sampling) incl. charts
 
 ## Phase 10 — Hardening
 - [x] Systematic security review of agent + API + frontend + deployment (run 2026-11-06: 9 lenses, adversarially verified, ~60 findings fixed with regression tests; see DEVELOPMENT_STATUS.md "Security audit"). Earlier fixes: role escalation, grant escalation, RCON env override, proxy rate-limit bypass, login CSRF, single owner, upload limit, agent source-network guard
 - [ ] External penetration test / review by a second party
 - [x] Dependency scanning in CI (pip-audit, npm audit, non-blocking)
-- [ ] Upgrade/reinstall test (data survives image upgrades)
+- [x] Upgrade test (data survives upgrade, rollback and a second upgrade): `.github/scripts/upgrade-rehearsal.sh`
+      with real containers, and by hand with real Minecraft servers. Both were run on a desktop
+      (2026-11-10); the CI job "upgrade" that calls the script had not run on GitHub then
 - [ ] Load test of console fan-out
 
 ## Dependencies

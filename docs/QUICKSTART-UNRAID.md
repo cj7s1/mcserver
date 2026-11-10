@@ -5,18 +5,22 @@ server that your friends can join. Budget about 30–45 minutes, most of it wait
 
 > **About the screenshots.** They come from a real MCPanel install on a test machine, so the sidebar
 > lists that machine's test servers. Your panel starts empty. Unraid's own screens aren't shown;
-> those steps are described in text.
+> those steps are described in text. The screenshots are older than some options: the Resources
+> step, for example, now also has a **Nightly backup** switch.
 >
-> **Status:** MCPanel works on Linux Docker hosts, and every step below was tested there, but this
-> is the first run on real Unraid hardware. If something on Unraid behaves differently, note
-> what you saw (Troubleshooting is at the end).
+> **Status:** an earlier version of MCPanel (seven platform containers) has been running on the
+> owner's Unraid 7.3.4 server since 2026-11-07. The current version (three containers, stopped
+> servers without a container, the upgrade script, the shutdown hook) was tested on a Linux
+> desktop with real Docker and real Minecraft servers and has not run on Unraid yet. If something
+> on Unraid behaves differently, note what you saw (Troubleshooting is at the end).
 
 ---
 
 ## What you are installing
 
 MCPanel is a small stack of three containers. You start it once with Docker Compose. After that, the
-panel creates one extra container per Minecraft server for you.
+panel creates one extra container for every Minecraft server that is running. A stopped server
+has no container; the panel creates a new one when you press Start.
 
 ```mermaid
 flowchart LR
@@ -48,17 +52,22 @@ You need:
 * Internet access from Unraid (to GitHub, Docker Hub, PyPI/npm while building, and CurseForge/Mojang
   while installing packs).
 
-## 1. Install Docker Compose
+## 1. Check Docker Compose
 
-1. In the Unraid web UI open **Apps** (Community Applications).
-2. Search for **Docker Compose Manager** and install it. It adds the `docker compose` command.
-3. Open a terminal (the **`>_`** icon at the top right of the Unraid web UI) and check:
+1. Open a terminal (the **`>_`** icon at the top right of the Unraid web UI) and check:
 
    ```bash
    docker compose version
+   docker buildx version
    ```
 
-   It should print a version number. Run every command in this guide in that terminal.
+   Both should print a version number. The second one is BuildKit, which step 5 needs to build
+   the images. Run every command in this guide in that terminal.
+2. Only if `docker compose` is missing: open **Apps** (Community Applications), search for
+   **Compose Manager Plus** and install it; it adds the command. The older **Docker Compose
+   Manager** plugin is deprecated and hidden in Community Applications by default. You only need
+   the command from it: this guide starts MCPanel from the terminal, not as a stack of the
+   plugin. No Compose plugin has been tested with MCPanel.
 
 ## 2. Prepare the storage
 
@@ -213,6 +222,9 @@ Better MC comes in several editions. Use a **CurseForge edition**:
   room for the JVM itself, so the *container limit* shown below the slider is what the server can
   really use. Make sure it fits in your free RAM.
 * **Game port:** the panel suggests a free one starting at 25565. Note it down.
+* **Nightly backup:** leave it switched on. It gives the server a backup schedule that runs once
+  every night between 03:00 and 05:00 (panel time), also while the server is stopped. Without a
+  schedule a server is only backed up when someone does it by hand.
 
 ![Resources](images/quickstart/05-wizard-resources.jpg)
 
@@ -266,17 +278,27 @@ Open the **Network** tab. It shows exactly how players reach the server:
 ## 10. Protect your world: backups and schedules
 
 Open **Backups** and click **Create backup** once to check it works. Backups are consistent even
-while the server runs (the panel pauses world saving for a moment).
+while the server runs (the panel pauses world saving for a moment). Until a server has its first
+backup, its pages and the server list show **No backup yet**; later they show **Last backup N
+days ago** when the newest backup is older than 7 days.
 
 ![Backups](images/quickstart/12-backups.jpg)
 
-Then open **Schedules** and add, for example:
+Then open **Schedules**. If you left **Nightly backup** on in the wizard, the schedule "Nightly
+backup" is already there. You can add more, for example:
 
-* **Backup** every night at 04:00,
 * **Restart** once a day (modded servers like a fresh start),
 * on a btrfs pool, an hourly **Snapshot**.
 
 ![Schedules](images/quickstart/13-schedules.jpg)
+
+A server without a backup schedule gets one from the "Nightly backup" template on this page. To
+give every server that has none a nightly backup in one go (run it in `deploy/`):
+
+```bash
+docker compose exec panel python manage.py ensure_backup_schedules --dry-run   # only lists them
+docker compose exec panel python manage.py ensure_backup_schedules
+```
 
 Restoring is one click on a backup. The panel takes a safety backup of the current state first
 unless you turn that off. You can also browse a backup and restore a single file or folder.
@@ -296,8 +318,8 @@ over. You confirm by typing the server's name. The panel then:
 
 Settings, mods, plugins, the whitelist, operators and your backups are kept. Player inventories and
 positions are part of the world and go with it. Data that plugins keep outside the world folder (live
-maps, land claims, homes) is not reset. To get the old world back, restore the “Before restore”
-backup from the **Backups** page.
+maps, land claims, homes) is not reset. To get the old world back, restore the backup named
+“Before resetting the world …” (marked “Before restore”) from the **Backups** page.
 
 Make the test backup above before your first reset: the safety backup uses the same backup storage,
 and a reset with the safety backup turned off cannot be undone.
@@ -310,20 +332,53 @@ world is kept.
 
 ![Settings](images/quickstart/14-settings.jpg)
 
+**Stop and Start.** Use the buttons in the panel. Stop first tells the server to save the world,
+then stops it. 10 to 20 seconds later the server's row disappears from Unraid's Docker tab: a
+stopped server has no container. Its world, settings and backups stay where they are, and the
+Console page keeps the last 2,000 lines of the run. Start creates the container again. A stopped
+server cannot be started from the Docker tab.
+
+**Before you stop the array or reboot.** Without help, Unraid's Docker gives running servers at
+most 20 seconds and does not tell them to save first. Install the shutdown hook once; it stops
+the servers through the panel and the panel starts them again after boot:
+[UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md). Until the hook is installed, press Stop in the panel
+before you stop the array.
+
 ## 12. Updating MCPanel
 
 ```bash
 cd /mnt/user/appdata/mcpanel-src && git pull
 cd deploy
 ./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
-./scripts/upgrade.sh run
+./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
+
+The dry run ends with the command to use. When the new version changes the database, that
+command is `./scripts/upgrade.sh run --with-migrations`, and a plain `run` refuses without
+changing anything. The first upgrade from the version with seven platform containers is one of
+those.
 
 `run` refuses while a job is running (wait until **Activity** is empty), saves the database and the
 current version first, downloads a newer database image, rebuilds the panel and agent on fresh base
 images (`docker compose build --pull`), switches over and waits until everything is healthy. The
-panel is away for under a minute. If the new version does not work for you,
-`./scripts/upgrade.sh rollback` brings the previous one back.
+panel is away for under a minute. If the terminal window is closed while the images are built,
+nothing was changed: run the command again. Once it has printed `==> Switching over`, a closed
+window no longer stops it: it finishes on its own and keeps what it printed in
+`deploy/upgrade-log-<time>.log`. `./scripts/upgrade.sh status` names that log and says whether
+the update is still at work, how it ended, and what to do if it did not finish.
+
+If the new version does not work for you, `./scripts/upgrade.sh rollback` brings the previous one
+back. Two things to know about it:
+
+* It needs the images Unraid's Docker tab lists as "(orphan image)" with names that start with
+  `mcpanel-rollback/`. Do not remove those rows while you may want to go back.
+* Afterwards the source folder is on the old version, and `deploy/scripts/upgrade.sh` may be gone
+  from disk because the old version did not have it. `git checkout <your branch>` brings it back.
+  From then on the folder holds the new version while the old one runs: do not type
+  `docker compose up -d` there, only `./scripts/upgrade.sh ...` (`status` shows which version
+  runs; `run` updates again).
+
+More about every step: [DEPLOYMENT.md](../DEPLOYMENT.md), "Upgrading".
 
 Running Minecraft servers are not restarted by a panel update. `run` already saves the panel
 database into `deploy/`; to take a copy at any other time (run it in `deploy/`):
@@ -358,8 +413,13 @@ logged-in user.
 | Unraid's Docker tab says "update available" for `mcpanel-…` | Ignore it. The panel manages those containers; change their runtime in the panel instead. **Don't edit or start `mcpanel-…` containers from the Docker tab.** |
 | Panel or agent logs | `docker compose logs --tail 100 panel` (or `agent`). Every panel line starts with the part that wrote it: `[web]`, `[worker]`, `[periodic]`, `[beat]`, `[redis]`. They never contain passwords. |
 | `panel` shows **unhealthy** | `docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status` shows which part is not running; `docker compose logs --tail 100 panel` shows why. |
-| You stopped or restarted `panel` in the Docker tab and a job failed | The Docker tab gives 10 seconds. With jobs running use `docker compose restart panel` in `deploy/` (up to 110 seconds for jobs to finish). |
+| You stopped or restarted `panel` in the Docker tab and a job failed | The Docker tab gives 10 seconds. With jobs running use `docker compose restart panel` in `deploy/` (up to 110 seconds for jobs to finish). A job that was cut off keeps its server locked for about 6 minutes; **Mark as failed** on the Activity page releases it sooner. |
+| A stopped server is missing in Unraid's Docker tab | Expected: a stopped server has no container. Start it in the panel. |
+| A server shows "restart required" after you updated MCPanel | Its container was made by the older version. Restart it when it suits you; the world is kept. |
+| A server shows **No backup yet** | Create one on its Backups page and check that it has a backup schedule (section 10). |
+| Servers did not start after a reboot | See [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md), "How the servers come back". |
 
-More detail: [docs/UNRAID.md](UNRAID.md) (snapshots on btrfs and ZFS pools, extra capabilities),
-[DEPLOYMENT.md](../DEPLOYMENT.md) (HTTPS behind a reverse proxy, more Docker hosts),
+More detail: [docs/UNRAID.md](UNRAID.md) (the Docker tab, orphan images, snapshots on btrfs and ZFS
+pools), [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md) (array stop, reboot, shutdown),
+[DEPLOYMENT.md](../DEPLOYMENT.md) (upgrades, HTTPS behind a reverse proxy, more Docker hosts),
 [docs/SECURITY.md](SECURITY.md) (what is and isn't isolated; only install mods you trust).

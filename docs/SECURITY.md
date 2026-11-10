@@ -10,7 +10,7 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 | Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
 | Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
-| Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). |
+| Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). Resetting a world needs two permissions (`instance.restore` and `instance.files.write`) and the server's name typed exactly; the seed is not written to the audit log. |
 
 ## What Docker does **not** protect you from
 
@@ -154,8 +154,32 @@ user. What was done about it:
   under a fixed name in `/tmp`. The status file is JSON and is only read, never executed.
 * Redis is started with `PATH`, `TZ` and `LANG` only: none of the panel's secrets are in its
   environment.
+* Redis keeps nothing on disk and loads nothing from disk. It is started with saving switched
+  off, and before every start the supervisor removes whatever Redis would load from its
+  directory (`dump.rdb`, `appendonly.aof`, `appendonlydir`, `temp-*.rdb`). The reason: the web
+  process can write to that directory, and the values in the cache are pickles, so a planted
+  dump file would become code execution at the next Redis start. If such a file cannot be
+  removed, Redis is not started, and the supervisor tries again later.
 * The agent stays its own container. The panel container still has no Docker socket, no host
   folders and no capabilities.
+
+## What is kept of a stopped server (the last-run record)
+
+A stopped server has no container. Before the agent removes the container it saves a record of
+that run, so that the panel can still show how the run ended.
+
+| | |
+|---|---|
+| Where | `<MCPANEL_DATA_DIR>/agent/last-run/<server id>.json` on the host of that server's node. One file per server; the next stop replaces it. |
+| Mode | The folder is 0700 and the file 0600, owned by the user the agent runs as (root). |
+| Content | Exit code, out-of-memory flag, restart count, container id and name, image name and image id, start and end time, the last health-check output, and the last 2,000 console lines (each cut at 16 KiB, 2 MiB in total). Control characters are removed; colour codes stay. |
+| Why it is sensitive | Console output can contain player names, player IP addresses, chat, and passwords someone typed into the console. |
+| Who can read it | Root on the host. The agent serves it only to callers with the agent token: the console lines through the endpoints that also serve the container log, the rest together with the container status. In the panel the console lines need the same permission as the live console (`instance.console`); the exit state is part of the server's status and visible to everyone who can see the server. |
+| What cannot reach it | The Minecraft server and its mods: the file is outside every server folder, and that folder is all a server container gets. It is never part of a restic backup, a clone or the panel database. |
+| When it is deleted | With the server. When a server moves to another node, the record on the old node is deleted. Archiving a server keeps it. |
+
+A backup of the whole data directory made outside MCPanel (an appdata backup plugin, for
+example) contains these files. Treat such a backup like the console logs themselves.
 
 ## Secrets
 
@@ -193,6 +217,54 @@ user. What was done about it:
    whose sessions were signed with the old key have to log in again.
 * **Back up `AGENT_RESTIC_PASSWORD`** (or `<data root>/agent/restic-password` if it was generated).
   Without it, backups cannot be restored.
+
+## Files the upgrade script writes
+
+`deploy/scripts/upgrade.sh run` writes into `deploy/` (or into the folder named by
+`MCPANEL_UPGRADE_BACKUP_DIR`), with mode 0600, owned by whoever runs the script (root on Unraid):
+
+| File | Content |
+|---|---|
+| `upgrade-backup-<time>.sql` | A plain SQL dump of the panel database: users with their password hashes, server definitions, schedules, backup metadata, the audit log and the encrypted secrets (RCON passwords, provider API keys, node tokens, webhook URLs). Login sessions are left out, so the dump cannot be used to act as a logged-in user. |
+| `upgrade-backup-<time>.env` | A copy of `.env` from that moment: every secret of the stack in clear text, among them `MCPANEL_SECRET_KEY`, which decrypts the secrets in the dump. |
+| `upgrade-state.env` | The rollback point: git revisions, image names and ids, names of database migrations, the paths of the two files above. No secrets. |
+
+The newest three dumps are kept with their `.env` copies; older ones are deleted by the next
+run. All three kinds of file are ignored by git (`deploy/*.sql`, `deploy/*.env`). A dump
+together with its `.env` copy is everything needed to impersonate the panel: keep the source
+folder off network shares and store copies like passwords.
+
+The images of the version before the last upgrade stay on the host under the names
+`mcpanel-rollback/...`. They contain no secrets (secrets come from `.env` at start).
+
+## Images
+
+* The panel and agent images are built on your host and never pulled (`pull_policy: never`): an
+  image of the same name from a registry would get every secret of the stack, and the agent
+  image the Docker socket.
+* Both are built from `python:3.13-slim-trixie`. The Debian release is part of the tag, so a
+  rebuild with `--pull` (what `upgrade.sh run` does) brings security fixes of that release and
+  never a new Debian release unasked. The agent's extra packages (`btrfs-progs`,
+  `zfsutils-linux`) come from that Debian release; restic is copied from `restic/restic:0.19.1`.
+* Redis in the panel image is copied from the official `redis:7.4` image; the build fails if the
+  binary is not a 7.4 release.
+* These are tags, not digests: what a rebuild fetches is decided by Docker Hub. Rebuild at least
+  monthly (DEPLOYMENT.md, "Upgrading").
+
+## The Unraid shutdown hook
+
+`deploy/unraid/stopping_docker` (docs/UNRAID-SHUTDOWN.md) is run by Unraid as root when Docker is
+about to stop. The only thing it calls is `docker`: `version`, `ps`, `exec <panel container>
+python manage.py host_shutdown` and, when no panel container runs, `stop` on containers with the
+label `io.mcpanel.managed=true`. What the panel command prints goes to the syslog line by line
+and is not executed. The Compose project
+name given to `install-hook.sh --project` is checked against Compose's own pattern before it is
+written into the installed copy.
+
+The server name a container carries in its `io.mcpanel.name` label has every `=` replaced by
+`-`. Unraid decides which containers are its own by searching the output of `docker ps` for the
+text `net.unraid.docker.managed=`; a server name must not be able to produce that text, or Unraid
+would stop that server itself at array stop and count it as stopped by hand.
 
 ## The agent treats the Minecraft process as hostile input
 

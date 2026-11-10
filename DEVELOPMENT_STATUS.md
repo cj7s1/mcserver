@@ -1,40 +1,157 @@
 # Development status
 
-_Last updated: 2026-11-09 (reset world: implemented and unit-tested, not yet run against a real agent or
-server; see "Reset world" below). Before that: 2026-11-06 (session 2: SpigotMC source, mods-listing
-speed-up, integration coverage, btrfs
-delete fix, Unraid simulation, modpack update checks, restart warnings, security-audit fixes, ZFS snapshot
-provider, world import/export). Previous: 2026-11-03, end of
-session 1._ Keep this file honest. Implemented,
-unit-tested, integration-tested, validated on a real Minecraft server, and validated on Unraid are
-**different** levels, and nothing has been validated on Unraid yet.
+_Last updated: 2026-11-10 (release on branch `feature/reset-world`: three containers, upgrade script,
+stopped servers without a container, stop safety, Unraid shutdown hook, btrfs snapshots without
+`CAP_SYS_ADMIN`, backup safeguards, Reset world). Before that: 2026-11-06 (session 2), 2026-11-03 (end
+of session 1)._
+
+Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
+server, and validated on Unraid are **different** levels.
+
+## Where things stand (2026-11-10)
+
+* **On Unraid:** the panel has been running on the owner's Unraid server (Unraid 7.3.4, Docker 29.8.2,
+  btrfs cache pool) since 2026-11-07, at commit `22a2c79`: seven platform containers, started from the
+  command line. In use there: install, one modpack server created in the panel (running and healthy),
+  seven servers imported from older setups, start and stop. Not used there so far: backups (the backup
+  folder was empty on 2026-11-09, so restic on the array share is untested). Whether snapshots were
+  used there is not known.
+* **This release has not run on Unraid.** Everything under "Release of 2026-11-10" below was verified on
+  a Linux desktop, with real Docker, real `itzg/minecraft-server` vanilla servers and real restic where
+  the section says so.
+* **The real-stack runs came before the last round of fixes.** They were made on 2026-11-10 between
+  about 00:45 and 04:10. After that, `deploy/scripts/upgrade.sh`, the supervisor and several agent and
+  backend files (`docker_ops.py`, `lastrun.py`, `handlers.py`, `reconcile.py`, `scheduling.py`) were
+  changed once more. On the final tree the unit suites below pass, which includes `upgrade.sh` against
+  the `docker` stand-in. A final gate run with real containers was still in progress when this file
+  was written; its results are not in here.
 
 ## Last verified working state
 
-The sandbox runs the agent on :8700 (ext4), a second agent on :8701 (btrfs loopback), the API on :8000
-and the worker+beat. All tests pass on `main` of this branch:
+Suites of this tree, run on the desktop on 2026-11-10. The restic, btrfs and zfs binaries are not
+installed there, so the agent tests that need them are skipped in this run (the btrfs ones were run
+separately in a VM, see the release section).
 
 | Suite | Result |
 |---|---|
-| `backend: uv run pytest -q -m "not integration"` | **862 passed** (2026-11-06, after the security-audit integration follow-ups; incl. OpenAPI fail-on-warn) |
-| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | **7 passed in 157 s** (2026-11-06, before the audit/ZFS/world merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
-| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | **533 passed** (2026-11-06; real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite, world swap/rollback on a real filesystem) |
-| `frontend: npx tsc -b && npm run lint && npm run build && npx vitest run` | clean (lint warnings only), 154 tests in 26 files (2026-11-06, after the audit follow-ups) |
-| `ruff check` / `ruff format --check` | clean (backend, agent) |
-| Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack (before `worker-periodic` was added; since then only `docker compose config -q` was run) |
+| `backend: pytest -q -m "not integration"` | **1377 passed** (10 integration tests deselected) |
+| `agent: pytest -q` | **867 passed, 43 skipped** |
+| `frontend: npx vitest run` | **266 tests** passed |
+| `backend: … -m integration` | Run one file at a time against a real agent on the desktop, before the last round of fixes: `test_integration_agent.py` 1 passed (75-86 s), `test_integration_retire.py` 1 passed (89-98 s), `test_integration_world_reset.py` 2 passed (103-114 s). The content, backup-browse, import and btrfs-snapshot files were **not** re-run for this release (last run 2026-11-06 in the sandbox) |
+| `.github/scripts/panel-acceptance.sh` (real containers) | 29 checks passed, by hand on the desktop, before the last changes to the supervisor and to the script |
+| `.github/scripts/upgrade-rehearsal.sh` (real containers, 7 → 3 → 7 → 3) | passed, by hand on the desktop, before the last fixes to `upgrade.sh` and to the script |
+| GitHub Actions | The workflow with the new jobs "docker" and "upgrade" has not run on GitHub |
 
-### Suites with reset world (branch `feature/reset-world`, 2026-11-09)
-
-Run on a development machine that has no restic, btrfs or zfs binaries and no running agent, so this
-does not replace the table above (the sandbox runs with real restic and btrfs):
+Older results, from the development sandbox on 2026-11-06 (real restic and a real btrfs loopback
+there; the agent ran on :8700 (ext4) and :8701 (btrfs)):
 
 | Suite | Result |
 |---|---|
-| `backend: pytest -q -m "not integration"` | **981 passed**, 1 skipped (the SPA check: frontend not built), 9 integration tests deselected |
-| `agent: pytest -q` | **648 passed, 19 skipped** (the restic, btrfs and ZFS-restore tests skip without the binaries) |
-| `frontend: npx tsc -b && npm run lint && npx vitest run && npm run build` | clean (45 lint warnings, as before), **226 tests in 29 files** |
-| `ruff check` / `ruff format --check` | clean (backend, agent) |
-| `backend: … -m integration` | **not run** (needs a running agent + Docker). This includes the new `test_integration_world_reset.py`, which has never run against a real agent |
+| `backend: uv run pytest -q -m "not integration"` | 862 passed (after the security-audit integration follow-ups; incl. OpenAPI fail-on-warn) |
+| `backend: … -m integration` (real agents + Docker, see TESTING.md → "Integration tests") | 7 passed in 157 s (before the audit/ZFS/world merges): vanilla lifecycle + backup/restore 70 s, Paper + Modrinth plugin 57 s, backup browser + restore-path 17 s, btrfs snapshots over pinned TLS 9 s (3 tests), zip import 2 s |
+| `agent: uv run pytest -q` (+ `MCPANEL_TEST_BTRFS=/srv/btrfs-test`) | 533 passed (real btrfs + restic, real HTTPS listener, fake-`zfs` ZFS suite, world swap/rollback on a real filesystem) |
+| Compose stack smoke test (`deploy/docker-compose.yml`) | 6 services healthy, a real vanilla server ran, RCON + restic backup through the containerized stack (the layout of that time; the stack has three services now) |
+
+## Release of 2026-11-10 (branch `feature/reset-world`)
+
+What it contains. How each part works is in ARCHITECTURE.md; how to use it is in DEPLOYMENT.md and
+docs/UNRAID.md.
+
+1. **Three containers instead of seven** (`panel`, `agent`, `postgres`). The panel container runs a
+   supervisor (`backend/container/supervise.py`) with five children: Redis (Unix socket only, nothing on
+   disk), web, worker, periodic worker, scheduler. Entry point mode `all`; the one-role modes still
+   exist. Redis as its own container: Compose profile `external-redis`. `/api/health` reports
+   `components` and `tick_age_seconds`.
+2. **`deploy/scripts/upgrade.sh`**: `status`, `dry-run`, `run`, `rollback`, `restore-db`.
+3. **A stopped server has no container.** The panel removes the exited container 10 to 20 s after a
+   stop; the agent keeps a last-run record (exit state and the last 2,000 console lines). Setting
+   `MCPANEL_RETIRE_STOPPED_CONTAINERS` (default on); `manage.py retire_stopped_containers [--dry-run]`.
+4. **Stop safety.** `save-all flush` before every stop, `docker stop` always, `stop` through RCON for a
+   server that is still starting, Docker stop timeout min(server stop timeout,
+   `AGENT_SHUTDOWN_STOP_TIMEOUT` = 20), `CREATE_CONSOLE_IN_PIPE=true`. Containers made before read
+   "restart required" and are recreated at their next start or restart.
+5. **Host shutdown hook** for Unraid (`deploy/unraid/stopping_docker`, `install-hook.sh`),
+   `manage.py host_shutdown`, and the resume step that starts the servers again, one per minute.
+6. **btrfs snapshots without `CAP_SYS_ADMIN`** (file-by-file delete where the kernel refuses
+   `btrfs subvolume delete`; a probe decides; the capability reports `delete_mode`).
+7. **Backup safeguards.** "No backup yet" / "Last backup N days ago", "Nightly backup" on by default in
+   the create wizard, `manage.py ensure_backup_schedules [--dry-run]`.
+8. **Reset world** (Settings → Danger zone). Details in "Reset world" below.
+
+Also in this release: the job worker sends queued jobs again when it starts, and the watchdog settles
+backup rows whose job was cut off.
+
+Corrected in this file and in ROADMAP.md on 2026-11-10, not part of the release: the System page has
+had a Nodes section and a Notifications section since before it. Both files said they were missing.
+
+### Verified on a real stack on the desktop (2026-11-10)
+
+Real Docker, real `itzg/minecraft-server` vanilla servers, real restic. Logs and scripts are outside
+the repository, on the development desktop in the folder `audit-2026-11-09/` next to the checkout
+(`e2e1/`, `e2e2/`, `bc/`, `d-run/`, `work/snapshots-btrfs/`).
+
+| What | Result |
+|---|---|
+| Reset world through the browser (three resets in two test rounds, desktop and phone width) | A running vanilla 1.21.1 server with a custom seed: stopped, safety backup taken and checked, world deleted, started again with a new world; the job succeeded each time. Refusals checked through the API: wrong or missing server name, folders that are not the world, a `level-name` that points at a server folder |
+| The three integration tests against a real agent in a container | `test_integration_world_reset.py` 2 passed, `test_integration_agent.py` 1 passed, `test_integration_retire.py` 1 passed, each in three separate runs |
+| Stopped server without a container | After Stop the container was gone 15 to 20 s later; the Console page showed the end of the run with the end-of-run marker; Start created a new container and the world was intact. With the restart policy "no", a server killed with `kill -9` while it was meant to run kept its container and showed "failed", and Stop removed it. With the default policy Docker restarted the killed server and the panel showed it running again |
+| Stop safety | Docker's stop timeout read back as 20 on a new container (unset on a container of the old version). "The world was saved (save-all flush)" in the job log. Stop requested 0 s, 1.5 s and 4 s after the start job finished: the server exited with code 0 each time, after 5 s, 3 s and 1 s. A plain `docker stop` was limited to 20 s |
+| `manage.py host_shutdown` + resume | Two running servers stopped in 1 to 7 s and marked; after the platform containers were stopped and started again (a simulated reboot, not a real one) the panel started them one minute apart; a stopped server stayed stopped |
+| The hook script, run by hand with a stand-in for `logger` | Normal case (panel stops the servers) and "no panel container running" (fallback `docker stop`). The case "panel command fails" was run with an earlier version of the hook, which still used the fallback there; the current behaviour (leave them to Docker) is covered by the unit tests only. `install-hook.sh install --project` and `status` were run against a temp folder (`MCPANEL_HOOK_ROOT`), not as root on Unraid |
+| Upgrade from `22a2c79` with a running, a stopped and a never-started server | 7 → 3 containers; the running server was not restarted and stayed reachable throughout (game port pinged once a second); `/api/health` was away for about 7 s; rollback to 7 containers; upgrade again. **Made before the last round of fixes to `upgrade.sh`** |
+| The panel container (`.github/scripts/panel-acceptance.sh`) | `kill -9` of each child, Redis on a socket only, a queued job sent again after a restart, health check, ordered stop, start-up guard: 29 checks passed |
+| Stopping the panel container with 10 s (what Unraid's Docker tab does) | Idle: stopped cleanly in 5.2 s. With a backup job running: killed after 10 s; the job was marked "interrupted" 6 min 9 s later and its server was locked until then |
+| Backup safeguards | Wizard with "Nightly backup": schedule created; notice shown before the first backup and gone after it; `ensure_backup_schedules --dry-run`, then for real, then again (nothing to add) |
+| btrfs without `CAP_SYS_ADMIN` | The whole agent suite on a real btrfs filesystem in a QEMU guest (kernel 7.2.14, btrfs-progs 6.14) at three privilege levels, plus a bind-mounted data directory and a pool with `user_subvol_rm_allowed`: 816 passed, 4 skipped per full pass, no subvolume left behind. One snapshot of 100,000 small files plus 1 GiB: deleted in 2.0 s file by file. Not Unraid's kernel (6.12) |
+
+Two things seen in these runs were changed in the code afterwards and have not been run on a real
+stack since: the diagnostics request answered 502 while Stop was removing the container of a failed
+server, and the end-of-run marker in the console gave its time in UTC instead of the server's time
+zone.
+
+### Not verified anywhere
+
+* **Anything on the Unraid server itself:** Unraid calling the `stopping_docker` event, the 30 s after
+  which Unraid kills the Docker daemon, `install-hook.sh` as root, the upgrade from the running
+  7-container install, btrfs snapshots without `CAP_SYS_ADMIN` on the cache pool, restic on the array
+  share.
+* A real host reboot or a real stop of the Docker daemon (only the platform containers were stopped and
+  started).
+* Large or modded servers against the 20 s (Docker) and 45 s (hook) limits. All runs used small vanilla
+  servers, which stop in 1 to 7 s.
+* The upgrade script on real containers after its last fixes (see "Where things stand").
+* ZFS snapshots on a real pool.
+* More than one node with different versions of panel and agent.
+* A Compose plugin managing the stack, and its own stop of stacks when Docker stops.
+* Reset world on Paper and on modpack servers with real servers (unit tests and one integration test
+  with Paper-style folders written by hand).
+
+### Things to know when this release goes onto the Unraid server
+
+* The checkout on the server followed the branch `claude/busy-planck-y5nw1u` on 2026-11-09; this
+  release is on `feature/reset-world`. `git pull` there brings the release only once it is on the
+  branch the server follows.
+* The command is `./scripts/upgrade.sh run --with-migrations` (one new migration); the dry run prints it.
+* Images there were built by hand, so the script has to work out the deployed revision: it is `22a2c79`.
+  It can do that after one `git pull`. If the dry run does not name `22a2c79` as "from" (for example
+  because the checkout was switched with `git checkout` instead), pass `--from 22a2c79`.
+* On 2026-11-09 seven of the eight servers there were stopped. Their exited containers are removed
+  within seconds of the first start of the new panel (the dry run says how many). The last 2,000 console
+  lines of each are kept.
+* The one running server shows "restart required" afterwards and has Docker's old 10 s until it is
+  restarted.
+* Then install the shutdown hook and do the check in docs/UNRAID-SHUTDOWN.md, with a small server first.
+* No backup had been taken there by 2026-11-09. `manage.py ensure_backup_schedules --dry-run` lists
+  the servers without a backup schedule; take one manual backup of a small server first to see that
+  restic works on the share.
+* Do not remove the "orphan image" rows named `mcpanel-rollback/...` in the Docker tab while a
+  rollback should stay possible (docs/UNRAID.md, section 4).
+
+## Earlier work (up to 2026-11-06, development sandbox)
+
+Everything from here to "Next recommended tasks" was written before the release of 2026-11-10 and
+describes the state of that time, except where a line says otherwise. The stack had six, later
+seven, containers then.
 
 ### Integration coverage added 2026-11-06 (and a bug it found)
 
@@ -89,8 +206,9 @@ all six services healthy; owner setup; **Better MC Forge BMC4 deployed by CurseF
 (keyless) → running in 3 min 16 s, auto-pinned to file 9104992; all 7,719 server files owned 99:100;
 RCON ok; restic backup to the array-style path ok; `docker compose up -d --force-recreate` (update)
 left the running server untouched and the session valid; `docker compose down` + `up -d` (reboot)
-→ server started again in 95 s. Production SPA served with no console errors. Still not run on real
-Unraid hardware.
+→ server started again in 95 s. Production SPA served with no console errors. This was a simulation in
+the sandbox. The real install on the owner's Unraid server followed on 2026-11-07 (see "Where things
+stand").
 
 ### Performance: Mods tab of a large modpack (2026-11-06)
 
@@ -131,8 +249,10 @@ backslash and non-ASCII in the operator message) parses on real vanilla **26.3**
 rejected on both). Not verified yet: what players see in chat (needs a client), Paper/Forge/Fabric, the `say` fallback, Celery beat actually firing the hourly tick, a real
 CurseForge key, and the new screens in a browser. A worker restart during a countdown fails the job
 as `interrupted` (players were warned but get no "cancelled" message). The countdown occupies one
-worker slot while it sleeps (like other long jobs). Notification channels still have no admin UI, so
-`modpack.update_available` is selectable through the API only.
+worker slot while it sleeps (like other long jobs). Correction of 2026-11-10: an earlier version of this
+file said that notification channels have no admin UI. They have one, the Notifications section of the
+System page, which offers the events the API lists (`modpack.update_available` among them). Whether it
+was opened in a browser is not recorded.
 
 ### Command palette + keyboard shortcuts (frontend)
 
@@ -171,9 +291,12 @@ actions, no console/files/backups/access pages, `c` inert, help without "Create 
 passed, no console errors. Every non-GET API request except the login was aborted in the browser (none
 was attempted). Still not verified: a real restricted account on the backend, and a real Mac.
 
-### Not yet verified
+### Not yet verified (features from before the release of 2026-11-10)
 
-* **Unraid hardware** (docs/UNRAID.md follows Unraid conventions; first real run is the user's).
+What is unverified in the release itself is listed under "Not verified anywhere" above.
+
+* **Unraid:** an earlier version has run on the owner's Unraid server since 2026-11-07 (see "Where
+  things stand"). Of the items in this list, none is known to have been checked there.
 * Frontend screens added in the last block (overview diagnostics/metrics, modpack tab, backup
   browser, snapshots, files zip/extract, Hangar tab, migrate dialog, CurseForge-by-URL wizard) were
   checked with tsc/lint/build/unit tests only; the Playwright pass and UX/correctness reviews were
@@ -188,9 +311,8 @@ was attempted). Still not verified: a real restricted account on the backend, an
   replaced world (Paper migrating a singleplayer world's `DIM-1` into `world_nether`): unit-tested with the fake
   agent only. Worlds above the panel upload limit (`MCPANEL_MAX_UPLOAD_BYTES`, 2 GiB) must be copied into the
   server folder first and chosen with “From the server folder”.
-* **Reset world** (2026-11-09): unit-tested with the simulated agent and on a real filesystem only. No real
-  agent, Docker, restic or Minecraft server has run it, and the dialog was not opened against a live panel.
-  Details and the list of what is assumed are in "Reset world" below.
+* **Reset world:** run end to end on real vanilla servers on 2026-11-10 (browser and integration tests).
+  What is still assumed, mostly about Paper and modpack servers, is in "Reset world" below.
 * World replace on Paper with a custom `world-container` (bukkit.yml / `--world-container`): the panel looks for
   the world in the server folder root only, so it would install a world there that Paper ignores (nothing is
   deleted). A dropped connection to the agent while a long replace runs fails the job (the agent keeps
@@ -207,10 +329,11 @@ server's current node (tagged with its `node_id`, like every backup). The world 
 (`.mcpanel-world-*`) are handled through SafeRoot inside the server folder, so they work unchanged on btrfs
 subvolumes and ZFS datasets.
 
-### Reset world (2026-11-09, branch `feature/reset-world`)
+### Reset world (2026-11-09, part of the release of 2026-11-10; this section is current)
 
-Status: **implemented + unit-tested. NOT yet run against a real agent, Docker, restic or a Minecraft
-server**, and not opened in a browser against a live panel.
+Status: **implemented, unit-tested, and run end to end on real vanilla servers on a Linux desktop**
+(real agent, Docker, restic; through the browser and through the integration tests, 2026-11-10). Not
+run on Paper or modpack servers, and not on Unraid.
 
 What exists:
 
@@ -248,11 +371,23 @@ What keeps it from deleting the wrong thing:
   failed, the agent was unreachable, the operation was lost) the server is left stopped.
 * A job that was marked as failed meanwhile does nothing more to the server.
 
-Verified, all without a real server:
+Verified with real servers (desktop, 2026-11-10):
+
+* `backend/tests/test_integration_world_reset.py` against a real agent, Docker and restic: 2 passed, in
+  three separate runs (103 to 114 s). Test 1 is a vanilla 1.20.4 server: reset while running with a new
+  seed and a safety backup, then a reset of the stopped server without a backup. Test 2 writes
+  Paper-style folders through the file API (no Paper server runs).
+* Three resets through the dialog in a browser against a live panel (vanilla 1.21.1, running, custom
+  seed, safety backup on; desktop and phone width): the job succeeded and the server came back with a
+  new world. Refusals were checked through the API.
+* So these are no longer open: the dialog against a live panel; the backup without the server's
+  exclusions and `restic ls` of the world folder for a vanilla world.
+
+Verified without a real server:
 
 * Agent: `tests/test_world_reset.py` (125 tests: the reset on a real temporary filesystem, and the
   route with a faked Docker status).
-* Backend: `tests/test_world_reset_api.py` (111 tests with the simulated agent) and
+* Backend: `tests/test_world_reset_api.py` (123 tests with the simulated agent) and
   `tests/test_world_reset_contract.py` (8 tests that read the agent and frontend sources and compare
   names, request and result fields and error codes across the three layers).
 * Frontend: model, dialog and danger-tab tests in jsdom with a mocked API. The session that built the
@@ -265,11 +400,8 @@ Verified, all without a real server:
 
 Not verified:
 
-* `backend/tests/test_integration_world_reset.py` (real agent, Docker, restic, vanilla 1.20.4) is written
-  and has not been run.
-* restic: the backup without the server's exclusions and `restic ls` of each world folder. What `ls`
-  returns for a path that is not in a snapshot is not known; an empty listing and an error both stop the
-  job before anything is deleted.
+* restic: what `restic ls` returns for a path that is not in a snapshot. An empty listing and an error
+  both stop the job before anything is deleted.
 * Docker: whether a container in restart back-off reports `running` or `restarting` (both count as
   running here).
 * Minecraft, Paper and the runtime image: that a world folder holding only `datapacks/` or
@@ -277,7 +409,7 @@ Not verified:
   whether a modpack installer brings a pack-provided world back (`CF_SET_LEVEL_FROM`: warning only);
   what the runtime writes for an empty `LEVEL` or `SEED` variable (both count as set); the folder layout
   of Paper 26.1+.
-* The dialog in a browser against a live panel, and anything on Unraid.
+* A reset on a real Paper server or a real modpack server, and anything on Unraid.
 
 Known limits:
 
@@ -416,20 +548,43 @@ trusted-proxy default narrowed to loopback; node agent bind address required. Fr
 `#token=`, setup token field, sockets stop retrying on 4401/4403, CSRF cookie primed before unsafe requests
 (fixed a real reset-link bug in fresh browsers), live events no longer refetch every query.
 Verified live: password reset end to end in a fresh browser; final browser smoke over 10 pages with no
-console or 5xx errors. Not re-run after the audit: the `-m integration` suite and the full compose stack
-(now 7 services with `worker-periodic`).
+console or 5xx errors. Not re-run at that time: the `-m integration` suite and the full compose stack
+(7 services with `worker-periodic` then). Since then (2026-11-10): three of the integration files and
+the compose stack in its three-container layout were run, see the top of this file; the content,
+backup-browse, import and btrfs-snapshot integration files were not.
 
 ## Next recommended tasks (in order)
 
-1. Run `backend/tests/test_integration_world_reset.py` against a real agent with restic, then one reset
-   by hand through the dialog (running Paper server, safety backup on) and record both under "Reset
-   world".
-2. Re-run the integration suite and the production compose stack (incl. `worker-periodic`) on the
-   current branch; browser pass over the audit-touched screens (properties redaction, schedules
-   permissions, backups on other nodes, nodes dialog, roles matrix) and the restart-warning dialog.
-3. Validate on real Unraid hardware (docs/QUICKSTART-UNRAID.md), including `MCPANEL_SETUP_TOKEN`.
-4. ZFS on a real pool (only fake-`zfs` unit tests so far; check `:rshared` visibility on Unraid).
-5. CurseForge per-mod search (needs a key); run one real restart with a warning and watch the chat.
+1. Read the result of the final gate run (real containers, after the last fixes to `upgrade.sh`) and
+   record it under "Release of 2026-11-10".
+2. Upgrade the owner's Unraid server: `./scripts/upgrade.sh dry-run`, then the command it prints
+   (`run --with-migrations`; `--from 22a2c79` if the script cannot tell the deployed revision). Check
+   `./scripts/upgrade.sh status` afterwards. Record what happened.
+3. On Unraid: install the shutdown hook, raise the shutdown time-out to 150 s, and do the check at the
+   end of docs/UNRAID-SHUTDOWN.md with one small server. Then an array stop with a modded server
+   running, to see whether 45 s is enough for it.
+4. On Unraid: one manual backup of a small server and a restore of one file from it (restic on the
+   array share has never run there), then `manage.py ensure_backup_schedules`.
+5. On Unraid: a btrfs snapshot, a rollback and a snapshot delete with the default stack (`delete_mode`
+   should read `fallback`).
+6. Re-run the integration files that were not run for this release (content, backup-browse, import,
+   btrfs snapshots), and Reset world on a real Paper server.
+7. Browser pass over the audit-touched screens (properties redaction, schedules permissions, backups on
+   other nodes, nodes dialog, roles matrix) and the restart-warning dialog.
+8. ZFS on a real pool (only fake-`zfs` unit tests so far; check `:rshared` visibility on Unraid).
+9. A second node with an older agent next to the new panel (the feature list and the container format
+   are untested with mixed versions).
+10. CurseForge per-mod search (needs a key); run one real restart with a warning and watch the chat.
+
+## Environment notes (desktop, 2026-11-10)
+
+The release was built and tested on the owner's Linux desktop, not in the cloud sandbox. Backend tests
+there use a throw-away Postgres on `127.0.0.1:55432`:
+`cd backend && POSTGRES_HOST=127.0.0.1 POSTGRES_PORT=55432 POSTGRES_PASSWORD=mcpanel
+MCPANEL_TEST_DB_NAME=test_mcpanel_<name> .venv/bin/python -m pytest -q -m "not integration"`.
+The restic, btrfs and zfs binaries are not installed, so those agent tests skip; real btrfs runs need
+the QEMU guest described in TESTING.md. Test stacks, logs and the guest harness are under
+the folder `audit-2026-11-09/` next to the checkout, outside the repository.
 
 ## Environment notes (cloud sandbox)
 
@@ -463,5 +618,28 @@ Server, Better MC 4 (Modrinth, failed on purpose), Better MC 4 (CurseForge), Bet
   cannot reproduce a cold read. Use folders that have not been read recently and check them with
   `mincore`.
 * btrfs snapshots are read-only subvolumes outside the server folder: anything that deletes a server's
-  data must delete them with `btrfs subvolume delete` (`shutil.rmtree` cannot).
+  data must delete them through `snapshots.delete_subvolume` (a plain `shutil.rmtree` cannot).
+  `btrfs subvolume delete` needs `CAP_SYS_ADMIN`, which the agent container does not have. Without it
+  the way is: clear the read-only flag, remove the files, `rmdir` the empty subvolume. Even on a pool
+  mounted with `user_subvol_rm_allowed` a read-only snapshot must be made writable first.
 * Several agents/sessions share one Postgres here: run pytest with a unique `MCPANEL_TEST_DB_NAME`.
+* Unraid stops only the containers that carry its own label when the array stops. Everything else is
+  stopped by the Docker daemon, which Unraid kills after 30 s. Hence `AGENT_SHUTDOWN_STOP_TIMEOUT=20`
+  (a server's Docker stop timeout must fit inside those 30 s) and the `stopping_docker` hook.
+* A container stopped with `docker stop` (also from Unraid's Docker tab or a backup plugin) counts as
+  stopped by hand: `restart: unless-stopped` does not start it again, not even after a reboot. That is
+  why the hook never uses `docker stop` while the panel runs.
+* docker-py's `containers.create()` rejects `stop_timeout`; only the low-level `create_container()`
+  sets Docker's stop timeout (`docker_ops.create_container`).
+* The itzg runner tries `rcon-cli stop` once on SIGTERM. Before the server has opened RCON that fails,
+  and without `CREATE_CONSOLE_IN_PIPE=true` its console fallback has nowhere to write: the stop is lost
+  and the server is killed later without saving.
+* Celery's Redis transport has no `unix://` scheme. A Redis on a Unix socket is `redis+socket:///path`
+  with `?virtual_host=N` for the database (`settings.celery_broker_url`).
+* A value in the Redis cache is a pickle, and Redis loads `dump.rdb` at start. Any process that can
+  write into Redis's directory can therefore run code in the panel; the supervisor removes such files
+  before every Redis start.
+* The upgrade script is replaced or removed by its own `git checkout` during a rollback. It ends with
+  `main "$@"; exit $?` on one line so that bash has read all of it before anything runs.
+* Real-stack runs made before a round of fixes do not cover the fixes. Record the order (see "Where
+  things stand").

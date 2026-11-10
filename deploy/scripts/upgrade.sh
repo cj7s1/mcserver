@@ -33,28 +33,43 @@
 #      although step 1 saw no new migration file (unless --with-migrations)
 #   6. stops and removes containers of services the new version no longer has (for example
 #      worker, worker-periodic, beat, redis) with 2 minutes to finish, then
-#      `docker compose up -d --remove-orphans`
+#      `docker compose up -d --remove-orphans` (after it removed what an earlier `up` that was
+#      cut off left half replaced; a service that `up` did not start is tried once more and is
+#      a failure at once after that)
 #   7. waits until every service is running and healthy, checks that nothing of the old layout
-#      is left and prints what changed
+#      is left and prints what changed (the images of the containers that run now)
 # Minecraft server containers are never touched: they do not belong to the Compose project.
 # Until step 6 nothing is switched: a run that ends before it points the image names (for example
 # mcpanel/panel:local) back at the images they had, and the old version keeps running.
 #
-# A `run` that did not finish (the build failed, the new version did not become healthy, the
-# terminal session was closed) keeps its rollback point, and no later `run` makes a new one on
-# top of it. If nothing was switched yet, the next `run` goes on with the recorded one. Otherwise
-# `run` refuses until you choose: `rollback` (back to the old version) or `run --resume` (go on
-# to the new one, with the rollback point as it was recorded).
+# A `run` that did not finish (the build failed, the new version did not become healthy, it was
+# killed) keeps its rollback point, and no later `run` makes a new one on top of it. If nothing
+# was switched yet, the next `run` goes on with the recorded one. Otherwise `run` refuses until
+# you choose: `rollback` (back to the old version) or `run --resume` (go on to the new one, with
+# the rollback point as it was recorded).
+#
+# A terminal that is closed: before the switch (step 6) it ends the run, and nothing was changed.
+# From the switch on, and in `rollback` and `restore-db` from their first change on, the script
+# ignores the hangup and finishes without the terminal; `docker compose` then runs in a session
+# of its own, so the hangup does not get to it either. What was printed is in the log (below).
+# `status` names the log and says whether that command is still at work; while it is, another
+# `run`, `rollback` or `restore-db` refuses. Ctrl-C and a kill still end the script (a kill -9 or
+# a host that goes down cannot be caught): `status` then says what is left to do, and both ways
+# out, `rollback` and `run --resume`, first remove what a `docker compose up` that was cut off
+# left half-made.
 #
 # `rollback` checks out the recorded revision (detached HEAD), points the image names back at
 # the saved images, undoes the database migrations of the upgrade and brings that layout up.
 # It asks the upgraded version first whether every migration can be undone and stops nothing if
 # one cannot. After the checkout this script may be gone from disk (older revisions do not have
-# it); `git checkout <branch>` brings it back.
+# it); `git checkout <branch>` brings it back. With the old version running and the source tree
+# on the branch again, do not run `docker compose up -d` by hand: the compose file of the tree
+# does not fit the images that run (`status` says so whenever the two differ).
 #
 # `restore-db FILE` loads a dump written by step 3 into a new database and, when that worked,
 # swaps it with the current one, which is kept under another name. Everything but the database
-# container must be stopped. It is the way back when a migration cannot be undone.
+# container must be stopped. It is the way back when a migration cannot be undone. It ends with
+# the commands that start the stack again; which ones depends on where the last run ended.
 #
 # Options:
 #   --force             run, rollback: do not refuse because of queued or running jobs
@@ -75,15 +90,23 @@
 # Files it writes, all in this deploy directory, mode 600 and ignored by git:
 #   upgrade-state.env                   the rollback point (do not edit)
 #   upgrade-backup-<time>.sql / .env    database dump and copy of .env (the newest 3 are kept)
+#   upgrade-log-<time>.log              what a `run`, `rollback` or `restore-db` printed, written
+#                                       from its first change on (a command that refuses or only
+#                                       shows something leaves none; the newest 10 are kept)
 #
 # Needs bash, docker with the compose plugin, and git. Nothing else.
 set -uo pipefail
+
+# The standard error the script was started with. Messages go there (warn), also from a trap that
+# runs while the output of a command is redirected into a file.
+exec 4>&2
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd) || exit 1
 DEPLOY_DIR=$(dirname -- "$SCRIPT_DIR")
 STATE_FILE="$DEPLOY_DIR/upgrade-state.env"
 BACKUP_DIR="${MCPANEL_UPGRADE_BACKUP_DIR:-$DEPLOY_DIR}"
 KEEP_BACKUPS=3
+KEEP_LOGS=10
 STAMP=$(date +%Y%m%d-%H%M%S)
 STOP_SECONDS=120
 REVISION_LABEL=io.mcpanel.revision
@@ -107,6 +130,7 @@ PROJECT=""
 WANT=""      # services of the source tree's compose file, space separated
 FROM_REV=""  # the revision that is deployed now ("" = unknown / nothing deployed)
 FROM_WHY=""
+PANEL_RUNS=0 # find_deployed_revision: a panel container is running
 TO_REV=""
 TO_LABEL=""
 PREV_STATUS=""    # STATUS of the state file when this command began ("" = there is none)
@@ -121,21 +145,85 @@ OWN_STATE=0       # this process wrote the state file: an interruption is noted 
 IMAGE_SNAPSHOT="" # lines "<image name>|<image id>" from before the pull and the build
 SCRIPT_GONE=""    # rollback: said after every message once the checkout removed this script
 UNCHANGED="nothing was changed (the old version is still running)"
+LOG_WANTED=0      # run, rollback, restore-db (not their dry forms): what is printed goes into a log as well
+LOG_FILE=""       # ... this file, from the first change on (begin_log)
+LOG_HELD=""       # ... and what was printed before that waits here
+LOG_ARGS=""       # the command line, for the first line of the log
+DETACH=""         # set at the first change of a switch (hold_on): how `docker compose` is started from then on
+UP_PROBLEM=""     # bring_up: why the stack is not up
+RUNNING_PID=""    # another_runs: the command of this script that is still at work, ...
+RUNNING_LOG=""    # ... its log ...
+RUNNING_WHAT=""   # ... and "<command line> | started <time>"
 
-say() { printf '%s\n' "$*"; }
+# Everything the script prints goes through say and warn, and with a log into the log as well.
+log_line() {
+    if [ -n "$LOG_FILE" ]; then
+        printf '%s\n' "$1" >>"$LOG_FILE"
+    elif [ "$LOG_WANTED" = 1 ]; then
+        LOG_HELD="$LOG_HELD$1"$'\n'
+    fi
+}
+say() {
+    printf '%s\n' "$*"
+    log_line "$*"
+}
 step() {
     STEP=$*
-    printf '\n==> %s\n' "$*"
+    say ""
+    say "==> $*"
 }
-warn() { printf 'upgrade: %s\n' "$*" >&2; }
+warn() {
+    printf 'upgrade: %s\n' "$*" >&4
+    log_line "upgrade: $*"
+}
 die() {
-    printf 'upgrade: %s\n' "$*" >&2
-    [ -z "$SCRIPT_GONE" ] || printf 'upgrade: %s\n' "$SCRIPT_GONE" >&2
+    warn "$*"
+    [ -z "$SCRIPT_GONE" ] || warn "$SCRIPT_GONE"
     exit 1
 }
 refuse() {
-    printf 'upgrade: %s\n' "$*" >&2
+    warn "$*"
     exit 2
+}
+
+# The output of a command that belongs on the screen: line by line to the screen and into the
+# log. It reads to the end of that output whatever the terminal sends meanwhile (a command whose
+# reader went away would be ended by its next line).
+relay() {
+    local line
+    (
+        trap '' HUP INT TERM PIPE
+        if [ -n "$LOG_FILE" ]; then exec 9>>"$LOG_FILE"; else exec 9>/dev/null; fi
+        while IFS= read -r line || [ -n "$line" ]; do
+            printf '%s\n' "$line"
+            printf '%s\n' "$line" >&9
+        done
+    )
+}
+shown() { # shown COMMAND...: run it with its output on the screen (and in the log); its status is the command's
+    local status
+    if [ -z "$LOG_FILE" ] && [ -z "$DETACH" ]; then
+        "$@"
+        return
+    fi
+    if [ -n "$DETACH" ]; then
+        # After hold_on the command is out of reach of Ctrl-C and of a kill of the process group
+        # (dc). The part of the pipeline that waits for it must not go before it does: bash would
+        # run the trap at once then, and the script would end while the command is still at work.
+        {
+            trap '' INT TERM
+            "$@"
+        } 2>&1 | relay
+        status=${PIPESTATUS[0]}
+    else
+        "$@" 2>&1 | relay
+        status=${PIPESTATUS[0]}
+    fi
+    return "$status"
+}
+show_file() { # show_file FILE [LINES]: the last lines of a file a command wrote its output into
+    local line
+    while IFS= read -r line; do say "$line"; done < <(tail -n "${2:-10}" "$1" 2>/dev/null)
 }
 
 usage() {
@@ -145,7 +233,21 @@ usage() {
     say "The comment at the top of $0 explains every step."
 }
 
-dc() { (cd "$DEPLOY_DIR" && docker compose "$@"); }
+# docker compose in the deploy directory. After hold_on it runs in a session of its own: the
+# hangup of a closed terminal, Ctrl-C and a kill of the process group do not get to it, so it
+# always finishes what it began (a `docker compose up` that is cut off leaves containers half
+# replaced). The subshell that waits for it ignores Ctrl-C and a kill meanwhile: the script acts
+# on them when the command has ended.
+dc() {
+    case "$DETACH" in
+        setsid) (
+            trap '' INT TERM
+            cd "$DEPLOY_DIR" && setsid -w docker compose "$@" </dev/null
+        ) ;;
+        nohup) (cd "$DEPLOY_DIR" && nohup docker compose "$@" </dev/null) ;;
+        *) (cd "$DEPLOY_DIR" && docker compose "$@") ;;
+    esac
+}
 g() { git -C "$DEPLOY_DIR" "$@"; }
 
 in_list() { # in_list WORD LIST...
@@ -162,13 +264,20 @@ short() { printf '%s' "${1:0:12}"; }
 # --- leaving early ----------------------------------------------------------------------
 # Runs at every exit. Before the switch a run has changed one thing only: the pull and the build
 # moved image names to the new images. They are pointed back, so "nothing was changed" is true.
+# The last line of the log says how the command ended (`status` reads it).
+# shellcheck disable=SC2317,SC2329 # called by the EXIT trap (SC2317: shellcheck up to 0.10, SC2329: from 0.11)
 on_exit() {
-    [ "$PHASE" = before-switch ] && restore_image_names
+    local status=$?
+    [ "$PHASE" = "before-switch" ] && restore_image_names
+    [ -z "$LOG_FILE" ] || printf '# ended %s, exit status %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$status" >>"$LOG_FILE"
     [ -z "$TMP" ] || rm -rf "$TMP"
 }
 
-# A closed terminal session (SIGHUP), Ctrl-C or a kill: note it in the state file, so `status`
-# and the next `run` say that the run did not finish and why.
+# Ctrl-C, a kill, or (until hold_on) a closed terminal session: note it in the state file, so
+# `status` and the next `run` say that the run did not finish and why. The message goes to the
+# standard error the script was started with (warn), not into the file the output of the command
+# that was running is redirected to.
+# shellcheck disable=SC2317,SC2329 # called by the signal traps
 on_signal() { # on_signal NAME NUMBER
     trap '' HUP INT TERM PIPE # the terminal may be gone: a message that cannot be written must not stop the rest
     local status
@@ -182,6 +291,121 @@ on_signal() { # on_signal NAME NUMBER
     warn "interrupted by SIG$1 during: ${STEP:-the start}. What is left to do: ./scripts/upgrade.sh status"
     [ -z "$SCRIPT_GONE" ] || warn "$SCRIPT_GONE"
     exit $((128 + $2))
+}
+
+# From the first change of a switch on (run, rollback, restore-db) a closed terminal must not end
+# the work half-way. The script ignores the hangup, and a reader of its output that went away;
+# every command it starts inherits that. `docker compose` is also started in a session of its
+# own (dc), where the hangup of the terminal does not get to it at all; without setsid, nohup
+# takes that place.
+# Tried with Docker 29.9 and Compose 5.7 (SIGHUP to the process group while `docker compose up -d`
+# replaced a container): as it is, Compose dies between creating the replacement and removing the
+# container it replaces. Started with SIGHUP ignored (inherited, or by nohup) it finishes, and
+# so it does in a session of its own (setsid), where the signal never arrives.
+hold_on() {
+    trap '' HUP PIPE
+    [ -z "$DETACH" ] || return 0
+    if setsid -w true >/dev/null 2>&1; then
+        DETACH="setsid"
+    elif command -v nohup >/dev/null 2>&1; then
+        DETACH="nohup"
+    else
+        DETACH="inherit"
+    fi
+}
+
+# --- the log ------------------------------------------------------------------------------
+newest_log() { # the log that was written to last, or fails
+    local file newest=""
+    for file in "$DEPLOY_DIR"/upgrade-log-*.log; do
+        [ -f "$file" ] || continue
+        if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest=$file; fi
+    done
+    [ -n "$newest" ] && printf '%s\n' "$newest"
+}
+
+# Is the command that wrote the newest log still at work? (It goes on after its terminal was
+# closed, so a second one must not start next to it.) Sets RUNNING_PID, RUNNING_LOG, RUNNING_WHAT.
+another_runs() {
+    local first last
+    RUNNING_LOG=$(newest_log) || return 1
+    IFS= read -r first <"$RUNNING_LOG" || return 1
+    # (the line that says how it ended need not be the very last: output of a command that was
+    # interrupted can still arrive after it)
+    last=$(grep '^# ended ' "$RUNNING_LOG" | tail -n 1)
+    [ -z "$last" ] || return 1
+    case "$first" in "# pid "*" | "*" | started "*) ;; *) return 1 ;; esac
+    RUNNING_PID=${first#"# pid "}
+    RUNNING_PID=${RUNNING_PID%% *}
+    RUNNING_WHAT=${first#*" | "}
+    case "$RUNNING_PID" in '' | *[!0-9]*) return 1 ;; esac
+    [ "$RUNNING_PID" != "$$" ] || return 1
+    if [ -d "/proc/$$" ]; then # a process of that number that is this script (the number may have been given out again)
+        [ -r "/proc/$RUNNING_PID/cmdline" ] && tr '\0' ' ' <"/proc/$RUNNING_PID/cmdline" 2>/dev/null | grep -q 'upgrade\.sh'
+    else
+        kill -0 "$RUNNING_PID" 2>/dev/null
+    fi
+}
+
+refuse_while_another_runs() {
+    another_runs || return 0
+    refuse "another command of this script is still at work (pid $RUNNING_PID: ${RUNNING_WHAT%" | started "*}, started ${RUNNING_WHAT##*" | started "}).
+         It goes on when its terminal was closed. Nothing was changed by this one. Wait until the other has ended;
+         to follow it:   tail -f $RUNNING_LOG
+         './scripts/upgrade.sh status' says whether it is still at work and how it ended."
+}
+
+# From here on the command changes things: what it prints goes into a log from now on, with
+# everything it printed so far. After a closed terminal the log says how it went on and ended.
+begin_log() {
+    local file="$DEPLOY_DIR/upgrade-log-$STAMP.log" count oldest
+    if [ "$LOG_WANTED" != 1 ] || [ -n "$LOG_FILE" ]; then
+        return 0
+    fi
+    refuse_while_another_runs
+    [ ! -e "$file" ] || file="$DEPLOY_DIR/upgrade-log-$STAMP-$$.log"
+    if ! (umask 077 && printf '# pid %s | ./scripts/upgrade.sh %s | started %s\n%s' "$$" "$LOG_ARGS" "$(date '+%Y-%m-%d %H:%M:%S')" "$LOG_HELD" >"$file") 2>/dev/null; then
+        LOG_WANTED=0
+        LOG_HELD=""
+        warn "cannot write $file: this command keeps no log"
+        return 0
+    fi
+    LOG_HELD=""
+    LOG_FILE=$file
+    say ""
+    say "Log: $file"
+    say "     (what this command prints, from its first line on; 'status' says how it ended)"
+    while :; do # keep the newest few
+        count=0
+        oldest=""
+        for file in "$DEPLOY_DIR"/upgrade-log-*.log; do
+            [ -f "$file" ] || continue
+            count=$((count + 1))
+            if [ -z "$oldest" ] || [ "$file" -ot "$oldest" ]; then oldest=$file; fi
+        done
+        [ "$count" -gt "$KEEP_LOGS" ] || break
+        rm -f "$oldest" || break
+    done
+}
+
+show_log() { # status: the newest log and how the command that wrote it ended
+    local file first last what
+    file=$(newest_log) || return 0
+    IFS= read -r first <"$file" || first=""
+    what=${first#*" | "}
+    last=$(grep '^# ended ' "$file" | tail -n 1)
+    say "Log:          $file"
+    case "$first" in
+        "# pid "*" | "*" | started "*) say "              ${what%" | started "*}, started ${what##*" | started "}" ;;
+    esac
+    if another_runs; then
+        say "              STILL AT WORK (pid $RUNNING_PID): wait until it has ended. To follow it: tail -f $file"
+    else
+        case "$last" in
+            "# ended "*) say "              ${last#"# "}" ;;
+            *) say "              it does not say how it ended and its process is gone: it was killed, or the host went down" ;;
+        esac
+    fi
 }
 
 # --- what is there ----------------------------------------------------------------------
@@ -235,12 +459,113 @@ service_container() { # service_container SERVICE [running] -> id of its (runnin
     return 1
 }
 
+stopped_panel() { # the id of the panel container, when there is exactly one and it ran and is stopped
+    local id service state found="" count=0
+    while read -r id service state; do
+        [ "$service" = panel ] || continue
+        count=$((count + 1))
+        case "$state" in exited | dead) found=$id ;; esac
+    done < <(project_containers)
+    [ "$count" = 1 ] && [ -n "$found" ] && printf '%s\n' "$found"
+}
+
 stale_containers() { # containers of services the source tree's compose file does not have
     local id service state
     # shellcheck disable=SC2086 # WANT is a space separated list
     while read -r id service state; do
         in_list "$service" $WANT || printf '%s %s %s\n' "$id" "$service" "$state"
     done < <(project_containers)
+}
+
+# A `docker compose up` that was cut off while it replaced a container (a kill, a host that went
+# down) leaves the replacement behind under the temporary name Compose gives it,
+# <12 hex digits>_<project>-<service>-<n>, next to the stopped container it was to replace. The
+# next `up` then ends without an error and without starting that service, or fails with
+# "dependency failed to start" (seen with Compose 5.7). So before every `up`:
+#   a replacement that does not run is removed (Compose makes a new one);
+#   a replacement that runs is the container of its service: it gets the proper name, and a
+#   stopped container that has that name is removed.
+clear_half_recreated() {
+    local id service state name proper other other_state line list=""
+    while read -r id service state; do
+        name=$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null) || continue
+        list="${list}${id} ${state} ${name#/}"$'\n'
+    done < <(project_containers)
+    while read -r id state name; do
+        [[ "$name" =~ ^[0-9a-f]{12}_("$PROJECT"-.+)$ ]] || continue
+        proper=${BASH_REMATCH[1]}
+        if [ "$state" != running ]; then
+            if docker rm "$id" >/dev/null 2>"$TMP/rm.err"; then
+                say "  removed $name ($state): the replacement container an interrupted 'docker compose up' left behind"
+            else
+                warn "could not remove the half-made container $name: $(head -n 1 "$TMP/rm.err")"
+            fi
+            continue
+        fi
+        other=""
+        other_state=""
+        while read -r line; do
+            [ "${line##* }" = "$proper" ] || continue
+            other=${line%% *}
+            other_state=${line#* }
+            other_state=${other_state%% *}
+        done <<<"$list"
+        if [ "$other_state" = running ]; then
+            warn "$name and $proper both run: left as they are for 'docker compose up'"
+            continue
+        fi
+        if [ -n "$other" ]; then
+            if ! docker rm "$other" >/dev/null 2>"$TMP/rm.err"; then
+                warn "could not remove the stopped container $proper: $(head -n 1 "$TMP/rm.err")"
+                continue
+            fi
+            say "  removed the stopped container $proper ($other_state): $name runs in its place"
+        fi
+        if docker rename "$id" "$proper" 2>"$TMP/rm.err"; then
+            say "  renamed $name to $proper (an interrupted 'docker compose up' left it with its temporary name)"
+        else
+            warn "could not rename $name to $proper: $(head -n 1 "$TMP/rm.err")"
+        fi
+    done <<<"$list"
+}
+
+# The services of the layout that have no started container, as " panel(created) beat(no container)".
+# `docker compose up` can end without an error and still leave a service like that.
+not_started() {
+    local service id other state found list
+    list=$(project_containers)
+    for service in $WANT; do
+        found="no container"
+        while read -r id other state; do
+            [ "$other" = "$service" ] || continue
+            case "$state" in
+                created | exited | dead) [ "$found" = started ] || found=$state ;;
+                *) found=started ;;
+            esac
+        done <<<"$list"
+        [ "$found" = started ] || printf ' %s(%s)' "$service" "$found"
+    done
+}
+
+# `docker compose up -d --remove-orphans` for the layout of the checkout, and the look whether
+# every service got started: if not, once more, and then it is a failure at once (nothing to wait
+# 5 minutes for). Fails with the reason in UP_PROBLEM.
+bring_up() { # bring_up [MORE OPTIONS OF up]
+    local attempt missing=""
+    UP_PROBLEM=""
+    for attempt in 1 2; do
+        clear_half_recreated
+        if ! shown dc up -d --remove-orphans "$@"; then
+            UP_PROBLEM="docker compose up failed (see the messages above)"
+            return 1
+        fi
+        missing=$(not_started)
+        [ -n "$missing" ] || return 0
+        [ "$attempt" = 2 ] || say "  docker compose up ended without an error, but did not start:$missing. Once more:"
+    done
+    UP_PROBLEM="docker compose up ended without an error, twice, and still did not start:$missing
+         ('docker compose ps -a' lists the containers, 'docker compose logs --tail 50 <service>' shows what one wrote)"
+    return 1
 }
 
 psql_query() { # psql_query SQL -> rows ("|" between columns); fails if the database cannot be asked
@@ -290,11 +615,16 @@ check_jobs() {
 # Exited Minecraft server containers, which the new panel removes soon after it starts (dry-run
 # and run say so once; the panel's default is not changed here).
 notice_exited_servers() {
-    local count=0 id line value="" has_line=0
+    local count=0 id line value="" has_line=0 them are="containers are"
     while read -r id; do
         [ -n "$id" ] && count=$((count + 1))
     done < <(docker ps -a --filter "label=$SERVER_LABEL" --filter status=exited --filter status=created --filter status=dead --format '{{.ID}}' 2>/dev/null)
     [ "$count" -gt 0 ] || return 0
+    them="these $count containers"
+    if [ "$count" = 1 ]; then
+        them="this container"
+        are="container is"
+    fi
     while IFS= read -r line; do
         case "$line" in
             "$RETIRE_SETTING="*)
@@ -307,16 +637,16 @@ notice_exited_servers() {
     value=${value//[\"\' ]/}
     if [ "$has_line" = 1 ] && [ -n "$value" ]; then
         case "$value" in
-            0 | [Ff]alse | [Nn]o | [Oo]ff) say "Stopped servers: $count exited server container(s) on this host are kept ($RETIRE_SETTING=$value in .env)." ;;
+            0 | [Ff]alse | [Nn]o | [Oo]ff) say "Stopped servers: $count exited server $are kept on this host ($RETIRE_SETTING=$value in .env)." ;;
         esac
         return 0
     fi
-    say "Stopped servers: this host has $count exited Minecraft server container(s). A stopped server needs no"
-    say "  container any more: shortly after the upgrade the panel removes these $count container(s). World data is"
+    say "Stopped servers: this host has $count exited Minecraft server ${are% *}. A stopped server needs no"
+    say "  container any more: shortly after the upgrade the panel removes $them. World data is"
     say "  not touched, the last 2,000 console lines of each are kept, and a stopped server is started from the"
     say "  panel as before (its container is created again). To look first, add this line to .env BEFORE the run:"
     say "      $RETIRE_SETTING=false"
-    say "  They are kept then, and after the upgrade this lists what would be removed, without removing anything:"
+    say "  Nothing is removed then, and after the upgrade this lists what would be removed, without removing anything:"
     say "      docker compose exec panel python manage.py retire_stopped_containers --dry-run"
     say ""
 }
@@ -384,11 +714,20 @@ find_deployed_revision() {
         FROM_WHY="given with --from"
         return 0
     fi
-    if panel=$(service_container panel); then
+    # The panel container that runs says it. Without one, the only panel container there is does
+    # (the stack is stopped); two of them, or one that was made and never started, say nothing:
+    # that is a switch that was cut off.
+    PANEL_RUNS=1
+    if ! panel=$(service_container panel running); then
+        PANEL_RUNS=0
+        panel=$(stopped_panel) || panel=""
+    fi
+    if [ -n "$panel" ]; then
         label=$(docker inspect -f "{{index .Config.Labels \"$REVISION_LABEL\"}}" "$panel" 2>/dev/null)
         label=${label%-dirty}
         if [[ "$label" =~ ^[0-9a-f]{7,40}$ ]] && FROM_REV=$(g rev-parse --verify -q "$label^{commit}"); then
             FROM_WHY="label of the running panel image"
+            [ "$PANEL_RUNS" = 1 ] || FROM_WHY="label of the image of the panel container, which is stopped"
             return 0
         fi
         image=$(docker inspect -f '{{.Image}}' "$panel" 2>/dev/null)
@@ -396,6 +735,12 @@ find_deployed_revision() {
             FROM_WHY="recorded by the last run of this script"
             return 0
         fi
+    fi
+    # A run that ended before its switch changed nothing: what it recorded is what is deployed.
+    # (`run` does not come here then: choose_origin reads that record itself.)
+    if [ "$(state_get STATUS)" = started ] && record_matches_containers && FROM_REV=$(g rev-parse --verify -q "$(state_get FROM_REV)^{commit}"); then
+        FROM_WHY="recorded $(state_get RECORDED || printf '?') by the run that ended before the switch"
+        return 0
     fi
     FROM_REV=""
     FROM_WHY="unknown"
@@ -528,15 +873,17 @@ choose_origin() {
 
 # --- showing things -----------------------------------------------------------------------
 show_containers() {
-    local id service state info mark name health image image_id
-    printf '  %-16s %-26s %-9s %-10s %s\n' SERVICE CONTAINER STATE HEALTH IMAGE
+    local id service state info mark name health image image_id row
+    printf -v row '  %-16s %-26s %-9s %-10s %s' SERVICE CONTAINER STATE HEALTH IMAGE
+    say "$row"
     while read -r id service state; do
         info=$(docker inspect -f '{{.Name}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}|{{.Config.Image}}|{{.Image}}' "$id" 2>/dev/null) || continue
         IFS='|' read -r name health image image_id <<<"$info"
         mark=""
         # shellcheck disable=SC2086
         in_list "$service" $WANT || mark="   <- not in the source tree's layout: removed by 'run'"
-        printf '  %-16s %-26s %-9s %-10s %s (%s)%s\n' "$service" "${name#/}" "$state" "$health" "$image" "$(short "${image_id#sha256:}")" "$mark"
+        printf -v row '  %-16s %-26s %-9s %-10s %s (%s)%s' "$service" "${name#/}" "$state" "$health" "$image" "$(short "${image_id#sha256:}")" "$mark"
+        say "$row"
     done < <(project_containers)
 }
 
@@ -568,7 +915,9 @@ show_rollback_point() {
         fi
     done <<<"$(state_all IMAGE)"
     entry=$(state_get BACKUP_SQL) && [ -n "$entry" ] && say "  database dump: $entry"
-    if unfinished "$status"; then
+    if unfinished "$status" && another_runs; then
+        say "  A command of this script is still at work on it (pid $RUNNING_PID, see 'Log' above): wait until it has ended."
+    elif unfinished "$status"; then
         entry=$(state_all INTERRUPTED | tail -n 1)
         case "$status" in
             started) say "  The run that recorded it ended before the switch${entry:+ (interrupted by $entry)}: 'run' goes on with this rollback point." ;;
@@ -588,10 +937,22 @@ cmd_status() {
     say ""
     branch=$(g symbolic-ref -q --short HEAD) || branch="(detached)"
     say "Source tree:  $(describe_revision "$TO_REV")   [branch $branch$([ "$TO_LABEL" = "$TO_REV" ] || printf ', with local changes')]"
-    if [ -n "$FROM_REV" ]; then
+    if [ "$PANEL_RUNS" != 1 ] && [ -n "$(project_containers)" ]; then
+        # never the label of a container that does not run (one that was only made, for example)
+        if [ -n "$FROM_REV" ]; then
+            say "Deployed:     the panel is not running. $(describe_revision "$FROM_REV")   [$FROM_WHY]"
+        else
+            say "Deployed:     the panel is not running$(unfinished "$(state_get STATUS)" && printf ', and the last run or rollback did not finish (see the rollback point below)')"
+        fi
+    elif [ -n "$FROM_REV" ]; then
         say "Deployed:     $(describe_revision "$FROM_REV")   [$FROM_WHY]"
     else
-        say "Deployed:     $FROM_WHY"
+        say "Deployed:     $FROM_WHY$(unfinished "$(state_get STATUS)" && printf ' (the last run or rollback did not finish: see the rollback point below)')"
+    fi
+    if [ -n "$FROM_REV" ] && [ "$FROM_REV" != "$TO_REV" ]; then
+        say "              The source tree is another version than the deployed one: do not run 'docker compose up -d'"
+        say "              here (the compose file of the tree does not fit the images that run). 'run' upgrades to the"
+        say "              source tree; 'git checkout --detach $(short "$FROM_REV")' is the checkout that fits what runs."
     fi
     if [ "$branch" != "(detached)" ] && upstream=$(g rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null); then
         remote_rev=$(run_limited 15 git -C "$DEPLOY_DIR" ls-remote "${upstream%%/*}" "refs/heads/${upstream#*/}" 2>/dev/null)
@@ -621,6 +982,7 @@ cmd_status() {
     else
         say "Jobs: unknown (the database is not running or has no tables yet)"
     fi
+    show_log
     show_rollback_point
 }
 
@@ -820,11 +1182,12 @@ backup_database() {
     fi
     (
         umask 077
-        docker exec "$pg" sh -c 'pg_dump -U "$POSTGRES_USER" --exclude-table-data=django_session "$POSTGRES_DB"' >"$sql.part" &&
-            cp "$DEPLOY_DIR/.env" "$env"
+        docker exec "$pg" sh -c 'pg_dump -U "$POSTGRES_USER" --exclude-table-data=django_session "$POSTGRES_DB"' >"$sql.part" 2>"$TMP/dump.err" &&
+            cp "$DEPLOY_DIR/.env" "$env" 2>>"$TMP/dump.err"
     ) || {
         rm -f "$sql.part"
-        die "the database dump failed; $UNCHANGED"
+        show_file "$TMP/dump.err"
+        die "the database dump failed (see above); $UNCHANGED"
     }
     mv -f "$sql.part" "$sql"
     chmod 600 "$sql" "$env"
@@ -853,6 +1216,7 @@ snapshot_image_names() {
     done < <(dc config --images 2>/dev/null | sort -u)
 }
 
+# shellcheck disable=SC2317,SC2329 # called by on_exit, which the EXIT trap calls
 restore_image_names() {
     local name id now
     [ -n "$IMAGE_SNAPSHOT" ] || return 0
@@ -881,8 +1245,8 @@ check_new_migrations() {
     fi
     plan=$(dc run --rm --no-deps -T panel manage showmigrations --plan </dev/null 2>/dev/null | grep -F '[ ]')
     if [ -z "$plan" ]; then
-        tail -n 5 "$TMP/migrate.out"
-        die "could not ask the new version for its database migrations; $UNCHANGED"
+        show_file "$TMP/migrate.out" 5
+        die "could not ask the new version for its database migrations (see above); $UNCHANGED"
     fi
     say "  the new version changes the database schema:"
     while IFS= read -r line; do say "   $line"; done <<<"$plan"
@@ -916,7 +1280,7 @@ remove_stale_containers() {
     done
     wait
     # shellcheck disable=SC2086
-    docker rm $ids >/dev/null || die "could not remove the old containers:$names"
+    docker rm $ids >/dev/null 2>"$TMP/rm.err" || die "could not remove the old containers:$names ($(head -n 1 "$TMP/rm.err"))"
     say "  removed$names"
 }
 
@@ -925,7 +1289,7 @@ wait_healthy() {
     while :; do
         pending=""
         for service in $WANT; do
-            if ! id=$(service_container "$service"); then
+            if ! id=$(service_container "$service" running) && ! id=$(service_container "$service"); then
                 pending="$pending $service(no container)"
                 continue
             fi
@@ -946,13 +1310,13 @@ wait_healthy() {
         if [ "$SECONDS" -ge "$deadline" ]; then
             say "  NOT healthy after $TIMEOUT s:$pending"
             for service in $WANT; do
-                id=$(service_container "$service") || continue
+                id=$(service_container "$service" running) || id=$(service_container "$service") || continue
                 state=$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{else}}ok{{end}}' "$id" 2>/dev/null)
                 case "$state" in running/healthy | running/ok) continue ;; esac
                 say "  --- $service: last health check"
-                docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}{{.Output}}{{end}}{{end}}' "$id" 2>/dev/null | tail -n 3
+                docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}{{.Output}}{{end}}{{end}}' "$id" 2>/dev/null | tail -n 3 | relay
                 say "  --- $service: last log lines"
-                docker logs --tail 25 "$id" 2>&1 | cut -c1-300
+                docker logs --tail 25 "$id" 2>&1 | cut -c1-300 | relay
             done
             return 1
         fi
@@ -1005,21 +1369,48 @@ count_schedulers() { # celery beat processes in all running containers of the pr
     printf '%s\n' "$total"
 }
 
-show_changes() { # show_changes: old and new image per image name, from the state file
-    local name old tag now
+# Old and new image per image name. The old one is the one of the rollback point; the new one is
+# read from the containers that are running, not from the image name: a name can point at an image
+# no container was made from (a build that ended after the containers were made).
+show_changes() {
+    local name old tag now id service state used="" seen line ids told=""
+    while read -r id service state; do
+        [ "$state" = running ] || continue
+        name=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null) || continue
+        now=$(docker inspect -f '{{.Image}}' "$id" 2>/dev/null) || continue
+        used="${used}${name}|${now}|${service}"$'\n'
+    done < <(project_containers)
     while IFS='|' read -r name old tag; do
         [ -n "$name" ] || continue
-        now=$(docker image inspect -f '{{.Id}}' "$name" 2>/dev/null) || now="(gone)"
-        if [ "$now" = "$old" ]; then
-            say "  $name: unchanged ($(short "${old#sha256:}"))"
-        else
-            say "  $name: $(short "${old#sha256:}") -> $(short "${now#sha256:}")"
-        fi
+        ids=""
+        while IFS='|' read -r seen now service; do
+            # shellcheck disable=SC2086 # a space separated list of image ids
+            [ "$seen" = "$name" ] && ! in_list "$now" $ids && ids="$ids $now"
+        done <<<"$used"
+        [ -n "$ids" ] || say "  $name: $(short "${old#sha256:}") -> no running container uses it any more"
+        for now in $ids; do
+            if [ "$now" = "$old" ]; then
+                say "  $name: unchanged ($(short "${old#sha256:}"))"
+            else
+                say "  $name: $(short "${old#sha256:}") -> $(short "${now#sha256:}")"
+            fi
+        done
     done <<<"$(state_all IMAGE)"
+    # an image name the rollback point does not have (a service that is new in this layout)
+    line=$(state_all IMAGE)
+    while IFS='|' read -r seen now service; do
+        [ -n "$seen" ] || continue
+        case $'\n'"$line" in *$'\n'"$seen|"*) continue ;; esac
+        # shellcheck disable=SC2086 # a space separated list of image names
+        in_list "$seen" $told && continue
+        told="$told $seen"
+        say "  $seen: new, $(short "${now#sha256:}")"
+    done <<<"$used"
 }
 
 cmd_run() {
     preflight
+    [ "$DRY" = 1 ] || refuse_while_another_runs
     PREV_STATUS=$(state_get STATUS) || PREV_STATUS=""
     find_target_revision
     choose_origin
@@ -1068,7 +1459,10 @@ cmd_run() {
         say ""
         show_rollback_point
         say ""
-        if [ -n "$BLOCKED" ]; then
+        if another_runs; then
+            say "Nothing was changed. 'run' would refuse now: another command of this script is still at work"
+            say "  (pid $RUNNING_PID: ${RUNNING_WHAT%" | started "*}). To follow it: tail -f $RUNNING_LOG"
+        elif [ -n "$BLOCKED" ]; then
             say "Nothing was changed. 'run' would refuse now:"
             say "  $BLOCKED"
         else
@@ -1086,6 +1480,7 @@ cmd_run() {
         return 0
     fi
 
+    begin_log
     if [ "$CONTINUE" = 1 ]; then
         point=1
         step "Rollback point: the one of the run that did not finish (no new one is made)"
@@ -1114,15 +1509,15 @@ cmd_run() {
 
     export MCPANEL_REVISION="$TO_LABEL"
     snapshot_image_names
-    PHASE=before-switch
+    PHASE="before-switch"
     if [ "$NO_PULL" = 1 ]; then
         step "Building panel and agent (with the base images on this host)"
-        dc build || die "the build failed; $UNCHANGED"
+        shown dc build || die "the build failed; $UNCHANGED"
     else
         step "Pulling upstream images"
-        dc pull --ignore-buildable || die "pulling failed; $UNCHANGED. Without internet: --no-pull"
+        shown dc pull --ignore-buildable || die "pulling failed; $UNCHANGED. Without internet: --no-pull"
         step "Building panel and agent on fresh base images (docker compose build --pull)"
-        dc build --pull || die "the build failed; $UNCHANGED"
+        shown dc build --pull || die "the build failed; $UNCHANGED"
     fi
 
     step "Database migrations of the new version"
@@ -1130,11 +1525,13 @@ cmd_run() {
 
     step "Switching over"
     check_jobs "right before the switch"
-    PHASE=switching
+    # From here on the stack changes, and a closed terminal no longer ends the run (hold_on).
+    hold_on
+    PHASE="switching"
     [ "$point" = 1 ] && write_state "STATUS=switching"
     remove_stale_containers
-    dc up -d --remove-orphans || {
-        warn "docker compose up failed. See the messages above."
+    bring_up || {
+        warn "$UP_PROBLEM."
         [ "$point" = 1 ] && warn "The run did not finish. To go back: ./scripts/upgrade.sh rollback   To try again: ./scripts/upgrade.sh run --resume"
         exit 1
     }
@@ -1155,7 +1552,7 @@ cmd_run() {
 
     step "Done"
     if [ "$point" = 1 ]; then
-        panel_image=$(docker inspect -f '{{.Image}}' "$(service_container panel)" 2>/dev/null)
+        panel_image=$(docker inspect -f '{{.Image}}' "$(service_container panel running)" 2>/dev/null)
         write_state "STATUS=done" "" "DEPLOYED_REV=$TO_REV" "DEPLOYED_PANEL_IMAGE=$panel_image"
         PHASE=""
         if [ "$FROM_REV" != "$TO_REV" ]; then
@@ -1192,10 +1589,12 @@ apply_configuration() {
             mcpanel/*) docker image inspect "$image" >/dev/null 2>&1 || die "the image $image does not exist yet: run without --no-build first" ;;
         esac
     done < <(dc config --images 2>/dev/null)
+    begin_log
     step "Applying the configuration (no build, the rollback point is not touched)"
     check_jobs "right before the switch"
+    hold_on
     remove_stale_containers
-    dc up -d --remove-orphans --no-build || die "docker compose up failed (see above)"
+    bring_up --no-build || die "$UP_PROBLEM"
     step "Waiting for the services (up to $TIMEOUT s)"
     wait_healthy || die "not healthy; see 'docker compose logs --tail 100 panel'"
     step "Checking the layout"
@@ -1266,7 +1665,7 @@ check_undo_plan() { # check_undo_plan LINES ("<app> <target>") WHAT-IS-TRUE-NOW
         [ -n "$name" ] || continue
         # </dev/null: `docker compose run` reads its standard input to the end, here the rest of this list
         if ! dc run --rm --no-deps -T panel manage migrate --plan "$name" "$tag" </dev/null >"$TMP/plan.out" 2>&1; then
-            tail -n 10 "$TMP/plan.out"
+            show_file "$TMP/plan.out"
             die "could not ask the upgraded version how to undo the migrations of '$name' (see above). $2"
         fi
         if bad=$(grep -m 1 -F IRREVERSIBLE "$TMP/plan.out"); then
@@ -1279,6 +1678,7 @@ $(dump_way_back)"
 
 cmd_rollback() {
     preflight
+    [ "$DRY" = 1 ] || refuse_while_another_runs
     local status from to branch name id tag undo="" seen="" db_ok=0 head service state ids="" names="" line top stopped=""
     status=$(state_get STATUS) || die "there is no rollback point ($STATE_FILE does not exist)"
     PREV_STATUS=$status
@@ -1332,8 +1732,11 @@ cmd_rollback() {
         return 0
     fi
 
-    # From here on things change. A rollback that does not get to its end is recorded as such:
-    # `run` then refuses to make a new rollback point from a half-rolled-back stack.
+    # From here on things change, and a closed terminal no longer ends the rollback (hold_on). A
+    # rollback that does not get to its end is recorded as such: `run` then refuses to make a new
+    # rollback point from a half-rolled-back stack.
+    begin_log
+    hold_on
     OWN_STATE=1
     STEP="the rollback"
     write_state "STATUS=rolling-back"
@@ -1365,13 +1768,13 @@ cmd_rollback() {
             say "  $name -> $tag"
             # </dev/null: `docker compose run` reads its standard input to the end, here the rest of this list
             dc run --rm --no-deps -T panel manage migrate "$name" "$tag" </dev/null >"$TMP/unmigrate.out" 2>&1 || {
-                tail -n 15 "$TMP/unmigrate.out"
+                show_file "$TMP/unmigrate.out" 15
                 warn "undoing the migrations of '$name' failed (see above). The database schema is now BETWEEN the two"
                 warn "versions, and the upgraded version is stopped, not removed. Either go forward again (the start of"
                 warn "the new version applies the undone migrations again):"
                 warn "           ./scripts/upgrade.sh run --resume --no-pull"
-                warn "or go back with the database dump:"
-                dump_way_back >&2
+                warn "or go back with the database dump:
+$(dump_way_back)"
                 exit 1
             }
         done <<<"$undo"
@@ -1379,7 +1782,10 @@ cmd_rollback() {
 
     if [ "$from" != "$head" ]; then
         step "Switching the source tree to $(short "$from")"
-        g checkout --quiet --detach "$from" || die "git checkout failed (see above). ${stopped:+The containers are stopped, not removed. }Fix what git says and run 'rollback' again, or go forward: ./scripts/upgrade.sh run --resume --no-pull"
+        g checkout --quiet --detach "$from" 2>"$TMP/git.err" || {
+            show_file "$TMP/git.err"
+            die "git checkout failed (see above). ${stopped:+The containers are stopped, not removed. }Fix what git says and run 'rollback' again, or go forward: ./scripts/upgrade.sh run --resume --no-pull"
+        }
         # From here on the files of this script may be gone from disk; it runs from memory.
         if [ ! -f "$SCRIPT_DIR/upgrade.sh" ]; then
             SCRIPT_GONE="Revision $(short "$from") does not have this script, so deploy/scripts/upgrade.sh is gone from disk now. To get it back (and run 'rollback' again): cd $top && git checkout ${branch:-<branch>}"
@@ -1389,7 +1795,7 @@ cmd_rollback() {
     while IFS='|' read -r name id tag; do
         [ -n "$name" ] || continue
         case "$name" in *@*) continue ;; esac # pinned by digest: it never moved
-        docker image tag "$id" "$name" || die "cannot tag $id as $name"
+        docker image tag "$id" "$name" 2>"$TMP/tag.err" || die "cannot tag $id as $name ($(head -n 1 "$TMP/tag.err"))"
         say "  $name = $(short "${id#sha256:}")"
     done <<<"$(state_all IMAGE)"
 
@@ -1397,7 +1803,7 @@ cmd_rollback() {
     [ -n "${WANT// /}" ] || die "the compose file of $(short "$from") is not valid with today's .env (docker compose config)"
     step "Bringing the previous layout up: $WANT"
     remove_stale_containers
-    dc up -d --remove-orphans --no-build || die "docker compose up failed (see above)"
+    bring_up --no-build || die "$UP_PROBLEM"
 
     step "Waiting for the services (up to $TIMEOUT s)"
     wait_healthy || die "the previous version is running but not healthy; see 'docker compose logs --tail 100'"
@@ -1405,16 +1811,24 @@ cmd_rollback() {
         die "containers that do not belong to this layout are left: $(stale_containers | tr '\n' ' ')"
     fi
     # the next `run` reads from here which revision is deployed
-    write_state "STATUS=rolled-back" "" "DEPLOYED_REV=$from" "DEPLOYED_PANEL_IMAGE=$(docker inspect -f '{{.Image}}' "$(service_container panel)" 2>/dev/null)"
+    write_state "STATUS=rolled-back" "" "DEPLOYED_REV=$from" "DEPLOYED_PANEL_IMAGE=$(docker inspect -f '{{.Image}}' "$(service_container panel running)" 2>/dev/null)"
 
     step "Rolled back"
     say "  revision: $(describe_revision "$from")$([ "$from" != "$head" ] && printf ' (detached HEAD)')"
     show_containers
     say ""
     if [ "$from" != "$to" ] || [ -n "$SCRIPT_GONE" ]; then
-        say "The source tree now is the old version$([ -n "$SCRIPT_GONE" ] && printf ', which does not have this script: deploy/scripts/upgrade.sh is gone from disk')."
-        say "'git checkout ${branch:-<branch>}' brings the new source tree$([ -n "$SCRIPT_GONE" ] && printf ' and this script') back. To try the upgrade again later:"
+        # Which checkout he is on, and which command is safe in which checkout.
+        say "The source tree ($top) is now at the old version, $(short "$from"), as a detached HEAD. It fits"
+        say "what is running: in this checkout 'docker compose up -d' and the other docker compose commands are safe."
+        [ -z "$SCRIPT_GONE" ] || say "That version does not have this script: deploy/scripts/upgrade.sh is gone from disk."
+        say "'git checkout ${branch:-<branch>}' brings the new source tree$([ -n "$SCRIPT_GONE" ] && printf ' and this script') back. The tree is the NEW version then, while the OLD"
+        say "one runs: do NOT run 'docker compose up -d' in that checkout (its compose file does not fit the old images,"
+        say "the panel would not start). Use this script there; 'status' names the deployed version and the checkout"
+        say "that fits it. To try the upgrade again later:"
         say "  cd $top && git checkout ${branch:-<branch>} && cd deploy && ./scripts/upgrade.sh run$(again_flags)"
+        say "To come back to the checkout that fits the old version:"
+        say "  cd $top && git checkout --detach $(short "$from")"
     fi
 }
 
@@ -1468,8 +1882,65 @@ fi
 echo "$old"
 '
 
+# The stack is stopped but for the database. What starts it again depends on which version is
+# deployed, and that is what the state file of the last run says: after a restore the wrong
+# command (a rollback that is done already, `docker compose up -d` with the compose file of the
+# other version) must not be the one that is printed.
+restore_next_steps() {
+    local status from to branch head top what="run"
+    status=$(state_get STATUS) || status=""
+    from=$(state_get FROM_REV) || from=""
+    to=$(state_get TO_REV) || to=""
+    branch=$(state_get BRANCH) || branch=""
+    head=$(g rev-parse HEAD 2>/dev/null) || head=""
+    top=$(g rev-parse --show-toplevel 2>/dev/null) || top="<mcpanel source>"
+    case "$status" in
+        "")
+            say "  Next: docker compose up -d"
+            ;;
+        done)
+            say "  Next, to finish going back to the version from before the upgrade ($(short "$from")):"
+            say "      ./scripts/upgrade.sh rollback"
+            if [ "$head" = "$to" ]; then
+                say "  To stay on the upgraded version with the data of the dump instead: docker compose up -d"
+                say "  (the panel then applies the database migrations of the upgrade to the restored database when it starts)."
+            fi
+            ;;
+        switching | rolling-back)
+            [ "$status" = switching ] || what="rollback"
+            say "  The last $what did not finish, so the stack is half old, half new: do NOT run 'docker compose up -d' now."
+            say "  Next, one of:"
+            say "      ./scripts/upgrade.sh rollback        back to the version from before the upgrade ($(short "$from"))"
+            say "      ./scripts/upgrade.sh run --resume    on to $(short "$to"); the new panel applies its database migrations"
+            say "                                           to the restored database when it starts"
+            ;;
+        started | rolled-back)
+            # the version from before the upgrade is the one that is deployed
+            if [ "$status" = rolled-back ]; then
+                say "  The last upgrade was rolled back: the deployed version is the one from before it ($(short "$from"))."
+            else
+                say "  The last run ended before it switched anything: the deployed version still is $(short "$from")."
+            fi
+            if [ "$head" = "$from" ]; then
+                say "  The source tree is at that version. Next: docker compose up -d"
+            else
+                say "  The source tree is at another version ($(short "$head")$([ -z "$branch" ] || printf ', branch %s' "$branch")), and its compose file does not fit the"
+                say "  images of the deployed one: do NOT run 'docker compose up -d' in this checkout. Next, start the stack"
+                say "  with the compose file of the deployed version:"
+                say "      cd $top && git checkout --detach $from && cd deploy && docker compose up -d"
+                say "  (In that checkout scripts/upgrade.sh is gone if that version did not have it; 'git checkout ${branch:-<branch>}'"
+                say "  brings it back, and 'docker compose up -d' is then again the wrong command.)"
+            fi
+            ;;
+        *)
+            say "  Next: './scripts/upgrade.sh status' (the state '$status' in $STATE_FILE is not one this script writes)."
+            ;;
+    esac
+}
+
 cmd_restore_db() {
     preflight
+    [ "$YES" != 1 ] || refuse_while_another_runs
     local file="$RESTORE_FILE" pg db others kept mode=keep-public suffix
     [ -n "$file" ] || die "restore-db needs the dump file: ./scripts/upgrade.sh restore-db <upgrade-backup-....sql> [--yes]"
     if [ ! -f "$file" ] || [ ! -r "$file" ]; then
@@ -1500,17 +1971,24 @@ cmd_restore_db() {
         refuse "nothing was changed. To do it: ./scripts/upgrade.sh restore-db $file --yes"
     fi
 
+    # From here on the database changes, and a closed terminal no longer ends the command.
+    begin_log
+    hold_on
     step "Loading the dump into a new database"
-    kept=$(docker exec -i "$pg" sh -c "$RESTORE_SCRIPT" sh "$suffix" "$mode" <"$file") || die "the restore failed (see above)"
+    kept=$(docker exec -i "$pg" sh -c "$RESTORE_SCRIPT" sh "$suffix" "$mode" <"$file" 2>"$TMP/restore.err") || {
+        show_file "$TMP/restore.err" 20
+        die "the restore failed (see above)"
+    }
     kept=$(tail -n 1 <<<"$kept")
     step "Done"
     say "  \"$db\" now holds the dump. The database as it was is kept as \"$kept\"; when all is well, remove it:"
     say "      docker compose exec postgres sh -c 'dropdb -U \"\$POSTGRES_USER\" $kept'"
-    say "  Next: ./scripts/upgrade.sh rollback (to finish going back), or docker compose up -d"
+    restore_next_steps
 }
 
 main() {
     local command="${1:-}"
+    LOG_ARGS=$*
     [ $# -gt 0 ] && shift
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1544,6 +2022,11 @@ main() {
         shift
     done
     case "$TIMEOUT" in '' | *[!0-9]*) die "--timeout needs a number of seconds" ;; esac
+    # What these three print goes into a log as well, once they begin to change things (begin_log).
+    case "$command" in
+        run | rollback) [ "$DRY" = 1 ] || LOG_WANTED=1 ;;
+        restore-db) [ "$YES" != 1 ] || LOG_WANTED=1 ;;
+    esac
     case "$command" in
         status) cmd_status ;;
         dry-run)

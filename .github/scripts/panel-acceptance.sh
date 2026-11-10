@@ -35,7 +35,7 @@ child() { # child NAME FIELD
     pexec python -c "import json,sys;print(json.load(open('/run/mcpanel/supervisor.json'))['children'][sys.argv[1]][sys.argv[2]])" "$1" "$2"
 }
 all_pids() { pexec python -c "import json;print(' '.join(f'{k}={v[\"pid\"]}' for k,v in json.load(open('/run/mcpanel/supervisor.json'))['children'].items()))"; }
-# shellcheck disable=SC2329 # used through check / wait_for
+# shellcheck disable=SC2317,SC2329 # used through check / wait_for (SC2317: shellcheck up to 0.10, SC2329: from 0.11)
 running() { pexec python "$SUP" status >/dev/null 2>&1; }
 healthcheck() { pexec python /usr/local/bin/mcpanel-healthcheck.py all; }
 wait_for() { # wait_for SECONDS COMMAND...
@@ -47,7 +47,7 @@ wait_for() { # wait_for SECONDS COMMAND...
     done
     return 1
 }
-# shellcheck disable=SC2329 # used through check / wait_for
+# shellcheck disable=SC2317,SC2329 # used through check / wait_for (SC2317: shellcheck up to 0.10, SC2329: from 0.11)
 healthy() { [ "$(docker inspect -f '{{.State.Health.Status}}' "$PANEL")" = healthy ]; }
 sql() { docker exec "$(dc ps -q postgres)" sh -c 'psql -X -q -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"; }
 

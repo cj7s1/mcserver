@@ -121,9 +121,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Shellcheck deployment scripts
-        run: >-
-          shellcheck deploy/scripts/generate-secrets.sh deploy/scripts/upgrade.sh backend/container/entrypoint.sh
-          .github/scripts/panel-acceptance.sh .github/scripts/upgrade-rehearsal.sh
+        # install-hook.sh on a line of its own: SC2016 is its sed expression, which is in single
+        # quotes on purpose (it reads a line of the hook as text, "${...}" included).
+        run: |
+          shellcheck --version
+          shellcheck deploy/scripts/generate-secrets.sh deploy/scripts/upgrade.sh backend/container/entrypoint.sh \
+            .github/scripts/panel-acceptance.sh .github/scripts/upgrade-rehearsal.sh deploy/unraid/stopping_docker
+          shellcheck --exclude=SC2016 deploy/unraid/install-hook.sh
       - name: Generate throw-away env files
         run: |
           deploy/scripts/generate-secrets.sh "$RUNNER_TEMP/ci.env"

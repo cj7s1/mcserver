@@ -4,7 +4,8 @@
 # image names, applied database migrations) is a few text files in $FAKE, and files named after
 # a toggle make one step fail. What it changed is appended to $FAKE/events.log.
 #
-#   containers   ID|SERVICE|STATE|ONEOFF|IMAGE_NAME|IMAGE_ID|HEALTH   (the Compose project)
+#   containers   ID|SERVICE|STATE|ONEOFF|IMAGE_NAME|IMAGE_ID|HEALTH[|NAME]   (the Compose project;
+#                without NAME a container is called mcpanel-<service>-1)
 #   servers      ID|STATE                                           (Minecraft server containers)
 #   images       NAME|IMAGE_ID
 #   labels       IMAGE_ID|REVISION                                  (io.mcpanel.revision)
@@ -14,6 +15,15 @@
 # Toggles: fail_pull new_pg fail_build fail_up hang_up unhealthy_panel db_down fail_dump
 #          fail_plan irreversible_<app> fail_unmigrate_<app> fail_restore redis_volume
 #          slow_migrations (the panel applies its migrations only while it is being stopped)
+#          hang_check (the migration check of the new image stays until $FAKE/release exists)
+#          panel_not_started (a file with a number: that many times `compose up` ends without an
+#          error and leaves the panel container "created"; "always" = every time)
+#          keep_agent (`compose up` leaves a running agent container as it is, whatever the
+#          image name points at now) rebuild_ids (every build gives the images new ids)
+#
+# `compose up` treats a container that an interrupted `up` left under its temporary name
+# (<12 hex digits>_mcpanel-<service>-1) the way Compose 5.7 does: see the comment there.
+# It also notes how it was started: "UP-ENV own-session|callers-session hup-ignored|hup-default".
 set -u
 F=${FAKE:?FAKE is not set}
 printf 'docker %s\n' "$*" >>"$F/calls.log"
@@ -43,6 +53,22 @@ cfield() { # container id, field number
     line=$(grep "^$1|" "$F/containers") || return 1
     printf '%s\n' "$line" | cut -d'|' -f"$2"
 }
+cname() { # container id -> its name
+    local name
+    name=$(cfield "$1" 8)
+    printf '%s\n' "${name:-mcpanel-$(cfield "$1" 2)-1}"
+}
+is_temp_name() { [[ "$1" =~ ^[0-9a-f]{12}_ ]]; }
+# upgrade.sh stops several containers at once: one writer of the containers file at a time
+lock() {
+    local tries=0
+    until mkdir "$F/lock" 2>/dev/null; do
+        tries=$((tries + 1))
+        [ "$tries" -lt 500 ] || break
+        sleep 0.01
+    done
+}
+unlock() { rmdir "$F/lock" 2>/dev/null; }
 code_file() { printf '%s/code/%s' "$F" "$(printf '%s' "$1" | tr ':/' '__')"; }
 is_new_layout_image() { case "$1" in *panel-new*) return 0 ;; esac; return 1; }
 image_of_service() {
@@ -125,6 +151,7 @@ case "${1:-}" in
                 ;;
             build)
                 rev=$(git -C "$PWD" rev-parse --short=12 HEAD)
+                [ -f "$F/rebuild_ids" ] && rev="$rev-b$(grep -c '^BUILD agent' "$F/events.log")"
                 kind=old
                 [ -f "$PWD/scripts/upgrade.sh" ] && kind=new
                 img_set "$(image_of_service agent)" "sha256:agent-$kind-$rev"
@@ -154,6 +181,10 @@ case "${1:-}" in
                 args="$*"
                 case "$args" in
                     *"migrate --check"*)
+                        if [ -f "$F/hang_check" ]; then # stays here until the test lets go (or the session is hung up)
+                            event "CHECK-WAIT"
+                            while [ -d "$F" ] && [ ! -e "$F/release" ]; do sleep 0.05; done
+                        fi
                         while read -r app name; do
                             [ -n "$app" ] || continue
                             grep -q -x "$app $name" "$F/migs" || exit 1
@@ -220,14 +251,46 @@ case "${1:-}" in
                     echo " DRY-RUN MODE -  Container mcpanel-panel-1  Recreate"
                     exit 0
                 fi
+                # how it was started: in a session of its own (setsid), with SIGHUP ignored (inherited or nohup)?
+                read -r _pid _comm _state _ppid _pgrp sid _rest </proc/$$/stat
+                mask=$(sed -n 's/^SigIgn:[[:space:]]*//p' /proc/$$/status)
+                session="callers-session"
+                [ "$sid" = "$$" ] && session="own-session"
+                hup="hup-default"
+                (((16#$mask & 1) == 1)) && hup="hup-ignored"
+                event "UP-ENV $session $hup"
                 if [ -f "$F/hang_up" ]; then # stays in `up` until the test lets go (or the session is hung up)
                     event "UP-WAIT"
-                    while [ ! -e "$F/release" ]; do sleep 0.05; done
+                    # (it may run in a session of its own, where no signal of the test gets to it: it
+                    # also ends when the test's folder is gone)
+                    while [ -d "$F" ] && [ ! -e "$F/release" ]; do sleep 0.05; done
                 fi
                 [ -f "$F/fail_up" ] && {
                     echo "compose up failed (toggle)" >&2
                     exit 1
                 }
+                # A container an interrupted `up` left behind under its temporary name. What Compose
+                # 5.7 was seen to do with it (docker compose up -d, real containers):
+                #   the layout of the file is the one the stopped original was made for (a rollback):
+                #     it removes the replacement and does not start the original; services that
+                #     depend on it make the command fail ("dependency failed to start")
+                #   otherwise, while the stopped original is still there: it removes the original,
+                #     leaves the replacement "created" and ends without an error
+                #   otherwise (only the replacement is left): it starts it, and the name stays
+                temp=""
+                while IFS='|' read -r id _service _state _oneoff _image _image_id _health name; do
+                    is_temp_name "${name:-}" && temp="$temp $id"
+                done <"$F/containers"
+                if [ -n "$temp" ] && services_of "$file" | grep -q -x worker; then
+                    for id in $temp; do
+                        echo " Container $(cname "$id") Removed" >&2
+                        grep -v "^$id|" "$F/containers" >"$F/containers.tmp"
+                        mv "$F/containers.tmp" "$F/containers"
+                    done
+                    event "UP-HALF removed the replacement, started nothing"
+                    echo "dependency failed to start: container mcpanel-panel-1 exited (143)" >&2
+                    exit 1
+                fi
                 : >"$F/containers.new"
                 n=0
                 for s in $(services_of "$file"); do
@@ -237,10 +300,36 @@ case "${1:-}" in
                         echo "no such image: $name" >&2
                         exit 1
                     }
+                    replacement=""
+                    for t in $temp; do [ "$(cfield "$t" 2)" = "$s" ] && replacement=$t; done
+                    if [ -n "$replacement" ]; then
+                        if [ "$(grep -c "^[^|]*|$s|" "$F/containers")" -gt 1 ]; then
+                            grep "^$replacement|" "$F/containers" >>"$F/containers.new" # still "created"
+                            event "UP-HALF removed the original of $s, did not start the replacement"
+                        else
+                            printf '%s|%s|running|False|%s|%s|healthy|%s\n' "$replacement" "$s" "$(cfield "$replacement" 5)" "$(cfield "$replacement" 6)" "$(cname "$replacement")" >>"$F/containers.new"
+                            event "UP-HALF started the replacement of $s under its temporary name"
+                            [ "$s" = panel ] && migrate_forward "$(cfield "$replacement" 6)"
+                        fi
+                        continue
+                    fi
+                    if [ "$s" = agent ] && [ -f "$F/keep_agent" ] && grep -q "^[^|]*|agent|running|" "$F/containers"; then
+                        grep "^[^|]*|agent|running|" "$F/containers" >>"$F/containers.new" # "Running": not made again
+                        continue
+                    fi
                     health=healthy
+                    state=running
                     if [ "$s" = panel ] && [ -f "$F/unhealthy_panel" ]; then health=unhealthy; fi
-                    printf 'c%s%s|%s|running|False|%s|%s|%s\n' "$n" "$(date +%N)" "$s" "$name" "$id" "$health" >>"$F/containers.new"
-                    if [ "$s" = panel ] && [ ! -f "$F/slow_migrations" ]; then migrate_forward "$id"; fi
+                    if [ "$s" = panel ] && [ -f "$F/panel_not_started" ]; then
+                        left=$(cat "$F/panel_not_started")
+                        if [ "$left" = always ] || [ "$left" -gt 0 ]; then
+                            state=created
+                            health=-
+                            [ "$left" = always ] || echo $((left - 1)) >"$F/panel_not_started"
+                        fi
+                    fi
+                    printf 'c%s%s|%s|%s|False|%s|%s|%s\n' "$n" "$(date +%N)" "$s" "$state" "$name" "$id" "$health" >>"$F/containers.new"
+                    if [ "$s" = panel ] && [ "$state" = running ] && [ ! -f "$F/slow_migrations" ]; then migrate_forward "$id"; fi
                 done
                 mv "$F/containers.new" "$F/containers"
                 event "UP $(services_of "$file" | tr '\n' ' ')"
@@ -281,8 +370,8 @@ case "${1:-}" in
             *'index .Config.Labels'*) grep -F "$image_id|" "$F/labels" | tail -n 1 | cut -d'|' -f2 ;;
             '{{.Image}}') echo "$image_id" ;;
             '{{.Config.Image}}') echo "$image_name" ;;
-            '{{.Name}}|'*) echo "/mcpanel-$service-1|$health|$image_name|$image_id" ;;
-            '{{.Name}}') echo "/mcpanel-$service-1" ;;
+            '{{.Name}}|'*) echo "/$(cname "$id")|$health|$image_name|$image_id" ;;
+            '{{.Name}}') echo "/$(cname "$id")" ;;
             '{{.State.Status}}/'*) echo "$state/$health" ;;
             *Health.Log*) echo "unhealthy: fake" ;;
             *) unhandled "inspect $fmt" ;;
@@ -393,17 +482,44 @@ case "${1:-}" in
         if [ "$(cfield "$id" 2)" = panel ] && [ "$(cfield "$id" 3)" = running ] && [ -f "$F/slow_migrations" ]; then
             migrate_forward "$(cfield "$id" 6)"
         fi
+        lock
         sed -i "s/^\($id|[^|]*\)|running|/\1|exited|/" "$F/containers"
+        unlock
         echo "$id"
         exit 0
         ;;
     rm)
         shift
         for id in "$@"; do
-            event "RM $(cfield "$id" 2)"
+            grep -q "^$id|" "$F/containers" || {
+                echo "Error response from daemon: No such container: $id" >&2
+                exit 1
+            }
+            [ "$(cfield "$id" 3)" != running ] || {
+                echo "Error response from daemon: cannot remove container \"$(cname "$id")\": container is running" >&2
+                exit 1
+            }
+            if [ "$(cname "$id")" = "mcpanel-$(cfield "$id" 2)-1" ]; then
+                event "RM $(cfield "$id" 2)"
+            else
+                event "RM $(cname "$id")"
+            fi
             grep -v "^$id|" "$F/containers" >"$F/containers.tmp"
             mv "$F/containers.tmp" "$F/containers"
         done
+        exit 0
+        ;;
+    rename)
+        id="$2"
+        new="$3"
+        row=$(grep "^$id|" "$F/containers") || {
+            echo "Error response from daemon: No such container: $id" >&2
+            exit 1
+        }
+        event "RENAME $(cname "$id") -> $new"
+        grep -v "^$id|" "$F/containers" >"$F/containers.tmp"
+        printf '%s|%s\n' "$(printf '%s\n' "$row" | cut -d'|' -f1-7)" "$new" >>"$F/containers.tmp"
+        mv "$F/containers.tmp" "$F/containers"
         exit 0
         ;;
     volume)
