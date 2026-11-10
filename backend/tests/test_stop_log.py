@@ -26,7 +26,7 @@ def running(make_instance, fake_agent):
     inst = make_instance(name="Survival", desired_state="running")
     fake_agent.apply(inst.id, build_spec(inst), start=True)
     Instance.objects.filter(pk=inst.pk).update(
-        container_spec_hash=current_spec_hash(inst), installed_at=timezone.now(), status="running"
+        container_spec_hash=current_spec_hash(inst), installed_at=timezone.now(), status="running", container_state="running"
     )
     inst.refresh_from_db()
     return inst

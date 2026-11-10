@@ -45,6 +45,11 @@ RESUME_HARMLESS_JOB_KINDS = frozenset(
         "recreate",
     }
 )
+# A job that failed with one of these codes never ran its handler, whatever its kind: it was
+# still queued when the watchdog gave up on it ("not_started", typically after the host was down
+# for hours), or no worker knew its kind. It did nothing to the server, so it says nothing about
+# whether the server may be started.
+RESUME_HARMLESS_ERROR_CODES = frozenset({"not_started", "unknown_job_kind"})
 NOT_RESUMED_AUDIT = "instance.not_resumed_after_boot"
 _LOADED_AT = timezone.now()
 
@@ -155,6 +160,9 @@ def runtime_started_at() -> datetime:
     Docker starts every container of the panel again after a host reboot or an array
     stop/start, so this is later than a ``resume_flagged_at`` written before Docker went down,
     and earlier than one written by ``host_shutdown`` while this container keeps running.
+    It must be PID 1 and not this process: the scheduler tick runs in a worker process, and the
+    supervisor starts workers again while the container keeps running (after a crash, after a
+    restart of Redis), which would make a mark of a shutdown that is still going on look old.
     Without a readable /proc the load time of this module is used.
     """
     try:
@@ -186,8 +194,8 @@ def _job_that_left_it_stopped(instance: Instance, flagged_at: datetime | None) -
 
     After such a job the server is stopped on purpose: a failed restore or update may have
     left its files half-written, an abandoned world reset its world folder moved aside. Jobs
-    that never took the server (a countdown that was cancelled) and the kinds in
-    RESUME_HARMLESS_JOB_KINDS do not count.
+    that never took the server (a countdown that was cancelled), jobs that never ran
+    (RESUME_HARMLESS_ERROR_CODES) and the kinds in RESUME_HARMLESS_JOB_KINDS do not count.
     """
     from apps.jobs.models import Job, JobStatus
 
@@ -201,6 +209,7 @@ def _job_that_left_it_stopped(instance: Instance, flagged_at: datetime | None) -
             status__in=(JobStatus.FAILED, JobStatus.CANCELLED),
         )
         .exclude(kind__in=RESUME_HARMLESS_JOB_KINDS)
+        .exclude(status=JobStatus.FAILED, error_code__in=RESUME_HARMLESS_ERROR_CODES)
         .order_by("-finished_at")
         .first()
     )

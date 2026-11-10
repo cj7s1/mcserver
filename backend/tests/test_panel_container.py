@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 import weakref
 from datetime import timedelta
@@ -307,13 +308,50 @@ def test_the_panel_service_runs_everything_and_gets_two_minutes_to_stop(compose)
 def test_redis_is_a_socket_inside_the_panel_container_by_default(compose):
     env = compose["x-panel-env"]
     assert env["MCPANEL_REDIS_URL"] == "${MCPANEL_REDIS_URL:-unix:///run/mcpanel/redis.sock?db=0}"
-    # the broker follows MCPANEL_REDIS_URL when that is set (external-redis profile), else the socket
-    assert env["MCPANEL_CELERY_BROKER_URL"] == (
-        "${MCPANEL_CELERY_BROKER_URL:-${MCPANEL_REDIS_URL:-redis+socket:///run/mcpanel/redis.sock}}"
-    )
+    # The broker URL is not built from MCPANEL_REDIS_URL here: a unix:// URL written into .env
+    # would reach Celery as it is ("No such transport: unix"). Empty means: the panel derives it.
+    assert env["MCPANEL_CELERY_BROKER_URL"] == "${MCPANEL_CELERY_BROKER_URL:-}"
     assert compose["services"]["panel"]["environment"] == env
     example = (REPO / "deploy" / ".env.example").read_text()
     assert "\n#COMPOSE_PROFILES=external-redis\n" in example and "\n#MCPANEL_REDIS_URL=redis://redis:6379/0\n" in example
+
+
+@pytest.mark.parametrize(
+    ("redis_url", "broker_url", "expected"),
+    [
+        # what the Compose file passes by default, and the same line written into .env by hand
+        ("unix:///run/mcpanel/redis.sock?db=0", "", "redis+socket:///run/mcpanel/redis.sock"),
+        ("unix:///run/mcpanel/redis.sock", "", "redis+socket:///run/mcpanel/redis.sock"),
+        ("unix:///srv/redis.sock?db=3", "", "redis+socket:///srv/redis.sock?virtual_host=3"),
+        ("unix://:s3cret@/srv/redis.sock?db=1", "", "redis+socket://:s3cret@/srv/redis.sock?virtual_host=1"),
+        # the external-redis profile: one variable in .env
+        ("redis://redis:6379/0", "", "redis://redis:6379/0"),
+        # a broker URL of its own wins, and a unix:// one is put right, too
+        ("redis://redis:6379/0", "rediss://broker.example:6380/2", "rediss://broker.example:6380/2"),
+        ("redis://redis:6379/0", "unix:///run/other.sock?db=2", "redis+socket:///run/other.sock?virtual_host=2"),
+    ],
+)
+def test_the_broker_url_is_derived_from_the_redis_url_in_a_form_celery_can_use(redis_url, broker_url, expected):
+    """The settings as a fresh process reads them from the environment the Compose file passes."""
+    env = {key: value for key, value in os.environ.items() if key not in ("MCPANEL_REDIS_URL", "MCPANEL_CELERY_BROKER_URL")}
+    env.update(MCPANEL_REDIS_URL=redis_url, MCPANEL_CELERY_BROKER_URL=broker_url, DJANGO_SETTINGS_MODULE="mcpanel.settings")
+    code = (
+        "from kombu import Connection\n"
+        "import mcpanel.settings as s\n"
+        "connection = Connection(s.CELERY_BROKER_URL)\n"
+        "connection.transport  # raises for a transport kombu does not have\n"
+        "print(s.CELERY_BROKER_URL, connection.transport_cls, s.REDIS_URL)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], env=env, cwd=REPO / "backend", capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.split() == [expected, expected.split(":")[0].split("+")[0], redis_url]
+
+
+def test_the_agent_image_is_pinned_to_the_same_debian_release():
+    """It installs btrfs-progs and zfsutils-linux from Debian: a base image that moves to the next
+    release by itself would change them under a rebuild (`upgrade.sh run` pulls base images)."""
+    dockerfile = (REPO / "agent" / "Dockerfile").read_text()
+    assert re.findall(r"^FROM (python:\S+)", dockerfile, re.M) == ["python:3.13-slim-trixie", "python:3.13-slim-trixie"]
 
 
 def test_locally_built_images_are_never_pulled(compose):

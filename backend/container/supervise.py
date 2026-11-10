@@ -12,8 +12,13 @@ Behaviour (pinned by backend/tests/test_supervise.py and the container tests in 
   backoff (1, 2, 4 ... 30 s); until then the status file names it and the container is unhealthy.
 * Start order: Redis first, the others only once Redis answers PING. If Redis dies it is started
   again and, once it answers, the others are restarted so that queue consumers and live-event
-  subscriptions are rebuilt and queued jobs are sent again (mcpanel/celery.py).
-* Every output line of a child is passed on with the child's name in front.
+  subscriptions are rebuilt and queued jobs are sent again (mcpanel/celery.py). The job worker
+  is not killed for that: it gets SIGTERM (Celery's warm shutdown), finishes the job it is
+  running, however long that takes, and is started again when it has exited by itself.
+* Redis never starts with a dump file in its directory: what could be one is removed first
+  (the web process can write there, and cache values are pickles).
+* Every output line of a child is passed on with the child's name in front; a child that never
+  stops writing is read in bounded pieces, so it cannot keep the supervisor from its other work.
 * The status file is JSON in a private 0700 directory. A failed write is logged, never raised.
 * Stop (SIGTERM / SIGINT): web server, scheduler and job worker first, then the periodic worker
   (it still delivers the notifications of jobs that just finished), then Redis. Every child has
@@ -34,6 +39,7 @@ import ipaddress
 import json
 import os
 import selectors
+import shutil
 import signal
 import socket
 import stat
@@ -62,6 +68,12 @@ PING_INTERVAL = 45.0  # seconds between two worker pings (the health check wants
 PING_RETRY = 15.0  # ... after a ping that a worker did not answer
 PING_TIMEOUT = 30.0  # a ping command still running after this is killed
 PING_WARMUP = 8.0  # a worker is not pinged before it ran this long
+READ_CHUNK = 65536  # bytes per read of a child's output
+READ_CHUNKS_PER_ROUND = 16  # reads per child and round: a child that floods its output is read 1 MiB at a time
+READ_CHUNKS_AT_EXIT = 64  # ... and what an exited child left in its pipe (at most the pipe's size) is read whole
+# What Redis could load when it starts, or leaves behind when someone told it to save (file names
+# of Redis 7 with default names; "temp-*.rdb" is a save in progress).
+REDIS_DATA_FILES = ("dump.rdb", "appendonly.aof", "appendonlydir")
 EX_CONFIG = 78
 
 WAITING, STARTING, RUNNING, BACKOFF, STOPPING, STOPPED = "waiting", "starting", "running", "backoff", "stopping", "stopped"
@@ -76,6 +88,12 @@ class ChildSpec:
     after: tuple[str, ...] = ()  # started only while these children are ready; restarted when they come back
     env: Mapping[str, str] | None = None  # None: the supervisor's environment
     ready: Callable[[], bool] | None = None  # None: ready as soon as it runs
+    # Called before every start; what it returns is logged. If it raises, the child is not
+    # started and tried again later.
+    before_start: Callable[[], str | None] | None = None
+    # A restart the supervisor decides on (Redis came back) sends SIGTERM and then waits for the
+    # child to exit by itself, without a kill after ``grace``: the job worker finishes its job.
+    finish_before_restart: bool = False
 
 
 @dataclass(frozen=True)
@@ -207,12 +225,18 @@ class Processes:
         except (ProcessLookupError, PermissionError):
             pass
 
-    def _read(self, fd: int) -> bool:
-        """Pass on what the pipe holds now. False at end of file."""
+    def _read(self, fd: int, chunks: int = READ_CHUNKS_PER_ROUND) -> bool:
+        """Pass on what the pipe holds now, at most ``chunks`` reads of it. False at end of file.
+
+        The limit is what keeps a child that writes without a pause from holding the loop: what
+        is left stays in the pipe (the child waits in its write) and is read in the next round.
+        """
         sink = self.sinks.get(fd)
-        while sink is not None:
+        if sink is None:
+            return False
+        for _ in range(chunks):
             try:
-                data = os.read(fd, 65536)
+                data = os.read(fd, READ_CHUNK)
             except BlockingIOError:
                 return True
             except OSError:
@@ -224,7 +248,7 @@ class Processes:
                     sink += data
             else:
                 sink.feed(data)
-        return False
+        return True
 
     def _close(self, fd: int) -> Any:
         sink = self.sinks.pop(fd, None)
@@ -288,7 +312,7 @@ class Processes:
             output = b""
             fd = self.fds.pop(pid, None)
             if fd is not None:
-                self._read(fd)
+                self._read(fd, READ_CHUNKS_AT_EXIT)
                 sink = self._close(fd)
                 if isinstance(sink, bytearray):
                     output = bytes(sink)
@@ -474,6 +498,15 @@ class Supervisor:
     def _start(self, child: Child, now: float) -> None:
         name = child.spec.name
         env = dict(self.environ if child.spec.env is None else child.spec.env)
+        if child.spec.before_start is not None:
+            try:
+                note = child.spec.before_start()
+            except Exception as exc:
+                delay = self._backoff(child, now, 0.0)
+                self.log(f"{name} is not started: its preparation failed ({exc}); trying again in {delay:.0f} s")
+                return
+            if note:
+                self.log(f"before the start of {name}: {note}")
         try:
             child.pid = self.procs.spawn(name, child.spec.argv, env)
         except OSError as exc:
@@ -486,9 +519,15 @@ class Supervisor:
         self.log(f"started {name} (pid {child.pid})")
 
     def _restart(self, child: Child, now: float, why: str) -> None:
-        self.log(f"restarting {child.spec.name}: {why}")
         child.restart_wanted = True
-        child.kill_at, child.killed = now + child.spec.grace, False
+        if child.spec.finish_before_restart:
+            # No kill deadline: a backup or restore that runs for hours is not cut off because
+            # Redis was started again. The worker takes no new job until it is back.
+            self.log(f"restarting {child.spec.name}: {why} (it finishes what it is doing first, without a time limit)")
+            child.kill_at, child.killed = None, False
+        else:
+            self.log(f"restarting {child.spec.name}: {why}")
+            child.kill_at, child.killed = now + child.spec.grace, False
         self._set(child, STOPPING)
         self.procs.signal(child.pid, signal.SIGTERM)
 
@@ -597,6 +636,10 @@ class Supervisor:
                 child.kill_at, child.killed = min(now + child.spec.grace, limit), False
                 self._set(child, STOPPING)
                 self.procs.signal(child.pid, signal.SIGTERM)
+            elif child.state == STOPPING and child.kill_at is None:
+                # was finishing its job for a restart (no deadline): the stop gives it its grace
+                # period from now. No second SIGTERM: Celery would take that as "stop at once".
+                child.kill_at = min(now + child.spec.grace, limit)
             elif child.state == STOPPING and child.kill_at is not None and child.kill_at > limit:
                 child.kill_at = limit  # was being restarted when the stop signal came
             if child.killed:
@@ -712,6 +755,31 @@ def redis_answers(path: str, timeout: float = 1.0) -> bool:
         return False
 
 
+def remove_redis_data(directory: str) -> list[str]:
+    """Remove what Redis would load at its start from ``directory``; returns the names removed.
+
+    Redis is started with saving off, so a dump file there was not written by this container's
+    own Redis on its way down: someone told Redis to save, or wrote the file. Redis would load
+    it, and the values of the cache are pickles. A link is removed, never followed. Raises
+    OSError when something cannot be removed: Redis is not started next to it.
+    """
+    removed = []
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return removed
+    for name in names:
+        if name not in REDIS_DATA_FILES and not (name.startswith("temp-") and name.endswith(".rdb")):
+            continue
+        path = os.path.join(directory, name)
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+        removed.append(name)
+    return removed
+
+
 def panel_plan(environ: Mapping[str, str], run_dir: str) -> tuple[list[ChildSpec], Probe]:
     entrypoint = "mcpanel-entrypoint"
     host = socket.gethostname()
@@ -720,27 +788,39 @@ def panel_plan(environ: Mapping[str, str], run_dir: str) -> tuple[list[ChildSpec
     after: tuple[str, ...] = ()
     if redis_socket:
         after = ("redis",)
+        redis_dir = os.path.dirname(redis_socket) or run_dir
+
+        def clean_redis_dir() -> str | None:
+            removed = remove_redis_data(redis_dir)
+            return f"removed {', '.join(sorted(removed))} from {redis_dir} (Redis would have loaded it)" if removed else None
+
         specs.append(
             ChildSpec(
                 "redis",
-                # No TCP listener at all, only a socket in a directory of this user; nothing is
-                # written to disk (jobs and state are in PostgreSQL, queued jobs are sent again).
+                # No TCP listener at all, only a socket in a directory of this user. Nothing is
+                # written to disk and nothing is loaded from it (jobs and state are in PostgreSQL,
+                # queued jobs are sent again): no save points, no append-only file, and the dump
+                # file it would load at its start (dbfilename in dir) is removed before every start.
                 (
                     "redis-server",
                     *("--port", "0", "--unixsocket", redis_socket, "--unixsocketperm", "700"),
-                    *("--save", "", "--appendonly", "no", "--dir", os.path.dirname(redis_socket) or run_dir),
+                    *("--save", "", "--appendonly", "no", "--dir", redis_dir, "--dbfilename", "dump.rdb"),
                 ),
                 grace=5,
                 stage=2,
                 # Redis gets none of the panel's secrets
                 env={key: environ[key] for key in ("PATH", "TZ", "LANG") if environ.get(key)},
                 ready=lambda: redis_answers(redis_socket),
+                before_start=clean_redis_dir,
             )
         )
     specs += [
         # the same command as `web`, without the migration step (entrypoint.sh)
         ChildSpec("web", (entrypoint, "serve"), grace=15, stage=0, after=after),
-        ChildSpec("worker", (entrypoint, "worker", "-n", "celery@%h"), grace=110, stage=0, after=after),
+        # after a restart of Redis it finishes the job it is running before it is restarted
+        ChildSpec(
+            "worker", (entrypoint, "worker", "-n", "celery@%h"), grace=110, stage=0, after=after, finish_before_restart=True
+        ),
         # always 2 slots, whatever MCPANEL_WORKER_CONCURRENCY says; WARNING: no line per tick
         ChildSpec(
             "periodic",

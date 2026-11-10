@@ -172,7 +172,7 @@ describe("DangerTab: Reset world row", () => {
       ...JOB,
       status: "succeeded",
       progress: 1,
-      result: { deleted: ["world"], kept: [], warnings: [], leftover: null, safety_backup: "b1", restarted: true },
+      result: { level_name: "world", deleted: ["world"], kept: [], warnings: [], leftover: null, safety_backup: "b1", restarted: true },
     } as Job;
     act(() => {
       qc.setQueryData(qk.job(JOB.id), { ...JOB, status: "succeeded", progress: 1 });
@@ -180,7 +180,7 @@ describe("DangerTab: Reset world row", () => {
     await waitFor(() =>
       expect(toast.success).toHaveBeenCalledWith("The world was reset", {
         description:
-          "The server was started again and is generating a new world. The old world is in the “Before restore” safety backup on the Backups page.",
+          "The server was started again and is generating a new world. The old world is in the safety backup “Before resetting the world 'world'” on the Backups page.",
         duration: undefined,
       }),
     );

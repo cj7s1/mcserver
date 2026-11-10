@@ -74,9 +74,11 @@ x-panel-env: &panel-env
   MCPANEL_AGENT_CA_BUNDLE: ${MCPANEL_AGENT_CA_BUNDLE:-}
   # Redis runs inside the panel container and is reached through a Unix socket: it has no
   # network listener. Both variables are empty in a normal .env. With the `external-redis`
-  # profile set MCPANEL_REDIS_URL=redis://redis:6379/0 (the broker URL follows it).
+  # profile set MCPANEL_REDIS_URL=redis://redis:6379/0. The broker URL follows MCPANEL_REDIS_URL
+  # whenever it is empty: the panel derives it (backend/mcpanel/settings.py, celery_broker_url),
+  # because Celery writes a Unix socket differently (redis+socket://...) than everything else.
   MCPANEL_REDIS_URL: ${MCPANEL_REDIS_URL:-unix:///run/mcpanel/redis.sock?db=0}
-  MCPANEL_CELERY_BROKER_URL: ${MCPANEL_CELERY_BROKER_URL:-${MCPANEL_REDIS_URL:-redis+socket:///run/mcpanel/redis.sock}}
+  MCPANEL_CELERY_BROKER_URL: ${MCPANEL_CELERY_BROKER_URL:-}
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
   POSTGRES_DB: ${POSTGRES_DB:-mcpanel}

@@ -9,6 +9,7 @@ import {
   outcomeMessage,
   PLAN_OUTDATED_CODES,
   resolveForm,
+  safetyBackupName,
   seedError,
   seedFromEnv,
   seedIsSet,
@@ -179,7 +180,7 @@ describe("summaryLines", () => {
     expect(summaryLines(plan, form(plan)).map((l) => l.id)).toEqual(["stop", "backup", "delete", "seed", "start"]);
     expect(text(plan)).toEqual([
       "The server is stopped (players are disconnected) and stays offline during the backup.",
-      "A safety backup of the server folder is taken and checked (“Before restore”); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
+      "A safety backup of the server folder is taken and checked (“Before resetting the world 'bruh'” on the Backups page); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
       "The world folders bruh, bruh_nether and bruh_the_end (2.0 GB in total) are deleted, with all player data in them. " +
         "Carried over into the new world: bruh/datapacks, bruh/paper-world.yml and bruh_nether/paper-world.yml.",
       "The seed setting is kept (level-seed: -4172144997902289642): the new world is generated from this seed.",
@@ -190,7 +191,7 @@ describe("summaryLines", () => {
   it("describes a stopped vanilla server", () => {
     expect(text()).toEqual([
       "The server stays stopped meanwhile.",
-      "A safety backup of the server folder is taken and checked (“Before restore”); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
+      "A safety backup of the server folder is taken and checked (“Before resetting the world 'world'” on the Backups page); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
       "The world folder world (3.0 MB) is deleted, with all player data in it.",
       "The new world gets a random seed.",
       "The server is left stopped. It generates the new world the next time it starts.",
@@ -271,11 +272,19 @@ describe("outcomeMessage", () => {
       title: "The world was reset",
       description: "The server generates a new world the next time it starts.",
     });
-    const full = outcomeMessage(job({ result: { ...done, restarted: true, kept: ["world/datapacks"], safety_backup: "b1" } }));
+    const full = outcomeMessage(
+      job({ result: { ...done, level_name: "world", restarted: true, kept: ["world/datapacks"], safety_backup: "b1" } }),
+    );
     expect(full?.tone).toBe("success");
+    // the backup is named as the list on the Backups page names it
     expect(full?.description).toBe(
       "The server was started again and is generating a new world. Carried over: world/datapacks. " +
-        "The old world is in the “Before restore” safety backup on the Backups page.",
+        "The old world is in the safety backup “Before resetting the world 'world'” on the Backups page.",
+    );
+    expect(safetyBackupName("world")).toBe("Before resetting the world 'world'");
+    // a result without the level name (a job of an older version) still says where to look
+    expect(outcomeMessage(job({ result: { ...done, safety_backup: "b1" } }))?.description).toBe(
+      "The server generates a new world the next time it starts. The old world is in the safety backup of this reset on the Backups page.",
     );
   });
 

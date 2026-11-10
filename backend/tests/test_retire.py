@@ -27,7 +27,7 @@ from apps.instances.spec import build_spec, current_spec_hash, restart_required
 from apps.instances.tasks import reconcile_all
 from apps.jobs import runner
 from apps.jobs.models import Job, JobStatus
-from apps.nodes.client import AgentClient, AgentError
+from apps.nodes.client import AgentClient, AgentError, AgentUnavailable
 
 pytestmark = pytest.mark.django_db
 
@@ -410,7 +410,8 @@ def test_crash_loop_stop_is_retired_and_still_diagnosed(make_instance, fake_agen
     assert run("start", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
     inst.refresh_from_db()
     assert inst.status == Status.RUNNING
-    assert "crash_loop" not in [i["code"] for i in diagnose(inst)["issues"]]
+    # ... and nothing else of the run before it: the new container is diagnosed by its own output
+    assert diagnose(inst)["issues"] == []
 
 
 def test_kill_only_kills_and_the_container_is_retired_later(server, fake_agent, clients):
@@ -1027,6 +1028,11 @@ def test_client_requests_and_answers_of_older_agents(node, monkeypatch):
     assert calls[-1] == ("POST", f"/v1/instances/{iid}/retire", {"json": {"settle_seconds": 10}, "timeout": 120})
     answers[("DELETE", f"/v1/instances/{iid}/last-run")] = {"deleted": True}
     assert client.forget_last_run(iid) is True
+    # the console reads the log as before; the diagnostics ask for the container's own output
+    answers[("GET", f"/v1/instances/{iid}/logs")] = {"lines": ["a"]}
+    assert client.logs(iid, tail=50) == ["a"] and calls[-1][2] == {"params": {"tail": 50}}
+    assert client.logs(iid, tail=50, previous=False) == ["a"]
+    assert calls[-1][2] == {"params": {"tail": 50, "previous": "false"}}
 
     for info in ({"version": "0.1.0"}, {"features": "retire"}, {"features": None}):  # no list of features: none
         answers[("GET", "/v1/info")] = info
@@ -1035,3 +1041,303 @@ def test_client_requests_and_answers_of_older_agents(node, monkeypatch):
     assert client.features(refresh=True) == {"retire", "something-newer"}
     asked = len(calls)
     assert client.supports("retire") is True and len(calls) == asked  # remembered
+
+
+# --- diagnostics read one run: the container's own, or the last one when there is none ------------
+JAVA_ERROR = (
+    "java.lang.UnsupportedClassVersionError: net/minecraft/server/Main has been compiled by a more recent version of "
+    "the Java Runtime (class file version 65.0), this version of the Java Runtime only recognizes class file versions up to 61.0"
+)
+
+
+def _change_java(inst, capture, mojang_java) -> Job:
+    """What the "java_too_old" issue tells the user to do: Settings > Software > Java 21, start afterwards."""
+    mojang_java("1.20.6", 21)
+    return run(
+        "software_update", inst, capture, minecraft_version="1.20.6", loader_version="", java_version=21, backup=False, start=True
+    )
+
+
+def test_a_server_repaired_with_change_java_version_loses_the_old_diagnosis(
+    server, fake_agent, mojang_java, django_capture_on_commit_callbacks
+):
+    """The agent keeps the end of the previous run in front of a new container's log (for the
+    console). The diagnostics must not read it: the repaired server kept showing the old problem."""
+    inst = stopped_and_retired(fake_agent, server(), django_capture_on_commit_callbacks, lines=[JAVA_ERROR])
+    assert [i["code"] for i in diagnose(inst)["issues"]] == ["java_too_old"]  # no container: the record of the last run
+
+    job = _change_java(inst, django_capture_on_commit_callbacks, mojang_java)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    fake_agent.log_lines[str(inst.id)] = ['[Server thread/INFO]: Done (3.1s)! For help, type "help"']
+    inst.refresh_from_db()
+    assert inst.status == Status.RUNNING and inst.java_version == 21
+    # the console still shows the previous run in front of the new one ...
+    assert JAVA_ERROR in AgentClient(inst.node).logs(inst.id, tail=500)
+    # ... the diagnostics read the new container's own output
+    found = diagnose(inst)
+    assert found["issues"] == [] and found["lines_scanned"] == 1
+    assert fake_agent.called("logs")[-1][1] == {"tail": 1500, "previous": False}
+
+
+def test_a_replaced_container_leaves_its_run_as_the_record_and_is_not_diagnosed_any_more(
+    server, fake_agent, mojang_java, django_capture_on_commit_callbacks
+):
+    """The same repair on a server whose container still exists (it is replaced, not created):
+    the agent's apply saves the old container's run as the last-run record."""
+    inst = server()
+    old_container = fake_agent.containers[str(inst.id)]["id"]
+    fake_agent.log_lines[str(inst.id)] = [JAVA_ERROR]
+    assert [i["code"] for i in diagnose(inst)["issues"]] == ["java_too_old"]
+
+    job = _change_java(inst, django_capture_on_commit_callbacks, mojang_java)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert fake_agent.containers[str(inst.id)]["id"] != old_container
+    record = fake_agent.last_runs[str(inst.id)]
+    assert record["container_id"] == old_container and record["log"]["lines"] == [JAVA_ERROR]
+    inst.refresh_from_db()
+    assert diagnose(inst)["issues"] == []  # the new container printed nothing of the kind
+    assert JAVA_ERROR in AgentClient(inst.node).logs(inst.id, tail=500)
+
+
+def test_a_new_crash_loop_is_not_explained_with_the_cause_of_the_previous_run(
+    make_instance, fake_agent, django_capture_on_commit_callbacks
+):
+    inst = make_instance(name="Looping", desired_state="running", java_version=21, image="itzg/minecraft-server:stable-java21")
+    fake_agent.prepare(inst.id, {})
+    fake_agent.apply(inst.id, build_spec(inst), start=True)
+    Instance.objects.filter(pk=inst.pk).update(
+        container_spec_hash=current_spec_hash(inst), installed_at=timezone.now(), status="running"
+    )
+    inst = stopped_and_retired(
+        fake_agent, Instance.objects.get(pk=inst.pk), django_capture_on_commit_callbacks, lines=[JAVA_ERROR]
+    )
+    # a new run that crash-loops for a reason no signature knows
+    fake_agent.start_healthy = False
+    assert run("start", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    fake_agent.log_lines[str(inst.id)] = ["Exception in thread main: something new"]
+    fake_agent.set_container_state(inst.id, restart_count=1)
+    reconcile_instance(inst.id)
+    fake_agent.set_container_state(inst.id, restart_count=7)
+    reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert inst.status == Status.FAILED and inst.status_detail.startswith(AUTO_STOP_PREFIX)
+    assert "Likely cause" not in inst.status_detail and "Java" not in inst.status_detail
+
+
+def test_diagnostics_answer_while_the_container_is_being_removed(server, fake_agent, clients, django_capture_on_commit_callbacks):
+    """Stop pressed on a failed server: the page asks for the diagnostics while the container is
+    retired. An agent that answers the log request with an error then (older ones: 502 for a
+    container that is being removed) must not turn the diagnostics into a 502."""
+    inst = server()
+    fake_agent.set_container_state(inst.id, restart_count=4)
+    Instance.objects.filter(pk=inst.pk).update(ready_at=None)
+    fake_agent.failures["logs"] = AgentError(
+        "Docker error: can not get logs from container which is dead or marked for removal", "docker_error", 502
+    )
+    response = clients["owner"].get(f"/api/instances/{inst.id}/diagnostics")
+    assert response.status_code == 200, response.content
+    body = response.json()
+    assert [i["code"] for i in body["issues"]] == ["crash_loop"] and body["lines_scanned"] == 0
+    # an agent that cannot be reached at all still is an error
+    fake_agent.failures["status"] = AgentUnavailable()
+    assert clients["owner"].get(f"/api/instances/{inst.id}/diagnostics").status_code == 503
+
+
+# --- a server that a job started is meant to run -------------------------------------------------
+def test_an_update_with_start_afterwards_records_that_the_server_is_meant_to_run(
+    server, fake_agent, mojang_java, django_capture_on_commit_callbacks
+):
+    """It ran while it was recorded as "stopped": when it crashed later, that looked like an
+    ordinary stop. No "failed", no notification, and the container with the evidence was removed."""
+    inst = stopped_and_retired(fake_agent, server(restart_policy="no"), django_capture_on_commit_callbacks)
+    assert inst.desired_state == "stopped"
+    job = _change_java(inst, django_capture_on_commit_callbacks, mojang_java)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    inst.refresh_from_db()
+    assert inst.status == Status.RUNNING and inst.desired_state == "running"
+
+    # it crashes (restart policy "no": Docker leaves it down)
+    retires = len(fake_agent.called("retire"))
+    fake_agent.set_container_state(inst.id, status="exited", running=False, exit_code=1, finished_at=fake_agent._now())
+    sweep(fake_agent)
+    inst.refresh_from_db()
+    assert has_container(fake_agent, inst) and len(fake_agent.called("retire")) == retires  # kept as evidence
+    assert inst.status == Status.FAILED and "exited unexpectedly (exit code 1)" in inst.status_detail
+
+
+def test_a_crash_loop_after_an_update_with_start_is_stopped_like_any_other(
+    server, fake_agent, mojang_java, django_capture_on_commit_callbacks
+):
+    inst = stopped_and_retired(fake_agent, server(), django_capture_on_commit_callbacks)
+    fake_agent.start_healthy = False  # the updated server never becomes ready
+    assert _change_java(inst, django_capture_on_commit_callbacks, mojang_java).status == JobStatus.SUCCEEDED
+    fake_agent.set_container_state(inst.id, restart_count=1)
+    reconcile_instance(inst.id)
+    fake_agent.set_container_state(inst.id, restart_count=7)
+    reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert inst.status == Status.FAILED and inst.status_detail.startswith(AUTO_STOP_PREFIX)
+    assert inst.desired_state == "stopped" and fake_agent.containers[str(inst.id)]["running"] is False
+    assert AuditEvent.objects.filter(action="instance.crash_loop_stopped", instance=inst).count() == 1
+
+
+def test_a_restart_that_a_kill_came_into_still_ends_with_a_server_that_is_meant_to_run(
+    server, fake_agent, users, django_capture_on_commit_callbacks
+):
+    inst = server()
+
+    def kill_meanwhile(*_args, **_kwargs):  # Kill is pressed while the restart is stopping the server
+        services.power(Instance.objects.get(pk=inst.pk), "kill", users["operator"])
+        assert Instance.objects.get(pk=inst.pk).desired_state == "stopped"
+
+    fake_agent.hooks["restart"] = kill_meanwhile
+    assert run("restart", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    inst.refresh_from_db()
+    assert fake_agent.containers[str(inst.id)]["running"] is True and inst.desired_state == "running"
+
+
+def test_a_job_that_starts_the_existing_container_records_it_too(server, fake_agent, django_capture_on_commit_callbacks):
+    """start_server with a container that is there (a restore of a server that was running starts
+    it again): a Kill during the job must not leave the running server recorded as stopped."""
+    inst = server()
+    fake_agent.stop(inst.id)
+    Instance.objects.filter(pk=inst.pk).update(desired_state="stopped", resume_after_boot=True, resume_flagged_at=timezone.now())
+    ctx = runner.JobContext(Job.objects.create(kind="restore", title="t", instance=inst))
+    from apps.instances.handlers import start_server
+
+    assert start_server(Instance.objects.get(pk=inst.pk), ctx) is False  # started, not recreated
+    inst.refresh_from_db()
+    assert inst.desired_state == "running" and inst.resume_after_boot is False
+    assert fake_agent.containers[str(inst.id)]["running"] is True
+
+
+def test_a_container_created_without_a_start_changes_nothing(server, fake_agent, mojang_java, django_capture_on_commit_callbacks):
+    inst = stopped_and_retired(fake_agent, server(), django_capture_on_commit_callbacks)
+    mojang_java("1.20.6", 21)
+    job = run(
+        "software_update",
+        inst,
+        django_capture_on_commit_callbacks,
+        minecraft_version="1.20.6",
+        loader_version="",
+        java_version=21,
+        backup=False,
+        start=False,
+    )
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    inst.refresh_from_db()
+    assert inst.desired_state == "stopped" and fake_agent.containers[str(inst.id)]["running"] is False
+
+
+# --- a retire that fails, or whose answer is lost ----------------------------------------------------
+def test_a_retire_that_keeps_failing_is_logged_and_audited_once_an_hour_not_on_every_pass(
+    server, fake_agent, caplog, django_capture_on_commit_callbacks
+):
+    inst = server()
+    run("stop", inst, django_capture_on_commit_callbacks)
+    fake_agent.failures["retire"] = AgentError("The last-run record of the server could not be saved", "last_run_failed", 500)
+    with caplog.at_level("WARNING", logger="apps.instances.reconcile"):
+        for _ in range(6):  # one minute of passes
+            sweep(fake_agent)
+    assert len(fake_agent.called("retire")) == 6  # it is tried again every time ...
+    warnings = [record for record in caplog.records if "could not retire" in record.getMessage()]
+    assert len(warnings) == 1  # ... and said once
+    assert AuditEvent.objects.filter(action=RETIRE_FAILED).count() == 1
+    assert has_container(fake_agent, inst)
+
+
+def test_a_retire_whose_answer_is_lost_is_not_a_failure_and_the_next_pass_sees_the_result(
+    server, fake_agent, caplog, django_capture_on_commit_callbacks
+):
+    inst = server()
+    fake_agent.stop_exit_code = 137
+    run("stop", inst, django_capture_on_commit_callbacks)
+    real_retire = fake_agent.retire
+
+    def lose_the_answer(instance_id, **kwargs):
+        fake_agent.hooks.pop("retire")
+        real_retire(instance_id, **kwargs)  # the agent did it ...
+        raise AgentUnavailable("The node agent did not respond in time (POST /retire)")  # ... the answer never arrived
+
+    fake_agent.hooks["retire"] = lose_the_answer
+    with caplog.at_level("WARNING", logger="apps.instances.reconcile"):
+        sweep(fake_agent)
+    assert not has_container(fake_agent, inst)
+    assert not AuditEvent.objects.filter(action=RETIRE_FAILED).exists()
+    assert not [record for record in caplog.records if "retire" in record.getMessage()]
+    # the next pass reads what happened from the agent's list: no container, and the record of the last run
+    reconcile_all()
+    inst.refresh_from_db()
+    assert (inst.status, inst.container_state, inst.last_exit_code) == (Status.STOPPED, "", 137)
+
+
+# --- "restart required" needs a container ------------------------------------------------------------
+def test_a_stopped_server_without_a_container_does_not_read_restart_required(
+    server, fake_agent, clients, django_capture_on_commit_callbacks
+):
+    def shown(instance) -> tuple[str, bool]:
+        body = clients["owner"].get(f"/api/instances/{instance.id}").json()
+        return body["container_state"], body["restart_required"]
+
+    inst = server()
+    reconcile_instance(inst.id)
+    Instance.objects.filter(pk=inst.pk).update(memory_mb=3072)  # a setting changes while it runs
+    assert shown(inst) == ("running", True)
+    assert run("stop", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    assert shown(inst) == ("exited", True)  # the container is still there for a moment
+    sweep(fake_agent)
+    assert not has_container(fake_agent, inst)
+    assert shown(inst) == ("", False)  # nothing to restart: the next start makes a new container
+    Instance.objects.filter(pk=inst.pk).update(memory_mb=4096)  # and no change of a setting brings it back
+    assert shown(inst) == ("", False)
+
+    # the start creates the container from the settings of now
+    inst.refresh_from_db()
+    assert run("start", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    inst.refresh_from_db()
+    assert fake_agent.containers[str(inst.id)]["spec"]["memory_limit_mb"] == build_spec(inst)["memory_limit_mb"]
+    assert inst.container_spec_hash == current_spec_hash(inst) and shown(inst) == ("running", False)
+
+
+def test_after_an_upgrade_only_the_servers_that_have_a_container_read_restart_required(
+    make_instance, fake_agent, clients, django_capture_on_commit_callbacks
+):
+    """A host as the previous release left it: exited containers and a running one, all made with
+    container format 1. The first pass of the new panel removes the exited ones."""
+    from apps.instances.spec import spec_hash
+
+    def old_release(name: str, *, running: bool):
+        inst = make_instance(name=name, desired_state="running" if running else "stopped")
+        fake_agent.prepare(inst.id, {})
+        fake_agent.apply(inst.id, build_spec(inst), start=True)
+        if not running:
+            fake_agent.stop(inst.id)
+        Instance.objects.filter(pk=inst.pk).update(
+            container_spec_hash=spec_hash(build_spec(inst), 1),
+            installed_at=timezone.now(),
+            applied_revision=1,
+            status="running" if running else "stopped",
+            container_state="running" if running else "exited",
+        )
+        return inst
+
+    stopped = [old_release(f"Old {n}", running=False) for n in range(3)]
+    running = old_release("Busy", running=True)
+    listed = {row["id"]: row["restart_required"] for row in clients["owner"].get("/api/instances/").json()}
+    assert all(listed[str(inst.id)] for inst in (*stopped, running))  # before the first pass: all of them
+
+    fake_agent.age_containers()
+    reconcile_all()
+    assert [has_container(fake_agent, inst) for inst in stopped] == [False, False, False]
+    listed = {row["id"]: row["restart_required"] for row in clients["owner"].get("/api/instances/").json()}
+    assert [listed[str(inst.id)] for inst in stopped] == [False, False, False]
+    assert listed[str(running.id)] is True  # its container was made by the old release
+    # a stopped one is started (a new container from the current release), the running one restarted
+    stopped[0].refresh_from_db()
+    assert run("start", stopped[0], django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    running.refresh_from_db()
+    applied = len(fake_agent.called("apply"))
+    assert run("restart", running, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    assert len(fake_agent.called("apply")) == applied + 1  # recreated, not just restarted
+    listed = {row["id"]: row["restart_required"] for row in clients["owner"].get("/api/instances/").json()}
+    assert listed[str(stopped[0].id)] is False and listed[str(running.id)] is False

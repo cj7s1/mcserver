@@ -132,6 +132,8 @@ class FakeAgent:
         # False = an agent from before the "stop" object existed.
         self.reports_stop = True
         self.operations: dict[str, dict[str, Any]] = {}
+        # instance id -> the operation the status of that server reports as still running
+        self.active_operations: dict[str, dict[str, Any]] = {}
         self.foreign_ports: list[dict[str, Any]] = []
         self.remote_files: dict[str, bytes] = {}
         self.log_lines: dict[str, list[str]] = {}
@@ -540,6 +542,12 @@ class FakeAgent:
             return failed
         existing = self.containers.get(iid)
         was_running = bool(existing and existing["running"])
+        if existing is not None and "retire" in self.features:
+            # docker_ops.remove_container inside the agent's apply: the old container is stopped,
+            # the record of its run is saved (when it ran) and its log goes with it
+            if self._live(existing):
+                self._set_exited(existing, self.stop_exit_code)
+            self._save_last_run(iid, existing)
         self._root(iid, create=True)
         spec_hash = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
         c = {
@@ -595,13 +603,15 @@ class FakeAgent:
 
     def status(self, instance_id: Any) -> dict[str, Any]:
         c = self.containers.get(str(instance_id))
+        # an operation the agent is still working on for this server (tests set it; default none)
+        operation = copy.deepcopy(self.active_operations.get(str(instance_id)))
         if c is None:
-            answer: dict[str, Any] = {"exists": False, "operation": None}
+            answer: dict[str, Any] = {"exists": False, "operation": operation}
             last_run = self._last_run_summary(str(instance_id))
             if last_run is not None:
                 answer["last_run"] = last_run
             return answer
-        return {**self._public(c), "operation": None}
+        return {**self._public(c), "operation": operation}
 
     def start(self, instance_id: Any) -> dict[str, Any]:
         c = self._container(str(instance_id))
@@ -675,9 +685,10 @@ class FakeAgent:
             "cached": False,
         }
 
-    def logs(self, instance_id: Any, tail: int = 500) -> list[str]:
-        """docker_ops.console_history: the container log with the end of the previous run in front;
-        without a container the end of the last run; without either 404 no_container."""
+    def logs(self, instance_id: Any, tail: int = 500, *, previous: bool = True) -> list[str]:
+        """docker_ops.console_history: the container log with the end of the previous run in front
+        (not with ``previous=False``); without a container the end of the last run; without
+        either 404 no_container."""
         iid = str(instance_id)
         c = self.containers.get(iid)
         if c is None:
@@ -685,9 +696,9 @@ class FakeAgent:
                 self._container(iid)  # raises no_container
             return self._last_run_console(iid)[-tail:]
         lines = self.log_lines.get(iid, [])[-tail:]
-        previous = self._last_run_console(iid)
-        if previous and self.last_runs[iid]["container_id"] != c["id"] and len(lines) < tail:
-            lines = previous[-(tail - len(lines)) :] + lines
+        record = self._last_run_console(iid)
+        if previous and record and self.last_runs[iid]["container_id"] != c["id"] and len(lines) < tail:
+            lines = record[-(tail - len(lines)) :] + lines
         return lines
 
     def command(self, instance_id: Any, command: str, timeout: float = 30) -> str:
@@ -1368,7 +1379,7 @@ class FakeAgent:
                     return True
         return False
 
-    def list_backups(self, instance_id: Any) -> list[dict[str, Any]]:
+    def list_backups(self, instance_id: Any, timeout: float = 300) -> list[dict[str, Any]]:
         return [{k: v for k, v in s.items() if k != "tree"} for s in self.repos.get(str(instance_id), [])]
 
     def create_backup(
@@ -1391,6 +1402,7 @@ class FakeAgent:
             for path in [path for path in tree[key] if self._excluded(path, patterns)]:
                 del tree[key][path]
         tree["dirs"] = {path for path in tree["dirs"] if not self._excluded(path, patterns)}
+        total = sum(len(v) for v in tree["files"].values())
         self.repos.setdefault(iid, []).append(
             {
                 "id": snap_id,
@@ -1398,12 +1410,22 @@ class FakeAgent:
                 "time": self._now(),
                 "tags": [f"instance:{iid}", f"backup:{backup_id}", *tags],
                 "paths": [f"/srv/mcpanel/instances/{iid}"],
+                # what restic keeps with every snapshot (restic 0.17 and later)
+                "summary": {
+                    "backup_start": self._now(),
+                    "backup_end": self._now(),
+                    "files_new": len(tree["files"]),
+                    "files_changed": 0,
+                    "files_unmodified": 0,
+                    "data_added": total,
+                    "total_files_processed": len(tree["files"]),
+                    "total_bytes_processed": total,
+                },
                 "tree": tree,
             }
         )
         if paused:
             self.commands.append((iid, "save-on"))
-        total = sum(len(v) for v in tree["files"].values())
         return self._op(
             "backup",
             iid,

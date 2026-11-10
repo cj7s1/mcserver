@@ -34,6 +34,12 @@ JOB_STATUS = {
 
 STARTUP_GRACE = timedelta(minutes=10)
 OOM_DETAIL = "Killed: out of memory. Increase the memory allocation."
+# A server that is meant to run and exited cleanly without a stop from the panel.
+STOPPED_ITSELF_DETAIL = "Server stopped itself"
+# ... which the reconciler says instead when that run was ended by `manage.py host_shutdown` and
+# the server was then not started again (reconcile.apply_observation): the mark was dropped after
+# ten minutes without a restart of the panel, or a job failed meanwhile.
+NOT_RESUMED_DETAIL = "Stopped at host shutdown and not started again automatically. Start it when you want it back."
 CRASH_LOOP_RESTARTS = 3
 
 
@@ -112,7 +118,7 @@ def compute(
         if instance.desired_state == "running" and exit_code not in (0, None):
             return Status.FAILED, f"Server exited unexpectedly (exit code {exit_code}). Check the console log."
         if instance.desired_state == "running" and exit_code == 0 and state == "exited":
-            return Status.STOPPED, "Server stopped itself"
+            return Status.STOPPED, STOPPED_ITSELF_DETAIL
         if instance.installed_at is None and state == "created":
             return Status.CREATED, "Installed container; not started yet"
         return Status.STOPPED, ""

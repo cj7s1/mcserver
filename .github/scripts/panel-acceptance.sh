@@ -153,6 +153,19 @@ for name in web beat periodic worker redis; do
     if [ "$changed" = "$expected" ]; then pass "kill -9 $name: restarted: $changed"; else fail "kill -9 $name: restarted '$changed', expected '$expected'"; fi
     sleep 3
 done
+
+echo "== 7b. Redis never loads a dump file: what could be one is removed before every start"
+# SAVE on request still writes one (saving by itself is off); the web process could also write the file.
+pexec sh -c 'redis-cli -s /run/mcpanel/redis.sock set zz_acceptance_planted 1 >/dev/null && redis-cli -s /run/mcpanel/redis.sock save >/dev/null && test -s /run/mcpanel/dump.rdb'
+verdict $? "planted a dump file in /run/mcpanel" "could not plant a dump file"
+pid=$(child redis pid)
+pexec sh -c "kill -9 $pid"
+wait_for 60 sh -c "[ \"\$(docker exec $PANEL python -c \"import json;print(json.load(open('/run/mcpanel/supervisor.json'))['children']['redis']['pid'])\")\" != $pid ] && docker exec $PANEL python $SUP status"
+verdict $? "Redis and the others are back" "Redis did not come back: $(all_pids)"
+check "the dump file is gone" sh -c "! docker exec $PANEL test -e /run/mcpanel/dump.rdb"
+check "Redis did not load it" sh -c "[ \"\$(docker exec $PANEL redis-cli -s /run/mcpanel/redis.sock exists zz_acceptance_planted)\" = 0 ]"
+check "the supervisor said that it removed it" sh -c "docker logs --since 120s $PANEL 2>&1 | grep -F '[supervisor]' | grep -qF 'removed dump.rdb'"
+sleep 3
 check "the container was never restarted by Docker: the supervisor handled all of it" sh -c "[ \"\$(docker inspect -f '{{.RestartCount}}/{{.State.StartedAt}}' $PANEL)\" = '$STARTED' ]"
 
 echo "== 8. a queued job survives a restart of the panel container: it is sent again"

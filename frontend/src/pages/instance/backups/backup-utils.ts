@@ -52,6 +52,13 @@ export const BACKUP_JOB_KINDS = [
   ...WORLD_JOB_KINDS,
 ];
 
+/** What the empty Backups page suggests: a schedule only to a server that has none. */
+export function emptyBackupsHint(hasBackupSchedule: boolean): string {
+  return hasBackupSchedule
+    ? "Create a first backup now. This server's backup schedule takes the next ones automatically."
+    : "Create a first backup now, and add a backup schedule so it happens automatically.";
+}
+
 /** restic excludes always applied by the backend (backend/apps/backups/handlers.py DEFAULT_EXCLUDES). */
 export const BUILTIN_EXCLUDES = ["logs/*.log.gz", "crash-reports", ".cache", "cache", "debug", "*.tmp", "modernfix/classCache*"];
 

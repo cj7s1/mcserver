@@ -8,7 +8,7 @@ import json
 import logging
 import threading
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from django.core.management import call_command
@@ -22,6 +22,7 @@ from apps.instances.management.commands import host_shutdown
 from apps.instances.models import Instance, Status
 from apps.instances.spec import build_spec, current_spec_hash
 from apps.jobs import runner
+from apps.jobs import tasks as job_tasks
 from apps.jobs.models import Job, JobStatus
 from apps.nodes.client import AgentError, AgentUnavailable
 from apps.nodes.models import Node
@@ -344,6 +345,34 @@ def test_runtime_started_at_is_a_past_moment():
     assert started <= timezone.now()
 
 
+def test_the_panel_start_time_is_the_start_time_of_pid_1(monkeypatch):
+    """The start of the container, not of the process that asks: a worker that the supervisor
+    started again a minute ago must not make a mark written two minutes ago look like one from
+    before a boot. The name of PID 1 may hold blanks and brackets (proc(5): field 2)."""
+    real_open = open
+    opened: list[str] = []
+    files = {
+        "/proc/1/stat": "1 (tini (x) y) S 0 1 1 0 -1 4194560 100 0 0 0 5 6 0 0 20 0 1 0 123456 1000000 80 18446744073709551615 1 1\n",
+        "/proc/stat": "cpu  1 2 3 4\ncpu0 1 2 3 4\nbtime 1700000000\nprocesses 99\n",
+    }
+
+    def fake_open(path, *args, **kwargs):
+        if str(path) in files:
+            opened.append(str(path))
+            return io.StringIO(files[str(path)])
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(scheduling.os, "sysconf", lambda name: {"SC_CLK_TCK": 100}[name])
+    started = scheduling.runtime_started_at()
+    # field 22 of /proc/1/stat (123456 clock ticks after the host booted) on top of the boot time
+    assert started == datetime.fromtimestamp(1700000000 + 1234.56, tz=UTC)
+    assert opened == ["/proc/1/stat", "/proc/stat"]
+    # without a usable /proc: the load time of the module, never an error
+    files["/proc/1/stat"] = "garbage"
+    assert scheduling.runtime_started_at() == scheduling._LOADED_AT
+
+
 def test_mark_is_dropped_when_the_server_runs_already(server, fake_agent, after_boot, django_capture_on_commit_callbacks):
     inst = server("Alpha", running=True)  # Docker's restart policy or the user was faster
     flag(inst)
@@ -632,6 +661,32 @@ def test_other_jobs_do_not_keep_a_marked_server_down(
     assert is_running(fake_agent, inst) and not AuditEvent.objects.filter(action=NOT_RESUMED_AUDIT).exists()
 
 
+@pytest.mark.parametrize("kind", ["stop", "restore", "world_reset", "software_update"])
+def test_a_job_that_was_never_picked_up_does_not_keep_a_marked_server_down(
+    kind, marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    """The host was down for hours. A job that was still queued when it went down is failed by
+    the watchdog as never started: it did nothing to the server, which was running and is
+    started again like every other marked server."""
+    inst = marked("Alpha", minutes_ago=200)
+    job = Job.objects.create(kind=kind, title=kind, instance=inst, exclusive=True)  # QUEUED; its message is gone
+    Job.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(hours=3))
+    Instance.objects.filter(pk=inst.pk).update(active_job=job)
+    assert job_tasks.watchdog() == 1
+    job.refresh_from_db()
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "not_started") and job.finished_at > inst.resume_flagged_at
+    assert resume(django_capture_on_commit_callbacks)["started"] == str(inst.id)
+    assert is_running(fake_agent, inst) and not AuditEvent.objects.filter(action=NOT_RESUMED_AUDIT).exists()
+
+
+def test_a_job_no_worker_knew_does_not_keep_a_marked_server_down(
+    marked, fake_agent, after_boot, django_capture_on_commit_callbacks
+):
+    inst = marked("Alpha", minutes_ago=5)
+    finished_job(inst, "restore", JobStatus.FAILED, minutes_ago=2, error_code="unknown_job_kind")
+    assert resume(django_capture_on_commit_callbacks)["started"] == str(inst.id)
+
+
 def test_a_failed_job_on_one_server_does_not_touch_the_next(marked, fake_agent, after_boot, django_capture_on_commit_callbacks):
     broken, fine = marked("Alpha"), marked("Bravo")
     finished_job(broken, "restore", JobStatus.FAILED, minutes_ago=1)
@@ -677,6 +732,33 @@ def test_a_mark_that_waits_in_the_same_panel_runtime_is_given_up_after_ten_minut
     # the usual text for a server that is down although it is meant to run
     assert state.compute(old, fake_agent.status(old.id), None) == (Status.STOPPED, "Server stopped itself")
     assert scheduling.RESUME_STALE_AFTER == timedelta(minutes=10)
+
+
+def test_a_server_that_was_not_started_again_says_that_it_was_stopped_at_host_shutdown(
+    server, fake_agent, monkeypatch, django_capture_on_commit_callbacks
+):
+    """Not "Server stopped itself": the shutdown step stopped it, and the mark was given up."""
+    inst = server("Alpha", running=True)
+    shutdown()  # stops it, marks it and writes the audit entry
+    reconcile.reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert inst.status_detail == "Stopped because the host was shutting down; it is started again automatically"
+    monkeypatch.setattr(scheduling, "runtime_started_at", lambda: timezone.now() - timedelta(days=3))
+    flag(inst, minutes_ago=11)  # Docker was never stopped: the mark is given up
+    assert resume(django_capture_on_commit_callbacks)["cleared"] == [str(inst.id)]
+    reconcile.reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert (inst.status, inst.status_detail) == (Status.STOPPED, state.NOT_RESUMED_DETAIL)
+    assert "host shutdown" in inst.status_detail and "not started again automatically" in inst.status_detail
+
+    # started by hand, and later it stops by itself (an in-game /stop): that is what it says then
+    assert run_job("start", inst, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    fake_agent.set_container_state(
+        inst.id, status="exited", running=False, exit_code=0, started_at=fake_agent._now(), finished_at=fake_agent._now()
+    )
+    reconcile.reconcile_instance(inst.id)
+    inst.refresh_from_db()
+    assert (inst.status, inst.status_detail) == (Status.STOPPED, state.STOPPED_ITSELF_DETAIL)
 
 
 def test_an_old_mark_is_still_resumed_by_the_panel_that_starts_after_it(

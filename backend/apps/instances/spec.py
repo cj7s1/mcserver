@@ -391,8 +391,23 @@ def current_spec_hash(instance: Instance) -> str:
     return spec_hash(build_spec(instance))
 
 
-def restart_required(instance: Instance) -> bool:
-    """True when the running container was created from an older configuration."""
+def spec_outdated(instance: Instance) -> bool:
+    """True when the container this server last got was created from another configuration (or
+    container format) than the current one. Says nothing about whether that container still
+    exists: the jobs ask the agent for that."""
     if not instance.container_spec_hash:
         return False
     return instance.container_spec_hash != current_spec_hash(instance)
+
+
+def restart_required(instance: Instance) -> bool:
+    """What the panel shows as "restart required": the server HAS a container, and it was created
+    from an older configuration.
+
+    A server without a container has nothing to restart: a stopped server's container is removed
+    (reconcile.maybe_retire), and its next start creates one from the current settings anyway.
+    Without this, every stopped server would read restart-required after an upgrade that raises
+    CONTAINER_FORMAT, and after every change of a setting. Whether there is a container is what
+    the reconciler last saw (``container_state``, empty without one).
+    """
+    return bool(instance.container_state) and spec_outdated(instance)

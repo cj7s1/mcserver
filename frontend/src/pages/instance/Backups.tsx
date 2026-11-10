@@ -21,7 +21,7 @@ import { DeleteBackupDialog, RestoreAsNewDialog, RestoreDialog } from "./backups
 import { RetentionPolicyForm } from "./backups/RetentionPolicyForm";
 import { SnapshotsSection } from "./backups/SnapshotsSection";
 import { TrackedJobBanner } from "./backups/TrackedJobBanner";
-import { onOtherNode, useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
+import { emptyBackupsHint, onOtherNode, useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
 import { isSnapshotJob } from "./backups/snapshot-utils";
 import { WorldSection } from "./backups/WorldSection";
 import { isWorldJob } from "./backups/world-utils";
@@ -166,7 +166,7 @@ export default function Backups() {
             <EmptyState
               icon={<Archive className="size-5" />}
               title="No backups yet"
-              description="Create a first backup now, and add a backup schedule so it happens automatically."
+              description={emptyBackupsHint((instance.backup_schedules ?? 0) > 0)}
               action={
                 <Button size="sm" onClick={() => open("create")} disabled={busy}>
                   <Plus /> Create backup

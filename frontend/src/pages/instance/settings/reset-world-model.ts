@@ -68,6 +68,15 @@ export interface WorldResetResult {
 
 type SeedInfo = Pick<WorldResetPlan, "seed">;
 
+/**
+ * The name the safety backup of a reset has in the list on the Backups page (the backend gives
+ * it: apps/instances/handlers.py, world_reset). The dialog and the result message name the backup
+ * the same way, so it can be found there.
+ */
+export function safetyBackupName(levelName: string): string {
+  return `Before resetting the world '${levelName}'`;
+}
+
 /** A seed is configured (SEED in the environment or a non-empty level-seed). */
 export function seedIsSet(plan: SeedInfo): boolean {
   return plan.seed.source !== "unset" && plan.seed.value !== "";
@@ -180,7 +189,10 @@ function seedLine(plan: SeedInfo, form: ResetForm): SummaryPart[] {
 }
 
 /** What happens, in order, when the user confirms: the list of the confirmation step. */
-export function summaryLines(plan: Pick<WorldResetPlan, "folders" | "delete" | "running" | "seed">, form: ResetForm): SummaryLine[] {
+export function summaryLines(
+  plan: Pick<WorldResetPlan, "folders" | "delete" | "running" | "seed" | "level_name">,
+  form: ResetForm,
+): SummaryLine[] {
   const f = resolveForm(plan, form);
   const deleted = deletedFolders(plan);
   const sized = deleted.every((d) => d.info);
@@ -203,7 +215,7 @@ export function summaryLines(plan: Pick<WorldResetPlan, "folders" | "delete" | "
       ? {
           id: "backup",
           parts: [
-            "A safety backup of the server folder is taken and checked (“Before restore”); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.",
+            `A safety backup of the server folder is taken and checked (“${safetyBackupName(plan.level_name)}” on the Backups page); like every backup it leaves out old logs, crash reports and caches. If it fails or does not contain the world, nothing is deleted.`,
           ],
         }
       : { id: "backup", parts: ["No safety backup is taken: the world cannot be recovered afterwards."], danger: true },
@@ -284,7 +296,11 @@ export function outcomeMessage(job: Pick<Job, "kind" | "status" | "error" | "err
     deleted.length ? "" : "There was no world folder left to delete.",
     result.restarted ? "The server was started again and is generating a new world." : "The server generates a new world the next time it starts.",
     result.kept?.length ? `Carried over: ${result.kept.join(", ")}.` : "",
-    result.safety_backup ? "The old world is in the “Before restore” safety backup on the Backups page." : "",
+    result.safety_backup
+      ? result.level_name
+        ? `The old world is in the safety backup “${safetyBackupName(result.level_name)}” on the Backups page.`
+        : "The old world is in the safety backup of this reset on the Backups page."
+      : "",
     result.leftover
       ? `The old world could not be deleted completely: remove the folder ${result.leftover} on the Files page.`
       : warnings.length

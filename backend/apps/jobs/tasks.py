@@ -101,4 +101,18 @@ def watchdog() -> int:
                 error=f"The job exceeded the maximum run time ({max_hours:g} h) and looks hung",
                 error_code="timeout",
             )
+    _settle_backups()
     return count
+
+
+def _settle_backups() -> None:
+    """Backup rows whose job ended without settling them (cut off, marked as failed): see
+    ``apps.backups.handlers.settle_orphaned_backups``. Never fails the watchdog."""
+    try:
+        from apps.backups.handlers import settle_orphaned_backups
+
+        settled = settle_orphaned_backups()
+        if any(settled.values()):
+            log.info("Backups left behind by ended jobs: %s", ", ".join(f"{n} {what}" for what, n in settled.items() if n))
+    except Exception:
+        log.exception("Settling the backups of ended jobs failed")

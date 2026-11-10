@@ -236,9 +236,21 @@ def summarize(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _when(value: Any) -> str:
-    """``2026-11-10T03:12:45.123456789Z`` as ``2026-11-10 03:12:45 UTC`` (empty when unknown)."""
+    """Docker's ``2026-11-10T03:12:45.123456789Z`` in this agent's time zone (TZ, the same one the
+    servers get), like the times in the console lines above it: ``2026-11-09 19:12:45 PST``.
+    With TZ unset that is ``2026-11-10 03:12:45 UTC``. Empty when unknown."""
     m = re.match(r"^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})", str(value or ""))
-    return f"{m.group(1)} {m.group(2)} UTC" if m else ""
+    if not m:
+        return ""
+    try:
+        local = (
+            datetime.strptime(f"{m.group(1)} {m.group(2)}", "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=UTC)
+            .astimezone()
+        )
+        return f"{local:%Y-%m-%d %H:%M:%S} {local.tzname() or 'UTC'}"
+    except (ValueError, OverflowError, OSError):
+        return f"{m.group(1)} {m.group(2)} UTC"
 
 
 def console_lines(record: dict[str, Any]) -> list[str]:

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { backupReadable, onOtherNode, otherNodeHint } from "./backup-utils";
+import { backupReadable, emptyBackupsHint, onOtherNode, otherNodeHint } from "./backup-utils";
+
+describe("the empty Backups page", () => {
+  it("suggests a backup schedule only to a server that has none", () => {
+    expect(emptyBackupsHint(false)).toMatch(/add a backup schedule/);
+    expect(emptyBackupsHint(true)).not.toMatch(/add a backup schedule/);
+    expect(emptyBackupsHint(true)).toMatch(/backup schedule takes the next ones/);
+  });
+});
 
 describe("backups stored on another node", () => {
   it("only flags backups the API reports as not on the current node", () => {

@@ -14,7 +14,7 @@ from django.utils.dateparse import parse_datetime
 from apps.console.events import broadcast
 from apps.core.errors import ApiError
 from apps.jobs.models import ACTIVE_STATUSES, Job
-from apps.nodes.client import AgentClient
+from apps.nodes.client import AgentClient, AgentError
 from apps.nodes.models import Node
 
 from . import state
@@ -108,6 +108,23 @@ def policy_restarts(instance: Instance, container: dict[str, Any] | None) -> int
     return current[1] - previous[1]
 
 
+def _ended_by_host_shutdown(instance: Instance, container: dict[str, Any] | None) -> bool:
+    """Was the run of this (exited) container ended by ``manage.py host_shutdown``?
+
+    The command writes an audit entry for every server it stops. While the server is marked to
+    be started again the status says so itself (state.compute); this is for afterwards, when the
+    mark was dropped without a start and the server would read "stopped itself".
+    """
+    from apps.audit.models import AuditEvent
+
+    started = _ts((container or {}).get("started_at"))
+    if started is None or instance.resume_after_boot:
+        return False
+    return AuditEvent.objects.filter(
+        instance_id=instance.pk, action="instance.stopped_for_host_shutdown", success=True, created_at__gte=started
+    ).exists()
+
+
 def _notify_failed(instance: Instance, title: str, message: str, data: dict[str, Any]) -> bool:
     """Send "instance.failed", at most once per server per FAILED_NOTIFY_INTERVAL."""
     if not cache.add(f"notify:instance.failed:{instance.pk}", 1, FAILED_NOTIFY_INTERVAL):
@@ -190,6 +207,8 @@ def apply_observation(
         restarts = crash_restarts(instance, container) if not job_kind else 0
         unexpected = policy_restarts(instance, container)
         status, detail = state.compute(instance, container, job_kind, crash_restarts=restarts)
+        if detail == state.STOPPED_ITSELF_DETAIL and _ended_by_host_shutdown(instance, container):
+            detail = state.NOT_RESUMED_DETAIL  # it did not stop "itself": say what happened
         if (
             status == Status.STOPPED
             and not job_kind
@@ -303,7 +322,8 @@ RETIRE_SETTLE_SECONDS = 10.0
 RETIRABLE_STATES = ("created", "exited", "dead")
 # Answers of the agent that mean "not now" (the next pass looks again), not a failure.
 RETIRE_NOT_NOW = frozenset({"container_running", "not_settled", "container_busy", "instance_busy"})
-# A retire that keeps failing is written to the audit log at most this often per server (seconds).
+# A retire that keeps failing is tried again on every pass (every 10 s), but written to the log
+# and to the audit log at most this often per server (seconds).
 RETIRE_FAILURE_AUDIT_INTERVAL = 3600
 
 
@@ -349,7 +369,9 @@ def retire_container(
     instance: Instance, client: AgentClient | None = None, *, settle: float | None = None
 ) -> dict[str, Any] | None:
     """Ask the agent to retire the server's container. Returns the agent's answer, or None when
-    it did not happen (the agent said "not now", or it failed: logged and audited)."""
+    it did not happen or is not known to have happened: the agent said "not now", its answer did
+    not arrive (the next pass sees what became of the container), or it failed (logged and
+    audited, once per RETIRE_FAILURE_AUDIT_INTERVAL while it keeps failing)."""
     from apps.audit import service as audit
 
     client = client or AgentClient(instance.node)
@@ -359,9 +381,19 @@ def retire_container(
         if exc.error_code in RETIRE_NOT_NOW:
             log.debug("container of %s not retired now: %s", instance.pk, exc.detail)
             return None
+        if not isinstance(exc, AgentError):
+            # No answer from the agent (a timeout, a dropped connection): the retire may have been
+            # done all the same. That is no failure to report: the next pass looks at the container.
+            log.info("retire of the container of %s (%s): no answer from the agent (%s)", instance.name, instance.pk, exc.detail)
+            return None
         # e.g. last_run_failed: the record could not be written, so the agent kept the container
-        log.warning("could not retire the container of %s (%s): %s", instance.name, instance.pk, exc.detail)
         if cache.add(f"retire-failed:{instance.pk}", 1, RETIRE_FAILURE_AUDIT_INTERVAL):
+            log.warning(
+                "could not retire the container of %s (%s): %s (tried again on every pass; this is logged once an hour)",
+                instance.name,
+                instance.pk,
+                exc.detail,
+            )
             audit.record(
                 "instance.container_retire_failed",
                 instance=instance,
@@ -369,6 +401,8 @@ def retire_container(
                 success=False,
                 details={"error": str(exc.detail)[:300], "code": exc.error_code},
             )
+        else:
+            log.debug("could not retire the container of %s: %s", instance.pk, exc.detail)
         return None
     if answer.get("retired"):
         last_run = answer.get("last_run") or {}

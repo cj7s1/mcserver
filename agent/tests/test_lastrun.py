@@ -11,6 +11,7 @@ import json
 import os
 import stat
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -262,7 +263,33 @@ def test_record_is_stored_in_the_agents_state_folder_readable_by_its_owner_only(
     assert [p.name for p in path.parent.iterdir()] == [f"{IID}.json"]  # no temporary file left
 
 
-def test_record_round_trip_and_summary(agent_settings):
+@pytest.fixture
+def time_zone(monkeypatch):
+    """Sets the process's time zone for one test (and puts it back)."""
+
+    def _set(name: str) -> None:
+        monkeypatch.setenv("TZ", name)
+        time.tzset()
+
+    yield _set
+    monkeypatch.undo()
+    time.tzset()
+
+
+def test_the_end_of_run_marker_is_in_the_agents_time_zone_like_the_log_lines(time_zone):
+    record = _record(lines=["[19:12:44] [Server thread/INFO]: Stopping server"], exit_code=0)
+    time_zone("America/Los_Angeles")
+    assert lastrun.console_lines(record)[-1] == (
+        "[mcpanel] ---- end of the run that stopped 2026-11-09 19:12:45 PST (exited with code 0) ----"
+    )
+    time_zone("Europe/Berlin")
+    assert "stopped 2026-11-10 04:12:45 CET (" in lastrun.console_lines(record)[-1]
+    record["finished_at"] = "0001-01-01T00:00:00Z"  # Docker's "never": no time can be made of it
+    assert lastrun.console_lines(record)[-1].startswith("[mcpanel] ---- end of the run that stopped")
+
+
+def test_record_round_trip_and_summary(agent_settings, time_zone):
+    time_zone("UTC")
     record = _record(
         lines=["one", "two", "§cthree"], exit_code=137, oom_killed=True, health_output="bad\x00output\x1b[2J"
     )
@@ -657,6 +684,59 @@ def test_console_history_puts_the_previous_run_in_front_of_the_new_log(world, ag
     assert lines[:2] == ["new 1", "new 2"] and lines[2].startswith(MARK) and len(lines) == 3
 
 
+def test_the_container_s_own_output_can_be_asked_for_without_the_previous_run(
+    api, auth, world, agent_settings
+):
+    """What the panel's diagnostics read: a server that was repaired and recreated must not be
+    diagnosed with what its previous run printed."""
+    docker_ops.retire(agent_settings, IID, settle_seconds=0)
+    world.container = FakeContainer(
+        world.calls, status="running", container_id="new-container", output=b"new 1\nnew 2\n"
+    )
+    assert docker_ops.console_history(IID, 500, None, agent_settings, previous=False) == ["new 1", "new 2"]
+    assert (
+        len(docker_ops.console_history(IID, 500, None, agent_settings)) == 6
+    )  # the console still shows both
+    own = api.get(f"/v1/instances/{IID}/logs", params={"tail": 500, "previous": "false"}, headers=auth)
+    assert own.status_code == 200 and own.json()["lines"] == ["new 1", "new 2"]
+    assert len(api.get(f"/v1/instances/{IID}/logs", params={"tail": 500}, headers=auth).json()["lines"]) == 6
+    # a new container that printed nothing yet: nothing, not the old run
+    world.container = FakeContainer(world.calls, status="created", container_id="third", output=b"")
+    assert docker_ops.console_history(IID, 500, None, agent_settings, previous=False) == []
+    # without a container the record is all there is, whatever was asked for
+    world.container = None
+    assert docker_ops.console_history(IID, 500, None, agent_settings, previous=False)[-2] == "Saving worlds"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        docker.errors.NotFound("No such container: c0ffee"),
+        docker.errors.APIError(
+            "409 Client Error",
+            response=type("R", (), {"status_code": 409, "reason": "Conflict", "headers": {}})(),
+            explanation="can not get logs from container which is dead or marked for removal",
+        ),
+    ],
+)
+def test_logs_of_a_container_that_is_being_removed_are_those_of_its_last_run(
+    api, auth, world, agent_settings, error
+):
+    """Stop was pressed on a failed server: its container is retired while the panel reads its
+    log for the diagnostics. That is a server without a container, not a Docker error (502)."""
+    docker_ops.retire(agent_settings, IID, settle_seconds=0)  # the record is written ...
+    world.container.removed = False  # ... and the removal is still in progress
+    world.container.logs_error = error
+    for params in ({"tail": 100}, {"tail": 100, "previous": "false"}):
+        r = api.get(f"/v1/instances/{IID}/logs", params=params, headers=auth)
+        assert r.status_code == 200, r.text
+        assert r.json()["lines"][-2] == "Saving worlds"
+    # without a record: no container, as for a server that never ran
+    lastrun.delete(agent_settings, IID)
+    r = api.get(f"/v1/instances/{IID}/logs", params={"tail": 100}, headers=auth)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "no_container"
+
+
 def test_console_history_survives_a_broken_record(world, agent_settings):
     folder = agent_settings.state_dir / "last-run"
     folder.mkdir()
@@ -800,6 +880,149 @@ def test_restart_holds_the_lock_from_the_stop_to_the_start(api, auth, world, age
     r = api.post(f"/v1/instances/{IID}/restart", json={"timeout": 5}, headers=auth)
     assert r.status_code == 200 and r.json()["running"] is True
     assert attempts == ["instance_busy"] and world.calls[-2:] == ["docker stop", "docker start"]
+
+
+def _try_the_lock(attempts: list[str], instance_id) -> None:
+    """What a retire that arrives now would find: the per-server lock, taken or not."""
+    try:
+        with docker_ops.instance_lock(instance_id, wait=0.05):
+            attempts.append("got the lock")
+    except AgentError as exc:
+        attempts.append(exc.code)
+
+
+def test_start_holds_the_lock_while_it_starts_the_container(api, auth, world, agent_settings, monkeypatch):
+    """A retire that looked at the exited container must not remove it under a start of it."""
+    attempts: list[str] = []
+    real_start = docker_ops.start
+
+    def start_while_a_retire_arrives(instance_id):
+        _try_the_lock(attempts, instance_id)
+        real_start(instance_id)
+
+    monkeypatch.setattr(docker_ops, "start", start_while_a_retire_arrives)
+    r = api.post(f"/v1/instances/{IID}/start", headers=auth)
+    assert r.status_code == 200 and r.json()["running"] is True
+    assert attempts == ["instance_busy"] and world.calls[-1] == "docker start"
+    _try_the_lock(attempts, IID)
+    assert attempts[-1] == "got the lock"  # and it is free again afterwards
+
+
+def test_apply_holds_the_lock_from_the_removal_of_the_old_container_to_the_start_of_the_new_one(
+    api, auth, world, agent_settings, monkeypatch
+):
+    """Remove, create, start are one step for a retire: it never sees the container in between."""
+    spec = {
+        "name": "s",
+        "image": "itzg/minecraft-server:java21",
+        "memory_limit_mb": 2048,
+        "rcon_password": PASSWORD,
+        "ports": [{"container_port": 25565, "host_port": 25565}],
+    }
+    attempts: list[str] = []
+    real_remove = docker_ops.remove_container
+    new_container = FakeContainer(world.calls, status="created", container_id="new-container")
+
+    def remove(instance_id, **kwargs):
+        _try_the_lock(attempts, instance_id)
+        return real_remove(instance_id, **kwargs)
+
+    def create(_settings, instance_id, _spec, _hash):
+        _try_the_lock(attempts, instance_id)
+        world.container = new_container
+        return new_container
+
+    def start(instance_id):
+        _try_the_lock(attempts, instance_id)
+        new_container.start()
+
+    monkeypatch.setattr(docker_ops, "image_present", lambda _image: True)
+    monkeypatch.setattr(docker_ops, "remove_container", remove)
+    monkeypatch.setattr(docker_ops, "create_container", create)
+    monkeypatch.setattr(docker_ops, "start", start)
+    r = api.put(f"/v1/instances/{IID}/container", json={"spec": spec, "start": True}, headers=auth)
+    assert r.status_code == 200, r.text
+    op = _wait_op(api, auth, r.json()["operation"]["id"])
+    assert op["status"] == "succeeded", op
+    assert op["result"]["recreated"] is True and op["result"]["container"]["id"] == "new-container"
+    assert attempts == [
+        "instance_busy",
+        "instance_busy",
+        "instance_busy",
+    ]  # at the removal, the create and the start
+    _try_the_lock(attempts, IID)
+    assert attempts[-1] == "got the lock"
+
+
+# --- a container that vanishes between the lookup and the request about it -----------------------
+def _gone():
+    raise docker.errors.NotFound("No such container: mcpanel-0123abcd0000")
+
+
+def test_stop_of_a_container_that_was_just_retired_is_no_container_not_a_docker_error(api, auth, world):
+    """A stop takes no lock: an exited container can be retired between its lookup and its reload."""
+    world.container.reload = _gone
+    r = api.post(f"/v1/instances/{IID}/stop", json={"timeout": 5}, headers=auth)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "no_container", r.text
+    assert "docker stop" not in world.calls
+
+
+def test_start_of_a_container_that_was_just_removed_is_no_container_not_a_docker_error(api, auth, world):
+    world.container.reload = _gone
+    r = api.post(f"/v1/instances/{IID}/start", headers=auth)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "no_container", r.text
+    assert "docker start" not in world.calls
+
+
+def test_start_that_fails_for_another_missing_thing_is_still_a_start_failure(api, auth, world):
+    def no_network():
+        raise docker.errors.NotFound("network mcpanel_instances not found")
+
+    world.container.start = no_network
+    r = api.post(f"/v1/instances/{IID}/start", headers=auth)
+    assert r.status_code == 502 and r.json()["error"]["code"] == "start_failed", r.text
+
+
+def test_removing_a_container_that_vanished_is_not_an_error(world, agent_settings):
+    world.container.reload = _gone
+    assert docker_ops.remove_container(IID, timeout=30, settings=agent_settings) is False
+    assert world.calls == []
+
+
+def test_the_list_survives_a_container_that_is_removed_while_it_is_listed(
+    api, auth, agent_settings, monkeypatch
+):
+    """docker-py lists the ids and then inspects every container; one that was retired in between
+    must not fail the list (the panel would show every server of the node as unknown)."""
+    from docker.models.containers import ContainerCollection
+
+    class Api:
+        def containers(self, **_kwargs):
+            return [{"Id": "aaa"}, {"Id": "bbb"}]
+
+        def inspect_container(self, container_id):
+            if container_id == "bbb":
+                raise docker.errors.NotFound("No such container: bbb")
+            labels = {docker_ops.LABEL_MANAGED: "true", docker_ops.LABEL_INSTANCE: str(IID)}
+            return {
+                "Id": container_id,
+                "Name": "/mcpanel-x",
+                "Config": {"Labels": labels, "Image": "i"},
+                "State": {"Status": "running", "Running": True},
+                "NetworkSettings": {"Networks": {}, "Ports": {}},
+            }
+
+    class Client:
+        api = Api()
+
+        def __init__(self) -> None:
+            self.containers = ContainerCollection(client=self)
+
+    monkeypatch.setattr(docker_ops, "client", lambda: Client())
+    r = api.get("/v1/instances", headers=auth)
+    assert r.status_code == 200, r.text
+    assert [c["id"] for c in r.json()["containers"]] == ["aaa"]
+    assert api.get("/v1/ports", headers=auth).status_code == 200
 
 
 def test_forget_last_run_route(api, auth, world, agent_settings):

@@ -13,7 +13,7 @@
 # reach it on the internal Compose network. Never publish this port on the host.
 
 # --- Stage 1: Python dependencies (locked, no dev group) --------------------------------
-FROM python:3.13-slim AS python-deps
+FROM python:3.13-slim-trixie AS python-deps
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --no-dev --no-install-project
 
 # --- Stage 2: runtime ---------------------------------------------------------------------
-FROM python:3.13-slim AS runtime
+FROM python:3.13-slim-trixie AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:$PATH

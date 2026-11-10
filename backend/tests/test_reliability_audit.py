@@ -195,6 +195,95 @@ def test_watchdog_fails_dead_jobs_but_never_live_long_ones(inst, make_instance, 
     assert other.active_job_id is None
 
 
+# --- the Backup row of a job that was cut off ------------------------------------------------------
+def _cut_off_backup(instance, *, kind: str = "manual") -> tuple[Job, Backup]:
+    """A backup job whose worker died (the panel container was restarted): the job still reads
+    RUNNING without a heartbeat, and so does the row run_backup created for it."""
+    now = timezone.now()
+    job = _running_job(instance, exclusive=True, started_at=now - timedelta(minutes=30), heartbeat_at=now - timedelta(minutes=20))
+    backup = Backup.objects.create(
+        instance=instance, name="Nightly", kind=kind, job=job, meta={"node_id": instance.node_id, "node_name": instance.node.name}
+    )
+    return job, backup
+
+
+def test_a_cut_off_backup_the_agent_finished_is_taken_over(inst, fake_agent, clients):
+    job, backup = _cut_off_backup(inst)
+    fake_agent.put_file(inst.id, "world/level.dat", b"x" * 1000)
+    # the agent went on while the panel was down: its snapshot carries the id of the backup
+    fake_agent.create_backup(inst.id, str(backup.id), tags=["kind:manual"])
+    snapshot = fake_agent.repos[str(inst.id)][-1]
+
+    assert watchdog() == 1  # the job is failed as interrupted ...
+    job.refresh_from_db()
+    backup.refresh_from_db()
+    assert (job.status, job.error_code) == (JobStatus.FAILED, "interrupted")
+    # ... and its backup is not left "running": the finished snapshot is taken over
+    assert backup.status == BackupStatus.SUCCEEDED and backup.snapshot_id == snapshot["id"]
+    assert backup.total_bytes == snapshot["summary"]["total_bytes_processed"] > 0
+    assert backup.files_count == 2 and backup.finished_at is not None and backup.error == ""
+    assert backup.consistent is False and any("took it over" in warning for warning in backup.warnings)
+    listed = clients["owner"].get(f"/api/instances/{inst.id}/backups").json()["backups"]
+    assert [(row["id"], row["status"]) for row in listed] == [(str(backup.id), "succeeded")]
+    assert [b.pk for b in local_backups(inst)] == [backup.pk]  # it can be restored and counts for retention
+    watchdog()
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.SUCCEEDED and len(backup.warnings) == 1
+
+
+def test_a_cut_off_backup_without_a_snapshot_is_marked_failed(inst, fake_agent):
+    _job, backup = _cut_off_backup(inst, kind="pre_update")
+    other = Backup.objects.create(instance=inst, name="Of another job", kind="manual")  # no job, just created
+    assert watchdog() == 1
+    backup.refresh_from_db()
+    other.refresh_from_db()
+    assert backup.status == BackupStatus.FAILED and backup.finished_at is not None and backup.snapshot_id == ""
+    assert "was not finished" in backup.error and "ended as failed" in backup.error and "stopped" in backup.error
+    assert other.status == BackupStatus.RUNNING
+
+
+def test_a_backup_of_a_job_that_was_marked_as_failed_is_settled_too(inst, fake_agent):
+    job, backup = _cut_off_backup(inst)
+    runner.finish(job, JobStatus.FAILED, error="Marked as failed by owner", error_code="abandoned")
+    watchdog()
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.FAILED and "Marked as failed by owner" in backup.error
+
+
+def test_a_backup_the_agent_is_still_writing_waits_for_it(inst, fake_agent):
+    _job, backup = _cut_off_backup(inst)
+    fake_agent.active_operations[str(inst.id)] = {"id": "op1", "kind": "backup", "status": "running", "finished_at": None}
+    assert watchdog() == 1
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.RUNNING  # restic is still running on the node
+    fake_agent.create_backup(inst.id, str(backup.id), tags=["kind:manual"])
+    del fake_agent.active_operations[str(inst.id)]
+    watchdog()
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.SUCCEEDED and backup.snapshot_id
+
+
+def test_a_backup_whose_agent_cannot_be_asked_is_given_an_hour(inst, fake_agent):
+    job, backup = _cut_off_backup(inst)
+    fake_agent.failures["list_backups"] = AgentUnavailable()
+    assert watchdog() == 1
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.RUNNING
+    Job.objects.filter(pk=job.pk).update(finished_at=timezone.now() - timedelta(hours=2))
+    watchdog()
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.FAILED and "could not be asked" in backup.error
+
+
+def test_the_backup_of_a_job_that_is_alive_is_left_alone(inst, fake_agent):
+    now = timezone.now()
+    job = _running_job(inst, started_at=now - timedelta(hours=5), heartbeat_at=now - timedelta(seconds=5))
+    backup = Backup.objects.create(instance=inst, name="Big", kind="manual", job=job)
+    assert watchdog() == 0
+    backup.refresh_from_db()
+    assert backup.status == BackupStatus.RUNNING and not fake_agent.called("list_backups")
+
+
 # =====================================================================================
 # 2. Periodic tasks: own queue, expiry, no overlapping runs
 # =====================================================================================

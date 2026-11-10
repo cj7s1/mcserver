@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlsplit
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -244,8 +245,27 @@ SPECTACULAR_SETTINGS = {
     "SERVE_PERMISSIONS": ["rest_framework.permissions.IsAuthenticated", "apps.core.permissions.PasswordChangeEnforced"],
 }
 
+
 # --- Celery ----------------------------------------------------------------------
-CELERY_BROKER_URL = env("MCPANEL_CELERY_BROKER_URL", REDIS_URL)
+def celery_broker_url(url: str) -> str:
+    """The URL as Celery's Redis transport (kombu) reads it.
+
+    Everything else here (redis-py, Django's cache, channels_redis) writes a Redis server on a
+    Unix socket as ``unix:///path/redis.sock?db=0``. kombu has no "unix" transport ("No such
+    transport: unix"): it wants ``redis+socket:///path/redis.sock`` with the database as
+    ``?virtual_host=N``. So MCPANEL_REDIS_URL alone is enough in .env, whatever its form.
+    """
+    parts = urlsplit(url or "")
+    if parts.scheme != "unix":
+        return url
+    query = parse_qs(parts.query)
+    database = (query.get("db") or ["0"])[0].strip() or "0"
+    password = parts.password or (query.get("password") or [""])[0]
+    credentials = f"{quote(parts.username or '', safe='')}:{quote(password, safe='')}@" if (parts.username or password) else ""
+    return f"redis+socket://{credentials}{parts.path}" + (f"?virtual_host={database}" if database != "0" else "")
+
+
+CELERY_BROKER_URL = celery_broker_url(env("MCPANEL_CELERY_BROKER_URL", REDIS_URL) or "")
 CELERY_RESULT_BACKEND = None
 CELERY_TASK_IGNORE_RESULT = True
 CELERY_TASK_ACKS_LATE = True

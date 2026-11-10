@@ -19,6 +19,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -127,7 +128,7 @@ def plan(redis: bool = True):
         )
     specs += [
         sup.ChildSpec("web", ("web",), grace=15, stage=0, after=after),
-        sup.ChildSpec("worker", ("worker",), grace=110, stage=0, after=after),
+        sup.ChildSpec("worker", ("worker",), grace=110, stage=0, after=after, finish_before_restart=True),
         sup.ChildSpec("periodic", ("periodic",), grace=30, stage=1, after=after),
         sup.ChildSpec("beat", ("beat",), grace=10, stage=0, after=after),
     ]
@@ -283,6 +284,45 @@ def test_3_real_children_are_prefixed_on_stdout_and_stderr():
     assert sorted(out) == [b"[worker] one\n", b"[worker] three\n", b"[worker] two\n"]
 
 
+@pytest.mark.skipif(shutil.which("yes") is None, reason="needs coreutils yes")
+def test_a_child_that_never_stops_writing_does_not_starve_the_loop():
+    """`yes` writes faster than the supervisor reads: one round must still end, so the other
+    children are supervised, the status file is written and a stop signal is seen."""
+    written = [0]
+
+    def count(data: bytes) -> None:
+        written[0] += len(data)
+
+    procs = sup.Processes(write=count)
+    pid = procs.spawn("flood", ("yes", "a line of output, over and over"), dict(os.environ))
+    rounds: list[tuple[float, int]] = []  # (seconds, bytes passed on) per round
+
+    def loop() -> None:
+        for _ in range(5):
+            began, before = time.monotonic(), written[0]
+            procs.pump(0.05)
+            rounds.append((time.monotonic() - began, written[0] - before))
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    thread.join(20)
+    stuck = thread.is_alive()
+    procs.signal(pid, signal.SIGKILL, group=True)  # (also ends a loop that is stuck in its read)
+    thread.join(20)
+    deadline = time.monotonic() + 10
+    done: list = []
+    while not done and time.monotonic() < deadline:
+        procs.pump(0.05)
+        done = procs.reap()
+    assert not stuck, "pump() never came back while the child was writing"
+    assert len(rounds) == 5 and max(seconds for seconds, _size in rounds) < 5
+    # every round passed output on: a bounded piece of it (what was read, plus the name in front of each line)
+    per_round = sup.READ_CHUNK * sup.READ_CHUNKS_PER_ROUND
+    assert sum(size for _seconds, size in rounds) > 0
+    assert max(size for _seconds, size in rounds) <= 2 * per_round
+    assert done and done[0][0] == pid and not procs.fds
+
+
 def test_output_of_the_ping_command_is_captured_whole_even_when_it_ends_before_it_is_reaped():
     procs = sup.Processes(write=lambda _data: None)
     pid = procs.spawn(
@@ -388,6 +428,8 @@ def test_5_6_7_the_panel_children():
     assert periodic[periodic.index("-l") + 1] == "warning" and beat[beat.index("-l") + 1] == "warning"
     # stop: the job worker gets 110 s; Redis goes last
     assert by_name["worker"].grace == 110 and by_name["worker"].stage < by_name["periodic"].stage < by_name["redis"].stage
+    # only the job worker is waited for without a time limit when Redis came back
+    assert [name for name, spec in by_name.items() if spec.finish_before_restart] == ["worker"]
     assert all(spec.after == ("redis",) for spec in specs if spec.name != "redis")
     # the ping asks both workers
     assert set(probe.nodes.values()) == {"worker", "periodic"}
@@ -405,6 +447,75 @@ def test_redis_gets_a_socket_only_no_persistence_and_none_of_the_secrets():
     assert argv[argv.index("--save") + 1] == "" and argv[argv.index("--appendonly") + 1] == "no"
     assert "--bind" not in argv
     assert redis.env == {"PATH": "/usr/bin", "TZ": "UTC", "LANG": "C.UTF-8"}
+    # the one file Redis would load at its start has a fixed name in the socket's directory
+    assert argv[argv.index("--dir") + 1] == "/run/mcpanel" and argv[argv.index("--dbfilename") + 1] == "dump.rdb"
+    assert redis.before_start is not None
+
+
+def test_what_redis_would_load_is_removed_before_every_start(tmp_path):
+    """The web process can write into the run directory, and cache values are pickles: a dump
+    file there must never be loaded when the Redis child is started again."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    env = {"PATH": "/usr/bin", "MCPANEL_REDIS_URL": f"unix://{run_dir}/redis.sock?db=0"}
+    redis = sup.panel_plan(env, str(run_dir))[0][0]
+    assert redis.argv[redis.argv.index("--dir") + 1] == str(run_dir)
+    assert redis.before_start() is None  # nothing there: nothing to say
+
+    secret = tmp_path / "elsewhere.txt"
+    secret.write_text("keep")
+    (run_dir / "dump.rdb").write_bytes(b"REDIS0011 planted")
+    (run_dir / "temp-123.rdb").write_bytes(b"x")
+    (run_dir / "appendonlydir").mkdir()
+    (run_dir / "appendonlydir" / "appendonly.aof.1.base.rdb").write_bytes(b"x")
+    (run_dir / "appendonly.aof").symlink_to(secret)  # a link is removed, what it points to is not
+    (run_dir / "supervisor.json").write_text("{}")
+    (run_dir / "redis.sock").write_text("")
+    note = redis.before_start()
+    assert sorted(p.name for p in run_dir.iterdir()) == ["redis.sock", "supervisor.json"]
+    assert secret.read_text() == "keep"
+    assert "dump.rdb" in note and "temp-123.rdb" in note and str(run_dir) in note
+    # a dump "file" that is a directory goes, too
+    (run_dir / "dump.rdb").mkdir()
+    (run_dir / "dump.rdb" / "x").write_text("")
+    redis.before_start()
+    assert not (run_dir / "dump.rdb").exists()
+    assert sup.remove_redis_data(str(tmp_path / "missing")) == []
+
+
+def test_the_preparation_runs_before_every_start_and_a_failure_keeps_the_child_down():
+    calls: list[str] = []
+    outcome: dict[str, object] = {"raise": None, "note": "removed dump.rdb from /run/mcpanel"}
+
+    def prepare():
+        calls.append("prepare")
+        if outcome["raise"]:
+            raise outcome["raise"]
+        return outcome["note"]
+
+    procs = FakeProcs()
+    lines: list[str] = []
+    specs = [
+        sup.ChildSpec("redis", ("redis-server",), grace=5, stage=2, before_start=prepare),
+        sup.ChildSpec("web", ("web",), grace=15, stage=0, after=("redis",)),
+    ]
+    supervisor = sup.Supervisor(specs, procs, environ={}, log=lines.append)
+    drive(supervisor, procs, 2)
+    assert calls == ["prepare"] and procs.started("redis") == 1
+    assert any("before the start of redis: removed dump.rdb" in line for line in lines)
+    # the Redis child dies: the file a process may have planted meanwhile is removed before the restart
+    procs.die("redis")
+    drive(supervisor, procs, 3)
+    assert calls == ["prepare", "prepare"] and procs.started("redis") == 2
+    # something that cannot be removed: Redis is not started next to it, and the supervisor goes on
+    outcome["raise"] = PermissionError(13, "Permission denied", "/run/mcpanel/dump.rdb")
+    procs.die("redis")
+    drive(supervisor, procs, 20)
+    assert procs.started("redis") == 2 and states(supervisor)["redis"] == "backoff" and not supervisor.done
+    assert any("redis is not started: its preparation failed" in line and "dump.rdb" in line for line in lines)
+    outcome["raise"] = None
+    drive(supervisor, procs, 31)
+    assert procs.started("redis") == 3 and states(supervisor)["redis"] == "running"
 
 
 def test_an_external_redis_url_means_no_redis_child():
@@ -462,6 +573,48 @@ def test_when_redis_dies_it_is_restarted_and_then_the_others():
     assert any("restarting worker: redis was started again" in line for line in lines)
     # a deliberate restart is not a failure: no backoff was added
     assert supervisor.children["worker"].failures == 0
+
+
+def test_a_busy_job_worker_finishes_its_job_when_redis_came_back_and_is_never_killed_for_it():
+    """A restore that needs hours must not be cut off 110 s after the Redis child was restarted."""
+    supervisor, procs, ready, lines = make()
+    drive(supervisor, procs, 5)
+    procs.term_delay["worker"] = 3 * 3600.0  # Celery's warm shutdown: it exits when its job is done
+    ready["redis"] = False
+    procs.die("redis")
+    drive(supervisor, procs, 3)
+    ready["redis"] = True
+    drive(supervisor, procs, 1)
+    assert procs.sent("worker", signal.SIGTERM) == 1 and states(supervisor)["worker"] == "stopping"
+    assert any("restarting worker: redis was started again (it finishes what it is doing first" in line for line in lines)
+    drive(supervisor, procs, 3 * 3600 - 10, step=1.0)
+    assert procs.sent("worker", signal.SIGKILL) == 0 and procs.sent("worker", signal.SIGTERM) == 1
+    assert states(supervisor)["worker"] == "stopping" and procs.started("worker") == 1
+    # the others were restarted right away, with their own grace periods
+    assert all(procs.started(name) == 2 and states(supervisor)[name] == "running" for name in ("web", "periodic", "beat"))
+    drive(supervisor, procs, 20)  # the job is done: the worker exits by itself and is started again
+    assert procs.started("worker") == 2 and states(supervisor)["worker"] == "running"
+    assert procs.sent("worker", signal.SIGKILL) == 0 and supervisor.children["worker"].failures == 0
+
+
+def test_a_container_stop_while_the_worker_finishes_its_job_gives_it_its_grace_period_once():
+    supervisor, procs, ready, _lines = make()
+    drive(supervisor, procs, 5)
+    procs.term_delay["worker"] = None  # still busy, whatever happens
+    ready["redis"] = False
+    procs.die("redis")
+    drive(supervisor, procs, 3)
+    ready["redis"] = True
+    drive(supervisor, procs, 600)
+    assert states(supervisor)["worker"] == "stopping" and procs.sent("worker", signal.SIGKILL) == 0
+    began = procs.now
+    supervisor.stop_requested = True
+    drive(supervisor, procs, 109)
+    # no second SIGTERM (Celery would stop at once and lose the job that has 110 s to finish)
+    assert procs.sent("worker", signal.SIGTERM) == 1 and procs.sent("worker", signal.SIGKILL) == 0
+    drive(supervisor, procs, 10)
+    assert procs.sent("worker", signal.SIGKILL) == 1 and supervisor.done
+    assert procs.now - began <= sup.STOP_DEADLINE + 1
 
 
 def test_a_child_that_crashed_while_redis_was_down_waits_for_it():

@@ -15,7 +15,7 @@ from apps.nodes.client import AgentClient, AgentError
 from . import properties
 from .models import DesiredState, Instance, Status
 from .reconcile import reconcile_instance
-from .spec import CONTAINER_FORMAT, applied_container_format, build_spec, restart_required, spec_hash
+from .spec import CONTAINER_FORMAT, applied_container_format, build_spec, spec_hash, spec_outdated
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,10 @@ def apply_container(
     container either (archiving removed it; the next start after unarchiving creates it from the
     current configuration). The flag is read from the database because the caller's copy may
     predate the archive.
+
+    A server that runs afterwards is recorded as meant to run (``_started``): the jobs that start
+    a server on the way (an update with "start afterwards", a recreate of a running server) do
+    not say so themselves.
     """
     if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
         if start:
@@ -60,6 +64,9 @@ def apply_container(
     instance.container_spec_hash = spec_hash(spec, applied)
     instance.applied_revision = Instance.objects.filter(pk=instance.pk).values_list("config_revision", flat=True).first() or 0
     instance.save(update_fields=["container_spec_hash", "applied_revision"])
+    container = done.get("container") if isinstance(done.get("container"), dict) else {}
+    if start or container.get("running"):  # (the agent also starts the replacement of a container that was running)
+        _started(instance)
     return done
 
 
@@ -74,6 +81,19 @@ def _set_desired(instance: Instance, desired: str) -> None:
     instance.resume_after_boot = False
     instance.resume_flagged_at = None
     Instance.objects.filter(pk=instance.pk).update(desired_state=desired, resume_after_boot=False, resume_flagged_at=None)
+
+
+def _started(instance: Instance) -> None:
+    """A job has just started the server: from now on it is meant to run.
+
+    Every start by a job ends here (``apply_container`` with a start, ``start_server``, the
+    restart of an existing container), whatever the recorded state was before: a software or
+    modpack update with "start afterwards" on a stopped server, or a restart during which someone
+    pressed Kill (which records "stopped"). A server that runs while it is recorded as "stopped"
+    is treated as stopped on purpose when it dies: no "failed", no notification, no stop of a
+    crash loop, and its container is removed as that of a stopped server.
+    """
+    _set_desired(instance, DesiredState.RUNNING)
 
 
 def _drop_resume_mark(instance: Instance) -> None:
@@ -133,12 +153,13 @@ def start_server(
     client = AgentClient(instance.node)
     status = client.status(instance.id)
     exists = bool(status.get("exists"))
-    outdated = exists and apply_changes and (restart_required(instance) or not instance.container_spec_hash)
+    outdated = exists and apply_changes and (spec_outdated(instance) or not instance.container_spec_hash)
     if exists and not outdated:
         if apply_changes:
             ctx.progress(0.3, "Starting container")
         try:
             client.start(instance.id)
+            _started(instance)
             return False
         except AgentError as exc:
             if exc.error_code != "no_container":
@@ -261,7 +282,7 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
     client = AgentClient(instance.node)
     _set_desired(instance, DesiredState.RUNNING)
     status = client.status(instance.id)
-    if not status.get("exists") or restart_required(instance):
+    if not status.get("exists") or spec_outdated(instance):
         if status.get("exists"):
             # changed settings, or a container made by an older release or agent (spec.CONTAINER_FORMAT)
             ctx.progress(
@@ -276,6 +297,7 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.progress(0.2, "Restarting server", force=True)
         try:
             _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
+            _started(instance)  # also after a Kill that came in while the server was stopping
         except AgentError as exc:
             if exc.error_code != "no_container":
                 raise

@@ -217,9 +217,29 @@ def enqueue(
             locked.save(update_fields=["active_job"])
         else:
             job = Job.objects.create(kind=kind, title=title, instance=instance, user=user, params=params or {}, exclusive=False)
-        transaction.on_commit(lambda: run_job.delay(str(job.id)))
+        transaction.on_commit(lambda: dispatch(job.id))
     broadcast("job.created", job_payload(job), str(job.instance_id) if job.instance_id else None)
     return job
+
+
+def dispatch(job_id: Any) -> bool:
+    """Send the message that makes a worker run the job. Returns False when it could not be sent.
+
+    The job exists and is QUEUED at this point (and holds its server, if it is exclusive), so a
+    broker that is not reachable for a moment (Redis is being restarted) must not turn into an
+    error for whoever queued it: that request would answer 500 for a job that then runs anyway.
+    The job stays queued and its message is sent again: when the job worker starts
+    (``tasks.resend_queued_jobs``, the supervisor restarts the workers after Redis) and by the
+    watchdog after ``tasks.REDISPATCH_QUEUED_AFTER``.
+    """
+    try:
+        run_job.delay(str(job_id))
+        return True
+    except Exception as exc:
+        log.warning(
+            "Job %s is queued, but its message could not be sent (%s: %s); it is sent again", job_id, type(exc).__name__, exc
+        )
+        return False
 
 
 def claim_lock(job: Job, ctx: JobContext, *, wait: float = 0.0, poll: float = 5.0) -> None:
@@ -312,6 +332,10 @@ INTERRUPTED_ERROR = (
 @shared_task(name="apps.jobs.runner.run_job", acks_late=True)
 def run_job(job_id: str) -> None:
     with transaction.atomic():
+        # The row lock is what makes a second message for the same job harmless, and queued jobs
+        # are sent again on purpose (dispatch, tasks.resend_queued_jobs, the watchdog): two workers
+        # that take the two messages at the same moment must not both find the job QUEUED.
+        # tests/test_jobs.py runs exactly that with two threads.
         job = Job.objects.select_for_update().filter(pk=job_id).first()
         if job is None:
             return

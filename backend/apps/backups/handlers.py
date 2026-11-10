@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
 from apps.instances.handlers import apply_container, ensure_stopped, start_server
 from apps.instances.models import Instance
-from apps.jobs.models import Job
+from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.jobs.runner import JobContext, register
 from apps.nodes.client import AgentClient
 from apps.nodes.models import Node
@@ -170,6 +172,118 @@ def run_backup(
     for w in backup.warnings:
         ctx.log(f"warning: {w}")
     return backup
+
+
+# --- backups whose job ended without settling them ---------------------------------------------
+# run_backup marks its row failed when the agent reports an error. A job that is cut off (the
+# panel container was restarted, the worker was killed, someone marked the job as failed) never
+# gets there: its row would read "running" for good, although the job is long over. The agent
+# goes on with a backup it has started, so the snapshot may even exist. The job watchdog
+# (apps/jobs/tasks.py, every 2 minutes) settles such rows here.
+ADOPTED_WARNING = (
+    "The job that started this backup did not see it finish (it was interrupted or marked as failed). The node's "
+    "agent completed the backup, and the panel took it over afterwards. Whether the world was paused while it was "
+    "taken is not known."
+)
+# How long a row whose agent cannot be asked is left alone before it is marked failed anyway.
+SETTLE_GIVE_UP_AFTER = timedelta(hours=1)
+# A row without a job is only looked at once it is this old (its job was deleted, not just created).
+SETTLE_JOBLESS_AFTER = timedelta(minutes=10)
+SETTLE_AGENT_TIMEOUT = 60.0
+
+
+def _snapshot_of(backup: Backup, snapshots: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The finished snapshot the agent tagged with this backup's id (the newest, if several)."""
+    tag = f"backup:{backup.id}"
+    found = [s for s in snapshots if tag in (s.get("tags") or []) and s.get("id")]
+    return max(found, key=lambda s: str(s.get("time") or "")) if found else None
+
+
+def _when(value: Any) -> datetime | None:
+    """A time as restic writes it (RFC 3339 with nanoseconds), or None."""
+    try:
+        return parse_datetime(str(value or ""))
+    except (ValueError, TypeError):
+        return None
+
+
+def _adopt(backup: Backup, snapshot: dict[str, Any]) -> None:
+    summary = snapshot.get("summary") or {}
+    counts = [summary.get(key) for key in ("files_new", "files_changed", "files_unmodified")]
+    started, ended = _when(summary.get("backup_start")), _when(summary.get("backup_end"))
+    backup.status = BackupStatus.SUCCEEDED
+    backup.snapshot_id = str(snapshot["id"])
+    backup.data_added_bytes = summary.get("data_added")
+    backup.total_bytes = summary.get("total_bytes_processed")
+    backup.files_count = (
+        sum(c or 0 for c in counts) if any(c is not None for c in counts) else summary.get("total_files_processed")
+    )
+    backup.duration_seconds = (ended - started).total_seconds() if started and ended else None
+    backup.consistent = False  # only the agent operation's result says so, and that is gone
+    backup.warnings = [*(backup.warnings or []), ADOPTED_WARNING]
+    backup.error = ""
+    backup.finished_at = ended or _when(snapshot.get("time")) or timezone.now()
+    backup.save()
+
+
+def settle_orphaned_backups(now: datetime | None = None) -> dict[str, int]:
+    """Settle backup rows that still read "running" although their job has ended.
+
+    For each one the node that holds the repository is asked: a finished snapshot tagged with
+    the backup's id is taken over (the row becomes "succeeded" with the snapshot's data);
+    without one the row becomes "failed". While the agent still works on the server (its
+    operation goes on after the job was cut off) or cannot be asked, the row is left for the
+    next run, for at most SETTLE_GIVE_UP_AFTER after the job ended.
+    """
+    now = now or timezone.now()
+    result = {"adopted": 0, "failed": 0, "waiting": 0}
+    rows = Backup.objects.filter(status=BackupStatus.RUNNING).select_related("instance__node", "job")
+    for backup in rows:
+        job = backup.job
+        if job is not None and job.status in ACTIVE_STATUSES:
+            continue  # being taken right now
+        if job is None and now - backup.created_at < SETTLE_JOBLESS_AFTER:
+            continue
+        ended_at = (job.finished_at if job is not None else None) or backup.created_at
+        why = (
+            f"job '{job.title}' ended as {job.status}" + (f": {job.error}" if job.error else "")
+            if job is not None
+            else "its job is gone"
+        )
+        give_up = now - ended_at > SETTLE_GIVE_UP_AFTER
+        snapshot = None
+        busy = False
+        note = ""
+        node = repository_node(backup, backup.instance)
+        if node is None:
+            note = " The node that held it no longer exists."
+        else:
+            try:
+                client = AgentClient(node, timeout=SETTLE_AGENT_TIMEOUT)
+                snapshot = _snapshot_of(backup, client.list_backups(backup.instance_id, timeout=SETTLE_AGENT_TIMEOUT))
+                if snapshot is None:
+                    operation = client.status(backup.instance_id).get("operation") or {}
+                    busy = operation.get("kind") == "backup" and not operation.get("finished_at")
+            except ApiError as exc:
+                if not give_up:
+                    log.info("backup %s: the agent of node %s cannot be asked yet (%s)", backup.id, node.name, exc)
+                    result["waiting"] += 1
+                    continue
+                note = f" The node's agent could not be asked whether it finished the backup ({exc.detail})."
+        if snapshot is not None:
+            _adopt(backup, snapshot)
+            log.warning("backup %s (%s) was finished by the agent after %s; taken over", backup.id, backup.name, why)
+            result["adopted"] += 1
+        elif busy and not give_up:
+            result["waiting"] += 1  # the agent is still writing it: looked at again by the next run
+        else:
+            backup.status = BackupStatus.FAILED
+            backup.error = f"The backup was not finished: {why}.{note}"[:4000]
+            backup.finished_at = now
+            backup.save(update_fields=["status", "error", "finished_at"])
+            log.warning("backup %s (%s) marked failed: %s", backup.id, backup.name, backup.error)
+            result["failed"] += 1
+    return result
 
 
 def apply_retention(instance: Instance, ctx: JobContext) -> list[str]:

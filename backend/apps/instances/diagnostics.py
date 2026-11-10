@@ -8,14 +8,17 @@ signature matches, nothing is reported.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from apps.core.errors import ApiError
-from apps.nodes.client import AgentClient
+from apps.nodes.client import AgentClient, AgentError
 
 from .models import Instance
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -254,23 +257,30 @@ def manual_downloads(instance: Instance) -> dict[str, Any]:
 
 
 def diagnose(instance: Instance, tail: int = 1500) -> dict[str, Any]:
-    """Problems found in the console output and the state of the server's last (or current) run.
+    """Problems found in the console output and the state of ONE run of the server.
 
-    A stopped server has no container: the agent then answers both the console lines and the
-    restart count from the record it kept of the last run, so the cause of a crash loop is
-    still shown after the server was stopped.
+    While the server has a container, that is the container's own run and nothing else: the
+    agent keeps the end of the previous run in front of a new container's log for the console,
+    and read here it would show the problem of a run that is over (a server repaired with
+    "Change Java version" would keep its old diagnosis, a new crash loop would be explained with
+    the previous one's cause). A stopped server has no container: then the run is the last one,
+    from the record the agent kept of it (console lines and restart count), so the cause of a
+    crash loop is still shown after the server was stopped.
     """
     client = AgentClient(instance.node)
-    try:
-        lines = client.logs(instance.id, tail=tail)
-    except ApiError as exc:
-        if exc.error_code == "no_container":  # no container and no record of an earlier run
-            lines = []
-        else:
-            raise
-    issues = analyze_logs(instance, lines)
     status = client.status(instance.id)
-    run = status if status.get("exists") else (status.get("last_run") or {})
+    exists = bool(status.get("exists"))
+    try:
+        lines = client.logs(instance.id, tail=tail, previous=not exists)
+    except AgentError as exc:
+        # no_container: neither a container nor a record. Anything else the agent answers here
+        # (an agent from before "a container that is being removed counts as none" answers a
+        # Docker error while Stop removes the container) only means: no lines to look at now.
+        if exc.error_code != "no_container":
+            log.info("diagnostics of %s: no console lines (%s: %s)", instance.pk, exc.error_code, exc.detail)
+        lines = []
+    issues = analyze_logs(instance, lines)
+    run = status if exists else (status.get("last_run") or {})
     restarts = int(run.get("restart_count") or 0)
     if restarts >= 3 and instance.ready_at is None:
         issues.insert(

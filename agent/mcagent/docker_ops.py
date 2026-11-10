@@ -158,11 +158,23 @@ def get_container(instance_id: UUID) -> Container | None:
     return c
 
 
+def no_container() -> AgentError:
+    return AgentError("The instance has no container; apply its configuration first", "no_container", 404)
+
+
 def require_container(instance_id: UUID) -> Container:
     c = get_container(instance_id)
     if c is None:
-        raise AgentError("The instance has no container; apply its configuration first", "no_container", 404)
+        raise no_container()
     return c
+
+
+def container_is_gone(exc: Exception) -> bool:
+    """Docker answered a request about a container with "No such container": it was removed
+    between the lookup and this request (a stopped server's container is retired, or someone
+    ran ``docker rm``). A 404 about something else (a network that is missing) does not count.
+    """
+    return isinstance(exc, NotFound) and "no such container" in str(exc.explanation or exc).lower()
 
 
 def label_safe_name(name: str) -> str:
@@ -316,7 +328,12 @@ def remove_container(
     if c is None:
         return False
     settings = settings or get_settings()
-    graceful_stop(settings, c, timeout)  # its warnings are in the agent log
+    try:
+        graceful_stop(settings, c, timeout)  # its warnings are in the agent log
+    except NotFound as exc:
+        if container_is_gone(exc):
+            return False  # removed between the lookup and the stop: there is none any more
+        raise
     if save_last_run:
         try:
             save_last_run_record(settings, instance_id, c)
@@ -324,7 +341,10 @@ def remove_container(
             log.warning(
                 "The last-run record of %s was not saved before its container was removed: %s", c.name, exc
             )
-    c.remove(v=False)
+    try:
+        c.remove(v=False)
+    except NotFound:
+        pass  # removed by someone else meanwhile: the result is the same
     return True
 
 
@@ -526,10 +546,14 @@ def reattach_recreated_networks(c: Container) -> list[str]:
 
 def start(instance_id: UUID) -> None:
     c = require_container(instance_id)
-    reattach_recreated_networks(c)
     try:
+        reattach_recreated_networks(c)
         c.start()
     except APIError as exc:
+        if container_is_gone(exc):
+            # removed between the lookup and this request: the same answer as without a container,
+            # which the panel answers by creating one (404 no_container, not 502)
+            raise no_container() from exc
         text = str(exc.explanation or exc)
         code = (
             "port_conflict"
@@ -750,7 +774,15 @@ def _stopped_exit_code(c: Container) -> int | None:
 
 def stop(instance_id: UUID, timeout: int | None, settings: Settings | None = None) -> StopResult:
     c = require_container(instance_id)
-    return graceful_stop(settings or get_settings(), c, timeout)
+    try:
+        return graceful_stop(settings or get_settings(), c, timeout)
+    except NotFound as exc:
+        if container_is_gone(exc):
+            # A stop takes no lock: the container of a server that was not running can be retired
+            # between the lookup and the first request about it. That is "no container" (404),
+            # which the panel's stop takes as stopped, and not a Docker error (502).
+            raise no_container() from exc
+        raise
 
 
 def kill(instance_id: UUID) -> None:
@@ -841,7 +873,12 @@ def status(instance_id: UUID, settings: Settings | None = None) -> dict[str, Any
 
 def list_managed() -> list[dict[str, Any]]:
     out = []
-    for c in client().containers.list(all=True, filters={"label": f"{LABEL_MANAGED}=true"}):
+    # ignore_removed: docker-py lists the ids and then inspects each container. One that is
+    # removed in between (a retire, an apply) must not fail the whole list: the panel would mark
+    # every server of the node "unknown" for a pass.
+    for c in client().containers.list(
+        all=True, filters={"label": f"{LABEL_MANAGED}=true"}, ignore_removed=True
+    ):
         info = describe(c)
         info["instance_id"] = c.labels.get(LABEL_INSTANCE)
         out.append(info)
@@ -851,7 +888,7 @@ def list_managed() -> list[dict[str, Any]]:
 def published_ports() -> list[dict[str, Any]]:
     """Host ports published by *any* container on this Docker host (for conflict checks)."""
     used = []
-    for c in client().containers.list(all=False):
+    for c in client().containers.list(all=False, ignore_removed=True):
         for key, bindings in (c.attrs.get("NetworkSettings", {}).get("Ports") or {}).items():
             _cport, _, proto = key.partition("/")
             for b in bindings or []:
@@ -945,14 +982,28 @@ def previous_run_lines(settings: Settings, instance_id: UUID, c: Container | Non
         return []
 
 
+def _is_gone(exc: APIError) -> bool:
+    """Docker's answer to a read of the log of a container that was removed, or is being
+    removed, under the request (404, or 409 "... is dead or marked for removal")."""
+    return isinstance(exc, NotFound) or exc.status_code in (404, 409)
+
+
 def console_history(
-    instance_id: UUID, tail: int = 500, since: int | None = None, settings: Settings | None = None
+    instance_id: UUID,
+    tail: int = 500,
+    since: int | None = None,
+    settings: Settings | None = None,
+    previous: bool = True,
 ) -> list[str]:
     """The last ``tail`` lines of console output: the container log, with the end of the
     previous run (the last-run record) in front of it while the log is shorter than ``tail``.
 
     Without a container the answer is the last-run record alone; without either it is
-    404 ``no_container`` as before. ``since`` reads the current container only.
+    404 ``no_container`` as before. A container that is removed while it is read (a stopped
+    server's container is retired) counts as "without a container". ``since`` reads the current
+    container only, and so does ``previous=False``: the output of this container's own run and
+    nothing of the run before it (the panel's diagnostics ask like that, or a server that was
+    repaired and recreated would still be diagnosed with the problem of its previous run).
     """
     settings = settings or get_settings()
     c = get_container(instance_id)
@@ -960,19 +1011,21 @@ def console_history(
     if c is not None:
         try:
             lines = _container_log(c, tail, since).splitlines()
-        except NotFound:  # removed between the two calls: answer like for a server without one
-            c = None
+        except APIError as exc:
+            if not _is_gone(exc):
+                raise
+            c = None  # removed between the two calls: answer like for a server without one
     if c is None:
-        previous = [] if since else previous_run_lines(settings, instance_id, None)
-        if not previous and lastrun.summary(settings, instance_id) is None:
+        record_lines = [] if since else previous_run_lines(settings, instance_id, None)
+        if not record_lines and lastrun.summary(settings, instance_id) is None:
             raise AgentError(
                 "The instance has no container; apply its configuration first", "no_container", 404
             )
-        return previous[-tail:]
-    if not since and len(lines) < tail:
-        previous = previous_run_lines(settings, instance_id, c)
-        if previous:
-            lines = previous[-(tail - len(lines)) :] + lines
+        return record_lines[-tail:]
+    if previous and not since and len(lines) < tail:
+        record_lines = previous_run_lines(settings, instance_id, c)
+        if record_lines:
+            lines = record_lines[-(tail - len(lines)) :] + lines
     return lines
 
 

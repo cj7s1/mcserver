@@ -220,8 +220,14 @@ class AgentClient:
     def disk(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("GET", f"/v1/instances/{instance_id}/disk", timeout=120)
 
-    def logs(self, instance_id: UUID, tail: int = 500) -> list[str]:
-        return self._json("GET", f"/v1/instances/{instance_id}/logs", params={"tail": tail})["lines"]
+    def logs(self, instance_id: UUID, tail: int = 500, *, previous: bool = True) -> list[str]:
+        """The last ``tail`` console lines. With a container the agent puts the end of the previous
+        run (its last-run record) in front of a short log; ``previous=False`` asks for the
+        container's own output only. Without a container the answer is the record either way."""
+        params: dict[str, Any] = {"tail": tail}
+        if not previous:
+            params["previous"] = "false"
+        return self._json("GET", f"/v1/instances/{instance_id}/logs", params=params)["lines"]
 
     def command(self, instance_id: UUID, command: str, timeout: float = 30) -> str:
         return self._json(
@@ -414,8 +420,8 @@ class AgentClient:
         )["operation"]
 
     # -- backups -------------------------------------------------------------------------
-    def list_backups(self, instance_id: UUID) -> list[dict[str, Any]]:
-        return self._json("GET", f"/v1/instances/{instance_id}/backups", timeout=300)["snapshots"]
+    def list_backups(self, instance_id: UUID, timeout: float = 300) -> list[dict[str, Any]]:
+        return self._json("GET", f"/v1/instances/{instance_id}/backups", timeout=timeout)["snapshots"]
 
     def create_backup(
         self, instance_id: UUID, backup_id: str, *, tags: list[str], consistency: str = "auto", excludes: list[str] | None = None

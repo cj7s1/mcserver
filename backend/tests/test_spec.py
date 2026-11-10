@@ -15,6 +15,7 @@ from apps.instances.spec import (
     image_for,
     restart_required,
     spec_hash,
+    spec_outdated,
 )
 
 pytestmark = pytest.mark.django_db
@@ -221,13 +222,27 @@ def test_build_spec_optional_fields():
 
 
 def test_spec_hash_and_restart_required():
-    instance = inst()
+    instance = inst(container_state="running")
     assert restart_required(instance) is False  # never applied
     instance.container_spec_hash = current_spec_hash(instance)
     assert restart_required(instance) is False
     instance.memory_mb = 3072
     assert restart_required(instance) is True
     assert spec_hash({"a": 1, "b": 2}) == spec_hash({"b": 2, "a": 1})
+
+
+@pytest.mark.parametrize(
+    ("container_state", "expected"),
+    [("running", True), ("exited", True), ("created", True), ("restarting", True), ("", False)],
+)
+def test_only_a_server_with_a_container_reads_restart_required(container_state, expected):
+    """A stopped server has no container (it is removed once the server is stopped): there is
+    nothing to restart, and the next start creates the container from the current settings."""
+    instance = inst(container_state=container_state)
+    instance.container_spec_hash = current_spec_hash(instance)
+    instance.memory_mb = 3072
+    assert spec_outdated(instance) is True  # what the jobs compare, whatever the reconciler last saw
+    assert restart_required(instance) is expected
 
 
 def test_container_format_is_hashed_on_the_panel_side_only(monkeypatch):
@@ -242,6 +257,7 @@ def test_container_format_is_hashed_on_the_panel_side_only(monkeypatch):
     monkeypatch.setattr(spec_module, "CONTAINER_FORMAT", spec_module.CONTAINER_FORMAT + 1)
     assert spec_hash(spec) != current
     # a container made by the next format reads restart-required under this one, and back
+    instance.container_state = "running"
     instance.container_spec_hash = current
     assert restart_required(instance) is True
     instance.container_spec_hash = current_spec_hash(instance)
@@ -257,8 +273,13 @@ def test_containers_from_before_the_format_number_read_restart_required():
     legacy = hashlib.sha256(json.dumps(build_spec(instance), sort_keys=True).encode()).hexdigest()[:16]
     assert legacy != current_spec_hash(instance)
     instance.container_spec_hash = legacy
+    instance.container_state = "running"
     assert restart_required(instance) is True
-    # a server that never had a container (or is archived) is not affected
+    # a stopped server whose container was removed has nothing to restart ...
+    instance.container_state = ""
+    assert restart_required(instance) is False and spec_outdated(instance) is True
+    # ... and a server that never had a container (or is archived) is not affected either
+    instance.container_state = "running"
     instance.container_spec_hash = ""
     assert restart_required(instance) is False
 

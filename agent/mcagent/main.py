@@ -349,7 +349,11 @@ async def apply_spec(
             existing = docker_ops.get_container(instance_id)
             was_running = False
             if existing is not None:
-                existing.reload()
+                try:
+                    existing.reload()
+                except docker.errors.NotFound:
+                    existing = None  # removed from outside the agent between the two requests
+            if existing is not None:
                 was_running = existing.status in ("running", "restarting")
                 op.update(0.88, "Stopping and removing previous container (data is kept)")
                 docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout, settings=settings)
@@ -658,12 +662,17 @@ async def get_logs(
     instance_id: UUID,
     tail: int = Query(500, ge=1, le=20000),
     since: int | None = None,
+    previous: bool = True,
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """The last ``tail`` console lines (``docker_ops.console_history``): the container log, with
     the end of the previous run in front of it; for a server without a container, the end of
-    its last run."""
-    return {"lines": await run_in_threadpool(docker_ops.console_history, instance_id, tail, since, settings)}
+    its last run. ``previous=false`` leaves the previous run out when there is a container."""
+    return {
+        "lines": await run_in_threadpool(
+            docker_ops.console_history, instance_id, tail, since, settings, previous
+        )
+    }
 
 
 # Console output is produced by the Minecraft process (third-party code): every buffer

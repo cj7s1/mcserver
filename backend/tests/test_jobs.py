@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
+from django.db import connections
 from django.utils import timezone
+from kombu.exceptions import OperationalError
 
 from apps.backups.models import Backup, BackupKind, BackupStatus, RetentionPolicy
 from apps.core.errors import ApiError, ConflictError
@@ -13,6 +18,7 @@ from apps.instances.models import Instance
 from apps.instances.reconcile import reconcile_instance, reconcile_node
 from apps.jobs import runner
 from apps.jobs.models import Job, JobStatus
+from apps.jobs.tasks import resend_queued_jobs
 from apps.nodes.client import AgentUnavailable
 
 pytestmark = pytest.mark.django_db
@@ -130,6 +136,92 @@ def test_interrupted_job_is_not_rerun(inst, temp_handlers):
     runner.run_job(str(job.id))
     assert calls == []
     runner.run_job("00000000-0000-0000-0000-000000000000")  # unknown id is a no-op
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_copies_of_a_message_taken_at_the_same_moment_run_the_job_once(monkeypatch, temp_handlers):
+    """Queued jobs are sent again on purpose (worker start, watchdog, a broker that was down), so
+    two workers can hold a message for the same job. The row lock in run_job is the only thing
+    that keeps both from finding it QUEUED: two threads, each with its own database connection,
+    call run_job at the same moment, and the time between reading the row and claiming it is
+    stretched so that without the lock both would be in it."""
+    runs: list[int] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2, timeout=10)
+    temp_handlers("zz_dup_probe", lambda job, ctx: runs.append(threading.get_ident()) or {})
+    job = Job.objects.create(kind="zz_dup_probe", title="t", exclusive=False)
+
+    def slow_now():
+        time.sleep(0.3)
+        return timezone.now()
+
+    monkeypatch.setattr(runner, "timezone", SimpleNamespace(now=slow_now, localtime=timezone.localtime))
+
+    def worker() -> None:
+        try:
+            barrier.wait()
+            runner.run_job(str(job.id))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert not errors and not any(thread.is_alive() for thread in threads)
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCEEDED
+    assert len(runs) == 1, f"the handler ran {len(runs)} times"
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_job_queued_while_the_broker_is_down_is_answered_normally_and_sent_again(
+    clients, make_instance, fake_agent, monkeypatch, caplog
+):
+    """Redis is being restarted at the moment someone presses Start: the job row is committed and
+    holds the server, only its message cannot be sent. That is no error for the request."""
+    instance = make_instance(name="Alpha")
+    fake_agent.prepare(instance.id, {})
+    attempts: list[str] = []
+
+    def down(job_id):
+        attempts.append(job_id)
+        raise OperationalError("Error 2 connecting to unix socket: /run/mcpanel/redis.sock. No such file or directory.")
+
+    client = clients["owner"]
+    client.raise_request_exception = False
+    with monkeypatch.context() as broker_down, caplog.at_level("WARNING", logger="apps.jobs.runner"):
+        broker_down.setattr("apps.jobs.runner.run_job.delay", down)
+        response = client.post(f"/api/instances/{instance.id}/power", {"action": "start"}, format="json")
+        assert response.status_code == 202, response.content
+        job = Job.objects.get()
+        assert response.json()["id"] == str(job.id) and attempts == [str(job.id)]
+        instance.refresh_from_db()
+        assert job.status == JobStatus.QUEUED and instance.active_job_id == job.id
+        assert any("its message could not be sent" in record.getMessage() for record in caplog.records)
+        # the server is held by the queued job, like by any other
+        busy = client.post(f"/api/instances/{instance.id}/power", {"action": "stop"}, format="json")
+        assert busy.status_code == 409 and busy.json()["error"]["code"] == "instance_busy"
+    # Redis is back and the supervisor restarted the job worker: its start sends the job again
+    assert resend_queued_jobs() == 1
+    job.refresh_from_db()
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert fake_agent.containers[str(instance.id)]["running"] is True
+
+
+def test_dispatch_says_whether_the_message_was_sent(monkeypatch):
+    sent: list[str] = []
+    monkeypatch.setattr("apps.jobs.runner.run_job.delay", sent.append)
+    assert runner.dispatch("abc") is True and sent == ["abc"]
+
+    def down(_job_id):
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr("apps.jobs.runner.run_job.delay", down)
+    assert runner.dispatch("abc") is False
 
 
 # --- lifecycle handlers -----------------------------------------------------------------------------

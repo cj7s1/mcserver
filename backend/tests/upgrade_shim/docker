@@ -1,0 +1,418 @@
+#!/bin/bash
+# Stand-in for `docker` in backend/tests/test_upgrade_script.py: it starts nothing and never
+# reaches a real Docker. deploy/scripts/upgrade.sh runs against it; the "world" (containers,
+# image names, applied database migrations) is a few text files in $FAKE, and files named after
+# a toggle make one step fail. What it changed is appended to $FAKE/events.log.
+#
+#   containers   ID|SERVICE|STATE|ONEOFF|IMAGE_NAME|IMAGE_ID|HEALTH   (the Compose project)
+#   servers      ID|STATE                                           (Minecraft server containers)
+#   images       NAME|IMAGE_ID
+#   labels       IMAGE_ID|REVISION                                  (io.mcpanel.revision)
+#   migs         APP NAME                                           (last applied migration per app)
+#   code/<id>    APP NAME                                           (last migration the code of an image has)
+#   jobs         QUEUED|RUNNING
+# Toggles: fail_pull new_pg fail_build fail_up hang_up unhealthy_panel db_down fail_dump
+#          fail_plan irreversible_<app> fail_unmigrate_<app> fail_restore redis_volume
+#          slow_migrations (the panel applies its migrations only while it is being stopped)
+set -u
+F=${FAKE:?FAKE is not set}
+printf 'docker %s\n' "$*" >>"$F/calls.log"
+event() { printf '%s\n' "$*" >>"$F/events.log"; }
+unhandled() {
+    printf 'fake docker: unhandled: %s\n' "$*" | tee -a "$F/unhandled.log" >&2
+    exit 97
+}
+
+img_id() { # name or id -> id
+    local ref="$1" name id
+    while IFS='|' read -r name id; do
+        if [ "$name" = "$ref" ] || [ "$id" = "$ref" ]; then
+            printf '%s\n' "$id"
+            return 0
+        fi
+    done <"$F/images"
+    return 1
+}
+img_set() { # name id
+    grep -v -F "$1|" "$F/images" >"$F/images.tmp"
+    printf '%s|%s\n' "$1" "$2" >>"$F/images.tmp"
+    mv "$F/images.tmp" "$F/images"
+}
+cfield() { # container id, field number
+    local line
+    line=$(grep "^$1|" "$F/containers") || return 1
+    printf '%s\n' "$line" | cut -d'|' -f"$2"
+}
+code_file() { printf '%s/code/%s' "$F" "$(printf '%s' "$1" | tr ':/' '__')"; }
+is_new_layout_image() { case "$1" in *panel-new*) return 0 ;; esac; return 1; }
+image_of_service() {
+    case "$1" in
+        postgres) echo postgres:16-alpine ;;
+        redis) echo redis:7-alpine ;;
+        agent) echo "mcpanel/agent:${MCPANEL_IMAGE_TAG:-local}" ;;
+        *) echo "mcpanel/panel:${MCPANEL_IMAGE_TAG:-local}" ;;
+    esac
+}
+services_of() { # the service names of a compose file of the test site (two spaces, a name, a colon)
+    sed -n '/^services:/,/^[a-z]/{s/^  \([a-z][a-z-]*\):$/\1/p}' "$1" | sort
+}
+set_mig() { # app name|zero
+    grep -v "^$1 " "$F/migs" >"$F/migs.tmp"
+    [ "$2" = zero ] || printf '%s %s\n' "$1" "$2" >>"$F/migs.tmp"
+    sort "$F/migs.tmp" >"$F/migs"
+    rm -f "$F/migs.tmp"
+}
+migrate_forward() { # image id: what the panel does when it starts
+    local app mig cur
+    [ -f "$(code_file "$1")" ] || return 0
+    while read -r app mig; do
+        [ -n "$app" ] || continue
+        cur=$(grep "^$app " "$F/migs" | cut -d' ' -f2)
+        if [[ -z "$cur" || "$cur" < "$mig" ]]; then set_mig "$app" "$mig"; fi
+    done <"$(code_file "$1")"
+}
+
+case "${1:-}" in
+    version)
+        echo 29.8.2
+        exit 0
+        ;;
+    compose)
+        shift
+        file="$PWD/docker-compose.yml"
+        dry=0
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -f)
+                    file="$2"
+                    shift 2
+                    ;;
+                --project-directory) shift 2 ;;
+                --dry-run)
+                    dry=1
+                    shift
+                    ;;
+                *) break ;;
+            esac
+        done
+        sub="${1:-}"
+        [ $# -gt 0 ] && shift
+        case "$sub" in
+            version)
+                echo "Docker Compose version 5.6.1"
+                exit 0
+                ;;
+            config)
+                [ -f "$file" ] || exit 1
+                case " $* " in
+                    *" --services "*) services_of "$file" ;;
+                    *" --images "*) for s in $(services_of "$file"); do image_of_service "$s"; done ;;
+                    *)
+                        echo "name: mcpanel"
+                        echo "services: {}"
+                        ;;
+                esac
+                exit 0
+                ;;
+            pull)
+                [ -f "$F/fail_pull" ] && {
+                    echo "pull failed (toggle)" >&2
+                    exit 1
+                }
+                [ -f "$F/new_pg" ] && img_set postgres:16-alpine sha256:pg-newer
+                echo " postgres Pulled"
+                exit 0
+                ;;
+            build)
+                rev=$(git -C "$PWD" rev-parse --short=12 HEAD)
+                kind=old
+                [ -f "$PWD/scripts/upgrade.sh" ] && kind=new
+                img_set "$(image_of_service agent)" "sha256:agent-$kind-$rev"
+                event "BUILD agent sha256:agent-$kind-$rev"
+                if [ -f "$F/fail_build" ]; then
+                    echo "build of panel failed (toggle; the agent image was tagged already)" >&2
+                    exit 1
+                fi
+                id="sha256:panel-$kind-$rev"
+                img_set "$(image_of_service panel)" "$id"
+                mkdir -p "$F/code"
+                : >"$(code_file "$id")"
+                for dir in "$PWD"/../backend/apps/*/migrations; do
+                    app=$(basename "$(dirname "$dir")")
+                    last=$(find "$dir" -maxdepth 1 -name '[0-9]*.py' -printf '%f\n' | sort | tail -n 1)
+                    [ -n "$last" ] && printf '%s %s\n' "$app" "${last%.py}" >>"$(code_file "$id")"
+                done
+                printf '%s|%s\n' "$id" "${MCPANEL_REVISION:-unknown}" >>"$F/labels"
+                event "BUILD panel $id"
+                echo " panel Built"
+                exit 0
+                ;;
+            run)
+                # like the real one: standard input is attached and read to its end
+                timeout 0.3 cat >/dev/null
+                panel=$(img_id "$(image_of_service panel)")
+                args="$*"
+                case "$args" in
+                    *"migrate --check"*)
+                        while read -r app name; do
+                            [ -n "$app" ] || continue
+                            grep -q -x "$app $name" "$F/migs" || exit 1
+                        done <"$(code_file "$panel")"
+                        exit 0
+                        ;;
+                    *"showmigrations --plan"*)
+                        while read -r app name; do
+                            [ -n "$app" ] || continue
+                            if grep -q -x "$app $name" "$F/migs"; then echo "[X]  $app.$name"; else echo "[ ]  $app.$name"; fi
+                        done <"$(code_file "$panel")"
+                        exit 0
+                        ;;
+                    *"manage migrate "*)
+                        target="${*: -1}"
+                        app="${*: -2:1}"
+                        # only code that has the applied migration can undo it
+                        applied=$(grep "^$app " "$F/migs" | cut -d' ' -f2)
+                        known=$(grep "^$app " "$(code_file "$panel")" | cut -d' ' -f2)
+                        if [ -n "$applied" ] && [[ "$known" < "$applied" ]]; then
+                            echo "CommandError: this code does not have migration $app.$applied"
+                            exit 1
+                        fi
+                        case "$args" in
+                            *"migrate --plan "*)
+                                [ -f "$F/fail_plan" ] && {
+                                    echo "django.db.utils.OperationalError (toggle)"
+                                    exit 1
+                                }
+                                event "PLAN $app -> $target"
+                                echo "Planned operations:"
+                                echo "$app.$applied"
+                                if [ -f "$F/irreversible_$app" ]; then
+                                    echo "    Raw Python operation -> IRREVERSIBLE"
+                                else
+                                    echo "    Undo Add field x to y"
+                                fi
+                                exit 0
+                                ;;
+                        esac
+                        [ -f "$F/fail_unmigrate_$app" ] && {
+                            echo "django.db.migrations.exceptions.IrreversibleError (toggle)"
+                            exit 1
+                        }
+                        set_mig "$app" "$target"
+                        event "UNMIGRATE $app -> $target"
+                        exit 0
+                        ;;
+                esac
+                unhandled "compose run $args"
+                ;;
+            up)
+                if [ "$dry" = 1 ]; then
+                    # like Compose: every event twice, and of the containers the file no longer has only
+                    # the orphans (redis still is a service of the file, behind a profile)
+                    wanted=" $(services_of "$file" | tr '\n' ' ') redis "
+                    while IFS='|' read -r _id service _rest; do
+                        case "$wanted" in *" $service "*) continue ;; esac
+                        echo " DRY-RUN MODE -  Container mcpanel-$service-1  Stopping"
+                        echo " DRY-RUN MODE -  Container mcpanel-$service-1  Stopping"
+                        echo " DRY-RUN MODE -  Container mcpanel-$service-1  Removed"
+                    done <"$F/containers"
+                    echo " DRY-RUN MODE -  Container mcpanel-panel-1  Recreate"
+                    echo " DRY-RUN MODE -  Container mcpanel-panel-1  Recreate"
+                    exit 0
+                fi
+                if [ -f "$F/hang_up" ]; then # stays in `up` until the test lets go (or the session is hung up)
+                    event "UP-WAIT"
+                    while [ ! -e "$F/release" ]; do sleep 0.05; done
+                fi
+                [ -f "$F/fail_up" ] && {
+                    echo "compose up failed (toggle)" >&2
+                    exit 1
+                }
+                : >"$F/containers.new"
+                n=0
+                for s in $(services_of "$file"); do
+                    n=$((n + 1))
+                    name=$(image_of_service "$s")
+                    id=$(img_id "$name") || {
+                        echo "no such image: $name" >&2
+                        exit 1
+                    }
+                    health=healthy
+                    if [ "$s" = panel ] && [ -f "$F/unhealthy_panel" ]; then health=unhealthy; fi
+                    printf 'c%s%s|%s|running|False|%s|%s|%s\n' "$n" "$(date +%N)" "$s" "$name" "$id" "$health" >>"$F/containers.new"
+                    if [ "$s" = panel ] && [ ! -f "$F/slow_migrations" ]; then migrate_forward "$id"; fi
+                done
+                mv "$F/containers.new" "$F/containers"
+                event "UP $(services_of "$file" | tr '\n' ' ')"
+                echo " Container up (fake)"
+                exit 0
+                ;;
+        esac
+        unhandled "compose $sub $*"
+        ;;
+    ps)
+        case "$*" in
+            *io.mcpanel.managed=true*)
+                while IFS='|' read -r id state; do
+                    case "$state" in exited | created | dead) printf '%s\n' "$id" ;; esac
+                done <"$F/servers"
+                ;;
+            *)
+                while IFS='|' read -r id service state oneoff _rest; do
+                    [ -n "$id" ] && printf '%s %s %s %s\n' "$id" "$service" "$state" "$oneoff"
+                done <"$F/containers"
+                ;;
+        esac
+        exit 0
+        ;;
+    inspect)
+        fmt="$3"
+        id="$4"
+        grep -q "^$id|" "$F/containers" || {
+            echo "Error: No such object: $id" >&2
+            exit 1
+        }
+        service=$(cfield "$id" 2)
+        state=$(cfield "$id" 3)
+        image_name=$(cfield "$id" 5)
+        image_id=$(cfield "$id" 6)
+        health=$(cfield "$id" 7)
+        case "$fmt" in
+            *'index .Config.Labels'*) grep -F "$image_id|" "$F/labels" | tail -n 1 | cut -d'|' -f2 ;;
+            '{{.Image}}') echo "$image_id" ;;
+            '{{.Config.Image}}') echo "$image_name" ;;
+            '{{.Name}}|'*) echo "/mcpanel-$service-1|$health|$image_name|$image_id" ;;
+            '{{.Name}}') echo "/mcpanel-$service-1" ;;
+            '{{.State.Status}}/'*) echo "$state/$health" ;;
+            *Health.Log*) echo "unhealthy: fake" ;;
+            *) unhandled "inspect $fmt" ;;
+        esac
+        exit 0
+        ;;
+    exec)
+        shift
+        [ "$1" = -i ] && shift
+        id="$1"
+        shift
+        all="$*"
+        case "$all" in
+            *_before_restore_*)
+                # $1 $2 $3 = sh -c SCRIPT, then: sh SUFFIX MODE; the dump is on standard input
+                suffix="$5"
+                dump=$(cat)
+                [ -f "$F/fail_restore" ] && {
+                    echo "psql: error (toggle); the database mcpanel was not changed" >&2
+                    exit 4
+                }
+                : >"$F/migs.tmp"
+                while read -r _dash tag app name; do
+                    [ "$tag" = MIG ] && printf '%s %s\n' "$app" "$name" >>"$F/migs.tmp"
+                done <<<"$dump"
+                sort "$F/migs.tmp" >"$F/migs"
+                rm -f "$F/migs.tmp"
+                event "RESTORE $suffix $6 lines=$(wc -l <<<"$dump" | tr -d ' ')"
+                echo "mcpanel_before_restore_$suffix"
+                exit 0
+                ;;
+            *'printf %s'*POSTGRES_DB*) # the name of the database
+                printf mcpanel
+                exit 0
+                ;;
+            *psql*)
+                sql=$(cat)
+                case "$sql" in
+                    *jobs_job*) cat "$F/jobs" 2>/dev/null || echo "0|0" ;;
+                    *django_migrations*)
+                        [ -f "$F/db_down" ] && exit 2
+                        cat "$F/migs"
+                        ;;
+                esac
+                exit 0
+                ;;
+            *pg_dump*)
+                [ -f "$F/fail_dump" ] && {
+                    echo "pg_dump: error (toggle)" >&2
+                    exit 1
+                }
+                echo "--"
+                echo "-- PostgreSQL database dump"
+                echo "--"
+                while read -r app name; do echo "-- MIG $app $name"; done <"$F/migs"
+                echo "COPY public.accounts_user (id, username) FROM stdin;"
+                event "DUMP"
+                exit 0
+                ;;
+            "test -f /run/mcpanel/supervisor.json")
+                is_new_layout_image "$(cfield "$id" 6)"
+                exit $?
+                ;;
+            *mcpanel-supervise.py*)
+                echo "phase running, supervisor pid 7, status written 1 s ago"
+                exit 0
+                ;;
+            *'[b]eat'*)
+                service=$(cfield "$id" 2)
+                if [ "$service" = beat ] || { [ "$service" = panel ] && is_new_layout_image "$(cfield "$id" 6)"; }; then echo 1; else echo 0; fi
+                exit 0
+                ;;
+        esac
+        unhandled "exec $all"
+        ;;
+    image)
+        case "${2:-}" in
+            inspect)
+                if [ "$3" = -f ]; then
+                    img_id "$5" || exit 1
+                else
+                    img_id "$3" >/dev/null || exit 1
+                    echo "[]"
+                fi
+                exit 0
+                ;;
+            tag)
+                id=$(img_id "$3") || {
+                    echo "no such image $3" >&2
+                    exit 1
+                }
+                img_set "$4" "$id"
+                event "TAG $4 = $id"
+                exit 0
+                ;;
+            rm)
+                grep -v -F "$3|" "$F/images" >"$F/images.tmp"
+                mv "$F/images.tmp" "$F/images"
+                event "UNTAG $3"
+                exit 0
+                ;;
+        esac
+        unhandled "image $*"
+        ;;
+    stop)
+        id="$4"
+        event "STOP $(cfield "$id" 2)"
+        if [ "$(cfield "$id" 2)" = panel ] && [ "$(cfield "$id" 3)" = running ] && [ -f "$F/slow_migrations" ]; then
+            migrate_forward "$(cfield "$id" 6)"
+        fi
+        sed -i "s/^\($id|[^|]*\)|running|/\1|exited|/" "$F/containers"
+        echo "$id"
+        exit 0
+        ;;
+    rm)
+        shift
+        for id in "$@"; do
+            event "RM $(cfield "$id" 2)"
+            grep -v "^$id|" "$F/containers" >"$F/containers.tmp"
+            mv "$F/containers.tmp" "$F/containers"
+        done
+        exit 0
+        ;;
+    volume)
+        [ -f "$F/redis_volume" ]
+        exit $?
+        ;;
+    logs)
+        echo "(fake logs)"
+        exit 0
+        ;;
+esac
+unhandled "$*"
