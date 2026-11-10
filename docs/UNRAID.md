@@ -96,19 +96,63 @@ files you would have to download by hand (the panel detects this and lists them)
 MCPanel offers instant snapshots and rollback alongside restic backups when `MCPANEL_DATA_DIR` is a
 **pool path** (`/mnt/cache/...`, `/mnt/<pool>/...`) on a **btrfs** or **ZFS** pool. They can't be used on
 `/mnt/user/...` FUSE paths or on XFS. Snapshots live on the same disk as the server, so they are **not**
-backups. The default stack grants none of the privileges below, so snapshots show as unavailable until
-you add an override; everything else works without it.
+backups. On a btrfs pool they work with the default stack (an override only makes deleting them faster).
+On a ZFS pool the default stack lacks the privileges below, so snapshots show as unavailable until you add
+the override; everything else works without it.
 
 ### btrfs pools
 
-Each new server folder is created as a btrfs subvolume. The agent image contains `btrfs-progs`; the agent
-only needs permission to delete subvolumes. Add this to `deploy/docker-compose.override.yml`:
+Each new server folder is created as a btrfs subvolume, and a snapshot is a read-only subvolume in
+`<data dir>/snapshots/<server id>/`. The agent image contains `btrfs-progs`.
+
+**Default stack (no override).** Taking a snapshot and rolling back need no extra privilege. Deleting is
+different: the kernel lets only a process with `CAP_SYS_ADMIN` run `btrfs subvolume delete`, and the agent
+container has no such capability. The agent then deletes the slow way: it clears the snapshot's read-only
+flag, removes its files one by one and removes the emptied subvolume (the kernel allows that to the owner
+since Linux 4.18). It does the same for the previous server folder after a rollback and for a server's
+snapshots when the server is deleted. What that means:
+
+* Deleting takes as long as deleting that many files. In a test with 100,000 small files plus 1 GiB of
+  world data on NVMe, one snapshot took about 2 seconds this way (and no measurable time with the
+  override); a hard-disk pool, or a server with millions of files such as map-renderer tiles, takes much
+  longer. Scheduled snapshots are pruned the same way.
+* The panel waits for a single snapshot delete only as long as it waits for any agent request
+  (`MCPANEL_AGENT_TIMEOUT`, 30 seconds by default). If a delete takes longer, the job reports that the
+  agent did not respond in time; the agent finishes the delete anyway.
+* A snapshot being deleted leaves the list at once (its folder is renamed to `.deleting-<name>` first),
+  so a half-removed snapshot can never be chosen for a rollback. If the agent is restarted in the middle,
+  the rest is removed with the next snapshot it deletes for that server, or when the server is deleted.
+* The agent finds out which way works by trying, not by guessing: at its first snapshot or storage request
+  after a start it creates a tiny subvolume and a read-only snapshot of it in
+  `<data dir>/.mcpanel-probe`, deletes both and removes the folder. The result is in the agent log
+  (`subvolumes are deleted in fallback mode`) and in the snapshot capability the panel gets from the
+  agent (`delete_mode`: `native` or `fallback`, with a `note` in fallback mode).
+* If neither way works, snapshots show as **unavailable** with the reason, and the agent refuses to take
+  snapshots or to convert a folder, so you never end up with snapshots that can't be deleted. A failed
+  check is repeated when the panel asks again, at most once a minute.
+
+**With the override: instant deletes.** Add this to `deploy/docker-compose.override.yml` and recreate the
+agent (`docker compose up -d`); `delete_mode` then reads `native`:
 
 ```yaml
 services:
   agent:
     cap_add: [SYS_ADMIN]   # btrfs subvolume delete; the agent already controls Docker (root-equivalent)
 ```
+
+A pool mounted with the btrfs option `user_subvol_rm_allowed` gives instant deletes without the
+capability: the kernel then accepts `btrfs subvolume delete` from the owner once a snapshot's read-only
+flag is cleared, and the agent clears it. `delete_mode` reads `native` there too.
+
+Whichever way is in use:
+
+* A rollback is done once the snapshot's files are in the server folder. If the previous folder can't be
+  removed afterwards, the job still succeeds (and starts the server again) with a warning that names the
+  folder, `instances/<server id>.mcpanel-old-<time>`; the agent tries again at the next rollback of that
+  server and when the server is deleted.
+* Deleting a server deletes its snapshots too. A snapshot that can't be deleted no longer stops the
+  server from being deleted: the job's log names what was left in `<data dir>/snapshots/<server id>/`,
+  and `btrfs subvolume delete <path>` on the Unraid command line removes it.
 
 ### ZFS pools (Unraid 6.12+ / 7)
 

@@ -1,0 +1,123 @@
+#!/bin/bash
+# MCPanel hook for Unraid: stop the Minecraft servers before Unraid stops Docker.
+#
+# Unraid runs every executable at /usr/local/emhttp/plugins/<name>/event/stopping_docker right
+# before it stops the Docker service (array stop, reboot, shutdown) and waits for it. Without
+# this hook Unraid does not stop the Minecraft containers itself: they are stopped by the
+# Docker daemon while it shuts down, with a few seconds each and everything else on the host
+# stopping at the same moment.
+#
+# What it does:
+#   1. Asks the panel to stop all running servers (python manage.py host_shutdown): the world
+#      is saved first, every server gets up to 45 s, and the panel marks the servers so that it
+#      starts them again after the next boot, one per minute.
+#   2. If the panel container is not running or the command fails: plain "docker stop" for
+#      every running container with the label io.mcpanel.managed=true, in parallel, with what
+#      is left of the time. Servers the panel did not mark stay stopped after the next boot.
+#
+# It finishes within 60 s (a watchdog ends it after 70 s whatever happens) and always exits 0,
+# so it can never block the shutdown. Everything is logged to the syslog with the tag
+# "mcpanel". Install it with deploy/unraid/install-hook.sh; see docs/UNRAID-SHUTDOWN.md.
+set -u
+
+PATH="${PATH:+${PATH}:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
+
+PROJECT="${MCPANEL_COMPOSE_PROJECT:-mcpanel}" # Compose project of the panel stack
+STOP_SECONDS=45                               # what a server gets to stop
+COMMAND_LIMIT=60                              # hard limit for the panel command
+BUDGET=60                                     # the hook as a whole
+HARD_LIMIT=70                                 # watchdog
+
+log() {
+    logger -t mcpanel -- "$*" 2>/dev/null || printf 'mcpanel: %s\n' "$*" >&2
+}
+
+# Run the real work under a watchdog, so that nothing in it can hold up the shutdown.
+if [ -z "${MCPANEL_HOOK_GUARDED:-}" ]; then
+    if command -v timeout >/dev/null 2>&1; then
+        MCPANEL_HOOK_GUARDED=1 timeout -k 5 "${HARD_LIMIT}" /bin/bash "$0" "$@"
+        rc=$?
+        if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+            log "the hook was ended by its watchdog after ${HARD_LIMIT}s"
+        fi
+    else
+        log "'timeout' is missing: the hook does nothing (the servers are stopped by Docker)"
+    fi
+    exit 0
+fi
+
+SECONDS=0
+
+running_servers() {
+    timeout 10 docker ps --filter "label=io.mcpanel.managed=true" --format '{{.ID}} {{.Names}}' 2>/dev/null
+}
+
+fallback() {
+    local servers left seconds count id name
+    servers="$(running_servers)"
+    if [ -z "${servers}" ]; then
+        log "no Minecraft server container is running: nothing to stop"
+        return 0
+    fi
+    count="$(printf '%s\n' "${servers}" | wc -l)"
+    left=$((BUDGET - SECONDS - 3))
+    seconds="${STOP_SECONDS}"
+    if [ "${left}" -lt "${seconds}" ]; then
+        seconds="${left}"
+    fi
+    # Docker's own stop gives a server up to 20 s; a shorter "docker stop" here would only cut that.
+    if [ "${seconds}" -lt 20 ]; then
+        log "no time left to stop ${count} running server(s) here: Docker stops them with its own timeout"
+        return 0
+    fi
+    log "fallback: docker stop -t ${seconds} for ${count} running server(s), without the panel"
+    log "fallback: servers the panel did not mark stay stopped after the next boot; start them in the panel"
+    while read -r id name; do
+        [ -n "${id}" ] || continue
+        (
+            if timeout -k 5 "$((seconds + 5))" docker stop -t "${seconds}" "${id}" >/dev/null 2>&1; then
+                log "fallback: stopped ${name}"
+            else
+                log "fallback: could not stop ${name}"
+            fi
+        ) &
+    done <<<"${servers}"
+    wait
+    log "fallback: finished after ${SECONDS}s"
+    return 0
+}
+
+main() {
+    local panel rc
+    if ! command -v docker >/dev/null 2>&1; then
+        log "docker is not installed: nothing to do"
+        return 0
+    fi
+    if ! timeout 10 docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+        log "Docker does not answer: nothing to do"
+        return 0
+    fi
+    panel="$(timeout 10 docker ps -q \
+        --filter "label=com.docker.compose.project=${PROJECT}" \
+        --filter "label=com.docker.compose.service=panel" 2>/dev/null | head -n 1)"
+    if [ -n "${panel}" ]; then
+        log "Docker is about to stop: asking the panel to stop the running servers (up to ${STOP_SECONDS}s each)"
+        timeout -k 5 "${COMMAND_LIMIT}" docker exec "${panel}" \
+            python manage.py host_shutdown --timeout "${STOP_SECONDS}" 2>&1 |
+            while IFS= read -r line; do log "${line}"; done
+        rc="${PIPESTATUS[0]}"
+        if [ "${rc}" -eq 0 ]; then
+            log "finished after ${SECONDS}s"
+            return 0
+        fi
+        log "the panel command failed (exit ${rc}) after ${SECONDS}s"
+    else
+        log "the panel container (project ${PROJECT}, service panel) is not running"
+    fi
+    fallback
+    return 0
+}
+
+main "$@"
+exit 0

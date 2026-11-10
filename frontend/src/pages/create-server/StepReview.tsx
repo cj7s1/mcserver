@@ -181,6 +181,10 @@ export function StepReview({
       );
   } else if (!state.start)
     warnings.push("The server will be installed but not started.");
+  if (d.nightlyBackupAllowed && !state.nightlyBackup)
+    warnings.push(
+      "No backup schedule will be created. Add one later on the server's Schedules page; until then it is only backed up by hand.",
+    );
   const icon = state.iconUrl.trim() || d.resolved?.icon_url || null;
 
   return (
@@ -233,6 +237,11 @@ export function StepReview({
                         ? "Start the server"
                         : "Leave stopped",
                   ],
+                  ...(d.nightlyBackupAllowed
+                    ? ([
+                        ["Backups", state.nightlyBackup ? "Nightly backup schedule (03:00–05:00, panel time)" : "No schedule"],
+                      ] as [ReactNode, ReactNode][])
+                    : []),
                 ]}
               />
             </Group>

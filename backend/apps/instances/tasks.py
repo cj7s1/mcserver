@@ -27,6 +27,12 @@ def reconcile_one(instance_id: str) -> None:
 
 @shared_task(name="apps.instances.tasks.scheduler_tick", ignore_result=True, expires=55)
 def scheduler_tick() -> int:
-    from .scheduling import run_due_schedules
+    from .scheduling import resume_flagged_servers, run_due_schedules
 
-    return run_due_schedules(timezone.now())
+    now = timezone.now()
+    try:
+        # servers stopped by `manage.py host_shutdown`: at most one is started per tick
+        resume_flagged_servers(now)
+    except Exception:  # never let it keep the schedules from running
+        log.exception("resuming servers after a host shutdown failed")
+    return run_due_schedules(now)

@@ -93,6 +93,10 @@ def compute(
     if state in ("created", "exited", "dead"):
         if container.get("oom_killed"):
             return Status.FAILED, "Killed: out of memory. Increase the memory allocation."
+        if instance.resume_after_boot and state == "exited":
+            # stopped by `manage.py host_shutdown`; scheduling.resume_flagged_servers starts it again
+            unclean = "" if exit_code in (0, None) else f" (exit code {exit_code}: not a clean stop)"
+            return Status.STOPPED, f"Stopped because the host was shutting down{unclean}; it is started again automatically"
         if instance.desired_state == "running" and exit_code not in (0, None):
             return Status.FAILED, f"Server exited unexpectedly (exit code {exit_code}). Check the console log."
         if instance.desired_state == "running" and exit_code == 0 and state == "exited":

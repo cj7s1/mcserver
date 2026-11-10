@@ -48,6 +48,8 @@ _PANEL_ENV = {
     "FTB_MODPACK_ID",
     "FTB_MODPACK_VERSION_ID",
     "STOP_DURATION",
+    "CREATE_CONSOLE_IN_PIPE",
+    "CONSOLE_IN_NAMED_PIPE",
     "MODPACK_PLATFORM",
     "MOD_PLATFORM",
     "UID",
@@ -253,6 +255,15 @@ def build_env(instance: Instance) -> dict[str, str]:
     env["TYPE"] = st
     env["MEMORY"] = f"{instance.memory_mb}M"
     env["STOP_DURATION"] = str(max(10, instance.stop_timeout - 20))
+    # Console input pipe. On SIGTERM mc-server-runner sends "stop" through rcon-cli and, when
+    # RCON is not listening yet (a stop while the server is still starting), writes it to the
+    # server console. Without the pipe that console is the container's read-only stdin: the
+    # write fails ("bad file descriptor"), the server finishes starting and is killed after
+    # STOP_DURATION. With it the runner keeps the server's stdin, the "stop" waits there and
+    # the server shuts down cleanly once it reads its console. The pipe stays at the image's
+    # default path inside the container (CONSOLE_IN_NAMED_PIPE is reserved too). Commands from
+    # the panel keep going through RCON; nothing uses the container's stdin.
+    env["CREATE_CONSOLE_IN_PIPE"] = "true"
     tz = SystemSetting.get("timezone") or settings.TIME_ZONE
     if tz and "TZ" not in env:
         env["TZ"] = tz
@@ -341,8 +352,19 @@ def build_spec(instance: Instance) -> dict[str, Any]:
     return spec
 
 
+# How the agent turns a spec into a container, for changes that the spec itself does not show.
+# The number is part of the hash "restart required" compares, so raising it makes every
+# container created by an older release read as restart-required: it is recreated at its next
+# start or restart (world data is never touched). It is mixed in here, on the panel side, and
+# is not part of the spec sent to the agent (the agent's spec schema has no such field).
+#   1  releases before the shutdown-safety fix (hash of the bare spec)
+#   2  the agent gives Docker a stop timeout (Config.StopTimeout) when it creates the container
+CONTAINER_FORMAT = 2
+
+
 def spec_hash(spec: dict[str, Any]) -> str:
-    return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:16]
+    hashed = {**spec, "container_format": CONTAINER_FORMAT}
+    return hashlib.sha256(json.dumps(hashed, sort_keys=True).encode()).hexdigest()[:16]
 
 
 def current_spec_hash(instance: Instance) -> str:

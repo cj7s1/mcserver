@@ -4,6 +4,7 @@ import ipaddress
 import re
 from typing import Any
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from apps.core.models import SystemSetting
@@ -88,6 +89,11 @@ class InstanceSerializer(serializers.ModelSerializer):
     env_values_hidden = serializers.SerializerMethodField(
         help_text="True when env values are masked because the caller lacks instance.configure"
     )
+    last_backup_at = serializers.SerializerMethodField(
+        help_text="When the newest successful backup (any kind) was taken; null when there is none "
+        "or the caller lacks instance.backup"
+    )
+    backup_schedules = serializers.SerializerMethodField(help_text="Number of enabled schedules whose action is a backup")
 
     class Meta:
         model = Instance
@@ -145,6 +151,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "active_job",
             "power_countdown",
             "modpack_update",
+            "last_backup_at",
+            "backup_schedules",
             "archived_at",
             "created_at",
             "updated_at",
@@ -238,6 +246,24 @@ class InstanceSerializer(serializers.ModelSerializer):
         from apps.modpacks.updates import summary
 
         return summary(obj)
+
+    # Both backup fields come from queryset annotations where a view added them (the list:
+    # services.backup_overview_annotations, no query per row) and are looked up otherwise.
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_last_backup_at(self, obj: Instance) -> str | None:
+        # backup history belongs to instance.backup, like the backup list itself
+        if "instance.backup" not in self.get_permissions(obj):
+            return None
+        from .services import last_backup_at
+
+        value = obj.last_backup_at if hasattr(obj, "last_backup_at") else last_backup_at(obj)
+        # same rendering as the model's own timestamps (panel timezone)
+        return serializers.DateTimeField().to_representation(value) if value else None
+
+    def get_backup_schedules(self, obj: Instance) -> int:
+        from .services import backup_schedule_count
+
+        return obj.backup_schedules if hasattr(obj, "backup_schedules") else backup_schedule_count(obj)
 
     # --- validation of editable fields --------------------------------------------------
     def validate_env(self, value: Any) -> dict[str, str]:
@@ -358,6 +384,10 @@ class CreateInstanceSerializer(serializers.Serializer):
     # initial server.properties values
     server_properties = serializers.DictField(child=serializers.JSONField(), required=False)
     start = serializers.BooleanField(default=True)
+    nightly_backup = serializers.BooleanField(
+        default=False,
+        help_text="Also create the default nightly backup schedule (skipped when the caller may not schedule backups)",
+    )
     node = serializers.IntegerField(required=False, help_text="Node id (default node when omitted)")
 
     def validate_accept_eula(self, value: bool) -> bool:

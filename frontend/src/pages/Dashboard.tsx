@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { BackupWarningBadge } from "@/components/BackupNotice";
 import { PageHeader, Section } from "@/components/PageHeader";
 import { ServerIcon } from "@/components/ServerIcon";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
@@ -256,6 +257,7 @@ function DashboardServerRow({ instance, withStats }: { instance: Instance; withS
             {instance.name}
           </Link>
           <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="shrink-0" />
+          <BackupWarningBadge instance={instance} />
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
           <span className="truncate">{softwareLabel(instance)}</span>

@@ -1,5 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import { Link } from "react-router";
+import { BackupWarningBadge } from "@/components/BackupNotice";
 import { ServerIcon } from "@/components/ServerIcon";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Progress } from "@/components/ui/progress";
@@ -31,7 +32,10 @@ export function ServerCard({ instance }: { instance: Instance }) {
           <p className="truncate text-xs text-muted-foreground" title={software}>
             {software}
           </p>
-          <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="mt-1.5" />
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <StatusBadge status={instance.status} title={instance.status_detail || undefined} />
+            <BackupWarningBadge instance={instance} className="relative z-10" />
+          </div>
         </div>
       </div>
 

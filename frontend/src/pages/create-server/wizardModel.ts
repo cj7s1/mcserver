@@ -7,8 +7,10 @@ import type {
   Instance,
   Job,
   JavaInfo,
+  Me,
   Project,
   Provider,
+  Schedule,
   ServerType,
 } from "@/lib/types";
 import {
@@ -147,6 +149,8 @@ export interface WizardState {
   gamePort: string | null;
   hostIp: string;
   start: boolean;
+  /** Create the default "Nightly backup" schedule with the server (sent only when the user may schedule backups). */
+  nightlyBackup: boolean;
   /** Node id; null = the panel's default node. */
   node: number | null;
   // import
@@ -199,6 +203,7 @@ export function initialState(): WizardState {
     gamePort: null,
     hostIp: "",
     start: true,
+    nightlyBackup: true,
     node: null,
     importFile: null,
     importOverwrite: true,
@@ -240,6 +245,24 @@ export interface Derived {
   softwareSummary: string;
   /** Name of the chosen node when the panel has more than one; otherwise null. */
   nodeName: string | null;
+  /** The user may give the new server a backup schedule (nightlyBackupAllowed); the option is hidden otherwise. */
+  nightlyBackupAllowed: boolean;
+}
+
+/**
+ * Whether the signed-in user may add a backup schedule to the server they are about to create, i.e.
+ * whether the wizard offers "Nightly backup". Mirrors the backend (InstanceListView.post, then the
+ * rule of ScheduleListView.post: "instance.schedules" plus "instance.backup" on that server): the
+ * owner may; a creator without global "instance.view" becomes Server manager of the new server,
+ * which includes both; everyone else needs both in their own role. The backend decides in the end
+ * and creates the server without the schedule when the user may not.
+ */
+export function nightlyBackupAllowed(user: Pick<Me, "is_owner" | "permissions"> | null): boolean {
+  if (!user) return false;
+  if (user.is_owner) return true;
+  const perms = user.permissions;
+  if (!perms.includes("instance.view")) return true;
+  return perms.includes("instance.schedules") && perms.includes("instance.backup");
 }
 
 /** Container memory limit for a heap size; mirrors Instance.container_memory_mb in the backend
@@ -510,7 +533,7 @@ export function stepForField(key: string): StepId {
     ].includes(k)
   )
     return "software";
-  if (["name", "memoryMb", "gamePort", "hostIp", "start", "node"].includes(k))
+  if (["name", "memoryMb", "gamePort", "hostIp", "start", "nightlyBackup", "node"].includes(k))
     return "resources";
   if (k === "acceptEula" || k === "form") return "review";
   return "gameplay";
@@ -539,6 +562,7 @@ export const SERVER_FIELD_MAP: Record<string, string> = {
   host_ip: "hostIp",
   server_properties: "serverProperties",
   start: "start",
+  nightly_backup: "nightlyBackup",
   node: "node",
   non_field_errors: "form",
 };
@@ -567,6 +591,8 @@ export interface CreatePayload {
   host_ip?: string;
   server_properties?: Record<string, string | number | boolean>;
   start: boolean;
+  /** Also create the default nightly backup schedule (the backend skips it when the user may not schedule backups). */
+  nightly_backup: boolean;
   /** Omitted = the default node. */
   node?: number;
 }
@@ -576,6 +602,8 @@ export interface CreateResponse {
   job: Job;
   warnings: string[];
   java: JavaInfo;
+  /** The nightly backup schedule created with the server; null when not asked for or not permitted. */
+  backup_schedule?: Schedule | null;
 }
 
 export function serverProperties(
@@ -614,6 +642,8 @@ export function buildPayload(state: WizardState, d: Derived): CreatePayload {
     game_port: Number(d.gamePort),
     // an imported server stays stopped: the archive is uploaded into it after creation
     start: state.category === "import" ? false : state.start,
+    // offered for every kind of server, imports included; never sent as true while the option is hidden
+    nightly_backup: state.nightlyBackup && d.nightlyBackupAllowed,
   };
   if (state.node !== null) payload.node = state.node;
   if (d.isModpack && state.modpackSource === "url") {

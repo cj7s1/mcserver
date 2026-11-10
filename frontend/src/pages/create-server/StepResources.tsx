@@ -283,6 +283,27 @@ export function StepResources({ state, patch, d, errors }: { state: WizardState;
         </div>
       </Section>
       )}
+
+      {d.nightlyBackupAllowed && (
+        <Section>
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <Label htmlFor={`${uid}-backup`}>Nightly backup</Label>
+              <p id={`${uid}-backup-hint`} className="mt-0.5 text-xs text-muted-foreground">
+                Adds a “Nightly backup” schedule: one backup every night between 03:00 and 05:00 (panel server time). Old
+                backups are pruned by the retention policy on the server's Backups page; the schedule can be changed or
+                removed under Schedules. Without a schedule the server is only backed up when someone does it by hand.
+              </p>
+            </div>
+            <Switch
+              id={`${uid}-backup`}
+              checked={state.nightlyBackup}
+              onCheckedChange={(v) => patch({ nightlyBackup: v })}
+              aria-describedby={`${uid}-backup-hint`}
+            />
+          </div>
+        </Section>
+      )}
     </div>
   );
 }

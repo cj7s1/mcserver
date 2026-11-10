@@ -30,6 +30,10 @@ class RconError(Exception):
     pass
 
 
+class RconUnavailable(RconError):
+    """RCON could not be reached or did not accept the login: no command was sent."""
+
+
 class RconClient:
     def __init__(self, host: str, port: int, password: str, timeout: float = 5.0) -> None:
         self.host = host
@@ -52,11 +56,14 @@ class RconClient:
                 asyncio.open_connection(self.host, self.port), timeout=self.timeout
             )
         except (OSError, TimeoutError) as exc:
-            raise RconError(f"Cannot connect to RCON at {self.host}:{self.port}: {exc}") from exc
-        req_id = await self._send(TYPE_AUTH, self.password)
-        resp_id, _type, _payload = await self._read_packet(self.timeout)
+            raise RconUnavailable(f"Cannot connect to RCON at {self.host}:{self.port}: {exc}") from exc
+        try:
+            req_id = await self._send(TYPE_AUTH, self.password)
+            resp_id, _type, _payload = await self._read_packet(self.timeout)
+        except RconError as exc:
+            raise RconUnavailable(str(exc)) from exc
         if resp_id == -1 or resp_id != req_id:
-            raise RconError("RCON authentication failed")
+            raise RconUnavailable("RCON authentication failed")
 
     async def close(self) -> None:
         if self._writer is not None:
@@ -65,6 +72,12 @@ class RconClient:
                 await self._writer.wait_closed()
             except OSError:
                 pass
+        self._reader = self._writer = None
+
+    def abort(self) -> None:
+        """Drop the connection without waiting for the peer; never blocks."""
+        if self._writer is not None:
+            self._writer.transport.abort()
         self._reader = self._writer = None
 
     async def _send(self, ptype: int, payload: str) -> int:
@@ -139,3 +152,38 @@ class RconClient:
 async def run_command(host: str, port: int, password: str, command: str, timeout: float = 30.0) -> str:
     async with RconClient(host, port, password) as client:
         return await client.command(command, timeout=timeout)
+
+
+def run_command_sync(
+    host: str, port: int, password: str, command: str, *, timeout: float = 30.0, connect_timeout: float = 5.0
+) -> str:
+    """:func:`run_command` for worker threads: runs its own event loop, so never call it from one.
+
+    Hard-bounded, whatever the peer does. Connecting and logging in may take ``connect_timeout``
+    in total; if RCON has not accepted the login by then :class:`RconUnavailable` is raised and
+    nothing was sent. The command may then take ``timeout``. The connection is dropped rather
+    than closed gracefully, so a peer that stops reading cannot hold the caller either.
+    ``host`` must be an IP address (as ``docker_ops.rcon_endpoint`` returns): a name would be
+    resolved in a helper thread that the event loop waits for when it shuts down.
+    """
+
+    async def _run() -> str:
+        client = RconClient(host, port, password, timeout=connect_timeout)
+        try:
+            try:
+                async with asyncio.timeout(connect_timeout):
+                    await client.connect()
+            except TimeoutError as exc:
+                raise RconUnavailable(
+                    f"RCON at {host}:{port} did not answer within {connect_timeout:g} s"
+                ) from exc
+            try:
+                # command() keeps to ``timeout`` itself; this is the backstop for its send
+                async with asyncio.timeout(timeout + 1.0):
+                    return await client.command(command, timeout=timeout)
+            except TimeoutError as exc:
+                raise RconError("Timed out waiting for RCON response") from exc
+        finally:
+            client.abort()
+
+    return asyncio.run(_run())

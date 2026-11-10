@@ -51,8 +51,16 @@ def apply_container(
 
 
 def _set_desired(instance: Instance, desired: str) -> None:
+    """Record what a job was told to do with the server (start, stop, restart, archive, delete, ...).
+
+    Such a decision also settles a pending "start again after the host restart" mark
+    (``resume_after_boot``, set by ``manage.py host_shutdown``): the server is either being
+    started now or meant to stay stopped. A kill clears it in ``services.power``.
+    """
     instance.desired_state = desired
-    Instance.objects.filter(pk=instance.pk).update(desired_state=desired)
+    instance.resume_after_boot = False
+    instance.resume_flagged_at = None
+    Instance.objects.filter(pk=instance.pk).update(desired_state=desired, resume_after_boot=False, resume_flagged_at=None)
 
 
 @register("install")
@@ -103,6 +111,21 @@ def _warn_players_first(job: Job, ctx: JobContext, action: str) -> dict[str, Any
     return PowerCountdown(job, ctx, _instance(job), action).run()
 
 
+def _log_stop(ctx: JobContext, answer: Any) -> None:
+    """Say in the job log what the agent's graceful stop did (agents before this field send none)."""
+    info = answer.get("stop") if isinstance(answer, dict) else None
+    if not isinstance(info, dict):
+        return
+    if info.get("flushed"):
+        ctx.log("The world was saved (save-all flush) before the server was stopped")
+    if info.get("stop_sent_via_rcon"):
+        ctx.log("The server was still starting; the stop was delivered as soon as it accepted commands")
+    for warning in info.get("warnings") or []:
+        ctx.log(f"warning: {warning}")
+    if isinstance(answer, dict) and answer.get("exit_code") == 137:
+        ctx.log("warning: the server did not stop in time and was killed")
+
+
 @register("stop")
 def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
     if (skipped := _warn_players_first(job, ctx, "stop")) is not None:
@@ -112,7 +135,7 @@ def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.2, f"Stopping server gracefully (up to {instance.stop_timeout}s)", force=True)
     status = AgentClient(instance.node).status(instance.id)
     if status.get("exists"):
-        AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout)
+        _log_stop(ctx, AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout))
     return {}
 
 
@@ -125,13 +148,14 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
     _set_desired(instance, DesiredState.RUNNING)
     status = client.status(instance.id)
     if not status.get("exists") or restart_required(instance):
+        # also the case for a container made by an older release (spec.CONTAINER_FORMAT)
         ctx.progress(0.1, "Configuration changed; recreating container (world data is kept)")
         if status.get("running"):
-            client.stop(instance.id, timeout=instance.stop_timeout)
+            _log_stop(ctx, client.stop(instance.id, timeout=instance.stop_timeout))
         apply_container(instance, ctx, start=True, span=(0.2, 0.9))
     else:
         ctx.progress(0.2, "Restarting server", force=True)
-        client.restart(instance.id, timeout=instance.stop_timeout)
+        _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
     return {}
 
 
@@ -207,7 +231,7 @@ def ensure_stopped(instance: Instance, ctx: JobContext) -> bool:
     status = client.status(instance.id)
     if status.get("running"):
         ctx.progress(None, "Stopping server", force=True)
-        client.stop(instance.id, timeout=instance.stop_timeout)
+        _log_stop(ctx, client.stop(instance.id, timeout=instance.stop_timeout))
         reconcile_instance(instance.id)
         return True
     return False

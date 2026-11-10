@@ -12,7 +12,6 @@ import os
 import shutil
 import socket
 import struct
-import subprocess
 import sys
 import tarfile
 import threading
@@ -814,7 +813,7 @@ def _make_server(settings: Settings, iid: uuid.UUID) -> tuple[Path, str]:
 
 @pytest.fixture
 def btrfs_settings(clean_env):
-    from mcagent.snapshots import is_subvolume
+    from mcagent.snapshots import is_subvolume, remove_tree
 
     base = Path(BTRFS or "/nonexistent") / f"t-audit-{uuid.uuid4().hex[:8]}"
     settings = Settings(data_root=base / "data", restic_password="test-password-123")
@@ -822,7 +821,7 @@ def btrfs_settings(clean_env):
     main.app.dependency_overrides.pop(get_settings, None)
     for p in sorted(base.rglob("*"), key=lambda x: -len(str(x))):
         if p.is_dir() and not p.is_symlink() and is_subvolume(p):
-            subprocess.run(["btrfs", "-q", "subvolume", "delete", str(p)], capture_output=True, check=False)
+            remove_tree(p)  # also without CAP_SYS_ADMIN, where `btrfs subvolume delete` is refused
     shutil.rmtree(base, ignore_errors=True)
 
 

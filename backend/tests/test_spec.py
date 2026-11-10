@@ -230,6 +230,55 @@ def test_spec_hash_and_restart_required():
     assert spec_hash({"a": 1, "b": 2}) == spec_hash({"b": 2, "a": 1})
 
 
+def test_container_format_is_hashed_on_the_panel_side_only(monkeypatch):
+    from apps.instances import spec as spec_module
+
+    instance = inst()
+    spec = build_spec(instance)
+    # the agent's spec schema has no such field: the number must not be sent to it
+    assert "container_format" not in spec
+    assert spec_module.CONTAINER_FORMAT >= 2
+    current = spec_hash(spec)
+    monkeypatch.setattr(spec_module, "CONTAINER_FORMAT", spec_module.CONTAINER_FORMAT + 1)
+    assert spec_hash(spec) != current
+    # a container made by the next format reads restart-required under this one, and back
+    instance.container_spec_hash = current
+    assert restart_required(instance) is True
+    instance.container_spec_hash = current_spec_hash(instance)
+    assert restart_required(instance) is False
+
+
+def test_containers_from_before_the_format_number_read_restart_required():
+    import hashlib
+    import json
+
+    instance = inst()
+    # what releases before CONTAINER_FORMAT stored: the hash of the bare spec
+    legacy = hashlib.sha256(json.dumps(build_spec(instance), sort_keys=True).encode()).hexdigest()[:16]
+    assert legacy != current_spec_hash(instance)
+    instance.container_spec_hash = legacy
+    assert restart_required(instance) is True
+    # a server that never had a container (or is archived) is not affected
+    instance.container_spec_hash = ""
+    assert restart_required(instance) is False
+
+
+def test_console_pipe_is_panel_owned():
+    from apps.instances.spec import env_override_error
+
+    assert build_env(inst())["CREATE_CONSOLE_IN_PIPE"] == "true"
+    env = build_env(
+        inst(env={"CREATE_CONSOLE_IN_PIPE": "false", "create_console_in_pipe": "0", "CONSOLE_IN_NAMED_PIPE": "/data/x"})
+    )
+    assert env["CREATE_CONSOLE_IN_PIPE"] == "true"
+    assert "create_console_in_pipe" not in env
+    # the pipe stays at the image's default path inside the container
+    assert "CONSOLE_IN_NAMED_PIPE" not in env
+    for key in ("CREATE_CONSOLE_IN_PIPE", "CONSOLE_IN_NAMED_PIPE"):
+        assert key in MANAGED_ENV
+        assert "managed by MCPanel" in env_override_error(key)
+
+
 def test_image_for_channels():
     assert image_for(21) == "itzg/minecraft-server:stable-java21"
     SystemSetting.set("runtime_image_channel", "latest")

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Archive, Camera, Clock, HardDrive, KeyRound, Lock, Pin, Plus, ShieldCheck } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { BackupNotice } from "@/components/BackupNotice";
 import { Section } from "@/components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
@@ -128,6 +129,8 @@ export default function Backups() {
 
   return (
     <div className="grid min-w-0 gap-4">
+      <BackupNotice instance={instance} backupsLink={false} />
+
       {query.data && <Summary backups={backups} />}
 
       <Section

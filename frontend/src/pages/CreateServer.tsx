@@ -41,6 +41,7 @@ import {
   type FieldErrors,
   IMPORT_TYPES,
   initialState,
+  nightlyBackupAllowed,
   SERVER_FIELD_MAP,
   type StandardCategory,
   STEPS,
@@ -50,6 +51,7 @@ import {
   validateStep,
   type WizardState,
 } from "./create-server/wizardModel";
+import { describeCron } from "./instance/schedules/cron";
 import { loaderLabel } from "./modpacks/modpackMeta";
 import {
   mpk,
@@ -115,7 +117,7 @@ function stateFromParams(sp: URLSearchParams): {
   return { state: s, step: "type" };
 }
 
-function useDerived(state: WizardState): Derived {
+function useDerived(state: WizardState, backupAllowed: boolean): Derived {
   const isModpack = state.category === "modpack";
   const isImport = state.category === "import";
   const types = isImport
@@ -228,8 +230,10 @@ function useDerived(state: WizardState): Derived {
       resolvePending: isModpack && resolve.isLoading,
       softwareSummary,
       nodeName,
+      nightlyBackupAllowed: backupAllowed,
     };
   }, [
+    backupAllowed,
     isModpack,
     isImport,
     state.importFile,
@@ -290,7 +294,7 @@ export default function CreateServer() {
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const headingRef = useRef<HTMLHeadingElement>(null);
   const firstRender = useRef(true);
-  const d = useDerived(state);
+  const d = useDerived(state, nightlyBackupAllowed(user));
   const nodes = useWizardNodes();
   const importer = useImportDeploy();
 
@@ -351,9 +355,13 @@ export default function CreateServer() {
     mutationFn: ({ payload }: { payload: CreatePayload; importFile?: File; overwrite?: boolean }) =>
       api.post<CreateResponse>("/instances/", payload),
     onSuccess: (res, vars) => {
+      // which minute the nightly backup got (it differs per server), in the words of the Schedules page
+      const backupNote = res.backup_schedule
+        ? ` Nightly backup: ${describeCron(res.backup_schedule.cron)?.toLowerCase() ?? res.backup_schedule.cron} (panel time).`
+        : "";
       if (vars.importFile) {
         toast.success(`Created ${res.instance.name}`, {
-          description: "Preparing it for the import; the archive upload starts next.",
+          description: `Preparing it for the import; the archive upload starts next.${backupNote}`,
         });
         for (const w of res.warnings ?? []) toast.warning(w);
         qc.setQueryData(qk.instance(res.instance.id), res.instance);
@@ -365,9 +373,9 @@ export default function CreateServer() {
         return;
       }
       toast.success(`Deploying ${res.instance.name}`, {
-        description: state.start
-          ? "Installing now; the server starts when the install finishes."
-          : "Installing now; it will stay stopped.",
+        description: `${
+          state.start ? "Installing now; the server starts when the install finishes." : "Installing now; it will stay stopped."
+        }${backupNote}`,
       });
       for (const w of res.warnings ?? []) toast.warning(w);
       qc.setQueryData(qk.instance(res.instance.id), res.instance);

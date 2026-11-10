@@ -1,13 +1,18 @@
 """Container policy: image allow-list, network/port/memory policy and the security properties
-of the Docker create() arguments. No Docker daemon is needed."""
+of the Docker create() arguments. No Docker daemon is needed, except for the one test that is
+marked ``docker`` and only runs with ``MCPANEL_TEST_DOCKER=1``."""
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
 from pathlib import Path
 
+import docker
 import pytest
+import requests
+from pydantic import ValidationError
 
 from mcagent import docker_ops
 from mcagent.config import Settings
@@ -31,6 +36,7 @@ ALLOWED_KWARGS = {
     "pids_limit",
     "restart_policy",
     "stop_signal",
+    "stop_timeout",  # low-level only: create_container() takes it out of the high-level arguments
     "stdin_open",
     "tty",
     "detach",
@@ -179,6 +185,225 @@ def test_create_kwargs_healthcheck_labels_and_identity(settings):
         "Name": "on-failure",
         "MaximumRetryCount": 3,
     }
+
+
+@pytest.mark.parametrize(
+    ("name", "label"),
+    [
+        ("Survival", "Survival"),
+        ("net.unraid.docker.managed=dockerman", "net.unraid.docker.managed-dockerman"),
+        ("a=b==c", "a-b--c"),
+        ("=" * 100, "-" * 100),
+        ("x" * 99 + "=", "x" * 99 + "-"),
+    ],
+)
+def test_name_label_never_contains_an_equals_sign(settings, name, label):
+    """Unraid treats a container as its own when `docker ps` label text contains
+    ``net.unraid.docker.managed=``; a server name must not be able to produce that."""
+    labels = build_create_kwargs(settings, IID, spec(name=name), "h")["labels"]
+    assert labels["io.mcpanel.name"] == label
+    rendered = ",".join(f"{k}={v}" for k, v in labels.items())  # what `docker ps --format {{.Labels}}` prints
+    assert "net.unraid.docker.managed=" not in rendered
+    # no other label carries text from the panel's user
+    assert {k for k, v in labels.items() if "=" in v} == set()
+
+
+# --- Docker's own stop timeout (Config.StopTimeout) --------------------------------------------------
+@pytest.mark.parametrize(
+    ("server_timeout", "agent_cap", "expected"),
+    [
+        (90, 20, 20),  # the defaults: capped
+        (900, 20, 20),
+        (15, 20, 15),  # a server that wants less keeps its own value
+        (5, 20, 5),
+        (20, 20, 20),
+        (90, 120, 90),  # a host that gives the daemon more time
+        (300, 600, 300),
+        (90, 5, 5),
+    ],
+)
+def test_stop_timeout_is_the_server_timeout_capped_by_the_agent_setting(
+    settings, server_timeout, agent_cap, expected
+):
+    settings.shutdown_stop_timeout = agent_cap
+    kw = build_create_kwargs(settings, IID, spec(stop_timeout=server_timeout), "h")
+    assert kw["stop_timeout"] == expected
+    # the label keeps the full value: it is the agent's default for a stop the panel asks for
+    assert kw["labels"]["io.mcpanel.stop-timeout"] == str(server_timeout)
+
+
+def test_shutdown_stop_timeout_setting(tmp_path, monkeypatch):
+    for var in list(os.environ):
+        if var.startswith("AGENT_"):
+            monkeypatch.delenv(var)
+    assert Settings(data_root=tmp_path).shutdown_stop_timeout == 20
+    monkeypatch.setenv("AGENT_SHUTDOWN_STOP_TIMEOUT", "45")
+    assert Settings(data_root=tmp_path).shutdown_stop_timeout == 45
+    for ok in (5, 600):
+        assert Settings(data_root=tmp_path, shutdown_stop_timeout=ok).shutdown_stop_timeout == ok
+    for bad in (4, 0, -1, 601):
+        with pytest.raises(ValidationError):
+            Settings(data_root=tmp_path, shutdown_stop_timeout=bad)
+    monkeypatch.setenv("AGENT_SHUTDOWN_STOP_TIMEOUT", "601")
+    with pytest.raises(ValidationError):
+        Settings(data_root=tmp_path)
+
+
+class _DockerWire(requests.adapters.BaseAdapter):
+    """Answers a real docker-py client without a daemon and keeps every request it sent."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sent: list[requests.PreparedRequest] = []
+
+    def send(self, request, **_kwargs):  # type: ignore[no-untyped-def]
+        self.sent.append(request)
+        path = request.path_url.split("?")[0].split("/", 2)[2]  # without the /v1.xx prefix
+        if request.method == "POST" and path == "containers/create":
+            status, body = 201, {"Id": "c0ffee", "Warnings": []}
+        elif request.method == "GET" and path == "containers/c0ffee/json":
+            status, body = 200, {"Id": "c0ffee", "Name": "/mcpanel-0123abcd0000", "Config": {}, "State": {}}
+        elif request.method == "GET" and path == "networks/mcpanel_instances":
+            status, body = 200, {"Id": "n1", "Name": "mcpanel_instances"}
+        else:
+            status, body = 404, {"message": f"unexpected request {request.method} {path}"}
+        response = requests.Response()
+        response.status_code = status
+        response.request = request
+        response.url = request.url
+        response.headers["Content-Type"] = "application/json"
+        response._content = json.dumps(body).encode()
+        return response
+
+    def close(self) -> None:
+        pass
+
+    def creates(self) -> list[tuple[str, dict]]:
+        return [
+            (r.path_url, json.loads(r.body))
+            for r in self.sent
+            if r.method == "POST" and "/containers/create" in r.path_url
+        ]
+
+
+@pytest.fixture
+def docker_wire(monkeypatch):
+    """A real docker-py client (the installed SDK builds the requests) with its HTTP layer captured."""
+    client = docker.DockerClient(base_url="tcp://127.0.0.1:1", version="1.47")
+    wire = _DockerWire()
+    client.api.mount("http://", wire)
+    monkeypatch.setattr(docker_ops, "client", lambda: client)
+    yield client, wire
+    client.close()
+
+
+@pytest.mark.parametrize(("server_timeout", "expected"), [(90, 20), (15, 15)])
+def test_create_request_carries_stop_timeout(settings, docker_wire, server_timeout, expected):
+    """The value must reach Docker's ``Config.StopTimeout`` in the create request itself."""
+    _client, wire = docker_wire
+    container = docker_ops.create_container(settings, IID, spec(stop_timeout=server_timeout), "hash123")
+    assert container.id == "c0ffee"
+    [(url, body)] = wire.creates()
+    assert url.endswith("/containers/create?name=mcpanel-0123abcd0000")
+    assert body["StopTimeout"] == expected
+    assert body["StopSignal"] == "SIGTERM"
+    assert body["Labels"]["io.mcpanel.stop-timeout"] == str(server_timeout)
+
+
+def test_create_request_is_the_high_level_one_plus_stop_timeout(settings, docker_wire):
+    """create_container() goes around docker-py's containers.create() to set StopTimeout.
+    Everything else in the request must stay exactly what containers.create() sends."""
+    client, wire = docker_wire
+    docker_ops.create_container(settings, IID, spec(cpu_limit=1.5), "hash123")
+    kwargs = build_create_kwargs(settings, IID, spec(cpu_limit=1.5), "hash123")
+    kwargs.pop("stop_timeout")
+    client.containers.create(**kwargs)
+    (ours_url, ours), (theirs_url, theirs) = wire.creates()
+    assert ours_url == theirs_url
+    assert "StopTimeout" not in theirs
+    assert ours == {**theirs, "StopTimeout": 20}
+    # spot checks that the comparison is not between two empty requests
+    assert ours["HostConfig"]["CapDrop"] == ["ALL"] and ours["HostConfig"]["Memory"] == 2560 * 1024 * 1024
+    assert ours["HostConfig"]["NetworkMode"] == "mcpanel_instances"
+    assert ours["HostConfig"]["RestartPolicy"] == {"Name": "unless-stopped"}
+    assert ours["Image"] == "itzg/minecraft-server:stable-java21" and ours["OpenStdin"] is True
+
+
+def test_high_level_create_cannot_set_stop_timeout(settings, docker_wire):
+    """Why create_container() does not simply pass stop_timeout to containers.create(): the
+    installed SDK rejects it, and every create would fail. If this starts to pass a value
+    through, the detour in create_container() can go."""
+    client, wire = docker_wire
+    with pytest.raises(TypeError, match="stop_timeout"):
+        client.containers.create(**build_create_kwargs(settings, IID, spec(), "h"))
+    assert wire.creates() == []
+
+
+def test_create_failure_is_still_an_agent_error(settings, docker_wire, monkeypatch):
+    client, _wire = docker_wire
+
+    def refuse(*_a, **_k):
+        raise docker.errors.APIError("500 Server Error", explanation="no space left on device")
+
+    monkeypatch.setattr(client.api, "create_container", refuse)
+    with pytest.raises(AgentError) as exc:
+        docker_ops.create_container(settings, IID, spec(), "h")
+    assert exc.value.code == "create_failed" and exc.value.status == 502
+    assert "no space left on device" in str(exc.value)
+
+
+@pytest.mark.docker
+@pytest.mark.skipif(os.environ.get("MCPANEL_TEST_DOCKER") != "1", reason="set MCPANEL_TEST_DOCKER=1")
+def test_real_docker_stores_stop_timeout(tmp_path, monkeypatch):
+    """Create (never start) a tiny container through create_container() on a real daemon and
+    read ``Config.StopTimeout`` back. The container is named mcpanel-audit-* and removed."""
+    image = os.environ.get("MCPANEL_TEST_TINY_IMAGE", "busybox:1.37")
+    for var in list(os.environ):
+        if var.startswith("AGENT_"):
+            monkeypatch.delenv(var)
+    try:
+        client = docker.from_env(timeout=60)
+        client.ping()
+    except Exception as exc:  # pragma: no cover - depends on the environment
+        pytest.skip(f"Docker daemon not reachable: {exc}")
+    try:
+        client.images.get(image)
+    except docker.errors.ImageNotFound:
+        try:
+            client.images.pull(image)
+        except docker.errors.APIError as exc:  # pragma: no cover - registry rate limits
+            pytest.skip(f"cannot pull {image}: {exc}")
+    real = Settings(
+        data_root=tmp_path / "data",
+        token="t",
+        allowed_images=[image.rpartition(":")[0]],
+        allowed_networks=["none"],  # no network to create, nothing published
+    )
+    monkeypatch.setattr(docker_ops, "client", lambda: client)
+    monkeypatch.setattr(docker_ops, "container_name", lambda iid: f"mcpanel-audit-{iid.hex[:12]}")
+    created = []
+    try:
+        for server_timeout, expected in ((90, 20), (8, 8)):
+            iid = uuid.uuid4()
+            docker_ops.instance_dir(real, iid).mkdir(parents=True)  # the bind source: ours, not root's
+            test_spec = spec(image=image, network="none", ports=[], stop_timeout=server_timeout, name="a=b")
+            container = docker_ops.create_container(real, iid, test_spec, "hash123")
+            created.append(container)
+            attrs = client.api.inspect_container(container.id)
+            assert attrs["Name"] == f"/mcpanel-audit-{iid.hex[:12]}"
+            assert attrs["Config"]["StopTimeout"] == expected
+            assert attrs["Config"]["StopSignal"] == "SIGTERM"
+            assert attrs["Config"]["Labels"]["io.mcpanel.stop-timeout"] == str(server_timeout)
+            assert attrs["Config"]["Labels"]["io.mcpanel.name"] == "a-b"
+            assert attrs["State"]["Status"] == "created"
+            # the rest of the request arrived as before
+            assert attrs["HostConfig"]["CapDrop"] == ["ALL"]
+            assert attrs["HostConfig"]["RestartPolicy"]["Name"] == "unless-stopped"
+            assert attrs["HostConfig"]["Memory"] == 2560 * 1024 * 1024
+    finally:
+        for container in created:
+            container.remove(force=True)
+        client.close()
 
 
 def test_create_kwargs_ports(settings):

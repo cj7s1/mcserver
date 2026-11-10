@@ -183,6 +183,10 @@ export interface Instance {
   power_countdown: PowerCountdown | null;
   /** null for standard (non-modpack) servers */
   modpack_update: ModpackUpdateInfo | null;
+  /** When the newest successful backup (any kind) was taken; null when there is none or the caller lacks instance.backup. */
+  last_backup_at?: string | null;
+  /** Number of enabled schedules whose action is a backup (snapshot schedules do not count). */
+  backup_schedules?: number;
   archived_at: string | null;
   created_at: string;
   updated_at: string;

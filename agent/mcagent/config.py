@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     # How the agent reaches RCON: "container_ip" (agent shares the instance network or
     # runs on the host) or "published" (connect to 127.0.0.1:<published rcon port>).
     rcon_mode: str = "container_ip"
+    # Upper limit, in seconds, for the stop timeout Docker itself gets for a Minecraft
+    # container (Config.StopTimeout = min(the server's stop timeout, this value)). Docker
+    # uses it whenever it stops a server on its own: host shutdown, daemon restart,
+    # `docker stop` / `docker restart` without a time. Stops from the panel are not affected
+    # and keep the server's full stop timeout.
+    # Why it is capped: at array stop or shutdown Unraid asks the Docker daemon to stop and
+    # kills it 30 s later, and the daemon waits for max(StopTimeout of its containers) + 5 s
+    # for them. 20 + 5 s fits inside those 30 s; with a larger value a slow server would
+    # still be stopping when the daemon is killed. Raise it only on hosts that give the
+    # daemon more time.
+    shutdown_stop_timeout: int = Field(default=20, ge=5, le=600)
 
     # API listener (used by ``python -m mcagent``) --------------------------------
     listen_host: str = "0.0.0.0"  # noqa: S104 - inside the agent container; see docs

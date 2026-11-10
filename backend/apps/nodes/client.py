@@ -31,6 +31,11 @@ OPERATION_RETRY_MAX_DELAY = 15.0
 TRANSIENT_AGENT_STATUSES = frozenset({502, 503, 504})
 
 
+# The agent's stop first asks the server to save (``save-all flush``, up to 60 s) and then runs
+# ``docker stop`` with the requested timeout, so its answer can take about timeout + 75 s.
+STOP_EXTRA_SECONDS = 120
+
+
 class AgentError(ApiError):
     """An error reported by the agent, with its machine-readable code."""
 
@@ -131,9 +136,9 @@ class AgentClient:
         ]
 
     def remove_container(self, instance_id: UUID, timeout: int = 60) -> bool:
-        return self._json("DELETE", f"/v1/instances/{instance_id}/container", params={"timeout": timeout}, timeout=timeout + 30)[
-            "removed"
-        ]
+        return self._json(
+            "DELETE", f"/v1/instances/{instance_id}/container", params={"timeout": timeout}, timeout=timeout + STOP_EXTRA_SECONDS
+        )["removed"]
 
     def status(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("GET", f"/v1/instances/{instance_id}/status")
@@ -143,11 +148,13 @@ class AgentClient:
 
     def stop(self, instance_id: UUID, timeout: int | None = None) -> dict[str, Any]:
         body = {"timeout": timeout} if timeout else {}
-        return self._json("POST", f"/v1/instances/{instance_id}/stop", json=body, timeout=(timeout or 120) + 60)
+        return self._json("POST", f"/v1/instances/{instance_id}/stop", json=body, timeout=(timeout or 120) + STOP_EXTRA_SECONDS)
 
     def restart(self, instance_id: UUID, timeout: int | None = None) -> dict[str, Any]:
         body = {"timeout": timeout} if timeout else {}
-        return self._json("POST", f"/v1/instances/{instance_id}/restart", json=body, timeout=(timeout or 120) + 120)
+        return self._json(
+            "POST", f"/v1/instances/{instance_id}/restart", json=body, timeout=(timeout or 120) + STOP_EXTRA_SECONDS + 120
+        )
 
     def kill(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/kill")
@@ -427,7 +434,8 @@ class AgentClient:
         )["operation"]
 
     def delete_snapshot(self, instance_id: UUID, name: str) -> dict[str, Any]:
-        return self._json("DELETE", f"/v1/instances/{instance_id}/snapshots/{name}")
+        # without CAP_SYS_ADMIN the agent deletes a btrfs snapshot file by file, which can take minutes
+        return self._json("DELETE", f"/v1/instances/{instance_id}/snapshots/{name}", timeout=1800)
 
     def restore_snapshot(self, instance_id: UUID, name: str) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/snapshots/{name}/restore")["operation"]

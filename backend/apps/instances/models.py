@@ -126,6 +126,15 @@ class Instance(models.Model):
     config_revision = models.PositiveIntegerField(default=1)
     applied_revision = models.PositiveIntegerField(default=0)
     active_job = models.ForeignKey("jobs.Job", null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+    # Set by `manage.py host_shutdown` (the Unraid stopping_docker hook) on a running server it
+    # stops because the host is about to stop Docker. desired_state stays "running"; after the
+    # next start of the panel the scheduler tick starts these servers again, one per minute
+    # (scheduling.resume_flagged_servers). An explicit start, stop, kill, archive or delete
+    # clears it. resume_flagged_at is when it was set: nothing is resumed by a panel process
+    # that was already running then (the host is still shutting down). db_default: after a
+    # rollback to an older image the column is still there and must not break new rows.
+    resume_after_boot = models.BooleanField(default=False, db_default=False)
+    resume_flagged_at = models.DateTimeField(null=True, blank=True)
 
     archived_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")

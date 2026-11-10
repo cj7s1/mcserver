@@ -68,9 +68,13 @@ def mount_for(path: Path) -> dict[str, str] | None:
     return best
 
 
-def describe_path(path: Path, *, same_host_path: bool = True) -> dict[str, Any]:
+def describe_path(
+    path: Path, *, same_host_path: bool = True, snapshot_root: Path | None = None
+) -> dict[str, Any]:
     """Filesystem, space and snapshot support of ``path``; ``same_host_path``: the agent sees it at
-    the same path as the host (ZFS snapshots need that)."""
+    the same path as the host (ZFS snapshots need that). ``snapshot_root``: the directory on the
+    same btrfs filesystem in which the agent may test that it can delete snapshots (the data root);
+    without it btrfs snapshot support is reported as not checked, never guessed."""
     path.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(path)
     mount = mount_for(path) or {}
@@ -80,8 +84,16 @@ def describe_path(path: Path, *, same_host_path: bool = True) -> dict[str, Any]:
         snapshot["provider"] = "btrfs"
         if not shutil.which("btrfs"):
             snapshot["reason"] = "btrfs-progs is not installed in the agent image"
+        elif snapshot_root is None:
+            snapshot["reason"] = "Not checked: MCPanel only takes snapshots of the server folders"
         else:
-            snapshot["available"] = True
+            from .snapshots import DELETE_FALLBACK, FALLBACK_NOTE, delete_support
+
+            support = delete_support(snapshot_root)
+            snapshot["available"] = support["mode"] is not None
+            snapshot["reason"] = support["reason"]
+            snapshot["delete_mode"] = support["mode"]
+            snapshot["note"] = FALLBACK_NOTE if support["mode"] == DELETE_FALLBACK else None
     elif fstype == "zfs":
         from .zfs import environment_problem
 
@@ -107,11 +119,21 @@ def describe_path(path: Path, *, same_host_path: bool = True) -> dict[str, Any]:
 
 
 def capabilities(settings: Settings) -> dict[str, Any]:
+    # Snapshots are taken from the server folders into <data root>/snapshots, so whether they can
+    # be deleted again is measured in the data root; the answer holds for the backups directory
+    # only if that is on the same filesystem.
+    data_source = (mount_for(settings.data_root) or {}).get("source")
+    backups_source = (mount_for(settings.backups_dir) or {}).get("source")
     return {
         "instances": describe_path(
-            settings.instances_dir, same_host_path=settings.host_instances_dir == settings.instances_dir
+            settings.instances_dir,
+            same_host_path=settings.host_instances_dir == settings.instances_dir,
+            snapshot_root=settings.data_root,
         ),
-        "backups": describe_path(settings.backups_dir),
+        "backups": describe_path(
+            settings.backups_dir,
+            snapshot_root=settings.data_root if data_source and backups_source == data_source else None,
+        ),
     }
 
 

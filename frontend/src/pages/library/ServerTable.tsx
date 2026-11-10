@@ -1,6 +1,7 @@
 import { ChevronRight } from "lucide-react";
 import type { MouseEvent } from "react";
 import { Link, useNavigate } from "react-router";
+import { BackupWarningBadge } from "@/components/BackupNotice";
 import { ServerIcon } from "@/components/ServerIcon";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Progress } from "@/components/ui/progress";
@@ -101,13 +102,17 @@ function ServerTableRow({ instance }: { instance: Instance }) {
             <div className="truncate text-xs text-muted-foreground" title={softwareLabel(instance)}>
               {softwareLabel(instance)}
             </div>
-            <StatusBadge status={instance.status} title={instance.status_detail || undefined} className="mt-1 sm:hidden" />
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 sm:hidden">
+              <StatusBadge status={instance.status} title={instance.status_detail || undefined} />
+              <BackupWarningBadge instance={instance} />
+            </div>
           </div>
         </div>
       </TableCell>
       <TableCell className="hidden sm:table-cell">
         <div className="grid justify-items-start gap-1">
           <StatusBadge status={instance.status} title={instance.status_detail || undefined} />
+          <BackupWarningBadge instance={instance} />
           {job && (
             <div className="flex items-center gap-1.5" title={job.message || job.title}>
               <Progress value={(job.progress ?? 0) * 100} className="h-1 w-16" aria-label={`${job.title} progress`} />

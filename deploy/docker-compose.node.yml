@@ -45,6 +45,8 @@ services:
       AGENT_PORT_MIN: ${AGENT_PORT_MIN:-1024}
       AGENT_PORT_MAX: ${AGENT_PORT_MAX:-65535}
       AGENT_MAX_MEMORY_MB: ${AGENT_MAX_MEMORY_MB:-65536}
+      # Longest time Docker itself may wait for a server when the host or the Docker daemon stops.
+      AGENT_SHUTDOWN_STOP_TIMEOUT: ${AGENT_SHUTDOWN_STOP_TIMEOUT:-20}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

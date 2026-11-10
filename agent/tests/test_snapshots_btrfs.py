@@ -3,6 +3,10 @@
 Run against a btrfs mount given by MCPANEL_TEST_BTRFS (e.g. a loopback image):
     truncate -s 2G /srv/btrfs.img && mkfs.btrfs /srv/btrfs.img && mount -o loop /srv/btrfs.img /srv/btrfs-test
     MCPANEL_TEST_BTRFS=/srv/btrfs-test uv run pytest tests/test_snapshots_btrfs.py
+
+They must pass as full root and as root without CAP_SYS_ADMIN (the default agent container), where
+the kernel refuses ``btrfs subvolume delete``; see tests/test_snapshots_btrfs_delete.py for the
+second run and for the tests of the two ways of deleting.
 """
 
 import os
@@ -14,7 +18,7 @@ import pytest
 
 from mcagent.config import Settings
 from mcagent.docker_ops import AgentError
-from mcagent.snapshots import BtrfsSnapshots, ensure_instance_dir, is_subvolume
+from mcagent.snapshots import BtrfsSnapshots, ensure_instance_dir, is_subvolume, remove_tree
 
 ROOT = os.environ.get("MCPANEL_TEST_BTRFS")
 pytestmark = pytest.mark.skipif(
@@ -30,9 +34,10 @@ def setup():
     iid = uuid.uuid4()
     yield settings, iid
     for p in sorted(base.rglob("*"), key=lambda x: -len(str(x))):
-        if p.is_dir() and is_subvolume(p):
-            os.system(f"btrfs -q subvolume delete '{p}' >/dev/null 2>&1")  # test cleanup only
+        if p.is_dir() and not p.is_symlink() and is_subvolume(p):
+            remove_tree(p)  # also without CAP_SYS_ADMIN, where `btrfs subvolume delete` is refused
     shutil.rmtree(base, ignore_errors=True)
+    assert not base.exists()
 
 
 def test_new_instance_dir_is_subvolume_and_snapshot_restore(setup):

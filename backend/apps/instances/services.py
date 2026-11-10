@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from collections.abc import Collection
+from datetime import datetime
 from typing import Any
 
+from croniter import croniter
 from django.conf import settings
 from django.db import transaction
-from django.db.models import F
+from django.db.models import Count, F, IntegerField, Max, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 
 from apps.audit import service as audit
 from apps.core.errors import ApiError, ConflictError
@@ -17,7 +22,7 @@ from apps.jobs.runner import enqueue
 from apps.nodes.client import AgentClient
 from apps.nodes.models import Node
 
-from .models import Instance
+from .models import Instance, Schedule
 
 log = logging.getLogger(__name__)
 
@@ -143,7 +148,8 @@ def power(
     if instance.archived_at:
         raise ConflictError("Unarchive this server before starting it", code="archived")
     if action == "kill":
-        Instance.objects.filter(pk=instance.pk).update(desired_state="stopped")
+        # a kill also settles a pending "start again after the host restart" mark (host_shutdown)
+        Instance.objects.filter(pk=instance.pk).update(desired_state="stopped", resume_after_boot=False, resume_flagged_at=None)
         status = AgentClient(instance.node).kill(instance.id)
         audit.record("instance.kill", request=request, instance=instance, target=instance)
         from .reconcile import reconcile_instance
@@ -163,3 +169,102 @@ def power(
 @transaction.atomic
 def create_instance_record(**fields: Any) -> Instance:
     return Instance.objects.create(**fields)
+
+
+# --- backup overview (InstanceSerializer.last_backup_at / backup_schedules) -----------------------
+def backup_overview_annotations() -> dict[str, Any]:
+    """Queryset annotations with the names ``InstanceSerializer`` reads, so a list costs no query per server."""
+    from apps.backups.models import Backup, BackupStatus
+
+    newest = (
+        Backup.objects.filter(instance=OuterRef("pk"), status=BackupStatus.SUCCEEDED).order_by("-created_at").values("created_at")
+    )
+    # order_by(): the model's default ordering would otherwise join the GROUP BY
+    schedules = (
+        Schedule.objects.filter(instance=OuterRef("pk"), enabled=True, action="backup")
+        .order_by()
+        .values("instance")
+        .annotate(n=Count("pk"))
+        .values("n")
+    )
+    return {
+        "last_backup_at": Subquery(newest[:1]),
+        "backup_schedules": Coalesce(Subquery(schedules, output_field=IntegerField()), 0),
+    }
+
+
+def last_backup_at(instance: Instance) -> datetime | None:
+    """When the newest successful backup of this server (any kind) was taken."""
+    from apps.backups.models import Backup, BackupStatus
+
+    return Backup.objects.filter(instance=instance, status=BackupStatus.SUCCEEDED).aggregate(at=Max("created_at"))["at"]
+
+
+def backup_schedule_count(instance: Instance) -> int:
+    """Enabled schedules of this server whose action is a backup (snapshot schedules do not count)."""
+    return Schedule.objects.filter(instance=instance, enabled=True, action="backup").count()
+
+
+# --- default nightly backup schedule ----------------------------------------------------------------
+# The same schedule the "Nightly backup" template of the Schedules page creates (frontend
+# pages/instance/Schedules.tsx TEMPLATES): a backup action with an empty payload, so its backups
+# are pruned by the retention policy of the Backups page. Only the time differs: the template runs
+# at 04:00 for every server, this one at a minute taken from the server's id.
+NIGHTLY_BACKUP_NAME = "Nightly backup"
+# Daily between 03:00 and 04:59 panel time. Two schedules of one server that are due in the same
+# minute do not both run (the second finds the server busy and is skipped), so minute 0 (every cron
+# preset of the schedule dialog, e.g. an hourly snapshot) and the other multiples of five that
+# people type by hand are never used.
+NIGHTLY_BACKUP_SLOTS: tuple[tuple[int, int], ...] = tuple((hour, minute) for hour in (3, 4) for minute in range(60) if minute % 5)
+
+
+def cron_minutes(expr: str) -> set[int]:
+    """Minutes of the hour at which a cron expression can fire (all sixty for ``*``)."""
+    try:
+        minutes = croniter(expr).expanded[0]
+    except (ValueError, KeyError, IndexError):  # croniter's errors derive from ValueError
+        return set()
+    if "*" in minutes:
+        return set(range(60))
+    return {int(m) for m in minutes}
+
+
+def schedule_minutes(instance: Instance) -> set[int]:
+    """Minutes of the hour used by any schedule of this server, paused ones included (they can be resumed)."""
+    used: set[int] = set()
+    for cron in Schedule.objects.filter(instance=instance).values_list("cron", flat=True):
+        used |= cron_minutes(cron)
+    return used
+
+
+def nightly_backup_cron(instance_id: Any, taken: Collection[int] = ()) -> str:
+    """Cron of the nightly backup of a server: a fixed slot derived from its id, so servers spread
+    over the two hours instead of all starting at once.
+
+    ``taken`` are minutes other schedules of the server use: the next free slot is chosen then.
+    When no slot is free (a schedule that runs every minute) the server's own slot is kept.
+    """
+    seed = instance_id.int if isinstance(instance_id, uuid.UUID) else uuid.UUID(str(instance_id)).int
+    start = seed % len(NIGHTLY_BACKUP_SLOTS)
+    ordered = NIGHTLY_BACKUP_SLOTS[start:] + NIGHTLY_BACKUP_SLOTS[:start]
+    hour, minute = next((slot for slot in ordered if slot[1] not in taken), ordered[0])
+    return f"{minute} {hour} * * *"
+
+
+def add_nightly_backup_schedule(instance: Instance) -> Schedule:
+    """Create the default nightly backup schedule of a server, away from the minutes of its other schedules.
+
+    The caller checks permissions and writes the audit event. ``next_run_at`` stays empty like for a
+    schedule made through the API: the scheduler fills it in on its next tick.
+    """
+    return Schedule.objects.create(
+        instance=instance,
+        name=NIGHTLY_BACKUP_NAME,
+        action="backup",
+        cron=nightly_backup_cron(instance.pk, schedule_minutes(instance)),
+        payload={},
+        enabled=True,
+        # also while stopped: an imported or edited server must not stay without any backup, and an
+        # unchanged folder costs restic almost nothing
+        only_when_running=False,
+    )

@@ -90,6 +90,71 @@ def test_describe_path_snapshot_capability(tmp_path, monkeypatch, fstype, provid
         assert "not installed" in info["snapshot"]["reason"]
 
 
+@pytest.mark.parametrize(
+    ("mode", "available", "note_part"),
+    [("native", True, None), ("fallback", True, "CAP_SYS_ADMIN"), (None, False, None)],
+)
+def test_describe_path_btrfs_reports_what_the_delete_probe_measured(
+    tmp_path, monkeypatch, mode, available, note_part
+):
+    """btrfs with the tools installed: available only if the agent can delete snapshots again."""
+    from mcagent import snapshots
+
+    asked = []
+
+    def delete_support(root, **_kwargs):
+        asked.append(root)
+        return {
+            "mode": mode,
+            "reason": None if mode else "self-test failed; see docs/UNRAID.md",
+            "checked_at": 0,
+        }
+
+    monkeypatch.setattr(
+        storage, "mount_for", lambda p: {"mount_point": "/x", "fstype": "btrfs", "source": "s", "root": "/"}
+    )
+    monkeypatch.setattr(storage.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(snapshots, "delete_support", delete_support)
+    snap = storage.describe_path(tmp_path / "instances", snapshot_root=tmp_path)["snapshot"]
+    assert asked == [tmp_path]
+    assert (snap["provider"], snap["available"], snap["delete_mode"]) == ("btrfs", available, mode)
+    assert (snap["reason"] is None) == available
+    if note_part:
+        assert note_part in snap["note"]
+    else:
+        assert snap["note"] is None
+    # Nowhere to test (not the data root's filesystem): reported as not checked, never guessed.
+    snap = storage.describe_path(tmp_path / "elsewhere")["snapshot"]
+    assert snap["available"] is False and "Not checked" in snap["reason"]
+    assert asked == [tmp_path]
+
+
+def test_capabilities_probe_only_the_data_roots_filesystem(agent_settings, monkeypatch):
+    from mcagent import snapshots
+
+    backups = agent_settings.data_root.parent / "other-disk"
+    settings = agent_settings.model_copy(update={"backup_root": backups})
+    asked = []
+
+    def mount_for(path):
+        source = "/dev/other" if str(path).startswith(str(backups)) else "/dev/pool"
+        return {"mount_point": "/x", "fstype": "btrfs", "source": source, "root": "/"}
+
+    def delete_support(root, **_kwargs):
+        asked.append(root)
+        return {"mode": "fallback", "reason": None, "checked_at": 0}
+
+    monkeypatch.setattr(storage, "mount_for", mount_for)
+    monkeypatch.setattr(storage.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(snapshots, "delete_support", delete_support)
+    caps = storage.capabilities(settings)
+    assert caps["instances"]["snapshot"]["available"] is True
+    assert caps["instances"]["snapshot"]["delete_mode"] == "fallback"
+    assert caps["backups"]["snapshot"]["available"] is False  # another filesystem: no test folders there
+    assert "Not checked" in caps["backups"]["snapshot"]["reason"]
+    assert asked == [settings.data_root]
+
+
 def test_dir_size_counts_files_and_skips_symlink_targets(tmp_path):
     (tmp_path / "a").mkdir()
     (tmp_path / "a" / "f").write_bytes(b"x" * 10000)

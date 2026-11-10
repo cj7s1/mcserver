@@ -331,7 +331,7 @@ async def apply_spec(
             existing.reload()
             was_running = existing.status in ("running", "restarting")
             op.update(0.88, "Stopping and removing previous container (data is kept)")
-            docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout)
+            docker_ops.remove_container(instance_id, timeout=body.spec.stop_timeout, settings=settings)
         op.update(0.92, "Creating container")
         c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
         if body.start or was_running:
@@ -345,9 +345,13 @@ async def apply_spec(
 
 
 @app.delete("/v1/instances/{instance_id}/container", dependencies=[Depends(require_token)])
-async def remove_container(instance_id: UUID, timeout: int = Query(60, ge=1, le=900)) -> dict[str, Any]:
+async def remove_container(
+    instance_id: UUID, timeout: int = Query(60, ge=1, le=900), settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
     registry.assert_lifecycle_allowed(instance_id)
-    removed = await run_in_threadpool(docker_ops.remove_container, instance_id, timeout=timeout)
+    removed = await run_in_threadpool(
+        docker_ops.remove_container, instance_id, timeout=timeout, settings=settings
+    )
     return {"removed": removed}
 
 
@@ -367,18 +371,33 @@ async def start(instance_id: UUID) -> dict[str, Any]:
 
 
 @app.post("/v1/instances/{instance_id}/stop", dependencies=[Depends(require_token)])
-async def stop(instance_id: UUID, body: StopRequest | None = None) -> dict[str, Any]:
+async def stop(
+    instance_id: UUID, body: StopRequest | None = None, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    """Graceful stop (``docker_ops.graceful_stop``): flush, ``docker stop``, RCON ``stop`` if needed.
+
+    Answers with the container status as before, plus ``stop``: what the stop did
+    (``flushed``, ``stop_sent_via_rcon``, ``warnings``). It can take the stop timeout plus
+    the flush (``docker_ops.flush_timeout``) plus a few seconds.
+    """
     registry.assert_lifecycle_allowed(instance_id)
-    await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None)
-    return await run_in_threadpool(docker_ops.status, instance_id)
+    result = await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None, settings)
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    status["stop"] = result.as_dict()
+    return status
 
 
 @app.post("/v1/instances/{instance_id}/restart", dependencies=[Depends(require_token)])
-async def restart(instance_id: UUID, body: StopRequest | None = None) -> dict[str, Any]:
+async def restart(
+    instance_id: UUID, body: StopRequest | None = None, settings: Settings = Depends(get_settings)
+) -> dict[str, Any]:
+    """The graceful stop of ``/stop``, then start; the answer carries the same ``stop`` field."""
     registry.assert_lifecycle_allowed(instance_id)
-    await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None)
+    result = await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None, settings)
     await run_in_threadpool(docker_ops.start, instance_id)
-    return await run_in_threadpool(docker_ops.status, instance_id)
+    status = await run_in_threadpool(docker_ops.status, instance_id)
+    status["stop"] = result.as_dict()
+    return status
 
 
 @app.post("/v1/instances/{instance_id}/kill", dependencies=[Depends(require_token)])
@@ -421,7 +440,7 @@ async def delete_data(
 
     def _delete(op: Operation) -> dict[str, Any]:
         op.update(0.1, "Removing container")
-        docker_ops.remove_container(instance_id, timeout=30)
+        docker_ops.remove_container(instance_id, timeout=30, settings=settings)
         # Before the files: if btrfs or ZFS refuses, the server is still intact and the delete
         # can be retried. On ZFS this destroys the server's dataset itself (with its history
         # datasets): a mount point cannot be renamed into the trash.

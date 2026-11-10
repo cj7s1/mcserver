@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArchiveRestore, ChevronRight, FolderOpen, PackageOpen, RefreshCw, SquareTerminal, TriangleAlert, Users } from "lucide-react";
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { BackupNotice } from "@/components/BackupNotice";
 import { Section } from "@/components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
@@ -152,6 +153,8 @@ function OverviewContent() {
           </Button>
         </div>
       )}
+
+      <BackupNotice instance={instance} />
 
       <DiagnosticsCard instance={instance} can={can} now={now} />
 

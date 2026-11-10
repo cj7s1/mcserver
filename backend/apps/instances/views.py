@@ -53,7 +53,10 @@ class InstanceListView(APIView):
             prefetch.append(Prefetch("access_grants", queryset=grants, to_attr="viewer_grants"))
         qs = visible_instances(
             request.user,
-            Instance.objects.select_related("node", "active_job", "modpack_update_check").prefetch_related(*prefetch),
+            Instance.objects.select_related("node", "active_job", "modpack_update_check")
+            .prefetch_related(*prefetch)
+            # last_backup_at / backup_schedules of the serializer, as subqueries of the list query
+            .annotate(**services.backup_overview_annotations()),
         )
         archived = request.query_params.get("archived")
         if archived == "true":
@@ -139,6 +142,12 @@ class InstanceListView(APIView):
                 manager = Role.objects.filter(key="server_manager").first()
                 if manager and not request.user.is_owner and "instance.view" not in request.user.global_permissions():
                     InstanceAccess.objects.create(user=request.user, instance=instance, role=manager, created_by=request.user)
+                # The wizard's "Nightly backup" option: same rule as creating the schedule by hand
+                # (checked after the grant above, which is what gives most creators the rights).
+                # Without them the server is still created, just without the schedule.
+                backup_schedule = None
+                if data.get("nightly_backup") and may_create_schedule(request.user, instance, "backup"):
+                    backup_schedule = services.add_nightly_backup_schedule(instance)
         except IntegrityError as exc:
             raise ConflictError("That port was just taken by another server; choose another", code="port_conflict") from exc
 
@@ -163,9 +172,25 @@ class InstanceListView(APIView):
                 "modpack_version": instance.modpack_version_id,
             },
         )
+        schedule_data = ScheduleSerializer(backup_schedule).data if backup_schedule is not None else None
+        if schedule_data is not None:
+            audit.record(
+                "schedule.created",
+                request=request,
+                instance=instance,
+                target=backup_schedule,
+                details={**schedule_data, "via": "server_created"},
+            )
         instance.refresh_from_db()
         return Response(
-            {"instance": _ser(instance, request), "job": JobSerializer(job).data, "warnings": warnings, "java": java_info},
+            {
+                "instance": _ser(instance, request),
+                "job": JobSerializer(job).data,
+                "warnings": warnings,
+                "java": java_info,
+                # the nightly backup schedule made with the server; null when not asked for or not permitted
+                "backup_schedule": schedule_data,
+            },
             status=status.HTTP_201_CREATED,
         )
 
@@ -686,6 +711,16 @@ def require_schedule_action(user: Any, instance: Instance, action: str, payload:
         # Every snapshot schedule prunes older scheduled snapshots (its own keep count, or the
         # default of 24 when none is set), and deleting snapshots is a restore-level operation.
         require(user, "instance.restore", instance)
+
+
+def may_create_schedule(user: Any, instance: Instance, action: str, payload: dict[str, Any] | None = None) -> bool:
+    """Whether ``user`` could create this schedule through ScheduleListView.post (same checks, no error)."""
+    try:
+        require(user, "instance.schedules", instance)
+        require_schedule_action(user, instance, action, payload)
+    except PermissionDenied:
+        return False
+    return True
 
 
 class ScheduleListView(APIView):
