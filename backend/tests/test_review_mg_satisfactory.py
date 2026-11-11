@@ -502,10 +502,12 @@ def test_first_start_deadline_fails_the_install(make_instance, fake_agent, monke
 
     inst = _claimed_instance(make_instance, fake_agent, running=False)
     monkeypatch.setattr(game_handlers, "FIRST_START_TIMEOUT", 0)
+    from apps.jobs.models import Job
     from apps.jobs.runner import JobContext
 
+    ctx = JobContext(Job.objects.create(kind="install", title="t", instance=inst))  # (the wait marks its job)
     with pytest.raises(Exception) as exc:
-        game_handlers.wait_first_start(inst, JobContext.__new__(JobContext), AgentClient(inst.node), span=(0.9, 0.05))
+        game_handlers.wait_first_start(inst, ctx, AgentClient(inst.node), span=(0.9, 0.05))
     assert getattr(exc.value, "error_code", "") == "first_start_timeout"
 
 

@@ -19,6 +19,12 @@ All six have in common:
   encrypted and never shown in logs; the agent hides them in the console as `********`.
 * Docker never restarts these servers by itself: a crash leaves the server stopped, and its Diagnostics
   name the usual causes (the game download failed, the disk is full, not enough memory).
+* **Stop works while the first start downloads the game** (Counter-Strike 2, Rust, Project Zomboid): it ends
+  the job that waits for the server and stops the container.
+* Files that may hold the server's passwords (Project Zomboid's logs and ini, Counter-Strike 2's
+  `server.cfg` and logs, Rust's logs, Palworld's settings) are masked in the editor and in downloads and
+  are never put into a zip; Project Zomboid's own backup zips are not handed out at all (the panel switches
+  them off and takes its own backups).
 
 ## Palworld
 

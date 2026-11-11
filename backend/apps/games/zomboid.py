@@ -52,8 +52,20 @@ PASSWORD_PATTERN = r"^[A-Za-z0-9_-]{8,64}$"
 # account names the panel passes in RCON commands (inside double quotes)
 PLAYER_NAME = r"^[A-Za-z0-9_.-]([A-Za-z0-9_. -]{0,30}[A-Za-z0-9_.-])?$"
 BRANCHES = ("public", "legacy41")
-MANAGED_KEYS = frozenset({"DefaultPort", "UDPPort", "RCONPort", "RCONPassword", "MaxPlayers", "UPnP", "BackupsOnStart"})
-PANEL_KEYS = {"UPnP": "false", "BackupsOnStart": "false"}
+# the game's own backups (data/backups/: zips that hold the ini with the RCON password) are switched off: at
+# a start, at a version change (the first start counts as one: the end-to-end run found backups/version/
+# backup_1.zip with BackupsOnStart=false) and periodically
+PANEL_KEYS = {"UPnP": "false", "BackupsOnStart": "false", "BackupsOnVersionChange": "false", "BackupsPeriod": "0"}
+MANAGED_KEYS = frozenset({"DefaultPort", "UDPPort", "RCONPort", "RCONPassword", "MaxPlayers", *PANEL_KEYS})
+GAME_BACKUPS = "data/backups"
+LOGS = ("data/server-console.txt",)
+LOG_FOLDERS = ("data/Logs",)
+MASK = "********"
+# lines that hold a password whatever its value (also one the server had before: logs keep old lines):
+# Build 41 logs every RCON login with its body ("RCON: ID=31 Type=3 Body='<password>' Socket[...]"),
+# the ini keeps the RCON and the join password
+_RCON_LOGIN = re.compile(r"(Type=3 Body=')[^']*(')")
+_INI_SECRET = re.compile(r"^(\s*(?:RCONPassword|Password)\s*=)(.+?)(\s*)$", re.MULTILINE)
 _PLAYERS_COUNT = re.compile(r"Players connected \((\d+)\)")
 
 INI_FIELDS: tuple[dict[str, Any], ...] = (
@@ -314,17 +326,42 @@ class ZomboidDefinition(SteamGameDefinition):
             client.mkdir(instance.id, path.rsplit("/", 1)[0], parents=True)
             client.write_text(instance.id, path, kv.update(text or "", changes))
 
+    masks_by_line = True  # (every rule of masked_text works on single lines)
+
     def masked_text(self, instance: Instance, path: str, content: str) -> str:
-        """The ini holds the RCON password (the image writes it): hidden in the editor."""
+        """The ini holds the RCON password (the image writes it) and the join password; Build 41's logs hold
+        every RCON login with the password: hidden in the editor and in every download of those files."""
         from apps.instances.spec import rcon_password
 
         for value in (rcon_password(instance), instance.secret_values.get(ADMIN_PASSWORD)):
             if value and len(value) >= 8:
-                content = content.replace(value, "********")
-        return content
+                content = content.replace(value, MASK)
+        content = _RCON_LOGIN.sub(lambda m: f"{m.group(1)}{MASK}{m.group(2)}", content)
+        return _INI_SECRET.sub(lambda m: f"{m.group(1)}{MASK}{m.group(3)}", content)
+
+    def unmask_text(self, instance: Instance, path: str, content: str, current: str) -> str:
+        """A saved ini keeps its passwords where the editor showed the mask."""
+        if not path.strip("/").endswith(".ini"):
+            return content
+        values = {m.group(1).strip().rstrip("=").strip(): m.group(2) for m in _INI_SECRET.finditer(current or "")}
+
+        def restore(m: re.Match[str]) -> str:
+            key = m.group(1).strip().rstrip("=").strip()
+            if m.group(2) == MASK and key in values:
+                return f"{m.group(1)}{values[key]}{m.group(3)}"
+            return m.group(0)
+
+        return _INI_SECRET.sub(restore, content)
+
+    def secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        # the game's own backup zips (its ini with the RCON password inside, not maskable): never handed out
+        return (*super().secret_paths(instance), GAME_BACKUPS)
 
     def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
-        return (self.ini_path(instance),)
+        return (self.ini_path(instance), *LOGS)
+
+    def secret_bearing_folders(self, instance: Instance) -> tuple[str, ...]:
+        return LOG_FOLDERS
 
     # -- console and players -------------------------------------------------------------------------
     def normalise_command(self, text: str) -> str:
@@ -380,9 +417,18 @@ class ZomboidDefinition(SteamGameDefinition):
         "ban": 'banuser "{name}"',
         "pardon": 'unbanuser "{name}"',
         "op": 'setaccesslevel "{name}" admin',
-        "deop": 'setaccesslevel "{name}" user',
+        "deop": 'setaccesslevel "{name}" {plain}',
         "whitelist_remove": 'removeuserfromwhitelist "{name}"',
     }
+    # the access level that takes admin rights away: Build 42 has "user"; Build 41 (legacy41) refuses it
+    # ("Access Level '0' unknown, list of access level: player, admin, moderator, overseer, gm, observer")
+    # and removes the level with "none" (end-to-end run of 2026-11-11)
+    PLAIN_LEVEL = {"public": "user", "legacy41": "none"}
+    # what the game answers when it did not do it: its usage text ("Use: /adduser ..."), an unknown access
+    # level or command, a user that does not exist (kick/ban/unban of a name it does not know)
+    refusal_pattern = (
+        r"(?i)\bunknown\b|doesn'?t exist|does not exist|\buse:|\bnot found\b|no such user|is not banned|isn'?t banned"
+    )
     # adding to the whitelist creates an account, which needs a password (adduser "name" "password"; with
     # the name alone the game only answers its usage text): the console does it, or players create their
     # own while the ini's Open=true
@@ -409,13 +455,14 @@ class ZomboidDefinition(SteamGameDefinition):
                 code="not_running",
                 status_code=409,
             )
-        command = self.COMMANDS[action].format(name=name)
+        branch = str((instance.game_options or {}).get("branch") or "public")
+        command = self.COMMANDS[action].format(name=name, plain=self.PLAIN_LEVEL.get(branch, "user"))
         reason = self.chat_text(reason, limit=120)
         if reason and action in ("kick", "ban"):
             command += f' -r "{reason}"'
         output = client.command(instance.id, command)
         cache.delete(f"players:online:{instance.pk}")
-        return {"via": "rcon", "output": output}
+        return {"via": "rcon", "output": self.checked_reply(output, said=(name,))}
 
     def consistency_note(self, instance: Instance) -> str:
         return (

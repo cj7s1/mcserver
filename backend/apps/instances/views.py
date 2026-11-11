@@ -841,6 +841,10 @@ class FilesTextView(APIView):
                 "editor that keeps its encoding, or confirm to overwrite it anyway.",
                 code="non_utf8_file",
             )
+        definition = games.get_or_none(instance.game)
+        if definition is not None and current is not None and isinstance(current.get("content"), str):
+            # what the editor showed masked (Project Zomboid's join password) keeps the file's value
+            content = definition.unmask_text(instance, path, content, current["content"])
         encoding, content = _properties_text(path, content, current)
         result = client.write_text(instance.id, path, content, create_only, encoding=encoding)
         audit.record("files.write", request=request, instance=instance, target=instance, details={"path": path})
@@ -856,6 +860,18 @@ class FilesDownloadView(APIView):
         chunks, length, upstream = AgentClient(instance.node).download(instance.id, path)
         filename = path.rsplit("/", 1)[-1] or "download"
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        if secret_files.is_bearing(instance, path) and secret_files.masked_by_line(instance):
+            # a file that may hold the server's passwords (Project Zomboid's logs record RCON logins): masked
+            # line by line while it is streamed (no size limit; its length changes, so none is sent)
+            response = AgentStreamingResponse(
+                secret_files.masked_stream(instance, path, chunks), upstream, content_type=content_type
+            )
+            response["Content-Disposition"] = content_disposition(filename)
+            response["X-Content-Type-Options"] = "nosniff"
+            audit.record(
+                "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
+            )
+            return response
         if secret_files.is_bearing(instance, path):
             # a file with a secret inside (TShock's config.json): masked like the text editor shows it
             try:
@@ -971,6 +987,8 @@ class FilesOpView(APIView):
             # a secret file, or a folder with one, moved elsewhere would be downloadable there
             secret_files.require_no_secret_inside(instance, source)
             secret_files.require_no_secret_inside(instance, destination)
+            secret_files.require_not_moved_out(instance, source)
+            secret_files.require_not_secret(instance, destination)  # (nothing is moved into one either)
             _files_touched(instance, [source, destination], "files were renamed")
             removed = [source]
             details: dict[str, Any] = {"source": source, "destination": destination, "overwrite": bool(data.get("overwrite"))}
@@ -1765,6 +1783,7 @@ class FilesArchiveView(APIView):
                 flushed = True
             except ApiError:
                 pass  # not running after all / RCON not ready: download what is on disk
+        secret_files.require_zippable(instance, paths, request.user)
         excludes = secret_files.zip_excludes(instance, paths, request.user)
         if excludes and not client.supports(ARCHIVE_EXCLUDES_FEATURE):
             raise ConflictError(

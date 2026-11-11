@@ -181,6 +181,8 @@ class Cs2Definition(SteamGameDefinition):
         {"console_commands", "broadcast", "players", "player_actions", "query", "config_files", "diagnostics"}
     )
     stop_words = frozenset({"quit", "exit", "_restart"})
+    # the Source console's refusals of a kick (a name nobody online has, an unknown command)
+    refusal_pattern = r"(?i)\bnot found\b|can'?t (?:find|kick)|cannot (?:find|kick)|no (?:such )?(?:user|player)|unknown command"
     refuse_stop_commands = True
     command_hint = "Server console commands, e.g. status, say Hello, changelevel de_dust2, mp_restartgame 1."
     player_name_pattern = PLAYER_NAME
@@ -298,6 +300,9 @@ class Cs2Definition(SteamGameDefinition):
     def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
         return (SERVER_CFG,)
 
+    def secret_bearing_folders(self, instance: Instance) -> tuple[str, ...]:
+        return ("game/csgo/logs",)  # the server's logs (sv_logfile): masked like server.cfg, never zipped
+
     # -- console and players -------------------------------------------------------------------------
     def normalise_command(self, text: str) -> str:
         return text.strip().lstrip("/").strip()
@@ -367,7 +372,7 @@ class Cs2Definition(SteamGameDefinition):
             raise ApiError("The server is not running, so nobody can be kicked", code="not_running", status_code=409)
         output = client.command(instance.id, f'kick "{name}"')
         cache.delete(f"players:online:{instance.pk}")
-        return {"via": "rcon", "output": output}
+        return {"via": "rcon", "output": self.checked_reply(output, said=(name,))}
 
 
 __all__ = ["GAME", "Cs2Definition", "parse_status"]

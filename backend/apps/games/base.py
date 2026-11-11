@@ -728,6 +728,20 @@ class GameDefinition:
         """A server file as the text editor shows it (secrets the game keeps inside a file hidden)."""
         return content
 
+    def unmask_text(self, instance: Instance, path: str, content: str, current: str) -> str:
+        """``content`` the text editor saves, with the masks of ``masked_text`` put back to the values of the
+        file as it is (``current``), so saving a masked file does not write the mask (Project Zomboid's join
+        password in its ini). Default: unchanged (TShock's keys are put back by ``before_apply``)."""
+        return content
+
+    # a secret-bearing file is masked line by line while it is streamed (no size limit, any encoding):
+    # ``masked_text`` must then work on single lines (the six Steam-era games); otherwise the whole file is
+    # read and masked at once (TShock's config.json, at most secret_files.MASKED_DOWNLOAD_LIMIT)
+    masks_by_line: bool = False
+    # secret-bearing files go into zips of users with ``instance.configure`` (TShock's REST token, which they
+    # can change anyway); False: never into a zip (files with the control secret, which nobody is shown)
+    bearing_in_zips_for_configure: bool = True
+
     def consistency_note(self, instance: Instance) -> str:
         """What a "consistent" backup of this game means, for the backup job's log (Minecraft: none,
         its saving is paused while restic copies)."""
@@ -736,12 +750,19 @@ class GameDefinition:
     def secret_paths(self, instance: Instance) -> tuple[str, ...]:
         """Server files that hold a control secret (Factorio: config/rconpw): the file API never
         serves them (download, zip, backup browser), never overwrites, renames or deletes them, and
-        never renames or deletes a folder that contains one (``apps.instances.secret_files``)."""
+        never renames or deletes a folder that contains one (``apps.instances.secret_files``). A
+        folder here covers everything inside it (Project Zomboid's own backup zips, which hold its
+        ini with the RCON password and cannot be masked)."""
         return (self.control_secret_file,) if self.control_secret_file else ()
 
     def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
         """Server files with a secret inside (``masked_text`` hides it, e.g. TShock's config.json):
         downloads are masked, zips leave them out for users without ``instance.configure``."""
+        return ()
+
+    def secret_bearing_folders(self, instance: Instance) -> tuple[str, ...]:
+        """Folders whose every file may hold a secret (Project Zomboid's logs, which record RCON logins
+        with the password): treated like ``secret_bearing_paths``."""
         return ()
 
     def files_touched(self, instance: Instance, paths: list[str], why: str) -> None:

@@ -303,7 +303,7 @@ class InstanceSerializer(serializers.ModelSerializer):
         job = obj.active_job
         if job is None or not job.is_active:
             return None
-        return {
+        data = {
             "id": str(job.id),
             "kind": job.kind,
             "title": job.title,
@@ -311,6 +311,10 @@ class InstanceSerializer(serializers.ModelSerializer):
             "message": job.message,
             "status": job.status,
         }
+        if (job.result or {}).get("waiting_first_start"):
+            # it only waits for a start that downloads the game: Stop ends it (services.end_first_start_wait)
+            data["stoppable"] = True
+        return data
 
     def get_power_countdown(self, obj: Instance) -> dict[str, Any] | None:
         """A restart/stop that is warning players and has not started yet (cancellable)."""

@@ -641,6 +641,7 @@ class SavesExportView(APIView):
             # the agent, without the game's own rolling copies and without files that hold a secret
             from . import secret_files
 
+            secret_files.require_zippable(instance, [path], request.user)
             excludes = sorted(
                 {*saves.export_excludes(instance, path), *secret_files.zip_excludes(instance, [path], request.user)}
             )

@@ -175,6 +175,8 @@ class HkmpDefinition(SteamGameDefinition):
     clean_exit_codes = frozenset({0})
     capability_set = frozenset({"console_commands", "broadcast", "players", "player_actions", "config_files", "diagnostics"})
     stop_words = frozenset({"exit"})
+    # "Could not find player with name ...", "Given argument is not a valid authentication key", "Unknown command"
+    refusal_pattern = r"(?i)could not find|not a valid|unknown command"
     refuse_stop_commands = True
     command_hint = "HKMP server commands without /, e.g. list, announce Hello, kick <name>, whitelist on."
     player_name_pattern = PLAYER_NAME
@@ -300,9 +302,11 @@ class HkmpDefinition(SteamGameDefinition):
                 code="not_running",
                 status_code=409,
             )
-        output = client.command(instance.id, f"{commands[action]} {target}")
+        command = f"{commands[action]} {target}"
+        output = client.command(instance.id, command)
         cache.delete(f"players:online:{instance.pk}")
-        return {"via": "console", "output": output}
+        # (the reply starts with the server's echo of the command, which may hold any name)
+        return {"via": "console", "output": self.checked_reply(output, said=(command, target))}
 
     def consistency_note(self, instance: Instance) -> str:
         return ""

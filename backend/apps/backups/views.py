@@ -372,6 +372,17 @@ class BackupFileDownloadView(APIView):
         secret_files.require_not_secret(instance, path)
         chunks, upstream = backup_agent(backup, instance).backup_download(instance.id, backup.snapshot_id, path)
         filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
+        if secret_files.is_bearing(instance, path) and secret_files.masked_by_line(instance):
+            # (the six Steam-era games: masked line by line while it is streamed, any size)
+            streamed = AgentStreamingResponse(
+                secret_files.masked_stream(instance, path, chunks), upstream, content_type="application/octet-stream"
+            )
+            streamed["Content-Disposition"] = content_disposition(filename)
+            streamed["X-Content-Type-Options"] = "nosniff"
+            audit.record(
+                "backup.file_download", request=request, instance=instance, target=backup, details={"path": path, "masked": True}
+            )
+            return streamed
         if secret_files.is_bearing(instance, path):
             from django.http import HttpResponse
 

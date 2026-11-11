@@ -383,6 +383,7 @@ def test_rust_env_seed_and_identity(clients, fake_agent, django_capture_on_commi
         "RUST_SERVER_SAVE_INTERVAL": "600",
         "RUST_APP_PORT": "28082",
         "RUST_SERVER_SEED": str(seed),
+        "RUST_SERVER_DESCRIPTION": "",  # (not the image's default text)
     }
     assert [(p["container_port"], p["protocol"]) for p in spec["ports"]] == [(28015, "udp"), (28017, "udp"), (28082, "tcp")]
     assert build_spec(inst) == spec  # the seed stays the same

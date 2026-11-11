@@ -352,6 +352,35 @@ def enqueue_power(
     return job
 
 
+def end_first_start_wait(instance: Instance, user: Any) -> Any:
+    """End the server's job when all it does is wait for a start that downloads the game (CS2, Rust, Project
+    Zomboid: ``game_handlers.wait_first_start``, flagged in ``Job.result``), so that a Stop is not refused while
+    that wait lasts (up to hours). The job is cancelled under its row lock, so one that has gone on to other work
+    meanwhile is left alone. Returns the ended job, else None."""
+    from apps.jobs.models import Job, JobStatus
+    from apps.jobs.runner import finish
+
+    from .game_handlers import WAITING_FIRST_START
+
+    if not instance.active_job_id:
+        return None
+    with transaction.atomic():
+        job = Job.objects.select_for_update().filter(pk=instance.active_job_id, status=JobStatus.RUNNING).first()
+        if job is None or not (job.result or {}).get(WAITING_FIRST_START):
+            return None
+        who = getattr(user, "username", None) or "the panel"
+        if not finish(
+            job,
+            JobStatus.CANCELLED,
+            error=f"Stopped by {who} while the server was still starting (the image downloads the game); "
+            "the server was stopped instead of waiting for it",
+            error_code="superseded",
+        ):
+            return None
+    instance.refresh_from_db(fields=["active_job"])
+    return job
+
+
 def power(
     instance: Instance,
     action: str,
@@ -381,6 +410,16 @@ def power(
         from . import capacity
 
         capacity.admit(instance)
+    superseded = end_first_start_wait(instance, user) if action == "stop" else None
+    if superseded is not None:
+        audit.record(
+            "job.superseded",
+            request=request,
+            instance=instance,
+            target_type="job",
+            target_id=str(superseded.id),
+            details={"kind": superseded.kind, "by": "stop"},
+        )
     job = enqueue_power(
         instance,
         action,

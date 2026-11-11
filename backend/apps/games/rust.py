@@ -191,6 +191,10 @@ class RustDefinition(SteamGameDefinition):
         }
     )
     stop_words = frozenset({"quit", "global.quit", "restart", "global.restart"})
+    # Rust's console refusals of kick/unban/removeowner ("Player not found", "User ... isn't banned")
+    refusal_pattern = (
+        r"(?i)\bnot found\b|couldn'?t find|isn'?t (?:banned|an owner)|is not (?:banned|an owner)|unknown command|invalid"
+    )
     refuse_stop_commands = True
     command_hint = "Rust console commands, e.g. status, say Hello, server.save, playerlist."
     flush_command = "server.save"
@@ -304,8 +308,9 @@ class RustDefinition(SteamGameDefinition):
         }
         if values.get("seed") is not None:
             env["RUST_SERVER_SEED"] = str(values["seed"])
-        if values.get("description"):
-            env["RUST_SERVER_DESCRIPTION"] = str(values["description"])
+        # always set: empty leaves the argument out (Rust's own empty description) instead of the image's default
+        # "This is a Rust server running inside a Docker container!"
+        env["RUST_SERVER_DESCRIPTION"] = str(values.get("description") or "")
         return env
 
     # -- console and players -------------------------------------------------------------------------
@@ -407,7 +412,19 @@ class RustDefinition(SteamGameDefinition):
             params["name"] = self.chat_text(display, limit=64)
         answer = client.game_action(instance.id, actions[action], params, timeout=30)
         cache.delete(f"players:online:{instance.pk}")
-        return {"via": "webrcon", "output": str(answer.get("output") or "")}
+        output = self.checked_reply(answer.get("output"), said=(steam_id, display, name, params.get("reason") or ""))
+        return {"via": "webrcon", "output": output}
+
+    def masked_text(self, instance: Instance, path: str, content: str) -> str:
+        """The WebRCON password (the control secret) is on Rust's command line; whatever of it reaches a file
+        (the image's log copies in logs/) is hidden."""
+        from apps.instances.spec import rcon_password
+
+        value = rcon_password(instance)
+        return content.replace(value, "********") if value and len(value) >= 8 else content
+
+    def secret_bearing_folders(self, instance: Instance) -> tuple[str, ...]:
+        return ("logs",)  # the image tees the server's console into logs/<identity>_<date>.txt
 
     def consistency_note(self, instance: Instance) -> str:
         return (

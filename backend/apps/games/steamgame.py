@@ -68,6 +68,10 @@ class SteamGameDefinition(GameDefinition):
     clean_exit_codes = frozenset({0, 143})
     allowed_user_env = frozenset({"TZ"})
     capability_set = frozenset({"diagnostics"})
+    # files with a secret inside hold the control secret (which nobody is shown): never in a zip, and masked
+    # line by line in downloads (``masked_text`` of these games works on single lines)
+    bearing_in_zips_for_configure = False
+    masks_by_line = True
 
     # -- data ------------------------------------------------------------------------------------
     def default_memory_mb(self) -> int:
@@ -225,6 +229,23 @@ class SteamGameDefinition(GameDefinition):
         return []
 
     # -- console helpers ---------------------------------------------------------------------------
+    # a reply of the game's console (RCON, WebRCON, HKMP's helper) that means it did not do what a player
+    # action asked (its usage text, "doesn't exist", "unknown"): the action fails instead of reading "done"
+    refusal_pattern: str = ""
+
+    def checked_reply(self, output: Any, *, said: tuple[str, ...] = ()) -> str:
+        """``output`` of a player action's console command, or 409 ``game_refused`` with the game's answer
+        when it is a refusal (``refusal_pattern``). ``said``: the command and the player's name, taken out
+        before the reply is judged (a player called "unknown"; HKMP echoes the command first)."""
+        text = str(output or "")
+        probe = text
+        for part in sorted((p for p in said if p), key=len, reverse=True):
+            probe = probe.replace(part, " ")
+        if self.refusal_pattern and re.search(self.refusal_pattern, probe):
+            answer = " ".join(text.split())[:300]
+            raise ApiError(f"{self.label} did not do it: {answer}", code="game_refused", status_code=409)
+        return text
+
     @staticmethod
     def chat_text(text: str, message: str = "", limit: int = 200) -> str:
         """An in-game message as one plain line: no control characters, no quotes, no backslash, no

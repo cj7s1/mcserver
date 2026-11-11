@@ -6,9 +6,13 @@
   API, and no folder that contains one is renamed or deleted (a renamed folder would make the file
   downloadable under another name). The panel writes the control secret file itself before every
   apply.
-* **Secret-bearing files** (``secret_bearing_paths``: TShock's ``config.json`` with the REST token):
-  a download is masked like the text editor (``masked_text``); a zip leaves them out for users
-  without ``instance.configure``.
+* **Secret-bearing files** (``secret_bearing_paths``: TShock's ``config.json`` with the REST token; and every
+  file of ``secret_bearing_folders``: Project Zomboid's logs): a download is masked like the text editor
+  (``masked_text``; streamed line by line for the six Steam-era games, ``masks_by_line``); a zip leaves them out
+  for users without ``instance.configure`` (for the six games: for everyone, ``bearing_in_zips_for_configure``),
+  and a zip of nothing but them is refused (``require_zippable``).
+* A **secret folder** (in ``secret_paths``: Project Zomboid's own backup zips, whose ini holds the RCON password
+  and cannot be masked) covers everything inside it: never downloaded, zipped, written or moved out.
 
 Paths are compared after normalising (no leading ``/``, no ``.`` parts, ``\\`` as ``/``).
 
@@ -53,17 +57,27 @@ def bearing_paths(instance: Instance) -> tuple[str, ...]:
     return tuple(norm(p) for p in definition.secret_bearing_paths(instance)) if definition is not None else ()
 
 
+def bearing_folders(instance: Instance) -> tuple[str, ...]:
+    definition = games.get_or_none(instance.game)
+    folders = definition.secret_bearing_folders(instance) if definition is not None else ()
+    return tuple(f for f in (norm(p) for p in folders) if f)
+
+
 def _within(path: str, folder: str) -> bool:
     """Whether ``path`` is ``folder`` or lies inside it ("" = the server folder)."""
     return not folder or path == folder or path.startswith(folder + "/")
 
 
 def is_secret(instance: Instance, path: Any) -> bool:
-    return norm(path) in secret_paths(instance)
+    """``path`` is a secret file, or lies inside a secret folder (Project Zomboid's own backups)."""
+    p = norm(path)
+    return bool(p) and any(_within(p, s) for s in secret_paths(instance))
 
 
 def is_bearing(instance: Instance, path: Any) -> bool:
-    return norm(path) in bearing_paths(instance)
+    """``path`` is a secret-bearing file, or lies inside a secret-bearing folder (Project Zomboid's logs)."""
+    p = norm(path)
+    return p in bearing_paths(instance) or (bool(p) and any(_within(p, f) for f in bearing_folders(instance)))
 
 
 def contains_secret(instance: Instance, path: Any) -> bool:
@@ -89,6 +103,13 @@ def require_no_secret_inside(instance: Instance, path: Any) -> None:
             if not is_secret(instance, path)
             else MANAGED_FILE_MESSAGE
         )
+
+
+def require_not_moved_out(instance: Instance, source: Any) -> None:
+    """A file inside a secret folder (Project Zomboid's own backups) is never renamed: at its new place it
+    would be downloadable. (Deleting it is fine.)"""
+    if is_secret(instance, source) and not contains_secret(instance, source):
+        raise refuse("This file is in a folder the panel does not hand out; it cannot be moved out of it")
 
 
 PANEL_FOLDER = ".mcpanel"  # the panel's (and the agent's) own folder in a server folder, when a game has one
@@ -124,13 +145,32 @@ def require_extract_support(instance: Instance, client: Any) -> list[str]:
     return protected
 
 
+def _bearing_zipped_for(instance: Instance, user: Any) -> bool:
+    """Whether secret-bearing files go into this user's zips: with ``instance.configure``, unless the game's
+    files hold its control secret (``bearing_in_zips_for_configure`` False: the six Steam-era games)."""
+    definition = games.get_or_none(instance.game)
+    if definition is not None and not definition.bearing_in_zips_for_configure:
+        return False
+    return user is not None and user.has_panel_perm("instance.configure", instance)
+
+
 def zip_excludes(instance: Instance, folders: list[str], user: Any) -> list[str]:
-    """The secret (and, without ``instance.configure``, secret-bearing) files inside ``folders``."""
+    """The secret (and, without ``instance.configure``, secret-bearing) files and folders inside ``folders``."""
     candidates = list(secret_paths(instance))
-    if not (user is not None and user.has_panel_perm("instance.configure", instance)):
-        candidates += list(bearing_paths(instance))
+    if not _bearing_zipped_for(instance, user):
+        candidates += list(bearing_paths(instance)) + list(bearing_folders(instance))
     wanted = [norm(f) for f in folders] or [""]
     return sorted({c for c in candidates if any(_within(c, f) for f in wanted)})
+
+
+def require_zippable(instance: Instance, folders: list[str], user: Any) -> None:
+    """A zip of a folder inside a secret folder, or of a secret-bearing one the user's zips leave out, would
+    hold nothing but those files: refused (403 ``managed_file``); single files are downloaded masked."""
+    for folder in folders:
+        if is_secret(instance, folder):
+            raise refuse("This folder holds files with the server's control secret that cannot be masked; it is not handed out")
+        if not _bearing_zipped_for(instance, user) and is_bearing(instance, folder) and norm(folder):
+            raise refuse("These files may hold the server's passwords: download them one by one (masked), not as a zip")
 
 
 def masked_bytes(instance: Instance, path: str, chunks: Any) -> bytes:
@@ -148,6 +188,36 @@ def masked_bytes(instance: Instance, path: str, chunks: Any) -> bytes:
     if definition is not None:
         text = definition.masked_text(instance, path, text)
     return text.encode("utf-8")
+
+
+def masked_stream(instance: Instance, path: str, chunks: Any) -> Any:
+    """A secret-bearing file of a game that masks line by line (``masks_by_line``), masked while it is
+    streamed: any size, any encoding (bytes that are not UTF-8 pass unchanged)."""
+    definition = games.get_or_none(instance.game)
+    pending = b""
+
+    def mask(line: bytes) -> bytes:
+        text = line.decode("utf-8", errors="surrogateescape")
+        if definition is not None:
+            text = definition.masked_text(instance, path, text)
+        return text.encode("utf-8", errors="surrogateescape")
+
+    for chunk in chunks:
+        pending += chunk
+        if b"\n" not in pending:
+            if len(pending) > MASKED_DOWNLOAD_LIMIT:  # one line this long: masked as it is, not held forever
+                yield mask(pending)
+                pending = b""
+            continue
+        complete, _, pending = pending.rpartition(b"\n")
+        yield b"".join(mask(line) + b"\n" for line in complete.split(b"\n"))
+    if pending:
+        yield mask(pending)
+
+
+def masked_by_line(instance: Instance) -> bool:
+    definition = games.get_or_none(instance.game)
+    return bool(definition is not None and definition.masks_by_line)
 
 
 def mask_search_results(instance: Instance, results: list[dict[str, Any]]) -> list[dict[str, Any]]:

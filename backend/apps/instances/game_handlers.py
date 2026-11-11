@@ -167,6 +167,25 @@ def wait_first_start(
     codes = definition.retryable_install_exits
     if not codes:
         return
+    # while the job only waits (the image downloads the game: CS2 up to hours), a Stop ends the job
+    # instead of being refused as "busy" (``services.end_first_start_wait``)
+    remember = getattr(ctx, "remember", None)  # (a job's context; callers' stand-ins may have none)
+    if remember is not None:
+        remember(**{WAITING_FIRST_START: True})
+    try:
+        _wait_first_start(instance, ctx, client, definition, span=span, first=first)
+    finally:
+        if remember is not None:
+            remember(**{WAITING_FIRST_START: False})
+
+
+WAITING_FIRST_START = "waiting_first_start"  # Job.result: the job is in wait_first_start's loop
+
+
+def _wait_first_start(
+    instance: Instance, ctx: JobContext, client: AgentClient, definition: Any, *, span: tuple[float, float], first: bool
+) -> None:
+    codes = definition.retryable_install_exits
     refused_exit = getattr(definition, "start_refused_exit", None)
     attempts = 1
     first_timeout = int(getattr(definition, "first_start_timeout", None) or FIRST_START_TIMEOUT)
@@ -262,6 +281,8 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
     from apps.backups.models import BackupKind
     from apps.jobs.runner import JobCancelled, WorkerStopping
 
+    from .spec import current_spec_hash
+
     instance = _instance(job)
     client = AgentClient(instance.node)
     saves = _saves(instance)
@@ -271,6 +292,7 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
     safety_id = None
     moved: list[str] = []
     stamp = _stamp()
+    spec_before = current_spec_hash(instance)
     try:
         if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
             raise ConflictError("This server is archived; unarchive it first", code="archived")
@@ -327,7 +349,13 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
         raise
     if was_running:
         ctx.progress(0.9, "Starting server", force=True)
-        starting_again(ctx, lambda: start_server(instance, ctx, span=(0.9, 0.09), admit=False))
+        # ``place`` may have changed what the container is made from (Valheim's new world name, Rust's new map
+        # seed): the stopped container is then recreated, not started as it is (it would load the old world)
+        instance.refresh_from_db()
+        reconfigured = current_spec_hash(instance) != spec_before
+        if reconfigured:
+            ctx.log("The server's configuration changed with the new world: its container is made again")
+        starting_again(ctx, lambda: start_server(instance, ctx, span=(0.9, 0.09), admit=False, apply_changes=reconfigured))
     return {
         "set_aside": moved,
         "folder": f"{saves.describe()['set_aside_folder']}/{stamp}" if moved else None,
