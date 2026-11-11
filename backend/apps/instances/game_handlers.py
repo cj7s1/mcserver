@@ -169,7 +169,8 @@ def wait_first_start(
         return
     refused_exit = getattr(definition, "start_refused_exit", None)
     attempts = 1
-    timeout = FIRST_START_TIMEOUT if first else START_WATCH_TIMEOUT
+    first_timeout = int(getattr(definition, "first_start_timeout", None) or FIRST_START_TIMEOUT)
+    timeout = first_timeout if first else START_WATCH_TIMEOUT
     deadline = time.monotonic() + timeout
     seen_started: str | None = None
     what = "first start" if first else "start"
@@ -229,7 +230,7 @@ def wait_first_start(
         return
     # not a success: the server never became ready (the job fails; the server goes on starting)
     raise ConflictError(
-        f"The server did not become ready within {FIRST_START_TIMEOUT // 60} minutes of its first start (the image may "
+        f"The server did not become ready within {first_timeout // 60} minutes of its first start (the image may "
         "still be downloading the game). It keeps starting: its status shows when it is ready, and its setup goes on "
         "then (Overview).",
         code="first_start_timeout",
@@ -248,12 +249,14 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
 
-def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any) -> dict[str, Any]:
+def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside: Any = None) -> dict[str, Any]:
     """The common part of saves_reset and saves_import: stop, safety backup, set aside, ``place``, start.
 
     ``place(client, instance)`` puts the new save (or the map settings) in place after the saves were
     moved aside. A failure before anything was moved starts a server that was running again; after
     that the server is left stopped (its saves are in saves-replaced/, the safety backup is listed).
+    ``set_aside(client, instance, stamp)``: what is moved aside (default: the saves model's
+    ``set_aside``; the folder saves model moves other paths for a reset than for an import).
     """
     from apps.backups.handlers import run_backup
     from apps.backups.models import BackupKind
@@ -304,7 +307,7 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any) -> dict[s
         ctx.check_cancelled()
         ctx.progress(0.65, "Moving the current saves aside", force=True)
         changed = True
-        moved = saves.set_aside(client, instance, stamp)
+        moved = (set_aside or saves.set_aside)(client, instance, stamp)
         if moved:
             ctx.log(f"Moved aside into {saves.describe()['set_aside_folder']}/{stamp}/: {', '.join(moved)}")
         ctx.progress(0.75, what.capitalize(), force=True)

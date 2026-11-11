@@ -58,6 +58,7 @@ instance_patterns = [
     path("<uuid:pk>/config", game_views.ConfigFilesView.as_view()),
     path("<uuid:pk>/config/<str:file_id>", game_views.ConfigFileView.as_view()),
     path("<uuid:pk>/secrets", game_views.SecretsView.as_view()),
+    path("<uuid:pk>/secrets/<slug:key>/reveal", game_views.SecretRevealView.as_view()),
     path("<uuid:pk>/setup", game_views.SetupView.as_view()),
     path("<uuid:pk>/saves", game_views.SavesView.as_view()),
     path("<uuid:pk>/saves/reset", game_views.SavesResetView.as_view()),

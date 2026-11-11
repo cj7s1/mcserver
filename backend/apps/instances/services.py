@@ -148,11 +148,16 @@ def assign_named_ports(
     start, end = port_range()
     out: list[dict[str, Any]] = []
     for spec in definition.ports:
-        if getattr(spec, "same_port_as", ""):
+        if getattr(spec, "same_port_as", "") or getattr(spec, "offset_of", ""):
             out.append(_same_port(definition, spec, out, requested.get(spec.name), used, taken, previous.get(spec.name)))
             continue
-        # a port whose number another port shares (Satisfactory's 7777 for UDP and TCP): free for all
-        group = [spec.protocol] + [s.protocol for s in definition.ports if getattr(s, "same_port_as", "") == spec.name]
+        # a port whose number another port shares (Satisfactory's 7777 for UDP and TCP) or derives from
+        # (Valheim's query port = game port + 1): free for all of them
+        group = [(0, spec.protocol)] + [
+            (int(getattr(s, "offset", 0) or 0) if getattr(s, "offset_of", "") else 0, s.protocol)
+            for s in definition.ports
+            if spec.name in (getattr(s, "same_port_as", ""), getattr(s, "offset_of", ""))
+        ]
         want = requested.get(spec.name)
         ip = host_ip
         if isinstance(want, dict):
@@ -189,7 +194,11 @@ def assign_named_ports(
                 (
                     p
                     for p in candidates
-                    if p not in avoid and all((p, proto) not in used and (p, proto) not in taken for proto in group)
+                    if p not in avoid
+                    and all(
+                        1024 <= p + off <= 65535 and (p + off, proto) not in used and (p + off, proto) not in taken
+                        for off, proto in group
+                    )
                 ),
                 0,
             )
@@ -217,24 +226,34 @@ def _same_port(
     taken: set[tuple[int, str]],
     previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The entry of a port that always has the host port of another one (``PortSpec.same_port_as``).
-    A requested number other than that is refused, unless it is the port's current number (an
-    editor that sends every port unchanged)."""
-    leader = next((e for e in out if e["name"] == spec.same_port_as), None)
+    """The entry of a port that always has the host port of another one (``PortSpec.same_port_as``)
+    or that number plus an offset (``PortSpec.offset_of``, Valheim's query port). A requested number
+    other than that is refused, unless it is the port's current number (an editor that sends every
+    port unchanged)."""
+    leader_name = getattr(spec, "same_port_as", "") or spec.offset_of
+    offset = 0 if getattr(spec, "same_port_as", "") else int(getattr(spec, "offset", 0) or 0)
+    leader = next((e for e in out if e["name"] == leader_name), None)
     if leader is None:
-        raise ValueError(f"{definition.id}: port {spec.name} must come after {spec.same_port_as}")
-    port = int(leader["host_port"])
+        raise ValueError(f"{definition.id}: port {spec.name} must come after {leader_name}")
+    port = int(leader["host_port"]) + offset
     if isinstance(want, dict):
         want = want.get("host_port")
     if want not in (None, "", 0) and str(want) not in (str(port), str((previous or {}).get("host_port"))):
+        if offset:
+            raise ApiError(
+                f"{spec.label} always uses the game port + {offset} ({port}); change the game port instead",
+                code="invalid_port",
+            )
         raise ApiError(f"{spec.label} always uses the same port number as the game port ({port})", code="invalid_port")
+    if not 1024 <= port <= 65535:
+        raise ApiError(f"{spec.label} would be port {port}; choose a lower game port", code="invalid_port")
     key = (port, spec.protocol)
     if key in used or key in taken:
         raise ConflictError(
             f"{spec.protocol.upper()} port {port} is already used by {used.get(key) or 'this server'}; "
             f"{definition.label} needs it for {spec.label} too",
             code="port_conflict",
-            details={"port": port, "protocol": spec.protocol, "name": spec.name, "port_name": spec.same_port_as},
+            details={"port": port, "protocol": spec.protocol, "name": spec.name, "port_name": leader_name},
         )
     taken.add(key)
     entry = {"name": spec.name, "container_port": spec.container_port, "protocol": spec.protocol, "host_port": port}

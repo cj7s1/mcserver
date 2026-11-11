@@ -301,6 +301,10 @@ def coerce(field: dict[str, Any], value: Any, *, text_codec: bool = False) -> An
         if not isinstance(value, (str, int, float)) or isinstance(value, bool):
             raise ValueError(f"{label} must be text")
         result = _text(label, str(value), text_codec)
+        # a value that reaches a container's environment (Counter-Strike 2's start line is eval'd by its
+        # image): the field's pattern, the same one the agent's profile checks
+        if field.get("pattern") and not re.fullmatch(str(field["pattern"]), result):
+            raise ValueError(f"{label}: {field.get('pattern_help') or 'contains characters that are not allowed'}")
     if text_codec and result is not None:
         return _as_text(result)
     return result

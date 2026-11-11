@@ -130,6 +130,17 @@ class PortSpec:
     # host port numbers this port must never get (Satisfactory's messaging port is published 1:1, so
     # 7777 would be the container's API port on TCP)
     avoid: frozenset[int] = frozenset()
+    # a port whose host number is always another port's number plus ``offset`` (Valheim: the query
+    # port is the game port + 1); like ``same_port_as`` the panel never asks for it, it only checks
+    # that the number is free
+    offset_of: str = ""
+    offset: int = 0
+    # published 1:1: the container port is the host port (the image takes the port from a variable
+    # and the server advertises it to Steam and players); ``container_port`` is then the default
+    one_to_one: bool = False
+    # published only while a setting is on: (config file id, key, value), e.g. Valheim's crossplay
+    # port. The number stays reserved for the server either way.
+    when: tuple[str, str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         data = {
@@ -142,6 +153,12 @@ class PortSpec:
         }
         if self.same_port_as:
             data["same_port_as"] = self.same_port_as
+        if self.offset_of:
+            data["derived_from"] = {"port": self.offset_of, "offset": self.offset}
+        if self.one_to_one:
+            data["one_to_one"] = True
+        if self.when:
+            data["when"] = {"config": self.when[0], "key": self.when[1], "value": self.when[2]}
         return data
 
 
@@ -161,6 +178,16 @@ class SecretSpec:
     # clearing it opens the server (Satisfactory's join password): the request must confirm it with
     # ``"access": "open"`` (``GameDefinition.check_secret_change``), the UI asks first
     clear_opens: bool = False
+    # > 0: the panel generates a value of this many letters and digits when the create request has
+    # none (Palworld's admin password); such a secret cannot be cleared afterwards
+    generate: int = 0
+    # the owner may read the value back (``POST /secrets/<key>/reveal``, audited): a password players
+    # type in game (Palworld's admin password, Project Zomboid's admin login)
+    reveal: bool = False
+    # the value must match this (the agent's profile checks the same pattern: the value reaches the
+    # container's environment); ``pattern_help`` says it in words
+    pattern: str = ""
+    pattern_help: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         data = {"key": self.key, "label": self.label, "help": self.help, "required": self.required, "link": self.link}
@@ -170,7 +197,22 @@ class SecretSpec:
             data["required_when"] = {"option": self.required_when[0], "value": self.required_when[1]}
         if self.clear_opens:
             data["clear_opens"] = True
+        if self.generate:
+            data["generated"] = True
+        if self.reveal:
+            data["reveal"] = True
+        if self.pattern:
+            data["pattern"] = self.pattern
+            data["pattern_help"] = self.pattern_help
         return data
+
+    def error(self, value: str) -> str | None:
+        """Why ``value`` is refused for this secret (None: fine)."""
+        import re
+
+        if self.pattern and not re.fullmatch(self.pattern, value):
+            return f"{self.label}: {self.pattern_help or 'contains characters that are not allowed'}"
+        return None
 
 
 @dataclass(frozen=True)
@@ -272,6 +314,9 @@ class GameDefinition:
     # server was never ready; the first start retries up to install_attempts times.
     retryable_install_exits: frozenset[int] = frozenset()
     install_attempts: int = 3
+    # how long the install job waits for the first start (the game download) of such a game; None:
+    # the job's default (game_handlers.FIRST_START_TIMEOUT, 30 minutes)
+    first_start_timeout: int | None = None
     # Exit codes of a correct, saving stop (Terraria's image exits 143 after its SIGTERM save)
     clean_exit_codes: frozenset[int] = frozenset({0})
     # the save files of the game (non-Minecraft games; Minecraft has instances/world.py)
@@ -421,6 +466,26 @@ class GameDefinition:
 
     def secret_spec(self, key: str) -> SecretSpec | None:
         return next((s for s in self.secret_specs if s.key == key), None)
+
+    def secret_error(
+        self, key: str, value: str, *, instance: Instance | None = None, data: dict[str, Any] | None = None
+    ) -> str | None:
+        """Why ``value`` is refused for the secret ``key`` (None: fine): the spec's pattern. ``instance``
+        (a change in Settings) or ``data`` (the create request) give a game the context of a rule
+        that depends on other settings (Valheim: the password must not contain the server name)."""
+        spec = self.secret_spec(key)
+        return spec.error(value) if spec is not None else None
+
+    def initial_secrets(self, data: dict[str, Any]) -> dict[str, str]:
+        """The secrets a new server is created with: the ones of the (validated) create request, plus a
+        generated value for every ``generate`` secret the request left empty."""
+        from apps.core.utils import random_secret
+
+        out = {str(k): str(v) for k, v in (data.get("secrets") or {}).items() if v}
+        for spec in self.secret_specs:
+            if spec.generate and not out.get(spec.key):
+                out[spec.key] = random_secret(spec.generate)
+        return out
 
     # -- config files ----------------------------------------------------------------------------
     def config_file(self, file_id: str) -> ConfigFile | None:
@@ -593,6 +658,8 @@ class GameDefinition:
         configured = {str(p.get("name")): p for p in instance.ports or [] if isinstance(p, dict)}
         out = []
         for port in self.ports:
+            if not self.port_enabled(instance, port):
+                continue  # (its number stays reserved in Instance.ports)
             entry = configured.get(port.name)
             if entry is None:
                 raise ConflictError(
@@ -600,15 +667,28 @@ class GameDefinition:
                     code="port_missing",
                     details={"port": port.name},
                 )
+            host_port = int(entry["host_port"])
             out.append(
                 {
-                    "container_port": port.container_port,
-                    "host_port": int(entry["host_port"]),
+                    # published 1:1: the image listens on (and advertises) the host port's number
+                    "container_port": host_port if port.one_to_one else port.container_port,
+                    "host_port": host_port,
                     "protocol": port.protocol,
                     "host_ip": entry.get("host_ip") or instance.host_ip,
                 }
             )
         return out
+
+    def port_enabled(self, instance: Instance, port: PortSpec) -> bool:
+        """Whether the server publishes ``port`` now (``PortSpec.when``: a setting that turns it on)."""
+        return port.when is None
+
+    def host_port(self, instance: Instance, name: str, default: int = 0) -> int:
+        """The host port number of the named port ``name`` (``default`` without one)."""
+        for p in instance.ports or []:
+            if isinstance(p, dict) and p.get("name") == name:
+                return int(p["host_port"])
+        return default
 
     def container_memory_mb(self, instance: Instance) -> int:
         """The container's memory limit (``plain``: what was set, plus an explicit overhead)."""

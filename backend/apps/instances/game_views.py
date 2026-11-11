@@ -83,8 +83,9 @@ def create_other_game(request: Request, data: dict[str, Any], node: Node, defini
         fields["ports"] = ports
         fields["game_port"] = int(ports[0]["host_port"]) if ports else services.allocate_port(node)
         instance = Instance.objects.create(**fields)
-        if data.get("secrets"):
-            instance.set_secret_values({k: v for k, v in data["secrets"].items() if v})
+        # the request's secrets, plus generated ones (Palworld's admin password); never logged
+        if initial := definition.initial_secrets(data):
+            instance.set_secret_values(initial)
             instance.save(update_fields=["secrets"])
         manager = Role.objects.filter(key="server_manager").first()
         if manager and not request.user.is_owner and "instance.view" not in request.user.global_permissions():
@@ -359,12 +360,18 @@ class SecretsView(APIView):
         known = {s.key for s in definition.secret_specs_for(instance)}
         definition.check_secret_change(instance, values, request.data)
         for key, value in values.items():
-            if definition.secret_spec(str(key)) is None or str(key) not in known:
+            spec = definition.secret_spec(str(key))
+            if spec is None or str(key) not in known:
                 raise ValidationError({"values": [f"Unknown secret '{key}'"]})
             if value is None or value == "":
+                if spec.generate or spec.required:
+                    # (Palworld's admin password, Valheim's join password: the server needs one)
+                    raise ValidationError({"values": [f"{spec.label} cannot be empty; enter a new value instead"]})
                 current.pop(str(key), None)
             elif not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
                 raise ValidationError({"values": [f"Invalid value for '{key}'"]})
+            elif (error := definition.secret_error(str(key), value, instance=instance)) is not None:
+                raise ValidationError({"values": [error]})
             else:
                 current[str(key)] = value
         instance.set_secret_values(current)
@@ -380,6 +387,27 @@ class SecretsView(APIView):
             except ApiError as exc:
                 log.info("setup of %s not queued: %s", instance.pk, exc)
         return Response(self._answer(instance, definition))
+
+
+class SecretRevealView(APIView):
+    """``POST /api/instances/<id>/secrets/<key>/reveal``: the value of a secret the game marks ``reveal``
+    (a password players type in game: Palworld's admin password, Project Zomboid's admin login). Only
+    for users who may change the secret anyway (``instance.configure``); audited with the key only."""
+
+    @extend_schema(request=None, responses={200: dict})
+    def post(self, request: Request, pk: str, key: str) -> Response:
+        instance = get_instance_for(request.user, pk, "instance.configure")
+        definition = games.for_instance(instance)
+        spec = next((s for s in definition.secret_specs_for(instance) if s.key == key), None)
+        if spec is None or not spec.reveal:
+            raise ApiError("This secret cannot be shown", code="not_revealable", status_code=404)
+        value = instance.secret_values.get(key)
+        if not value:
+            raise ApiError(f"{spec.label} is not set", code="not_set", status_code=404)
+        audit.record("instance.secret_revealed", request=request, instance=instance, target=instance, details={"key": key})
+        response = Response({"key": key, "value": value})
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class SetupView(APIView):
@@ -531,6 +559,9 @@ class SavesImportView(APIView):
             raise ValidationError({"file": [reason]})
         raw_backup = request.data.get("backup")
         backup = bool(SystemSetting.get("pre_restore_backup")) if raw_backup in (None, "") else str(raw_backup).lower() == "true"
+        # what the job needs to know about the upload (a zipped world folder: where the world is in it)
+        upload_params = getattr(saves, "upload_params", None)
+        extra = upload_params(upload) if upload_params is not None else {}
         client = AgentClient(instance.node)
         path = f"{IMPORT_ARCHIVE_PREFIX}{_secrets.token_hex(6)}{saves.extension}"
         client.upload(instance.id, path, upload.chunks(256 * 1024), overwrite=False)
@@ -540,7 +571,7 @@ class SavesImportView(APIView):
                 title=f"Import a save into {instance.name}",
                 instance=instance,
                 user=request.user,
-                params={"path": path, "backup": backup, "name": str(upload.name)[:120]},
+                params={"path": path, "backup": backup, "name": str(upload.name)[:120], **extra},
             )
         except ApiError:
             from .handlers import drop_import_archive
@@ -605,7 +636,23 @@ class SavesExportView(APIView):
                         break
             except ApiError:
                 pass  # not running after all: download what is on disk
-        chunks, _length, upstream = client.download(instance.id, path)
+        if getattr(saves, "export_endpoint", "download") == "archive":
+            # a world that is a folder (Palworld, Valheim, Project Zomboid, Rust): a zip of it, built by
+            # the agent, without the game's own rolling copies and without files that hold a secret
+            from . import secret_files
+
+            excludes = sorted(
+                {*saves.export_excludes(instance, path), *secret_files.zip_excludes(instance, [path], request.user)}
+            )
+            if excludes and not client.supports("archive_excludes"):
+                raise ConflictError(
+                    "The node's agent is too old to build this zip; update the agent first", code="agent_outdated"
+                )
+            chunks, _length, upstream = client.download(
+                instance.id, path, endpoint="archive", **({"exclude": excludes} if excludes else {})
+            )
+        else:
+            chunks, _length, upstream = client.download(instance.id, path)
         response = AgentStreamingResponse(chunks, upstream, content_type=getattr(saves, "content_type", "application/zip"))
         response["Content-Disposition"] = content_disposition(filename or f"{instance.name}-{path.rsplit('/', 1)[-1]}")
         response["X-Content-Type-Options"] = "nosniff"

@@ -708,6 +708,10 @@ class CreateInstanceSerializer(serializers.Serializer):
         missing = [s.label for s in definition.secret_specs if s.required and not (attrs.get("secrets") or {}).get(s.key)]
         if missing:
             raise serializers.ValidationError({"secrets": [f"Required: {', '.join(missing)}"]})
+        for key, value in (attrs.get("secrets") or {}).items():
+            # the secret's pattern (it reaches the container's environment) and the game's own rules
+            if value and (error := definition.secret_error(str(key), str(value), data=attrs)) is not None:
+                raise serializers.ValidationError({"secrets": [error]})
         node = Node.objects.filter(pk=attrs["node"]).first() if attrs.get("node") else Node.default()
         if node is not None and (error := container_limit_error(node, int(memory))):
             raise serializers.ValidationError({"memory_mb": [error]})

@@ -73,6 +73,13 @@ CURRENT_AGENT_GAMES: dict[str, dict[str, Any]] = {
         "images": ["passivelemon/terraria-docker", "ryshe/terraria"],
         "control": "console",
     },
+    # the six games of games-6-contract.md
+    "palworld": {"variants": [], "images": ["thijsvanloef/palworld-server-docker"], "control": "palworld-api"},
+    "valheim": {"variants": [], "images": ["ghcr.io/community-valheim-tools/valheim-server"], "control": "none"},
+    "project-zomboid": {"variants": [], "images": ["indifferentbroccoli/projectzomboid-server-docker"], "control": "rcon"},
+    "hkmp": {"variants": [], "images": ["maximalmax90/hkmpserver"], "control": "console"},
+    "cs2": {"variants": [], "images": ["joedwards32/cs2"], "control": "rcon"},
+    "rust": {"variants": [], "images": ["didstopia/rust-server"], "control": "webrcon"},
 }
 
 
@@ -117,6 +124,7 @@ class FakeAgent:
         "hash_files",
         "hash_files_partial",
         "fetch_file",
+        "extract",
         "world_info",
         "world_replace",
         "world_reset",
@@ -605,7 +613,9 @@ class FakeAgent:
 
     def apply(self, instance_id: Any, spec: dict[str, Any], *, start: bool = False, pull: str = "missing") -> dict[str, Any]:
         iid = str(instance_id)
-        repo = str(spec.get("image", "")).rpartition(":")[0]
+        image = str(spec.get("image", ""))
+        # repository:tag, or repository@sha256:<digest> (Rust: the agent allows listed digests)
+        repo = image.split("@", 1)[0] if "@" in image else image.rpartition(":")[0]
         game = spec.get("game") or "minecraft"
         allowed = {"itzg/minecraft-server", "docker.io/itzg/minecraft-server"}
         if "games" in self.features:
@@ -1162,6 +1172,67 @@ class FakeAgent:
     }
     WORLD_KEEPABLE_NAMES = frozenset({"datapacks", "serverconfig", "paper-world.yml"})
     WORLD_MARKERS = frozenset({"level.dat", "level.dat_old", "session.lock", "uid.dat", "region", "DIM-1", "DIM1", "dimensions"})
+
+    def extract(
+        self,
+        instance_id: Any,
+        path: str,
+        destination: str = "",
+        *,
+        strip: str = "auto",
+        overwrite: bool = False,
+        delete_archive: bool = False,
+        protected: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """POST files/extract (archive.extract): a zip from the server folder into ``destination``;
+        links and special files are skipped, ``protected`` entries too; the archive is deleted with
+        ``delete_archive`` also when the extraction fails."""
+        import stat as _stat
+
+        iid = str(instance_id)
+        c = self.containers.get(iid)
+        if c is not None and c["running"]:
+            raise self._err("Stop the server before extracting archives into it", "must_stop", 409)
+        data = self._read(iid, path)
+        if failed := self._injected("import", iid):
+            if delete_archive:
+                self.delete_files(iid, [path])
+            return failed
+        dest = "/".join(self._parts(destination))
+        written: list[str] = []
+        skipped = 0
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                infos = zf.infolist()
+                names = [i.filename for i in infos if not i.is_dir()]
+                tops = {n.split("/", 1)[0] for n in names}
+                prefix = next(iter(tops)) if strip == "auto" and len(tops) == 1 and all("/" in n for n in names) else None
+                for info in infos:
+                    mode = (info.external_attr >> 16) & 0o170000
+                    if mode and not (_stat.S_ISREG(mode) or _stat.S_ISDIR(mode)):
+                        skipped += 1
+                        continue
+                    parts = self._parts(info.filename)
+                    if prefix and parts and parts[0] == prefix:
+                        parts = parts[1:]
+                    if not parts:
+                        continue
+                    rel = "/".join([*self._parts(dest), *parts])
+                    if any(rel == p or rel.startswith(p + "/") for p in protected or []):
+                        skipped += 1
+                        continue
+                    if info.is_dir():
+                        self.mkdir(iid, rel, parents=True)
+                        continue
+                    root = self._root(iid)
+                    if rel in root["files"] and not overwrite:
+                        continue
+                    self.put_file(iid, rel, zf.read(info))
+                    written.append(rel)
+        finally:
+            if delete_archive:
+                self.delete_files(iid, [path])
+        return self._op("import", iid, {"files": len(written), "skipped_count": skipped, "stripped_prefix": prefix})
 
     def _world_paths(self, level_name: str, layout: str) -> list[tuple[str, str]]:
         parts = self._parts(level_name)
