@@ -43,6 +43,13 @@ for the new catalog shapes is not done yet; nothing of it has run on Unraid.**
   (the panel says "at the latest at the next start"), PZ reading a partial `Server/<name>.ini` written before
   its first start, the JSON shape of HKMP's `approved` entries, CS2's `status` parsing (only a fallback:
   the player list comes from A2S), Rust's map wipe file list (community practice) and its RCON replies.
+* Review of the branch (2026-11-11, `audit-2026-11-09/more-games/review.md`): no exploitable security
+  defect; fixed: CS2 (game port 27020, CSTV off) and Palworld (game port 27015) servers that could never
+  start (the agent's default CSTV/query port collided: the panel now names both), PZ "whitelist add"
+  without a password (refused, the console does it), TZ checked with the agent's pattern, catalog option
+  patterns and `fixed_version.updates_on_restart`, players `changes_while_stopped`, connection info without
+  conditional ports that are off and with the real container port of 1:1 ports, schedules without
+  "Command" for games without a console, and `upgrade.sh` dumps that one second could overwrite.
 
 ## Real-container gate of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
 
