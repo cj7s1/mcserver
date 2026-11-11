@@ -2,8 +2,9 @@
 
 ``get(id)``, ``all()`` and ``for_instance(instance)`` return the definition objects
 (``base.GameDefinition``). Built-in games: Minecraft (``minecraft.MinecraftDefinition``), Factorio
-(``factorio.FactorioDefinition``), Terraria (``terraria.TerrariaDefinition``) and Satisfactory
-(``satisfactory.SatisfactoryDefinition``). They are registered on first use, so importing this package
+(``factorio.FactorioDefinition``), Terraria (``terraria.TerrariaDefinition``), Satisfactory
+(``satisfactory.SatisfactoryDefinition``) and, on the shared base ``steamgame.SteamGameDefinition``,
+Palworld, Valheim, Project Zomboid, Hollow Knight (HKMP), Counter-Strike 2 and Rust. They are registered on first use, so importing this package
 loads no models. To add a game: a module with a ``GameDefinition`` subclass, registered in
 ``_load`` below, and the matching runtime profile in the agent (agent/mcagent/profiles/).
 """
@@ -81,15 +82,31 @@ def _load() -> None:
     if _loaded:
         return
     _loaded = True
+    from .cs2 import Cs2Definition
     from .factorio import FactorioDefinition
+    from .hkmp import HkmpDefinition
     from .minecraft import MinecraftDefinition
+    from .palworld import PalworldDefinition
+    from .rust import RustDefinition
     from .satisfactory import SatisfactoryDefinition
     from .terraria import TerrariaDefinition
+    from .valheim import ValheimDefinition
+    from .zomboid import ZomboidDefinition
 
     _registry.setdefault(DEFAULT_GAME, MinecraftDefinition())
     _registry.setdefault(FactorioDefinition.id, FactorioDefinition())
     _registry.setdefault(SatisfactoryDefinition.id, SatisfactoryDefinition())
     _registry.setdefault(TerrariaDefinition.id, TerrariaDefinition())
+    # the six games of games-6-contract.md (images that download their game and follow Steam's branch)
+    for definition in (
+        PalworldDefinition(),
+        ValheimDefinition(),
+        ZomboidDefinition(),
+        HkmpDefinition(),
+        Cs2Definition(),
+        RustDefinition(),
+    ):
+        _registry.setdefault(definition.id, definition)
 
 
 def register(definition: GameDefinition) -> GameDefinition:
@@ -101,7 +118,18 @@ def register(definition: GameDefinition) -> GameDefinition:
     return definition
 
 
-BUILT_IN = (DEFAULT_GAME, "factorio", "terraria", "satisfactory")
+BUILT_IN = (
+    DEFAULT_GAME,
+    "factorio",
+    "terraria",
+    "satisfactory",
+    "palworld",
+    "valheim",
+    "project-zomboid",
+    "hkmp",
+    "cs2",
+    "rust",
+)
 
 
 def unregister(game_id: str) -> None:
