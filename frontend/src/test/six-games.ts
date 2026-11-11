@@ -1,6 +1,7 @@
 /**
  * The catalog entries (GET /api/catalog/games) of the six Steam-era games exactly as the backend builds
- * them (apps/games/{palworld,valheim,zomboid,hkmp,cs2,rust}.py at de82d35, `GameDefinition.catalog_entry()`),
+ * them (apps/games/{palworld,valheim,zomboid,hkmp,cs2,rust}.py after the review of feature/more-games,
+ * `GameDefinition.catalog_entry()`: options with `pattern`, `fixed_version.updates_on_restart`),
  * so the tests run against the real shapes: derived and conditional ports, generated/revealable secrets
  * with patterns, virtual configs, folder worlds. To refresh: dump `[d.catalog_entry() for d in
  * apps.games.all()]` from a Django shell and replace the array.
@@ -372,7 +373,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "public",
       "label": "Steam public branch",
-      "help": "Players' game clients update themselves, so the server always runs the current public build: the image checks for an update at every start. There is no version to choose; 'update' means restart."
+      "help": "Players' game clients update themselves, so the server always runs the current public build: the image checks for an update at every start. There is no version to choose; 'update' means restart.",
+      "updates_on_restart": true
     },
     "min_memory_mb": 8192,
     "default_stop_timeout": 60,
@@ -636,7 +638,9 @@ const ENTRIES = [
         "type": "string",
         "default": "Dedicated",
         "help": "The world's folder name (config/worlds_local/<name>/): letters, digits, - and _. A world reset can start a world under a new name.",
-        "pinned": true
+        "pinned": true,
+        "pattern": "^[A-Za-z0-9_-]{1,32}$",
+        "pattern_help": "1 to 32 letters, digits, - and _"
       }
     ],
     "secrets": [
@@ -653,7 +657,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "public",
       "label": "Steam public branch",
-      "help": "The image checks the game at every start, so the server runs the current public build (players' clients update themselves). There is no version to choose; 'update' means restart."
+      "help": "The image checks the game at every start, so the server runs the current public build (players' clients update themselves). There is no version to choose; 'update' means restart.",
+      "updates_on_restart": true
     },
     "min_memory_mb": 4096,
     "default_stop_timeout": 120,
@@ -850,7 +855,9 @@ const ENTRIES = [
         "type": "string",
         "default": "servertest",
         "help": "Names the server's settings, world and database files (letters, digits, - and _). Chosen once.",
-        "pinned": true
+        "pinned": true,
+        "pattern": "^[A-Za-z0-9_-]{1,32}$",
+        "pattern_help": "1 to 32 letters, digits, - and _"
       },
       {
         "key": "branch",
@@ -889,7 +896,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "public",
       "label": "Steam branch chosen at creation",
-      "help": "The image checks the game at every start and runs the newest build of the server's branch (Build 42 public or Build 41 legacy41). There is no version to choose; 'update' means restart."
+      "help": "The image checks the game at every start and runs the newest build of the server's branch (Build 42 public or Build 41 legacy41). There is no version to choose; 'update' means restart.",
+      "updates_on_restart": true
     },
     "min_memory_mb": 4096,
     "default_stop_timeout": 120,
@@ -1151,7 +1159,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "2.4.3",
       "label": "HKMP 2.4.3",
-      "help": "The HKMP server comes with the panel's runtime image; a panel release updates it. Players need the same HKMP version in their game."
+      "help": "The HKMP server comes with the panel's runtime image; a panel release updates it. Players need the same HKMP version in their game.",
+      "updates_on_restart": false
     },
     "min_memory_mb": 256,
     "default_stop_timeout": 40,
@@ -1365,7 +1374,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "public",
       "label": "Steam public branch",
-      "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients update themselves). There is no version to choose; 'update' means restart."
+      "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients update themselves). There is no version to choose; 'update' means restart.",
+      "updates_on_restart": true
     },
     "min_memory_mb": 2048,
     "default_stop_timeout": 30,
@@ -1515,7 +1525,9 @@ const ENTRIES = [
         "type": "string",
         "default": "rust",
         "help": "The folder of the server's map and saves (server/<identity>/): lower-case letters, digits, - and _. Chosen once.",
-        "pinned": true
+        "pinned": true,
+        "pattern": "^[a-z0-9_-]{1,32}$",
+        "pattern_help": "1 to 32 lower-case letters, digits, - and _"
       }
     ],
     "stop_words": [
@@ -1528,7 +1540,8 @@ const ENTRIES = [
     "fixed_version": {
       "id": "public",
       "label": "Steam public branch",
-      "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients update themselves). There is no version to choose; 'update' means restart."
+      "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients update themselves). There is no version to choose; 'update' means restart.",
+      "updates_on_restart": true
     },
     "min_memory_mb": 10240,
     "default_stop_timeout": 180,

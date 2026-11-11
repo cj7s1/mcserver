@@ -7,7 +7,8 @@
  * (Palworld, Rust); entries whose `name` is an id and `display_name` the player's name (Rust); `ip_bans`
  * (HKMP, lifted by address); `id_hint` (what a typed name may be: Valheim takes SteamID64s);
  * `no_online_list` (Valheim cannot list who is online); `lists_unknown` (Project Zomboid keeps its lists in
- * its database: changed by name, never listed).
+ * its database: changed by name, never listed); `changes_while_stopped` (false: the game changes its lists
+ * only while it runs, the note says so).
  */
 import { Ban, Loader2, Plus, Trash2, UserX } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
@@ -213,6 +214,8 @@ function OnlineEntry({ instanceId, entry, canManage, canBan }: { instanceId: str
 function modeNote(data: PlayersResponse, game: string): string {
   if (data.no_online_list) return "These lists are files the server reads when it starts: changes are written to them now and apply at the latest at its next start.";
   if (data.lists_unknown) return data.id_hint || `${game} keeps its lists itself: the panel changes them by name while the server runs, but cannot show them.`;
+  if (!data.running && data.changes_while_stopped === false)
+    return `The server is stopped: ${game} changes these lists only while it runs, so start it to change them.`;
   return data.running
     ? `The server is running: changes are sent to it and apply at once; ${game} saves them to its lists itself.`
     : "The server is stopped: changes are written to its list files and apply when it starts (a game that changes its lists only through the running server refuses them until it runs).";

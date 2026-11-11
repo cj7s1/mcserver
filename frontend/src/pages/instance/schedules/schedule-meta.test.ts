@@ -7,6 +7,7 @@ import {
   draftFrom,
   editBlockedReason,
   SCHEDULE_ACTIONS,
+  scheduleActions,
   scheduleWarnMinutes,
   warnPayload,
 } from "./schedule-meta";
@@ -79,5 +80,14 @@ describe("schedule action permissions (backend SCHEDULE_ACTION_PERMISSIONS)", ()
     expect(editBlockedReason(schedule({}, "snapshot" as Schedule["action"]), backup)).toMatch(/Restore/);
     expect(editBlockedReason(schedule({ keep: 5 }, "snapshot" as Schedule["action"]), canOnly("instance.backup", "instance.restore"))).toBeNull();
     expect(editBlockedReason(schedule({ command: "say hi" }, "command"), backup)).toMatch(/^Editing command schedules needs/);
+  });
+});
+
+describe("scheduleActions", () => {
+  it("offers a console command only to a game with a console", () => {
+    expect(scheduleActions(true)).toEqual(SCHEDULE_ACTIONS);
+    expect(scheduleActions(false)).toEqual(["restart", "start", "stop", "backup", "snapshot"]);
+    // an existing command schedule still shows its own action
+    expect(scheduleActions(false, "command")).toEqual(SCHEDULE_ACTIONS);
   });
 });

@@ -36,6 +36,15 @@ export const ACTION_INFO: Record<string, { label: string; description: string }>
 export const SCHEDULE_ACTIONS: ScheduleAction[] = ["restart", "start", "stop", "backup", "snapshot", "command"];
 
 /**
+ * The actions a server's schedules can have: "command" only for a game with a console (capability
+ * `console_commands`; the backend refuses a command schedule for Palworld, Valheim or Satisfactory). An
+ * existing schedule keeps its own action in the list (`current`), so its dialog can show it.
+ */
+export function scheduleActions(hasConsole: boolean, current?: ScheduleAction): ScheduleAction[] {
+  return SCHEDULE_ACTIONS.filter((a) => a !== "command" || hasConsole || a === current);
+}
+
+/**
  * Permission a schedule action needs: a schedule runs it with the panel's authority, so creating or
  * editing one needs the action's own permission (backend apps/instances/views.py
  * SCHEDULE_ACTION_PERMISSIONS; instance.schedules alone only allows viewing, pausing and deleting).

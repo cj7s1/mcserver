@@ -156,12 +156,13 @@ export function serverIconColor(variant: string | undefined, game?: string | nul
 }
 
 /**
- * Whether a game without versions to choose (catalog `fixed_version`) updates when it restarts: it follows
- * a branch ("public", "stable": the image downloads the newest build at every start). A fixed version
- * number ("2.4.3": HKMP, carried by the panel's image) changes only with a panel release.
+ * Whether a game without versions to choose (catalog `fixed_version`) updates when it restarts, as the
+ * catalog says (`updates_on_restart`: the six Steam-era games; HKMP's server comes with the panel's image
+ * and changes only with a panel release). Without the flag (Satisfactory) the game follows a branch whose
+ * newest build the image downloads at every start.
  */
-export function updatesOnRestart(fixed: Pick<NonNullable<GameInfo["fixed_version"]>, "id"> | null | undefined): boolean {
-  return !!fixed && !/^\d/.test(fixed.id);
+export function updatesOnRestart(fixed: Pick<NonNullable<GameInfo["fixed_version"]>, "updates_on_restart"> | null | undefined): boolean {
+  return !!fixed && fixed.updates_on_restart !== false;
 }
 
 /** Label of a mod loader id ("neoforge" -> "NeoForge"); "—" when empty. */

@@ -49,7 +49,9 @@ describe("labels, icons and colours of the six games", () => {
   it("a branch updates at the next start; a fixed version number (HKMP) does not", () => {
     for (const id of ["palworld", "valheim", "project-zomboid", "cs2", "rust"] as const) expect(updatesOnRestart(sixGame(id).fixed_version)).toBe(true);
     expect(updatesOnRestart(sixGame("hkmp").fixed_version)).toBe(false);
-    expect(updatesOnRestart({ id: "stable" })).toBe(true);
+    // the catalog says it (updates_on_restart); without the flag (Satisfactory) a restart updates the game
+    expect(updatesOnRestart({})).toBe(true);
+    expect(updatesOnRestart({ updates_on_restart: false })).toBe(false);
     expect(updatesOnRestart(undefined)).toBe(false);
   });
 });

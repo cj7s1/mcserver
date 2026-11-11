@@ -99,7 +99,8 @@ export interface GameInfo {
   /** The game has a version catalog (GET /catalog/games/<id>/versions). */
   has_versions?: boolean;
   /** No version to choose: what the server runs (Satisfactory: Steam's stable branch, updated at every start). */
-  fixed_version?: { id: string; label: string; help?: string };
+  /** No version to choose; `updates_on_restart`: whether a restart updates the game (absent: it does). */
+  fixed_version?: { id: string; label: string; help?: string; updates_on_restart?: boolean };
   min_memory_mb?: number;
   /** Seconds a stop may take before Docker kills the server (games with named ports). */
   default_stop_timeout?: number;
@@ -815,6 +816,8 @@ export interface PlayersResponse {
   no_online_list?: boolean;
   /** The lists exist in the game but cannot be read (Project Zomboid's database): changes by name only. */
   lists_unknown?: boolean;
+  /** Whether the lists can be changed while the server is stopped (the six Steam-era games say so; Valheim: files). */
+  changes_while_stopped?: boolean;
 }
 
 export interface Role {

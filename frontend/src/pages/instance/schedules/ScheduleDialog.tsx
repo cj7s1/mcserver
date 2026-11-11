@@ -67,6 +67,7 @@ export function ScheduleDialog({
   panelTz,
   open,
   onOpenChange,
+  actions = SCHEDULE_ACTIONS,
 }: {
   instanceId: string;
   schedule?: Schedule | null;
@@ -76,6 +77,8 @@ export function ScheduleDialog({
   panelTz: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** The actions this server's schedules can have (`scheduleActions`: no "command" without a console). */
+  actions?: ScheduleAction[];
 }) {
   const qc = useQueryClient();
   const canBackup = can("instance.backup");
@@ -84,7 +87,7 @@ export function ScheduleDialog({
     const d = draftFrom(schedule, template);
     if (schedule || !actionBlockedReason(d.action, can)) return d;
     // a new schedule starts with the first action this user may schedule
-    const first = SCHEDULE_ACTIONS.find((a) => !actionBlockedReason(a, can));
+    const first = actions.find((a) => !actionBlockedReason(a, can));
     return first ? { ...d, action: first } : d;
   });
   const [touched, setTouched] = useState(false);
@@ -186,7 +189,7 @@ export function ScheduleDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {SCHEDULE_ACTIONS.map((a) => {
+                {actions.map((a) => {
                   const reason = actionBlockedReason(a, can);
                   return (
                     <SelectItem key={a} value={a} disabled={!!reason}>

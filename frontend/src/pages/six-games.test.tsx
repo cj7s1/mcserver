@@ -25,6 +25,7 @@ import { ConnectionPorts, GameNetwork } from "./instance/network/GameNetwork";
 import Overview from "./instance/Overview";
 import { SoftwareCard } from "./instance/overview/info-cards";
 import { GamePlayers } from "./instance/players/GamePlayers";
+import Schedules from "./instance/Schedules";
 import Settings from "./instance/Settings";
 import { GameSettingsTab } from "./instance/settings/game-settings-tab";
 
@@ -529,6 +530,67 @@ describe("players", () => {
     wrap(<GamePlayers instance={inst} canManage />);
     expect(await screen.findByRole("button", { name: "Kick Terrorist" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /Whitelist|Admins|Bans/ })).toBeNull();
+  });
+});
+
+describe("players while the server is stopped", () => {
+  const stopped = (over: Partial<PlayersResponse>): PlayersResponse => ({
+    running: false,
+    whitelist: [],
+    ops: [],
+    bans: [],
+    ip_bans: [],
+    known_players: [],
+    ...over,
+  });
+
+  it("Rust: the note says the lists change only while the server runs", async () => {
+    const inst = sixInstance("rust", { status: "stopped" });
+    gets[`/instances/${inst.id}/players`] = stopped({ labels: { ops: "Owners (admins)", bans: "Bans" }, changes_while_stopped: false });
+    wrap(<GamePlayers instance={inst} canManage />);
+    expect(await screen.findByText("The server is stopped: Rust changes these lists only while it runs, so start it to change them.")).toBeInTheDocument();
+    expect(screen.queryByText(/changes are written to its list files/)).toBeNull();
+  });
+
+  it("a game that writes its list files while stopped keeps the files note", async () => {
+    const inst = sixInstance("hkmp", { status: "stopped" });
+    gets[`/instances/${inst.id}/players`] = stopped({ labels: { whitelist: "Whitelist", ops: "Authorized (admins)", bans: "Bans" } });
+    wrap(<GamePlayers instance={inst} canManage />);
+    expect(await screen.findByText(/The server is stopped: changes are written to its list files/)).toBeInTheDocument();
+  });
+});
+
+describe("Schedules", () => {
+  function renderSchedules(instance: Instance) {
+    gets[`/instances/${instance.id}`] = instance;
+    gets[`/instances/${instance.id}/schedules`] = [];
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(qk.instance(instance.id), instance);
+    const router = createMemoryRouter(
+      [{ path: "/servers/:id", element: <InstanceLayout />, children: [{ path: "schedules", element: <Schedules /> }] }],
+      { initialEntries: [`/servers/${instance.id}/schedules`] },
+    );
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <RouterProvider router={router} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it.each([
+    ["palworld", false],
+    ["valheim", false],
+    ["cs2", true],
+  ] as const)("%s: a console command is offered only to a game with a console", async (id, offered) => {
+    const user = userEvent.setup();
+    renderSchedules(sixInstance(id));
+    await user.click((await screen.findAllByRole("button", { name: /New schedule/ }))[0]);
+    await user.click(await screen.findByRole("combobox", { name: "Action" }));
+    const options = (await screen.findAllByRole("option")).map((o) => o.textContent);
+    expect(options.some((o) => o?.startsWith("Command"))).toBe(offered);
+    expect(options.some((o) => o?.startsWith("Restart"))).toBe(true);
   });
 });
 

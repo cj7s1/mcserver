@@ -26,6 +26,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
 import { formatDateTime, relativeTime } from "@/lib/format";
+import { hasCapability } from "@/lib/games";
 import { qk } from "@/lib/queries";
 import type { PermissionCode, Schedule } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -38,7 +39,7 @@ import {
   DEFAULT_SNAPSHOT_KEEP,
   editBlockedReason,
   RUNNING_ONLY_ACTIONS,
-  SCHEDULE_ACTIONS,
+  scheduleActions,
   scheduleWarnMinutes,
   snapshotKeep,
   WARN_ACTIONS,
@@ -235,8 +236,10 @@ export default function Schedules() {
   const { instance, can } = useInstanceContext();
   const canManage = can("instance.schedules");
   const canBackup = can("instance.backup");
+  // console commands only for a game with a console (the backend refuses them for Palworld, Valheim, Satisfactory)
+  const hasConsole = hasCapability(instance, "console_commands");
   // a schedule runs its action with the panel's authority: only actions the user may run are offered
-  const canCreate = canManage && SCHEDULE_ACTIONS.some((a) => !actionBlockedReason(a, can));
+  const canCreate = canManage && scheduleActions(hasConsole).some((a) => !actionBlockedReason(a, can));
   const [dialog, setDialog] = useState<{ key: number; schedule?: Schedule; template?: Partial<ScheduleDraft> } | null>(null);
 
   const query = useQuery({
@@ -262,7 +265,7 @@ export default function Schedules() {
         title="Schedules"
         description={
           <>
-            Automate restarts, backups, snapshots and console commands with cron expressions. Times use the panel server's timezone
+            Automate restarts, backups, snapshots{hasConsole ? " and console commands" : ""} with cron expressions. Times use the panel server's timezone
             {panelTz ? ` (${panelTz})` : ""}
             {panelTz && panelTz !== localTz ? `; run times below are shown in your browser's time (${localTz})` : ""}.
           </>
@@ -371,6 +374,7 @@ export default function Schedules() {
           panelTz={panelTz}
           open
           onOpenChange={(o) => !o && setDialog(null)}
+          actions={scheduleActions(hasConsole, dialog.schedule?.action)}
         />
       )}
     </div>
