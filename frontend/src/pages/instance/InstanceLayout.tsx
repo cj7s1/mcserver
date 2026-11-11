@@ -141,7 +141,7 @@ export function InstanceLayout() {
         </NavLink>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
-            <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-12" />
+            <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} game={instance.game} className="size-12" />
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <h1 className="min-w-0 text-xl font-semibold tracking-tight [overflow-wrap:anywhere]">{instance.name}</h1>

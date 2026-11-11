@@ -133,6 +133,7 @@ export function GeneralTab({ instance, can, onDirtyChange }: TabProps) {
               url={errors.icon_url ? null : current.icon_url}
               name={current.name || instance.name}
               type={instance.server_type}
+              game={instance.game}
               className="size-20 text-xl"
             />
             <span className="text-xs text-muted-foreground">Preview</span>

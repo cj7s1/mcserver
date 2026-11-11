@@ -1,7 +1,7 @@
 /** First wizard step when the panel runs more than one game: which game the server is for. */
-import { Gamepad2 } from "lucide-react";
 import { useId } from "react";
 import { Section } from "@/components/PageHeader";
+import { gameIcon } from "@/lib/games";
 import type { GameInfo } from "@/lib/types";
 import { ChoiceCard } from "./WizardBits";
 import { creatableGame } from "./wizardModel";
@@ -29,6 +29,7 @@ export function StepGame({
         >
           {games.map((g) => {
             const available = creatableGame(g.id);
+            const Icon = gameIcon(g.id);
             return (
               <ChoiceCard
                 key={g.id}
@@ -44,7 +45,7 @@ export function StepGame({
                     ? g.variants.map((v) => v.label).join(" · ") || undefined
                     : `${g.label} servers cannot be created with this panel version yet.`
                 }
-                icon={<Gamepad2 />}
+                icon={<Icon />}
               />
             );
           })}

@@ -246,7 +246,7 @@ function DashboardServerRow({ instance, withStats }: { instance: Instance; withS
   const job = instance.active_job;
   return (
     <li className="flex items-center gap-3 px-4 py-2.5">
-      <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-9" />
+      <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} game={instance.game} className="size-9" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
           <Link

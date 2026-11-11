@@ -21,7 +21,7 @@ export function ServerCard({ instance }: { instance: Instance }) {
   return (
     <article className="relative flex flex-col gap-3 rounded-xl border bg-card p-4 text-card-foreground transition-colors hover:border-primary/40 hover:bg-muted/20 has-[a[data-card-link]:focus-visible]:ring-3 has-[a[data-card-link]:focus-visible]:ring-ring/50">
       <div className="flex items-start gap-3">
-        <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} className="size-11" />
+        <ServerIcon url={instance.icon_url} name={instance.name} type={instance.server_type} game={instance.game} className="size-11" />
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-sm font-semibold leading-snug" title={instance.name}>
             <Link

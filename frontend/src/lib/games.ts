@@ -4,6 +4,7 @@
  * `game_label`, `capabilities` and `memory_model` with every instance; an older panel sends none of
  * them, and the instance is then a Minecraft server gated exactly as before (content_kind, is_modpack).
  */
+import { Axe, Biohazard, Bug, Cog, Crosshair, Factory, Gamepad2, Hammer, PawPrint, Pickaxe, TreePine, type LucideIcon } from "lucide-react";
 import type { GameCapability, GameInfo, Instance, MemoryModel } from "./types";
 
 export const MINECRAFT = "minecraft";
@@ -27,7 +28,22 @@ const MINECRAFT_BASE: readonly GameCapability[] = [
   "world_reset",
 ];
 
-const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft", factorio: "Factorio", terraria: "Terraria", satisfactory: "Satisfactory" };
+/** Labels, icons and icon colours of the games the panel knows (the catalog's label wins when the API sends one). */
+const GAMES: Record<string, { label: string; icon: LucideIcon; color?: string }> = {
+  [MINECRAFT]: { label: "Minecraft", icon: Pickaxe },
+  factorio: { label: "Factorio", icon: Cog },
+  terraria: { label: "Terraria", icon: TreePine },
+  satisfactory: { label: "Satisfactory", icon: Factory },
+  // the six Steam-era games (games-6-contract.md); their servers have no variant, so the game gives the colour
+  palworld: { label: "Palworld", icon: PawPrint, color: "from-cyan-500/30 to-sky-700/30 text-cyan-700 dark:text-cyan-300" },
+  valheim: { label: "Valheim", icon: Axe, color: "from-yellow-500/30 to-stone-700/30 text-yellow-800 dark:text-yellow-200" },
+  "project-zomboid": { label: "Project Zomboid", icon: Biohazard, color: "from-red-500/30 to-red-800/30 text-red-700 dark:text-red-300" },
+  hkmp: { label: "Hollow Knight (HKMP)", icon: Bug, color: "from-slate-400/30 to-indigo-900/30 text-slate-700 dark:text-slate-200" },
+  cs2: { label: "Counter-Strike 2", icon: Crosshair, color: "from-orange-400/30 to-amber-700/30 text-orange-700 dark:text-orange-300" },
+  rust: { label: "Rust", icon: Hammer, color: "from-orange-700/30 to-red-900/30 text-orange-800 dark:text-orange-300" },
+};
+
+const GAME_LABELS: Record<string, string> = Object.fromEntries(Object.entries(GAMES).map(([id, g]) => [id, g.label]));
 
 export function gameId(i: Pick<Instance, "game">): string {
   return i.game || MINECRAFT;
@@ -122,6 +138,30 @@ export function variantLabel(variant: string): string {
 /** Tailwind classes of a variant's icon gradient; grey for unknown variants. */
 export function variantColor(variant: string | undefined): string {
   return VARIANT_COLORS[variant ?? ""] ?? FALLBACK_COLOR;
+}
+
+/** The icon of a game (the create wizard's game cards); a gamepad for a game the UI does not know. */
+export function gameIcon(game: string | null | undefined): LucideIcon {
+  return GAMES[game || MINECRAFT]?.icon ?? Gamepad2;
+}
+
+/** Tailwind classes of a game's icon gradient, for games whose servers have no variant colour; undefined otherwise. */
+export function gameColor(game: string | null | undefined): string | undefined {
+  return GAMES[game || MINECRAFT]?.color;
+}
+
+/** The icon colour of a server: its variant's (Minecraft server types, Terraria), else its game's, else grey. */
+export function serverIconColor(variant: string | undefined, game?: string | null): string {
+  return VARIANT_COLORS[variant ?? ""] ?? gameColor(game) ?? FALLBACK_COLOR;
+}
+
+/**
+ * Whether a game without versions to choose (catalog `fixed_version`) updates when it restarts: it follows
+ * a branch ("public", "stable": the image downloads the newest build at every start). A fixed version
+ * number ("2.4.3": HKMP, carried by the panel's image) changes only with a panel release.
+ */
+export function updatesOnRestart(fixed: Pick<NonNullable<GameInfo["fixed_version"]>, "id"> | null | undefined): boolean {
+  return !!fixed && !/^\d/.test(fixed.id);
 }
 
 /** Label of a mod loader id ("neoforge" -> "NeoForge"); "—" when empty. */

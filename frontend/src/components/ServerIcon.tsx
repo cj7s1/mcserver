@@ -1,9 +1,22 @@
 import { Box } from "lucide-react";
 import { useState } from "react";
-import { variantColor } from "@/lib/games";
+import { serverIconColor } from "@/lib/games";
 import { cn } from "@/lib/utils";
 
-export function ServerIcon({ url, name, type, className }: { url?: string | null; name: string; type?: string; className?: string }) {
+/** A server's icon: its picture, else its initials on the colour of its variant (or of its game, for games without variants). */
+export function ServerIcon({
+  url,
+  name,
+  type,
+  game,
+  className,
+}: {
+  url?: string | null;
+  name: string;
+  type?: string;
+  game?: string | null;
+  className?: string;
+}) {
   const [failed, setFailed] = useState(false);
   if (url && !failed) {
     return (
@@ -26,7 +39,7 @@ export function ServerIcon({ url, name, type, className }: { url?: string | null
     <div
       className={cn(
         "flex size-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-sm font-semibold",
-        variantColor(type),
+        serverIconColor(type, game),
         className,
       )}
       aria-hidden

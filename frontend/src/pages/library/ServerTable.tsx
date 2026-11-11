@@ -100,6 +100,7 @@ function ServerTableRow({ instance }: { instance: Instance }) {
             url={instance.icon_url}
             name={instance.name}
             type={instance.server_type}
+            game={instance.game}
             className="size-8 rounded-md text-xs"
           />
           <div className="min-w-0 sm:max-w-[18rem]">
