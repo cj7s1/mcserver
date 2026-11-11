@@ -19,6 +19,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ApiError, errorMessage } from "@/lib/api";
 import { formatMemoryMb } from "@/lib/format";
 import { displayValue, fromText } from "@/lib/game-config";
+import { conditionText, derivedNumber, derivedRule, editablePorts, portPublished } from "@/lib/game-ports";
 import { memoryWording } from "@/lib/games";
 import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { qk } from "@/lib/queries";
@@ -40,6 +41,7 @@ import {
   secretRequiredNow,
   validateGameStep,
   variantView,
+  wizardConfigValues,
   wizardVariants,
   type GameWizardState,
 } from "./gameWizardModel";
@@ -141,12 +143,15 @@ export function GameWizard({
       if (err instanceof OvercommitDeclined) return;
       toast.error(errorMessage(err));
       let errs: FieldErrors = {};
-      if (err instanceof ApiError && (err.code === "port_conflict" || err.code === "no_free_ports")) {
+      if (err instanceof ApiError && (err.code === "port_conflict" || err.code === "no_free_ports" || err.code === "invalid_port")) {
         const name = (err.details?.port_name as string | undefined) ?? game.ports?.[0]?.name;
         errs = { [name ? `ports.${name}` : "form"]: err.message };
         qc.invalidateQueries({ queryKey: mpk.ports });
       } else if (err instanceof ApiError && Object.keys(err.fieldErrors).length) {
         errs = gameServerErrors(err.fieldErrors);
+      } else if (err instanceof ApiError && (err.code === "invalid_option" || err.code === "invalid_setting")) {
+        // an option or setting the server refused (a pattern the catalog does not describe): shown on its step
+        errs = { [err.code === "invalid_option" ? "options" : "settings"]: err.message };
       } else {
         errs = { form: errorMessage(err) };
       }
@@ -263,6 +268,11 @@ export function GameWizard({
                   errors={Object.fromEntries(Object.entries(errors).filter(([k]) => k.startsWith("options.")).map(([k, v]) => [k.slice(8), v]))}
                   idPrefix="game-option"
                 />
+                {errors.options && (
+                  <p className="text-xs text-destructive" role="alert">
+                    {errors.options}
+                  </p>
+                )}
                 {(game.options ?? []).some((o) => o.pinned) && (
                   <p className="text-xs text-muted-foreground">These choices are fixed once the server exists: changing them later could damage its saves.</p>
                 )}
@@ -311,21 +321,28 @@ export function GameWizard({
           </Section>
           <Section title="Network" description="Host ports players connect to. Empty = the game's usual port when it is free, else the next free one.">
             <div className="grid gap-4">
-              {/* a port that always has another one's number (Satisfactory's API on TCP) is not asked for */}
-              {(game.ports ?? []).filter((p) => !p.same_port_as).map((p) => {
+              {/* a port that always has another one's number (Satisfactory's API on TCP) or that number plus an
+                  offset (Valheim's query port) is not asked for: listed below its port */}
+              {editablePorts(game.ports).map((p) => {
                 const id = `game-port-${p.name}`;
                 const t = (state.ports[p.name] ?? "").trim();
                 const used = t ? ports.data?.in_use.find((u) => u.port === Number(t)) : undefined;
+                const condition = conditionText(game, p);
                 return (
                   <Field
                     key={p.name}
                     id={id}
                     label={
-                      <span className="flex items-center gap-2">
+                      <span className="flex flex-wrap items-center gap-2">
                         {p.label}
                         <Badge variant="outline" className="font-mono uppercase">
                           {sharedPortsLabel(game.ports ?? [], p)}
                         </Badge>
+                        {condition && (
+                          <Badge variant="secondary" className="font-normal">
+                            {condition}
+                          </Badge>
+                        )}
                       </span>
                     }
                     error={errors[`ports.${p.name}`]}
@@ -342,6 +359,7 @@ export function GameWizard({
                   </Field>
                 );
               })}
+              <DerivedPorts game={game} state={state} inUse={ports.data?.in_use} />
               <Field id="game-bind" label="Bind address" error={errors.hostIp} hint="Empty = the panel's default (usually every interface).">
                 <Input id="game-bind" className="sm:max-w-60" value={state.hostIp} onChange={(e) => patch({ hostIp: e.target.value })} placeholder="0.0.0.0" />
               </Field>
@@ -397,14 +415,21 @@ export function GameWizard({
                 ["Memory", Number.isFinite(mem) ? formatMemoryMb(mem) : "—"],
                 ...(game.ports ?? []).filter((p) => !p.same_port_as).map((p): [string, string] => [
                   `${p.label} (${sharedPortsLabel(game.ports ?? [], p).toUpperCase()})`,
-                  (state.ports[p.name] ?? "").trim() || `automatic (${p.default_host_port} when free)`,
+                  portSummary(game, state, p),
                 ]),
                 ["Bind address", state.hostIp.trim() || "Panel default"],
               ]}
             />
           </Section>
           {(game.secrets ?? []).length > 0 && (
-            <Section title="Secrets" description="Stored encrypted; never shown again. You can also enter them later in Settings → Game settings.">
+            <Section
+              title="Secrets"
+              description={
+                (game.secrets ?? []).some((s) => s.reveal)
+                  ? "Stored encrypted. You can enter or change them later in Settings → Game settings, where the passwords players type in game can be shown."
+                  : "Stored encrypted; never shown again. You can also enter them later in Settings → Game settings."
+              }
+            >
               <div className="grid gap-4">
                 {(game.secrets ?? []).map((s) => (
                   <Field
@@ -417,12 +442,30 @@ export function GameWizard({
                     }
                     optional={!s.required && !secretRequiredNow(s, state)}
                     error={errors[`secrets.${s.key}`]}
-                    hint={s.help}
+                    hint={
+                      s.generated || s.link ? (
+                        <>
+                          {s.help}
+                          {s.generated && " Leave it empty and the panel generates one."}
+                          {s.link && (
+                            <>
+                              {" "}
+                              <a href={s.link} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                                Where to get it
+                              </a>
+                            </>
+                          )}
+                        </>
+                      ) : (
+                        s.help
+                      )
+                    }
                   >
                     <Input
                       id={`game-secret-${s.key}`}
                       type="password"
                       autoComplete="new-password"
+                      placeholder={s.generated ? "Generated if left empty" : undefined}
                       value={state.secrets[s.key] ?? ""}
                       onChange={(e) => patch({ secrets: { ...state.secrets, [s.key]: e.target.value } })}
                     />
@@ -485,5 +528,65 @@ export function GameWizard({
         )}
       </div>
     </div>
+  );
+}
+
+/** A port's host number as the review lists it, with the setting it depends on (CS2's CSTV port). */
+function portSummary(game: GameInfo, state: GameWizardState, p: NonNullable<GameInfo["ports"]>[number]): string {
+  let value: string;
+  if (p.derived_from) {
+    const lead = (state.ports[p.derived_from.port] ?? "").trim();
+    value = /^\d+$/.test(lead) ? String(derivedNumber(p, Number(lead))) : `${derivedRule(game.ports, p).toLowerCase()} (automatic)`;
+  } else {
+    value = (state.ports[p.name] ?? "").trim() || `automatic (${p.default_host_port} when free)`;
+  }
+  if (!p.when) return value;
+  const published = portPublished(game, p, wizardConfigValues(game, state));
+  return `${value}, ${published === false ? "not published: " : ""}${conditionText(game, p)}`;
+}
+
+/** The ports whose number is another one's plus an offset (Valheim: query = game + 1): shown, never asked for. */
+function DerivedPorts({
+  game,
+  state,
+  inUse,
+}: {
+  game: GameInfo;
+  state: GameWizardState;
+  inUse?: { port: number; used_by: string }[];
+}) {
+  const derived = (game.ports ?? []).filter((p) => p.derived_from);
+  if (!derived.length) return null;
+  return (
+    <ul className="grid gap-2" aria-label="Ports that follow another port">
+      {derived.map((p) => {
+        const lead = (state.ports[p.derived_from!.port] ?? "").trim();
+        const n = /^\d+$/.test(lead) ? derivedNumber(p, Number(lead)) : Number.NaN;
+        const used = Number.isFinite(n) ? inUse?.find((u) => u.port === n) : undefined;
+        const condition = conditionText(game, p);
+        return (
+          <li key={p.name} className="grid gap-0.5 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+            <span className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{p.label}</span>
+              <Badge variant="outline" className="font-mono uppercase">
+                {p.protocol}
+              </Badge>
+              <span className="text-muted-foreground">
+                {derivedRule(game.ports, p)}
+                {Number.isFinite(n) ? ` = ${n}` : ""}
+              </span>
+              {condition && (
+                <Badge variant="secondary" className="font-normal">
+                  {condition}
+                </Badge>
+              )}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              {used ? `Port ${n} is in use by ${used.used_by} (fine if that is the other protocol).` : p.help}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
   );
 }

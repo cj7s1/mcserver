@@ -16,7 +16,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ApiError, errorMessage } from "@/lib/api";
-import { displayValue } from "@/lib/game-config";
+import { displayValue, optionValue } from "@/lib/game-config";
 import { gameId, gameLabel } from "@/lib/games";
 import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
@@ -123,7 +123,7 @@ export function GameSoftwareTab({ instance, can, onDirtyChange }: TabProps) {
                   <div key={o.key} className="contents">
                     <dt className="text-muted-foreground">{o.label}</dt>
                     <dd>
-                      {displayValue(o, instance.game_options?.[o.key])}{" "}
+                      {displayValue(o, optionValue(instance.game_options, o.key))}{" "}
                       <span className="text-xs text-muted-foreground">(fixed when the server was created)</span>
                     </dd>
                   </div>

@@ -21,6 +21,7 @@ export function resetBody(
     const raw = (texts.seed ?? "").trim();
     if (raw) {
       if (!/^\d+$/.test(raw)) errors.seed = "Enter a whole number, or leave it empty for a random map";
+      else if (seedField.max !== undefined && Number(raw) > seedField.max) errors.seed = `Must be at most ${seedField.max}`;
       else seed = Number(raw);
     }
   }

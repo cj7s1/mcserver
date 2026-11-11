@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
-import { groupFields, MASK } from "@/lib/game-config";
+import { EMPTY_OPTION, emptyOptionLabel, groupFields, MASK } from "@/lib/game-config";
 import type { ConfigField } from "@/lib/types";
 
 function idFor(prefix: string, key: string): string {
@@ -75,15 +75,21 @@ export function ConfigFieldControl({
 
   let control;
   if (field.type === "enum") {
+    // an empty option ("" = the game's default: Valheim's preset, CS2's bot settings) cannot be a Select item value
+    const hasEmpty = (field.options ?? []).includes("");
     control = (
-      <Select value={text} onValueChange={onChange} disabled={disabled}>
+      <Select
+        value={hasEmpty && text === "" ? EMPTY_OPTION : text}
+        onValueChange={(v) => onChange(v === EMPTY_OPTION ? "" : v)}
+        disabled={disabled}
+      >
         <SelectTrigger id={id} className="w-full" aria-describedby={describedBy} aria-invalid={!!error || undefined}>
           <SelectValue placeholder="Not set" />
         </SelectTrigger>
         <SelectContent>
           {(field.options ?? []).map((o) => (
-            <SelectItem key={o} value={o}>
-              {field.option_labels?.[o] ?? o}
+            <SelectItem key={o || EMPTY_OPTION} value={o === "" ? EMPTY_OPTION : o}>
+              {o === "" ? emptyOptionLabel(field) : (field.option_labels?.[o] ?? o)}
             </SelectItem>
           ))}
         </SelectContent>
@@ -117,7 +123,7 @@ export function ConfigFieldControl({
           if (field.secret && text === MASK) e.currentTarget.select();
         }}
         disabled={disabled}
-        placeholder={field.nullable ? (numeric ? "Random" : "Not set") : undefined}
+        placeholder={field.nullable ? (numeric && /seed/i.test(field.key) ? "Random" : "Not set") : undefined}
         autoComplete={field.secret ? "new-password" : "off"}
         aria-describedby={describedBy}
         aria-invalid={!!error || undefined}

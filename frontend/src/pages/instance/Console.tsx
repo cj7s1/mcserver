@@ -30,7 +30,7 @@ import { useTheme } from "@/hooks/use-theme";
 import { api, errorMessage } from "@/lib/api";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { consoleRules, gameId, isMinecraft } from "@/lib/games";
+import { consoleRules, gameId, gameLabel, hasCapability, isMinecraft } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
 import { useGameInfo } from "./game-api";
 import { CommandInput } from "./console/CommandInput";
@@ -445,7 +445,10 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
   // --- derived UI state ------------------------------------------------------------------
   const socketOpen = sock.state === "connected" || sock.state === "agent_lost";
   let disabledReason: string | null = null;
-  if (!canCommandPerm || sock.canCommand === false) disabledReason = "You can view the console but do not have permission to send commands.";
+  // a game without a console the panel can talk to (Palworld, Valheim, Satisfactory): output only
+  if (!hasCapability(instance, "console_commands"))
+    disabledReason = `${gameLabel(instance)} servers take no console commands from the panel; this page shows their output.`;
+  else if (!canCommandPerm || sock.canCommand === false) disabledReason = "You can view the console but do not have permission to send commands.";
   else if (!COMMAND_STATUSES.includes(instance.status))
     disabledReason = `Commands can be sent while the server is running (it is currently ${statusLabel(instance.status).toLowerCase()}).`;
   else if (!socketOpen) disabledReason = "The console is not connected yet; commands are available once it reconnects.";

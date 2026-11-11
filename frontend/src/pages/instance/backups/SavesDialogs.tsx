@@ -3,6 +3,8 @@
  * job saves_reset) and "Import a save" (POST /instances/{id}/saves/import, multipart -> job
  * saves_import). Both stop a running server, take a safety backup unless the user turns it off, move
  * the current save aside (it stays in the server folder) and need the server name typed to confirm.
+ * A world that is a folder (`folder`: Palworld, Valheim, Project Zomboid, Rust) is reset as a whole
+ * (the game creates a new one at its next start) and imported as a zip of the world folder.
  */
 import { Loader2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -14,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api, errorMessage, uploadWithProgress } from "@/lib/api";
+import { formatBytes } from "@/lib/format";
 import { initialTexts } from "@/lib/game-config";
 import type { ConfigField, Instance, Job } from "@/lib/types";
 import { DEFAULT_RESET_FIELDS, resetBody } from "./saves-model";
@@ -77,15 +80,19 @@ function Shell({
 export function SavesResetDialog({
   instance,
   fields,
+  folder,
   onClose,
   onStarted,
 }: {
   instance: Instance;
+  /** The reset form; absent: a seed (a game that describes no form); []: none (Palworld). */
   fields?: ConfigField[];
+  /** The world is a folder: where the old world goes. */
+  folder?: { setAside?: string };
   onClose: () => void;
   onStarted: (job: Job) => void;
 }) {
-  const resetFields = fields?.length ? fields : DEFAULT_RESET_FIELDS;
+  const resetFields = fields ?? DEFAULT_RESET_FIELDS;
   const [texts, setTexts] = useState(() => initialTexts(resetFields));
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [confirm, setConfirm] = useState("");
@@ -99,7 +106,7 @@ export function SavesResetDialog({
     setPending(true);
     try {
       const job = await api.post<Job>(`/instances/${instance.id}/saves/reset`, body);
-      toast.success("Creating a new map");
+      toast.success(folder ? "Resetting the world" : "Creating a new map");
       onStarted(job);
       onClose();
     } catch (err) {
@@ -110,13 +117,27 @@ export function SavesResetDialog({
   };
   return (
     <Shell
-      title="Start a new map?"
+      title={folder ? "Start a new world?" : "Start a new map?"}
       description={
-        <>
-          {live ? "The server is stopped, " : ""}the current save files are moved aside (they stay in the server folder) and a new map
-          is generated with the settings below{live ? "; then the server starts again" : " on the next start"}. Settings, admins and
-          the whitelist are kept.
-        </>
+        folder ? (
+          <>
+            {live ? "The server is stopped, " : ""}the current world is moved aside
+            {folder.setAside ? (
+              <>
+                {" "}
+                into <span className="font-mono">{folder.setAside}/</span>
+              </>
+            ) : null}{" "}
+            (it stays in the server folder) and the game creates a new world {live ? "when the server starts again" : "at its next start"}
+            {resetFields.length ? ", with the choices below" : ""}. The server&apos;s settings are kept.
+          </>
+        ) : (
+          <>
+            {live ? "The server is stopped, " : ""}the current save files are moved aside (they stay in the server folder) and a new map
+            is generated with the settings below{live ? "; then the server starts again" : " on the next start"}. Settings, admins and
+            the whitelist are kept.
+          </>
+        )
       }
       onClose={onClose}
       footer={
@@ -125,18 +146,20 @@ export function SavesResetDialog({
             Cancel
           </Button>
           <Button variant="destructive" onClick={submit} disabled={pending || confirm !== instance.name}>
-            {pending && <Loader2 className="animate-spin" />} Start a new map
+            {pending && <Loader2 className="animate-spin" />} {folder ? "Start a new world" : "Start a new map"}
           </Button>
         </>
       }
     >
-      <ConfigFieldsForm
-        fields={resetFields}
-        texts={texts}
-        onChange={(k, t) => setTexts((p) => ({ ...p, [k]: t }))}
-        errors={errors}
-        idPrefix="saves-reset"
-      />
+      {resetFields.length > 0 && (
+        <ConfigFieldsForm
+          fields={resetFields}
+          texts={texts}
+          onChange={(k, t) => setTexts((p) => ({ ...p, [k]: t }))}
+          errors={errors}
+          idPrefix="saves-reset"
+        />
+      )}
       <BackupSwitch backup={backup} setBackup={setBackup} id="saves-reset-backup" />
       <ConfirmName instance={instance} value={confirm} onChange={setConfirm} id="saves-reset-confirm" />
     </Shell>
@@ -146,11 +169,14 @@ export function SavesResetDialog({
 export function SavesImportDialog({
   instance,
   extension = ".zip",
+  folder,
   onClose,
   onStarted,
 }: {
   instance: Instance;
   extension?: string;
+  /** The world is a folder: what the zip must hold, the largest world (unpacked) and the panel's upload limit. */
+  folder?: { help?: string; maxBytes?: number; maxUpload?: number | null };
   onClose: () => void;
   onStarted: (job: Job) => void;
 }) {
@@ -161,8 +187,11 @@ export function SavesImportDialog({
   const [error, setError] = useState<string | null>(null);
   const live = LIVE.includes(instance.status);
   const wrongType = !!file && !file.name.toLowerCase().endsWith(extension.toLowerCase());
+  // the panel refuses an upload above its limit, and a zip larger than the largest world cannot hold a valid one
+  const limit = Math.min(folder?.maxUpload || Infinity, folder?.maxBytes || Infinity);
+  const tooLarge = !!file && !wrongType && file.size > limit;
   const submit = async () => {
-    if (!file || wrongType) return;
+    if (!file || wrongType || tooLarge) return;
     const form = new FormData();
     form.append("file", file);
     form.append("confirm_name", confirm);
@@ -184,13 +213,21 @@ export function SavesImportDialog({
   const pending = progress !== null;
   return (
     <Shell
-      title="Import a save"
+      title={folder ? "Import a world" : "Import a save"}
       description={
-        <>
-          The uploaded save becomes the server&apos;s map. {live ? "The server is stopped first and started again afterwards. " : ""}
-          The current save is moved aside and stays in the server folder. The save must have been made with the same game version (or
-          an older one) and, for Factorio, the same Space Age setting.
-        </>
+        folder ? (
+          <>
+            The uploaded world becomes the server&apos;s world. {live ? "The server is stopped first and started again afterwards. " : ""}
+            The current world is moved aside and stays in the server folder. Upload {folder.help || "a zip of the world folder"}
+            {folder.maxBytes ? ` (at most ${formatBytes(folder.maxBytes)} unpacked)` : ""}.
+          </>
+        ) : (
+          <>
+            The uploaded save becomes the server&apos;s map. {live ? "The server is stopped first and started again afterwards. " : ""}
+            The current save is moved aside and stays in the server folder. The save must have been made with the same game version (or
+            an older one) and, for Factorio, the same Space Age setting.
+          </>
+        )
       }
       onClose={onClose}
       footer={
@@ -198,7 +235,7 @@ export function SavesImportDialog({
           <Button variant="outline" onClick={onClose} disabled={pending}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={pending || !file || wrongType || confirm !== instance.name}>
+          <Button onClick={submit} disabled={pending || !file || wrongType || tooLarge || confirm !== instance.name}>
             {pending && <Loader2 className="animate-spin" />}
             {pending ? `Uploading ${Math.round((progress ?? 0) * 100)}%` : "Import"}
           </Button>
@@ -206,7 +243,7 @@ export function SavesImportDialog({
       }
     >
       <div className="grid gap-1.5">
-        <Label htmlFor="saves-import-file">Save file ({extension})</Label>
+        <Label htmlFor="saves-import-file">{folder ? `World (${extension} of the world folder)` : `Save file (${extension})`}</Label>
         <Input
           id="saves-import-file"
           type="file"
@@ -217,6 +254,11 @@ export function SavesImportDialog({
         {wrongType && (
           <p className="text-xs text-destructive" role="alert">
             Choose a {extension} file
+          </p>
+        )}
+        {tooLarge && (
+          <p className="text-xs text-destructive" role="alert">
+            The file is larger than the panel accepts ({formatBytes(limit)})
           </p>
         )}
       </div>

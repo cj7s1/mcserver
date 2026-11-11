@@ -2,6 +2,12 @@
  * Players page of games other than Minecraft (backend contract B9): online players, and the game's
  * whitelist / admin / ban lists with the labels the API gives them ({ops: "Admins"} for Factorio).
  * Names are checked with the game's pattern; no avatars or UUIDs (those are Minecraft's).
+ *
+ * What the answer may add (the six Steam-era games): online `entries` with the id kicks and bans use
+ * (Palworld, Rust); entries whose `name` is an id and `display_name` the player's name (Rust); `ip_bans`
+ * (HKMP, lifted by address); `id_hint` (what a typed name may be: Valheim takes SteamID64s);
+ * `no_online_list` (Valheim cannot list who is online); `lists_unknown` (Project Zomboid keeps its lists in
+ * its database: changed by name, never listed).
  */
 import { Ban, Loader2, Plus, Trash2, UserX } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
@@ -11,24 +17,42 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { gameLabel } from "@/lib/games";
-import type { Instance, PlayersResponse } from "@/lib/types";
+import type { Instance, OnlinePlayerEntry, PlayersResponse } from "@/lib/types";
+import { ConfirmAction } from "../content/ConfirmAction";
 import { useGameInfo } from "../game-api";
-import { ACTIONS, gamePlayerNameError, listLabels, type ListKey } from "./game-players-model";
+import { ACTIONS, gamePlayerNameError, listEntries, listLabels, type GameListEntry, type ListKey } from "./game-players-model";
 import { usePlayerAction, usePlayers } from "./player-utils";
 
-function AddForm({ instanceId, list, label, pattern, disabled }: { instanceId: string; list: ListKey; label: string; pattern?: string; disabled: boolean }) {
+function AddForm({
+  instanceId,
+  list,
+  label,
+  pattern,
+  disabled,
+  hint,
+  withRemove,
+}: {
+  instanceId: string;
+  list: ListKey;
+  label: string;
+  pattern?: string;
+  disabled: boolean;
+  /** What a typed name may be (the answer's `id_hint`). */
+  hint?: string;
+  /** Also a "remove by name" button (a list the panel cannot read: Project Zomboid). */
+  withRemove?: boolean;
+}) {
   const id = useId();
   const act = usePlayerAction(instanceId);
   const [name, setName] = useState("");
   const [reason, setReason] = useState("");
   const [touched, setTouched] = useState(false);
   const error = touched ? gamePlayerNameError(name, pattern) : null;
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
+  const run = (action: "add" | "remove") => {
     setTouched(true);
     if (gamePlayerNameError(name, pattern)) return;
     act.mutate(
-      { action: ACTIONS[list].add, name, reason: list === "bans" ? reason : undefined },
+      { action: ACTIONS[list][action], name, reason: list === "bans" && action === "add" ? reason : undefined },
       {
         onSuccess: () => {
           setName("");
@@ -38,11 +62,15 @@ function AddForm({ instanceId, list, label, pattern, disabled }: { instanceId: s
       },
     );
   };
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    run("add");
+  };
   return (
     <form onSubmit={submit} className="grid gap-2">
       <div className="flex flex-wrap items-end gap-2">
         <div className="grid min-w-40 flex-1 gap-1">
-          <Label htmlFor={`${id}-name`}>Player name</Label>
+          <Label htmlFor={`${id}-name`}>{hint ? "Player" : "Player name"}</Label>
           <Input
             id={`${id}-name`}
             value={name}
@@ -50,6 +78,7 @@ function AddForm({ instanceId, list, label, pattern, disabled }: { instanceId: s
             disabled={disabled || act.isPending}
             aria-invalid={!!error || undefined}
             aria-label={`Player name to add to ${label}`}
+            aria-describedby={hint && !error ? `${id}-hint` : undefined}
             autoComplete="off"
             spellCheck={false}
           />
@@ -63,12 +92,21 @@ function AddForm({ instanceId, list, label, pattern, disabled }: { instanceId: s
         <Button type="submit" size="sm" disabled={disabled || act.isPending}>
           {act.isPending ? <Loader2 className="animate-spin" /> : list === "bans" ? <Ban /> : <Plus />} {ACTIONS[list].addLabel}
         </Button>
+        {withRemove && (
+          <Button type="button" size="sm" variant="outline" disabled={disabled || act.isPending} onClick={() => run("remove")}>
+            <Trash2 /> {ACTIONS[list].removeLabel}
+          </Button>
+        )}
       </div>
-      {error && (
+      {error ? (
         <p className="text-xs text-destructive" role="alert">
           {error}
         </p>
-      )}
+      ) : hint ? (
+        <p id={`${id}-hint`} className="text-xs text-muted-foreground">
+          {hint}
+        </p>
+      ) : null}
     </form>
   );
 }
@@ -80,23 +118,33 @@ function PlayerList({
   entries,
   canManage,
   pattern,
+  hint,
+  unknown,
 }: {
   instanceId: string;
   list: ListKey;
   label: string;
-  entries: { name: string; reason?: string }[];
+  entries: GameListEntry[];
   canManage: boolean;
   pattern?: string;
+  hint?: string;
+  /** The game keeps this list where the panel cannot read it (Project Zomboid's database). */
+  unknown?: boolean;
 }) {
   const act = usePlayerAction(instanceId);
   return (
-    <Section title={label} description={`${entries.length} ${entries.length === 1 ? "entry" : "entries"}`}>
+    <Section title={label} description={unknown ? "Not readable by the panel" : `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`}>
       <div className="grid gap-3">
         {entries.length ? (
           <ul className="divide-y rounded-lg border" aria-label={label}>
             {entries.map((e) => (
-              <li key={e.name} className="flex items-center gap-2 px-3 py-2 text-sm">
-                <span className="min-w-0 truncate font-medium">{e.name}</span>
+              <li key={`${e.ip ? "ip" : "name"}:${e.name}`} className="flex min-w-0 items-center gap-2 px-3 py-2 text-sm">
+                <span className="grid min-w-0 gap-0.5">
+                  <span className="truncate font-medium">{e.display_name || e.name}</span>
+                  {(e.display_name || e.ip) && (
+                    <span className="truncate font-mono text-[11px] text-muted-foreground">{e.ip ? `IP address ${e.name}` : e.name}</span>
+                  )}
+                </span>
                 {e.reason && <span className="min-w-0 truncate text-xs text-muted-foreground">{e.reason}</span>}
                 {canManage && (
                   <Button
@@ -105,7 +153,7 @@ function PlayerList({
                     className="ml-auto"
                     onClick={() => act.mutate({ action: ACTIONS[list].remove, name: e.name })}
                     disabled={act.isPending}
-                    aria-label={`${ACTIONS[list].removeLabel} ${e.name}`}
+                    aria-label={`${ACTIONS[list].removeLabel} ${e.display_name || e.name}`}
                   >
                     <Trash2 /> {ACTIONS[list].removeLabel}
                   </Button>
@@ -114,12 +162,60 @@ function PlayerList({
             ))}
           </ul>
         ) : (
-          <p className="text-sm text-muted-foreground">Nobody yet.</p>
+          <p className="text-sm text-muted-foreground">
+            {unknown ? "The game keeps this list itself: add or remove players by name while the server runs." : "Nobody yet."}
+          </p>
         )}
-        {canManage && <AddForm instanceId={instanceId} list={list} label={label} pattern={pattern} disabled={false} />}
+        {canManage && (
+          <AddForm instanceId={instanceId} list={list} label={label} pattern={pattern} disabled={false} hint={hint} withRemove={unknown} />
+        )}
       </div>
     </Section>
   );
+}
+
+/** An online player with the id the game kicks and bans by (Palworld, Rust): kick, and ban when the game has a ban list. */
+function OnlineEntry({ instanceId, entry, canManage, canBan }: { instanceId: string; entry: OnlinePlayerEntry; canManage: boolean; canBan: boolean }) {
+  const act = usePlayerAction(instanceId);
+  const target = entry.id || entry.name;
+  return (
+    <li className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-sm">
+      <span className="grid min-w-0 gap-0.5">
+        <span className="truncate font-medium">{entry.name}</span>
+        {entry.id && <span className="truncate font-mono text-[11px] text-muted-foreground">{entry.id}</span>}
+      </span>
+      {canManage && (
+        <span className="ml-auto flex items-center gap-1">
+          <Button size="xs" variant="ghost" onClick={() => act.mutate({ action: "kick", name: target })} disabled={act.isPending} aria-label={`Kick ${entry.name}`}>
+            <UserX /> Kick
+          </Button>
+          {canBan && (
+            <ConfirmAction
+              trigger={
+                <Button size="xs" variant="ghost" className="text-destructive hover:text-destructive" disabled={act.isPending} aria-label={`Ban ${entry.name}`}>
+                  <Ban /> Ban
+                </Button>
+              }
+              title={`Ban ${entry.name}?`}
+              description={`They are disconnected and cannot join again until they are unbanned${entry.id ? ` (banned by their id ${entry.id})` : ""}.`}
+              confirmLabel="Ban player"
+              destructive
+              onConfirm={() => act.mutateAsync({ action: "ban", name: target })}
+            />
+          )}
+        </span>
+      )}
+    </li>
+  );
+}
+
+/** The line above the lists: how changes reach the game. */
+function modeNote(data: PlayersResponse, game: string): string {
+  if (data.no_online_list) return "These lists are files the server reads when it starts: changes are written to them now and apply at the latest at its next start.";
+  if (data.lists_unknown) return data.id_hint || `${game} keeps its lists itself: the panel changes them by name while the server runs, but cannot show them.`;
+  return data.running
+    ? `The server is running: changes are sent to it and apply at once; ${game} saves them to its lists itself.`
+    : "The server is stopped: changes are written to its list files and apply when it starts (a game that changes its lists only through the running server refuses them until it runs).";
 }
 
 export function GamePlayers({ instance, canManage }: { instance: Instance; canManage: boolean }) {
@@ -133,26 +229,34 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
   const labels = listLabels(data, game?.player_list_labels);
   const pattern = game?.player_name_pattern;
   const online = data.online;
-  // only the lists the game has: an answer with labels names them (Terraria: bans only; TShock: none)
+  // only the lists the game has: an answer with labels names them (Terraria: bans only; TShock, CS2: none)
   const lists: ListKey[] = (["whitelist", "ops", "bans"] as ListKey[]).filter((l) => !data.labels || l in data.labels);
+  // a hint about what a typed name may be goes with the lists, not with the online players
+  const hint = data.lists_unknown ? undefined : data.id_hint;
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4">
-      <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-        {data.running
-          ? `The server is running: changes are sent to it as console commands and apply at once; ${gameLabel(instance)} saves them to its lists itself.`
-          : "The server is stopped: changes are written to its list files and apply when it starts."}
-      </p>
+      {lists.length > 0 && <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">{modeNote(data, gameLabel(instance))}</p>}
       <Section
         title="Online"
         description={
-          !data.running
-            ? "The server is not running."
-            : online?.error
-              ? online.error
-              : `${online?.online ?? online?.players.length ?? 0}${online?.max ? ` of ${online.max}` : ""} online`
+          data.no_online_list
+            ? `${gameLabel(instance)} has no way to list the players online.`
+            : !data.running
+              ? "The server is not running."
+              : online?.error
+                ? online.error
+                : `${online?.online ?? online?.players.length ?? 0}${online?.max ? ` of ${online.max}` : ""} online`
         }
       >
-        {data.running && online?.players.length ? (
+        {data.no_online_list ? (
+          <p className="text-sm text-muted-foreground">Players who are online are not shown here; the lists below still apply.</p>
+        ) : data.running && online?.entries?.length ? (
+          <ul className="divide-y rounded-lg border" aria-label="Online players">
+            {online.entries.map((e) => (
+              <OnlineEntry key={`${e.id}:${e.name}`} instanceId={instance.id} entry={e} canManage={canManage} canBan={lists.includes("bans")} />
+            ))}
+          </ul>
+        ) : data.running && online?.players.length ? (
           <ul className="divide-y rounded-lg border" aria-label="Online players">
             {online.players.map((p) => (
               <li key={p} className="flex items-center gap-2 px-3 py-2 text-sm">
@@ -169,19 +273,23 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
           <p className="text-sm text-muted-foreground">Nobody is online.</p>
         )}
       </Section>
-      <div className="grid gap-4 lg:grid-cols-3">
-        {lists.map((l) => (
-          <PlayerList
-            key={l}
-            instanceId={instance.id}
-            list={l}
-            label={labels[l]}
-            entries={(data[l] ?? []).map((e) => ({ name: e.name, reason: e.reason }))}
-            canManage={canManage}
-            pattern={pattern}
-          />
-        ))}
-      </div>
+      {lists.length > 0 && (
+        <div className="grid gap-4 lg:grid-cols-3">
+          {lists.map((l) => (
+            <PlayerList
+              key={l}
+              instanceId={instance.id}
+              list={l}
+              label={labels[l]}
+              entries={listEntries(data, l)}
+              canManage={canManage}
+              pattern={pattern}
+              hint={hint}
+              unknown={data.lists_unknown}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

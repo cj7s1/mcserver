@@ -19,6 +19,28 @@ export function listLabels(
   return { ...DEFAULT_LABELS, ...(catalog ?? {}), ...(data?.labels ?? {}) };
 }
 
+/** An entry of one of the lists as the page shows it. */
+export interface GameListEntry {
+  /** What actions name the player by: a name, an id (Rust: SteamID64) or an IP address. */
+  name: string;
+  /** The player's name when `name` is an id (Rust's owners and bans). */
+  display_name?: string;
+  reason?: string;
+  /** An IP ban (HKMP): lifted with the address. */
+  ip?: boolean;
+}
+
+/** The entries of a list; the ban list also holds the IP bans (HKMP), which are lifted by their address. */
+export function listEntries(data: Pick<PlayersResponse, ListKey | "ip_bans">, list: ListKey): GameListEntry[] {
+  const out: GameListEntry[] = (data[list] ?? []).map((e) => ({
+    name: e.name,
+    display_name: e.display_name && e.display_name !== e.name ? e.display_name : undefined,
+    reason: e.reason,
+  }));
+  if (list === "bans") for (const b of data.ip_bans ?? []) if (b.ip) out.push({ name: b.ip, reason: b.reason, ip: true });
+  return out;
+}
+
 /** Why a typed player name is invalid for the game (pattern from the catalog; default: 1-60 safe characters). */
 export function gamePlayerNameError(raw: string, pattern?: string): string | null {
   const name = raw.trim();

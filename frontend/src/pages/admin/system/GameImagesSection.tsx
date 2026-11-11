@@ -43,7 +43,7 @@ export function GameImagesSection({ settings, games }: { settings: SystemSetting
   return (
     <Section
       title="Runtime images of other games"
-      description="Image repository per game; empty = the game's default. The tag is chosen per server (its exact game version). The node agent must allow the repository too (AGENT_GAME_<ID>_IMAGES)."
+      description="Image repository per game; empty = the game's default. The tag is chosen per server (its exact game version), or pinned by the panel release for games without versions to choose. The node agent must allow the repository too (AGENT_GAME_<ID>_IMAGES)."
     >
       <div className="grid gap-4">
         {others.map((g) => (

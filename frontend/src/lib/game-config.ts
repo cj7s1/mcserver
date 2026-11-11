@@ -43,7 +43,40 @@ export function fromText(field: ConfigField, text: string): { value: ConfigValue
   }
   if (text.length > 4096) return { error: "Too long (max 4096 characters)" };
   if (/[\r\n]/.test(text)) return { error: "Must be a single line" };
+  const mismatch = patternError(text, field.pattern, field.pattern_help);
+  if (mismatch) return { error: mismatch };
   return { value: text };
+}
+
+const patternCache = new Map<string, RegExp | null>();
+
+/**
+ * A server-side pattern (Python syntax, matched whole with re.fullmatch) as a JS RegExp; null when JS
+ * cannot compile it (the server still checks it). The six games' patterns compile the same in both.
+ */
+export function patternRegExp(pattern: string): RegExp | null {
+  let re = patternCache.get(pattern);
+  if (re === undefined) {
+    re = null;
+    for (const flags of ["u", ""]) {
+      try {
+        re = new RegExp(`^(?:${pattern})$`, flags);
+        break;
+      } catch {
+        /* try without the unicode flag, then give up */
+      }
+    }
+    patternCache.set(pattern, re);
+  }
+  return re;
+}
+
+/** Why `text` does not match `pattern` (`help` says what is allowed), or null. */
+export function patternError(text: string, pattern?: string, help?: string): string | null {
+  if (!pattern) return null;
+  const re = patternRegExp(pattern);
+  if (!re || re.test(text)) return null;
+  return help ? `Allowed: ${help}` : "Contains characters that are not allowed";
 }
 
 /** Form text of every field: the stored value, else the field's default. */
@@ -93,9 +126,25 @@ export function groupFields(fields: readonly ConfigField[]): [string, ConfigFiel
   return [...groups.entries()];
 }
 
+/** A pinned option's value from a server's `game_options` (undefined for a virtual config kept in the same map). */
+export function optionValue(options: Record<string, unknown> | null | undefined, key: string): ConfigValue | undefined {
+  const value = options?.[key];
+  if (value === undefined || (value !== null && typeof value === "object" && !Array.isArray(value))) return undefined;
+  return value as ConfigValue;
+}
+
+/** The Select value standing for an enum's empty option (Radix Select items cannot have the value ""). */
+export const EMPTY_OPTION = "__mcpanel_empty__";
+
+/** What an enum's empty option is called: its label from the schema, else "Default" (the game's own default). */
+export function emptyOptionLabel(field: Pick<ConfigField, "option_labels">): string {
+  return field.option_labels?.[""] || "Default";
+}
+
 /** Display text of a value in summaries ("On", "Off", "Not set", the mask for secrets). */
 export function displayValue(field: ConfigField, value: ConfigValue | undefined): string {
   if (field.secret) return value ? "Set" : "Not set";
+  if (field.type === "enum" && value === "" && field.options?.includes("")) return emptyOptionLabel(field);
   if (value === undefined || value === null || value === "") return field.nullable ? "Random / not set" : "Not set";
   if (field.type === "bool") return value === true ? "On" : "Off";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";

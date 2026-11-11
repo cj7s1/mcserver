@@ -1,5 +1,6 @@
 /** Named ports of a non-Minecraft server: rows of the editor, validation and the PATCH body (GameNetwork.tsx). */
-import type { NamedPort } from "@/lib/types";
+import { derivedPorts } from "@/lib/game-ports";
+import type { GamePortSpec, NamedPort } from "@/lib/types";
 
 export interface NamedPortRow {
   name: string;
@@ -19,8 +20,11 @@ export function rowsFromPorts(ports: readonly NamedPort[]): NamedPortRow[] {
   }));
 }
 
-/** Errors per port name: range, and two named ports of this server on the same host port and protocol. */
-export function validateNamedPorts(rows: readonly NamedPortRow[]): Record<string, string> {
+/**
+ * Errors per port name: range, and two named ports of this server on the same host port and protocol.
+ * With the catalog's `specs`, the ports derived from a row (Valheim: query = game + 1) count as well.
+ */
+export function validateNamedPorts(rows: readonly NamedPortRow[], specs?: readonly GamePortSpec[]): Record<string, string> {
   const errors: Record<string, string> = {};
   const seen = new Map<string, string>();
   for (const r of rows) {
@@ -33,6 +37,13 @@ export function validateNamedPorts(rows: readonly NamedPortRow[]): Record<string
     const other = seen.get(key);
     if (other) errors[r.name] = `Same port and protocol as ${other}`;
     else seen.set(key, r.label);
+    for (const d of derivedPorts(specs, r.name)) {
+      const n = Number(t) + (d.derived_from?.offset ?? 0);
+      const dk = `${n}/${d.protocol}`;
+      if (n > 65535) errors[r.name] ??= `${d.label} would be port ${n}; choose a lower port`;
+      else if (seen.has(dk)) errors[r.name] ??= `${d.label} (port ${n}) would have the same port and protocol as ${seen.get(dk)}`;
+      seen.set(dk, d.label);
+    }
   }
   return errors;
 }

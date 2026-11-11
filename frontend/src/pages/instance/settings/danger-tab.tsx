@@ -364,7 +364,9 @@ export function DangerTab({ instance, can }: TabProps) {
                     ? "Not available while the server is archived. Unarchive it first."
                     : minecraft
                       ? "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. The next step lets you take a safety backup first."
-                      : "Moves the current save aside (it stays in the server folder) and generates a new map, with a new seed if you want. Settings, admins, the whitelist and backups are kept. The next step lets you take a safety backup first."
+                      : game?.world?.kind === "folder"
+                        ? "Moves the current world aside (it stays in the server folder) and the game creates a new one at its next start. Settings and backups are kept. The next step lets you take a safety backup first."
+                        : "Moves the current save aside (it stays in the server folder) and generates a new map, with a new seed if you want. Settings, admins, the whitelist and backups are kept. The next step lets you take a safety backup first."
                 }
                 action={
                   <Button ref={resetButton} variant="destructive" size="sm" onClick={() => setResetOpen(true)} disabled={busy || archived}>
@@ -437,6 +439,7 @@ export function DangerTab({ instance, can }: TabProps) {
         <SavesResetDialog
           instance={instance}
           fields={game?.world?.reset_fields}
+          folder={game?.world?.kind === "folder" ? { setAside: game.world.set_aside_folder } : undefined}
           onClose={() => {
             setResetOpen(false);
             resetButton.current?.focus();

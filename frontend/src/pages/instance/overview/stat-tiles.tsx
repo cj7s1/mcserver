@@ -6,6 +6,7 @@ import { Link } from "react-router";
 import { StatusBadge } from "@/components/StatusBadge";
 import { errorMessage } from "@/lib/api";
 import { formatBytes, formatDateTime, formatDuration, formatMemoryMb, relativeTime, toDate, uptimeSince } from "@/lib/format";
+import { isMinecraft } from "@/lib/games";
 import type { Instance, Stats } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import type { StatSample } from "./live-samples";
@@ -139,7 +140,11 @@ function PlayersTile({ instance, stats }: { instance: Instance; stats?: Stats })
         icon={<Users />}
         label="Players"
         value={<Muted>Unavailable</Muted>}
-        sub="Player list could not be read over RCON (the server may still be loading)."
+        sub={
+          isMinecraft(instance)
+            ? "Player list could not be read over RCON (the server may still be loading)."
+            : "The server did not report its players (it may still be loading, or the game cannot list them)."
+        }
         action={manage}
       />
     );

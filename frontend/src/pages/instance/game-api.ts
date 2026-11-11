@@ -14,6 +14,7 @@ import type {
   GameVersionsResponse,
   Instance,
   Job,
+  RevealedSecret,
   SavesInfo,
   SecretsResponse,
 } from "@/lib/types";
@@ -76,6 +77,13 @@ export function usePutSecrets(instanceId: string) {
       qc.setQueryData(qk.secrets(instanceId), data);
       invalidate(instanceId);
     },
+  });
+}
+
+/** POST /instances/{id}/secrets/{key}/reveal: the value of a secret the game lets the owner read (audited). */
+export function useRevealSecret(instanceId: string) {
+  return useMutation({
+    mutationFn: (key: string) => api.post<RevealedSecret>(`/instances/${instanceId}/secrets/${encodeURIComponent(key)}/reveal`),
   });
 }
 

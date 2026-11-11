@@ -7,7 +7,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { formatDateTime, formatMemoryMb, relativeTime } from "@/lib/format";
 import type { ConnectionInfo, Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { displayValue } from "@/lib/game-config";
+import { displayValue, optionValue } from "@/lib/game-config";
 import { gameLabel, isMinecraft, knownVariantLabel } from "@/lib/games";
 import { useGameInfo } from "../game-api";
 import { BranchVersion } from "./BranchVersion";
@@ -211,7 +211,7 @@ function GameSoftwareCard({ instance: i, canConfigure }: { instance: Instance; c
         </Row>
         {pinned.map((o) => (
           <Row key={o.key} label={o.label}>
-            {displayValue(o, i.game_options?.[o.key])}
+            {displayValue(o, optionValue(i.game_options, o.key))}
           </Row>
         ))}
         <Row label="Image">

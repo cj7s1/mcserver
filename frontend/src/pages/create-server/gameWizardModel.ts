@@ -4,7 +4,8 @@
  * creation (Factorio: Space Age, off by default), plain container memory, the named ports, the config
  * fields marked `initial`, and the secrets. Minecraft keeps its own wizard (wizardModel.ts).
  */
-import { fromText, initialTexts, valuesForCreate } from "@/lib/game-config";
+import { fromText, initialTexts, patternError, valuesForCreate } from "@/lib/game-config";
+import { derivedPorts } from "@/lib/game-ports";
 import type { ConfigField, ConfigValue, GameInfo, GameVariantInfo, GameVersionsResponse } from "@/lib/types";
 import type { FieldErrors, StepId } from "./wizardModel";
 
@@ -151,6 +152,14 @@ export function validateGameStep(step: StepId, game: GameInfo, state: GameWizard
       const key = `${Number(t)}/${p.protocol}`;
       if (seen.has(key)) errors[`ports.${p.name}`] = `Same port and protocol as ${seen.get(key)}`;
       seen.set(key, p.label);
+      // the ports that always have this number plus an offset (Valheim: query = game + 1, crossplay = game + 2)
+      for (const d of derivedPorts(game.ports, p.name)) {
+        const n = Number(t) + (d.derived_from?.offset ?? 0);
+        const dk = `${n}/${d.protocol}`;
+        if (n > 65535) errors[`ports.${p.name}`] ??= `${d.label} would be port ${n}; choose a lower port`;
+        else if (seen.has(dk)) errors[`ports.${p.name}`] ??= `${d.label} (port ${n}) would have the same port and protocol as ${seen.get(dk)}`;
+        seen.set(dk, d.label);
+      }
     }
     if (state.hostIp.trim() && !IP_RE.test(state.hostIp.trim())) errors.hostIp = "Enter a valid IPv4 or IPv6 address";
   } else if (step === "settings") {
@@ -162,7 +171,12 @@ export function validateGameStep(step: StepId, game: GameInfo, state: GameWizard
     if (state.group.length > 60) errors.group = "Group must be at most 60 characters";
   } else if (step === "review") {
     for (const s of game.secrets ?? []) {
-      if ((s.required || secretRequiredNow(s, state)) && !(state.secrets[s.key] ?? "").trim()) errors[`secrets.${s.key}`] = `${s.label} is required`;
+      const value = (state.secrets[s.key] ?? "").trim();
+      if ((s.required || secretRequiredNow(s, state)) && !value) errors[`secrets.${s.key}`] = `${s.label} is required`;
+      else if (value) {
+        const mismatch = patternError(value, s.pattern, s.pattern_help);
+        if (mismatch) errors[`secrets.${s.key}`] = mismatch;
+      }
     }
   }
   return errors;
@@ -171,6 +185,24 @@ export function validateGameStep(step: StepId, game: GameInfo, state: GameWizard
 /** A secret that is required only with one choice of an option (Satisfactory's join password with access "password"). */
 export function secretRequiredNow(s: { required_when?: { option: string; value: string } }, state: Pick<GameWizardState, "options">): boolean {
   return !!s.required_when && (state.options[s.required_when.option] ?? "") === s.required_when.value;
+}
+
+/**
+ * The settings the new server will have, per config file: the wizard's choices for the fields it asks,
+ * the fields' defaults for the rest (whether a conditional port, such as Valheim's crossplay port, is published).
+ */
+export function wizardConfigValues(game: GameInfo, state: Pick<GameWizardState, "settings">): Record<string, Record<string, ConfigValue>> {
+  const out: Record<string, Record<string, ConfigValue>> = {};
+  for (const f of game.config_files ?? []) {
+    const values: Record<string, ConfigValue> = {};
+    for (const field of f.fields) {
+      const text = state.settings[f.id]?.[field.key];
+      const parsed = text === undefined ? undefined : fromText(field, text);
+      values[field.key] = parsed && !("error" in parsed) ? parsed.value : (field.default ?? null);
+    }
+    out[f.id] = values;
+  }
+  return out;
 }
 
 /** Which step a (client or server) error key belongs to. */
