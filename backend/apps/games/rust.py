@@ -206,14 +206,17 @@ class RustDefinition(SteamGameDefinition):
             "rust",
             "The folder of the server's map and saves (server/<identity>/): lower-case letters, digits, - and _. Chosen once.",
             pinned=True,
+            pattern=IDENTITY_PATTERN,
+            pattern_help="1 to 32 lower-case letters, digits, - and _",
         ),
     )
-    option_patterns = {"identity": (IDENTITY_PATTERN, "1 to 32 lower-case letters, digits, - and _")}
     fixed_version = {
         "id": "public",
         "label": "Steam public branch",
         "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients "
         "update themselves). There is no version to choose; 'update' means restart.",
+        # "Update now" is a restart: the image downloads the newest build of the branch at every start
+        "updates_on_restart": True,
     }
     notes = (
         "Dedicated server on the didstopia/rust-server image (pinned by digest). The first start downloads the game "
@@ -365,6 +368,8 @@ class RustDefinition(SteamGameDefinition):
             "ip_bans": [],
             "known_players": [],
             "id_hint": "Owners and bans use SteamID64s (17 digits); an online player's name works too.",
+            # owners and bans change through WebRCON: only while the server runs
+            "changes_while_stopped": False,
         }
         if running:
             try:

@@ -186,6 +186,8 @@ class HkmpDefinition(SteamGameDefinition):
         "label": f"HKMP {HKMP_VERSION}",
         "help": "The HKMP server comes with the panel's runtime image; a panel release updates it. Players need the "
         "same HKMP version in their game.",
+        # a restart does not update it: the HKMP server comes with the image (a panel release)
+        "updates_on_restart": False,
     }
     notes = (
         "HKMP (Hollow Knight Multiplayer) server on the maximalmax90/hkmpserver image: small (about 25 MB of memory), "
@@ -261,6 +263,8 @@ class HkmpDefinition(SteamGameDefinition):
             "known_players": [],
             "id_hint": "HKMP lists hold auth keys (and names on the whitelist's pre-list); actions take a player's "
             "name, auth key or IP address.",
+            # the lists change through the console: only while the server runs
+            "changes_while_stopped": False,
         }
         if running:
             try:

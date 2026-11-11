@@ -65,8 +65,10 @@ All six have in common:
 * **Server name** (chosen once) names the settings, world and database files (`data/Server/<name>.ini`,
   `data/Saves/Multiplayer/<name>/`). The settings form edits the ini; the sandbox settings are
   `data/Server/<name>_SandboxVars.lua` in the file manager.
-* **Players:** the online list, kick, ban/unban, admin and the whitelist go through RCON while the server
-  runs; Project Zomboid keeps accounts and bans in its database, so the panel cannot list them.
+* **Players:** the online list, kick, ban/unban, admin and removing from the whitelist go through RCON while
+  the server runs; Project Zomboid keeps accounts and bans in its database, so the panel cannot list them.
+  A whitelist entry is an account with a password: create it in the console (`adduser "name" "password"`)
+  and give the player both, or let players create their own accounts (`Open` on in the server settings).
 
 ## Hollow Knight (HKMP)
 

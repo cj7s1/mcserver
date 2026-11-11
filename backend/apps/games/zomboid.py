@@ -15,8 +15,9 @@ What the panel knows about it (probe ``audit-2026-11-09/design/probe-6games.md``
 * Control: Source RCON (the existing ``rcon`` driver; the password is the control secret, which the agent
   injects as ``RCON_PASSWORD``).
   Saves with ``save``, players with ``players``; accounts, bans and admins live in the server's database
-  and change through RCON only (``kickuser``, ``banuser``, ``unbanuser``, ``setaccesslevel``, ``adduser``,
-  ``removeuserfromwhitelist``).
+  and change through RCON only (``kickuser``, ``banuser``, ``unbanuser``, ``setaccesslevel``,
+  ``removeuserfromwhitelist``). A whitelist entry is an account with a password (``adduser "name" "password"``):
+  the console makes it, the panel's players page does not.
 * The admin account ``admin`` gets the admin password (a generated secret the owner can show) at every
   start; the launcher prints it, the agent hides it in every log it hands out.
 * ``Server/<name>.ini`` is edited with the ``kv`` codec; the image overwrites the ports, the RCON password and
@@ -187,6 +188,8 @@ class ZomboidDefinition(SteamGameDefinition):
             "servertest",
             "Names the server's settings, world and database files (letters, digits, - and _). Chosen once.",
             pinned=True,
+            pattern=SERVER_NAME_PATTERN,
+            pattern_help="1 to 32 letters, digits, - and _",
         ),
         GameOption(
             "branch",
@@ -199,7 +202,6 @@ class ZomboidDefinition(SteamGameDefinition):
             option_labels=(("public", "Build 42 (public)"), ("legacy41", "Build 41 (legacy41)")),
         ),
     )
-    option_patterns = {"server_name": (SERVER_NAME_PATTERN, "1 to 32 letters, digits, - and _")}
     secret_specs = (
         SecretSpec(
             ADMIN_PASSWORD,
@@ -217,6 +219,8 @@ class ZomboidDefinition(SteamGameDefinition):
         "label": "Steam branch chosen at creation",
         "help": "The image checks the game at every start and runs the newest build of the server's branch (Build 42 "
         "public or Build 41 legacy41). There is no version to choose; 'update' means restart.",
+        # "Update now" is a restart: the image downloads the newest build of the branch at every start
+        "updates_on_restart": True,
     }
     notes = (
         "Dedicated server on the indifferentbroccoli/projectzomboid-server-docker image. The first start downloads "
@@ -361,6 +365,8 @@ class ZomboidDefinition(SteamGameDefinition):
             "lists_unknown": True,
             "id_hint": "Project Zomboid keeps accounts, admins and bans in its database: the panel changes them while the "
             "server runs but cannot list them.",
+            # (through RCON: only while the server runs)
+            "changes_while_stopped": False,
         }
         if running:
             try:
@@ -375,9 +381,15 @@ class ZomboidDefinition(SteamGameDefinition):
         "pardon": 'unbanuser "{name}"',
         "op": 'setaccesslevel "{name}" admin',
         "deop": 'setaccesslevel "{name}" user',
-        "whitelist_add": 'adduser "{name}"',
         "whitelist_remove": 'removeuserfromwhitelist "{name}"',
     }
+    # adding to the whitelist creates an account, which needs a password (adduser "name" "password"; with
+    # the name alone the game only answers its usage text): the console does it, or players create their
+    # own while the ini's Open=true
+    WHITELIST_ADD_REFUSED = (
+        'Project Zomboid accounts need a password: create the account in the console with adduser "name" "password" '
+        "and give the player both (or let players create their own accounts: Open=true in the server settings)"
+    )
 
     def player_action(self, instance: Instance, action: str, name: str, reason: str = "") -> dict[str, Any]:
         from django.core.cache import cache
@@ -385,6 +397,8 @@ class ZomboidDefinition(SteamGameDefinition):
         from apps.nodes.client import AgentClient
 
         self.require(instance, "player_actions")
+        if action == "whitelist_add":
+            raise ApiError(self.WHITELIST_ADD_REFUSED, code="invalid_action")
         if action not in self.COMMANDS:
             raise ApiError("Unknown player action", code="invalid_action")
         name = self.validate_player_name(name)

@@ -196,7 +196,8 @@ def test_palworld_env(clients, fake_agent, django_capture_on_commit_callbacks):
     }
     assert env["EXP_RATE"] == "2.500000" and env["IS_PVP"] == "True" and env["DIFFICULTY"] == "None"
     assert env["DEATH_PENALTY"] == "Item" and env["GUILD_PLAYER_MAX_NUM"] == "20"
-    assert "SERVER_DESCRIPTION" not in env and "QUERY_PORT" not in env
+    # the query port stays inside the container, on a number that is not the game port's
+    assert "SERVER_DESCRIPTION" not in env and env["QUERY_PORT"] == "27015"
     assert build_spec(inst)["ports"] == [{"container_port": 8300, "host_port": 8300, "protocol": "udp", "host_ip": "0.0.0.0"}]
 
 
@@ -432,10 +433,19 @@ def test_the_agent_profiles_accept_the_specs(clients, fake_agent, django_capture
         },
         "rust": {"settings": {"server": {"rust_plus": True, "description": "Weekly wipes"}}},
     }
+    # game ports on the number of a port the agent defaults inside the container (CS2's CSTV port while CSTV is off,
+    # Palworld's query port): the panel names those ports itself, so the agent never sees two names for one port
+    collisions = {"cs2": {"ports": {"game": 27020}}, "palworld": {"ports": {"game": 27015}}}
     for game in SIX:
-        for label, over in (("default", {}), ("variant", variants[game])):
+        cases = [("default", {}), ("variant", variants[game])]
+        if game in collisions:  # first: the other servers of the game reserve those numbers afterwards
+            cases.insert(0, ("collision", collisions[game]))
+        for label, over in cases:
             inst = create(clients, django_capture_on_commit_callbacks, game, **over)
             specs[f"{game}-{label}"] = build_spec(inst)
+    assert specs["cs2-collision"]["env"]["CS2_PORT"] == "27020" and specs["cs2-collision"]["env"]["TV_ENABLE"] == "0"
+    assert specs["cs2-collision"]["env"]["TV_PORT"] not in ("", "27020")
+    assert specs["palworld-collision"]["env"]["PORT"] == "27015" and specs["palworld-collision"]["env"]["QUERY_PORT"] == "27016"
     path = tmp_path / "specs.json"
     path.write_text(json.dumps(specs))
     script = (
@@ -557,7 +567,6 @@ def test_zomboid_players_through_rcon(clients, fake_agent, django_capture_on_com
         ("pardon", 'unbanuser "alice"'),
         ("op", 'setaccesslevel "alice" admin'),
         ("deop", 'setaccesslevel "alice" user'),
-        ("whitelist_add", 'adduser "alice"'),
         ("whitelist_remove", 'removeuserfromwhitelist "alice"'),
     ):
         resp = owner.post(
@@ -565,6 +574,12 @@ def test_zomboid_players_through_rcon(clients, fake_agent, django_capture_on_com
         )
         assert resp.status_code == 200, resp.json()
         assert fake_agent.commands[-1] == (str(inst.id), expected)
+    # a whitelist entry is an account with a password (adduser "name" "password"): the name alone would only get
+    # the game's usage text back, so the panel says how instead of reporting a success
+    sent = len(fake_agent.commands)
+    resp = owner.post(f"/api/instances/{inst.id}/players", {"action": "whitelist_add", "name": "alice"}, format="json")
+    assert resp.status_code == 400 and err(resp) == "invalid_action"
+    assert 'adduser "name" "password"' in resp.json()["error"]["message"] and len(fake_agent.commands) == sent
     resp = owner.post(f"/api/instances/{inst.id}/players", {"action": "kick", "name": 'a" -r "x'}, format="json")
     assert resp.status_code == 400
     # a stop word typed into the console becomes the Stop job (not a command)
@@ -868,3 +883,92 @@ def test_first_start_waits_longer_for_big_downloads():
     assert games.get("satisfactory").first_start_timeout is None  # the job's default, 30 minutes
     assert games.get("project-zomboid").retryable_install_exits == frozenset({1})
     assert not games.get("palworld").retryable_install_exits
+
+
+# --- review of feature/more-games (audit-2026-11-09/more-games/review.md) -----------------------------------
+def test_catalog_options_carry_their_patterns_and_the_update_rule(clients):
+    entries = {g["id"]: g for g in clients["owner"].get("/api/catalog/games").json()}
+    # the create form checks the pinned options that name files the way the panel and the agent do
+    patterns = {g: {o["key"]: o.get("pattern") for o in entries[g]["options"]} for g in ("valheim", "rust", "project-zomboid")}
+    assert patterns == {
+        "valheim": {"world_name": r"^[A-Za-z0-9_-]{1,32}$"},
+        "rust": {"identity": r"^[a-z0-9_-]{1,32}$"},
+        "project-zomboid": {"server_name": r"^[A-Za-z0-9_-]{1,32}$", "branch": None},
+    }
+    assert all(o["pattern_help"] for g in patterns for o in entries[g]["options"] if o.get("pattern"))
+    # whether a restart updates the game is said, not guessed from the version id
+    updates = {g: entries[g]["fixed_version"]["updates_on_restart"] for g in SIX}
+    assert updates == {g: g != "hkmp" for g in SIX}
+    assert "updates_on_restart" not in entries["satisfactory"]["fixed_version"]  # (its pinned entry is unchanged)
+    owner = clients["owner"]
+    for game, option in (("valheim", "world_name"), ("rust", "identity"), ("project-zomboid", "server_name")):
+        resp = owner.post("/api/instances/", body(game, options={option: "../x"}), format="json")
+        assert resp.status_code == 400, game
+
+
+def test_players_say_whether_lists_change_while_stopped(clients, fake_agent, django_capture_on_commit_callbacks):
+    expected = {"palworld": False, "valheim": True, "project-zomboid": False, "hkmp": False, "cs2": False, "rust": False}
+    for game, flag in expected.items():
+        inst = create(clients, django_capture_on_commit_callbacks, game)
+        data = clients["owner"].get(f"/api/instances/{inst.id}/players").json()
+        assert data["running"] is False and data["changes_while_stopped"] is flag, game
+
+
+def test_connection_lists_only_published_ports_with_their_real_container_port(
+    clients, fake_agent, django_capture_on_commit_callbacks
+):
+    owner = clients["owner"]
+    for game, port_name, setting, game_port_number in (
+        ("cs2", "tv", "cstv", 30100),
+        ("valheim", "crossplay", "crossplay", 30200),
+        ("rust", "app", "rust_plus", 30300),
+    ):
+        inst = create(clients, django_capture_on_commit_callbacks, game, ports={"game": game_port_number})
+        # the reserved number of the conditional port stays with the server, published or not
+        assert port_name in {p["name"] for p in inst.ports}
+        reserved = next(p["host_port"] for p in inst.ports if p["name"] == port_name)
+        connection = owner.get(f"/api/instances/{inst.id}").json()["connection"]
+        assert port_name not in {p["name"] for p in connection["ports"]}, game
+        assert f" {reserved}" not in " ".join(connection["notes"]), game
+        assert spec_names(inst) == {p["name"] for p in connection["ports"]}, game
+        # published 1:1: the container listens on the host port's number
+        game_port = next(p for p in connection["ports"] if p["name"] == "game")
+        assert game_port["host_port"] == game_port["container_port"] == game_port_number, game
+        assert all(p["container_port"] == p["host_port"] for p in inst.ports), game
+        resp = owner.patch(f"/api/instances/{inst.id}/config/server", {"values": {setting: True}}, format="json")
+        assert resp.status_code == 200, resp.json()
+        connection = owner.get(f"/api/instances/{inst.id}").json()["connection"]
+        on = next(p for p in connection["ports"] if p["name"] == port_name)
+        assert on["host_port"] == on["container_port"] == reserved, game
+        assert f"{on['protocol'].upper()} {reserved}" in " ".join(connection["notes"]), game
+
+
+def spec_names(inst: Instance) -> set[str]:
+    """The names of the ports the agent's spec publishes (by host port)."""
+    inst.refresh_from_db()
+    published = {p["host_port"] for p in build_spec(inst)["ports"]}
+    return {p["name"] for p in inst.ports if p["host_port"] in published}
+
+
+def test_timezone_values_follow_the_agents_pattern(clients, fake_agent, django_capture_on_commit_callbacks):
+    from apps.core.models import SystemSetting
+
+    owner = clients["owner"]
+    for bad in ("../../etc/passwd", "Europe/Berlin;id", "a b", "/UTC"):
+        resp = owner.post("/api/instances/", body("cs2", env={"TZ": bad}), format="json")
+        assert resp.status_code == 400, bad
+    inst = create(clients, django_capture_on_commit_callbacks, "cs2", env={"TZ": "America/Argentina/Buenos_Aires"})
+    assert build_spec(inst)["env"]["TZ"] == "America/Argentina/Buenos_Aires"
+    resp = owner.patch(f"/api/instances/{inst.id}", {"env": {"TZ": "$(id)"}}, format="json")
+    assert resp.status_code == 400
+    # the panel's own time zone reaches a server only when the agent would take it (else the image runs in UTC)
+    other = create(clients, django_capture_on_commit_callbacks, "rust")
+    SystemSetting.set("timezone", "Etc/GMT+5")
+    assert build_spec(other)["env"]["TZ"] == "Etc/GMT+5"
+    SystemSetting.set("timezone", "Bad Zone")
+    assert "TZ" not in build_spec(other)["env"]
+    # the games before the six keep their rule (any value without a line break)
+    from apps.instances.serializers import validate_game_env
+
+    for game in ("satisfactory", "factorio", "terraria"):
+        assert validate_game_env(games.get(game), {"TZ": "Bad Zone"}) == {"TZ": "Bad Zone"}

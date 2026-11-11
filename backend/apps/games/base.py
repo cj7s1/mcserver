@@ -10,6 +10,7 @@ profile for each game (``profile``) and refuses a game it does not know.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -246,6 +247,11 @@ class GameOption:
     variants: tuple[str, ...] = ()  # the variants that have it (empty: every variant)
     # what the form shows for each value of an enum ((value, label), ...)
     option_labels: tuple[tuple[str, str], ...] = ()
+    # a string option that names files or reaches a container's environment (Valheim's world name):
+    # the value must match ``pattern`` (re.fullmatch, the agent checks the same); ``pattern_help`` says
+    # it in words. The catalog carries both, so the create form checks as the panel does.
+    pattern: str = ""
+    pattern_help: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         data = {
@@ -262,6 +268,9 @@ class GameOption:
             data["variants"] = list(self.variants)
         if self.option_labels:
             data["option_labels"] = dict(self.option_labels)
+        if self.pattern:
+            data["pattern"] = self.pattern
+            data["pattern_help"] = self.pattern_help
         return data
 
 
@@ -328,8 +337,10 @@ class GameDefinition:
     # refused (images of other games have variables that download code or run scripts)
     allowed_user_env: frozenset[str] = frozenset({"TZ"})
     # a game without versions to choose: {"id", "label", "help"} of what it runs (the catalog says so
-    # and the wizard asks for no version; Satisfactory follows Steam's stable branch)
-    fixed_version: dict[str, str] | None = None
+    # and the wizard asks for no version; Satisfactory follows Steam's stable branch), and
+    # "updates_on_restart" (the six Steam-era games: whether a restart updates the game, which the UI
+    # offers as "Update now"; absent: it does, as Satisfactory's stable branch)
+    fixed_version: dict[str, Any] | None = None
 
     # -- data -------------------------------------------------------------------------------
     def default_memory_mb(self) -> int:
@@ -455,6 +466,11 @@ class GameDefinition:
                 raise ApiError(f"{option.label} must be a whole number", code="invalid_option")
             if option.type == "string" and not isinstance(value, str):
                 raise ApiError(f"{option.label} must be text", code="invalid_option")
+            if option.pattern and not re.fullmatch(option.pattern, str(value)):
+                raise ApiError(
+                    f"{option.label}: {option.pattern_help or 'contains characters that are not allowed'}",
+                    code="invalid_option",
+                )
             out[key] = value
         return out
 
@@ -463,6 +479,11 @@ class GameDefinition:
         if str(key).upper() in self.allowed_user_env:
             return None
         return f"{key} is not allowed for {self.label} servers (allowed: {', '.join(sorted(self.allowed_user_env)) or 'none'})"
+
+    def env_value_error(self, key: str, value: str) -> str | None:
+        """Why the value of an allowed extra variable is refused (None: fine). Default: any value (the games before
+        the six Steam-era ones; their images quote it)."""
+        return None
 
     def secret_spec(self, key: str) -> SecretSpec | None:
         return next((s for s in self.secret_specs if s.key == key), None)

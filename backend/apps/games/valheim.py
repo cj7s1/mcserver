@@ -230,9 +230,10 @@ class ValheimDefinition(SteamGameDefinition):
             "The world's folder name (config/worlds_local/<name>/): letters, digits, - and _. A world reset can "
             "start a world under a new name.",
             pinned=True,
+            pattern=WORLD_NAME_PATTERN,
+            pattern_help="1 to 32 letters, digits, - and _",
         ),
     )
-    option_patterns = {"world_name": (WORLD_NAME_PATTERN, "1 to 32 letters, digits, - and _")}
     secret_specs = (
         SecretSpec(
             PASSWORD,
@@ -248,6 +249,8 @@ class ValheimDefinition(SteamGameDefinition):
         "label": "Steam public branch",
         "help": "The image checks the game at every start, so the server runs the current public build (players' "
         "clients update themselves). There is no version to choose; 'update' means restart.",
+        # "Update now" is a restart: the image downloads the newest build of the branch at every start
+        "updates_on_restart": True,
     }
     notes = (
         "Dedicated server on the community-valheim-tools image. The first start downloads the game (about 4 GB on "
@@ -366,6 +369,8 @@ class ValheimDefinition(SteamGameDefinition):
             ids = parse_ids(_read_text(client, instance, path) or "")
             result[key] = [{"name": i, "reason": ""} if key == "bans" else {"name": i} for i in ids]
         result["no_online_list"] = True
+        # the lists are files the panel writes: also while the server is stopped (read at its next start)
+        result["changes_while_stopped"] = True
         result["id_hint"] = "Valheim's lists hold SteamID64s (17 digits, e.g. from steamid.io)."
         return result
 

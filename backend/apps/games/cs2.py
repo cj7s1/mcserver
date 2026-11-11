@@ -216,6 +216,8 @@ class Cs2Definition(SteamGameDefinition):
         "label": "Steam public branch",
         "help": "The image runs SteamCMD at every start, so the server always runs the current build (players' clients "
         "update themselves). There is no version to choose; 'update' means restart.",
+        # "Update now" is a restart: the image downloads the newest build of the branch at every start
+        "updates_on_restart": True,
     }
     notes = (
         "Dedicated server on the joedwards32/cs2 image. The first start downloads the whole game (about 60 GB on "
@@ -265,11 +267,12 @@ class Cs2Definition(SteamGameDefinition):
             "CS2_MAPGROUP": str(values["map_group"]),
             "CS2_LAN": "1" if values["lan"] else "0",
             "TV_ENABLE": "1" if values["cstv"] else "0",
+            # always the number the panel reserved for CSTV, also while it is off (nothing listens then): the
+            # agent's default 27020 would otherwise be refused as a second name of a game port set to 27020
+            "TV_PORT": str(self.host_port(instance, "tv", TV_PORT)),
         }
-        if values["cstv"]:
-            env["TV_PORT"] = str(self.host_port(instance, "tv", TV_PORT))
-            if secrets.get(TV_PASSWORD):
-                env["TV_PW"] = secrets[TV_PASSWORD]
+        if values["cstv"] and secrets.get(TV_PASSWORD):
+            env["TV_PW"] = secrets[TV_PASSWORD]
         if values.get("bot_quota") is not None:
             env["CS2_BOT_QUOTA"] = str(values["bot_quota"])
         if values.get("bot_difficulty"):
@@ -340,6 +343,8 @@ class Cs2Definition(SteamGameDefinition):
             "bans": [],
             "ip_bans": [],
             "known_players": [],
+            # a kick needs the running server (RCON)
+            "changes_while_stopped": False,
         }
         if running:
             try:

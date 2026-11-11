@@ -27,7 +27,7 @@ Every value that reaches the environment is checked with the same pattern the ag
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 from apps.core.errors import ApiError
 
@@ -43,6 +43,9 @@ if TYPE_CHECKING:
 SAFE_TEXT = r"[A-Za-z0-9 _.,:;!?()\[\]@#%+=/'-]"
 SAFE_NAME_PATTERN = rf"^(?! ){SAFE_TEXT}{{1,64}}(?<! )$"
 SAFE_NAME_HELP = "1 to 64 letters, digits, spaces and . , : ; ! ? ( ) [ ] @ # % + = / ' - _ (no quotes or backslashes)"
+# an IANA time zone name (Europe/Berlin, America/Argentina/Buenos_Aires, Etc/GMT+5, UTC): the agent's profiles
+# allow TZ with exactly this pattern (agent/mcagent/profiles/steam.py TZ; images link /usr/share/zoneinfo/$TZ)
+TZ_PATTERN = r"[A-Za-z][A-Za-z0-9_+-]{0,31}(?:/[A-Za-z0-9_+-]{1,32}){0,2}"
 
 
 def safe_name(text: str, default: str, limit: int = 64) -> str:
@@ -65,8 +68,6 @@ class SteamGameDefinition(GameDefinition):
     clean_exit_codes = frozenset({0, 143})
     allowed_user_env = frozenset({"TZ"})
     capability_set = frozenset({"diagnostics"})
-    # patterns of options that name files or reach the environment: {key: (pattern, help)}
-    option_patterns: ClassVar[dict[str, tuple[str, str]]] = {}
 
     # -- data ------------------------------------------------------------------------------------
     def default_memory_mb(self) -> int:
@@ -84,16 +85,19 @@ class SteamGameDefinition(GameDefinition):
             return f"{repo}@{self.image_digest}"
         return f"{repo}:{self.image_tag}"
 
-    # -- options ---------------------------------------------------------------------------------
-    def validate_options(self, values: dict[str, Any] | None) -> dict[str, Any]:
-        """The base checks (type, enum), then each option's ``pattern`` (it names files or reaches the
-        environment): ``option_patterns`` {key: (pattern, help)}."""
-        out = super().validate_options(values)
-        for key, (pattern, help_text) in self.option_patterns.items():
-            if key in out and not re.fullmatch(pattern, str(out[key])):
-                label = next((o.label for o in self.options if o.key == key), key)
-                raise ApiError(f"{label}: {help_text}", code="invalid_option")
-        return out
+    # -- environment -------------------------------------------------------------------------------
+    def env_value_error(self, key: str, value: str) -> str | None:
+        if str(key).upper() == "TZ" and not re.fullmatch(TZ_PATTERN, value):
+            return "TZ must be a time zone name such as Europe/Berlin or UTC"
+        return None
+
+    def build_env(self, instance: Instance) -> dict[str, str]:
+        """The base environment, without a TZ the agent would refuse (the panel's own time zone setting is not
+        checked against the agent's pattern when it is saved): the image then runs in UTC."""
+        env = super().build_env(instance)
+        if "TZ" in env and not re.fullmatch(TZ_PATTERN, env["TZ"]):
+            env.pop("TZ")
+        return env
 
     # -- virtual configs (kept by the panel, passed as environment variables) ----------------------
     def is_virtual_config(self, cfg: ConfigFile) -> bool:
@@ -313,4 +317,4 @@ def steam_issues(definition: GameDefinition, instance: Instance, lines: list[str
     return issues
 
 
-__all__ = ["SAFE_NAME_HELP", "SAFE_NAME_PATTERN", "SteamGameDefinition", "safe_name", "steam_issues"]
+__all__ = ["SAFE_NAME_HELP", "SAFE_NAME_PATTERN", "TZ_PATTERN", "SteamGameDefinition", "safe_name", "steam_issues"]

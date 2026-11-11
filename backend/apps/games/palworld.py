@@ -42,6 +42,7 @@ GAME = "palworld"
 DEFAULT_REPOSITORY = "thijsvanloef/palworld-server-docker"
 IMAGE_TAG = "v2.8.1"
 GAME_PORT = 8211
+QUERY_PORT = 27015  # inside the container only (never published)
 ADMIN_PASSWORD = "admin_password"
 JOIN_PASSWORD = "server_password"
 SAVES_ROOT = "Pal/Saved/SaveGames/0"
@@ -335,6 +336,8 @@ class PalworldDefinition(SteamGameDefinition):
         "label": "Steam public branch",
         "help": "Players' game clients update themselves, so the server always runs the current public build: the "
         "image checks for an update at every start. There is no version to choose; 'update' means restart.",
+        # "Update now" is a restart: the image downloads the newest build of the branch at every start
+        "updates_on_restart": True,
     }
     notes = (
         "Dedicated server on the thijsvanloef/palworld-server-docker image. The first start downloads the game "
@@ -377,6 +380,9 @@ class PalworldDefinition(SteamGameDefinition):
         env = {
             "PORT": str(port),
             "PUBLIC_PORT": str(port),
+            # the Steam query port stays inside the container (Palworld answers no query on it), but it must not be
+            # the game port's number: the agent's default 27015 would be refused for a game port of 27015
+            "QUERY_PORT": str(QUERY_PORT if port != QUERY_PORT else QUERY_PORT + 1),
             "PLAYERS": str(server["max_players"]),
             "SERVER_NAME": str(server["server_name"]),
             "COMMUNITY": "true" if server["community"] else "false",
@@ -454,6 +460,8 @@ class PalworldDefinition(SteamGameDefinition):
             "ip_bans": [],
             "known_players": [],
             "id_hint": "Bans and kicks use the player's user id (steam_<SteamID64>, shown with the online players).",
+            # kicks and bans need the running server (its REST API); only an unban works while it is stopped
+            "changes_while_stopped": False,
         }
         if running:
             try:

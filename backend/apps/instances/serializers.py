@@ -60,7 +60,11 @@ def validate_game_env(definition: Any, value: Any) -> dict[str, str]:
             raise serializers.ValidationError(reason)
         if not isinstance(v, (str, int, float, bool)) or len(str(v)) > 8192 or "\x00" in str(v) or "\n" in str(v):
             raise serializers.ValidationError(f"Invalid value for {k}")
-        out[str(k)] = str(v).lower() if isinstance(v, bool) else str(v)
+        value = str(v).lower() if isinstance(v, bool) else str(v)
+        # the value's pattern where the game has one (the six Steam-era games: the agent checks the same)
+        if (reason := definition.env_value_error(str(k), value)) is not None:
+            raise serializers.ValidationError(reason)
+        out[str(k)] = value
     return out
 
 
@@ -500,6 +504,10 @@ def _named_connection_info(instance: Instance, *, public: str, lan: str) -> dict
         if not isinstance(port, dict):
             continue
         spec = specs.get(str(port.get("name")))
+        if spec is not None and definition is not None and not definition.port_enabled(instance, spec):
+            # published only while a setting is on (Valheim's crossplay, CS2's CSTV, Rust+): off now, so nobody
+            # connects to it and nothing is to be forwarded (its number stays reserved in instance.ports)
+            continue
         host_port = port.get("host_port")
         bind = port.get("host_ip") or instance.host_ip
         addresses = []
@@ -516,7 +524,10 @@ def _named_connection_info(instance: Instance, *, public: str, lan: str) -> dict
                 "name": port.get("name"),
                 "label": spec.label if spec else str(port.get("name")),
                 "protocol": port.get("protocol") or (spec.protocol if spec else "tcp"),
-                "container_port": port.get("container_port") or (spec.container_port if spec else None),
+                # published 1:1 (the image takes the port from a variable): the container listens on the host number
+                "container_port": host_port
+                if spec is not None and spec.one_to_one
+                else port.get("container_port") or (spec.container_port if spec else None),
                 "host_port": host_port,
                 "bind_address": bind,
                 "help": spec.help if spec else "",

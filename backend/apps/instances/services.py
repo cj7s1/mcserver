@@ -209,12 +209,18 @@ def assign_named_ports(
                     details={"port_name": spec.name},
                 )
         taken.add((port, spec.protocol))
-        entry = {"name": spec.name, "container_port": spec.container_port, "protocol": spec.protocol, "host_port": port}
+        entry = {"name": spec.name, "container_port": _container_port(spec, port), "protocol": spec.protocol, "host_port": port}
         if ip:
             ipaddress_ok(ip)
             entry["host_ip"] = ip
         out.append(entry)
     return out
+
+
+def _container_port(spec: Any, host_port: int) -> int:
+    """The port the server listens on inside its container: the host port's number for a port published 1:1
+    (``PortSpec.one_to_one``: the image takes it from a variable), else the definition's container port."""
+    return int(host_port) if getattr(spec, "one_to_one", False) else int(spec.container_port)
 
 
 def _same_port(
@@ -256,7 +262,7 @@ def _same_port(
             details={"port": port, "protocol": spec.protocol, "name": spec.name, "port_name": leader_name},
         )
     taken.add(key)
-    entry = {"name": spec.name, "container_port": spec.container_port, "protocol": spec.protocol, "host_port": port}
+    entry = {"name": spec.name, "container_port": _container_port(spec, port), "protocol": spec.protocol, "host_port": port}
     if leader.get("host_ip"):
         entry["host_ip"] = leader["host_ip"]
     return entry
