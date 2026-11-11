@@ -429,6 +429,8 @@ export interface ActiveJob {
   progress: number;
   message: string;
   status: JobStatus;
+  /** The job only waits for a start that downloads the game (CS2, Rust, Project Zomboid): Stop ends it. */
+  stoppable?: boolean;
 }
 
 /** Result of the periodic modpack update check (backend apps/modpacks/updates.py summary()). */

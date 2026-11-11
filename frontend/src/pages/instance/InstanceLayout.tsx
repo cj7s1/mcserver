@@ -57,6 +57,8 @@ function PowerControls({ instance, can }: InstanceContext) {
   });
   if (!can("instance.control") || instance.archived_at) return null;
   const busy = !!instance.active_job || power.isPending;
+  // a job that only waits for the first start (the image downloads the game, CS2 for hours) does not block Stop
+  const stopBusy = (!!instance.active_job && !instance.active_job.stoppable) || power.isPending;
   const show = powerButtons(instance);
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -79,7 +81,7 @@ function PowerControls({ instance, can }: InstanceContext) {
         </Button>
       )}
       {show.stop && (
-        <Button size="sm" variant="outline" onClick={() => setConfirm("stop")} disabled={busy}>
+        <Button size="sm" variant="outline" onClick={() => setConfirm("stop")} disabled={stopBusy}>
           <Square /> Stop
         </Button>
       )}

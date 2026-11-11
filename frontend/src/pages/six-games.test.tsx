@@ -560,6 +560,36 @@ describe("players while the server is stopped", () => {
   });
 });
 
+describe("Stop while the first start downloads the game", () => {
+  function renderLayout(instance: Instance) {
+    gets[`/instances/${instance.id}`] = instance;
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(qk.instance(instance.id), instance);
+    const router = createMemoryRouter([{ path: "/servers/:id", element: <InstanceLayout />, children: [{ index: true, element: <div /> }] }], {
+      initialEntries: [`/servers/${instance.id}`],
+    });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <RouterProvider router={router} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+  const job = { id: "j1", kind: "install", title: "Install CS2", progress: 0.95, message: "Waiting for the first start", status: "running" as const };
+
+  it("CS2: a job that only waits for the first start does not block Stop", async () => {
+    renderLayout(sixInstance("cs2", { status: "installing", active_job: { ...job, stoppable: true } }));
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Restart" })).toBeDisabled();
+  });
+
+  it("other jobs still block it", async () => {
+    renderLayout(sixInstance("cs2", { status: "installing", active_job: job }));
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeDisabled();
+  });
+});
+
 describe("Schedules", () => {
   function renderSchedules(instance: Instance) {
     gets[`/instances/${instance.id}`] = instance;
