@@ -994,6 +994,30 @@ def test_the_summary_names_the_images_of_the_running_containers(site):
     assert site.state()["DEPLOYED_PANEL_IMAGE"] == [site.containers()["panel"]]
 
 
+# --- review of feature/more-games: dumps taken in the same second ------------------------------------------
+def test_a_rollback_in_the_same_second_as_the_run_keeps_the_dump_from_before_the_upgrade(site):
+    """Dumps are named by the second they are taken in. A rollback right after its run (or the shim's quick
+    run and rollback, which made the test below fail now and then) must not write over the run's dump: that
+    one holds the database from before the upgrade, the way back."""
+    stamp = site.bin / "date"  # every `date +%Y%m%d-%H%M%S` of the script answers the same second
+    stamp.write_text(
+        '#!/bin/sh\nif [ "$1" = "+%Y%m%d-%H%M%S" ]; then echo 20261111-120000; exit 0; fi\nPATH=/usr/bin:/bin exec date "$@"\n'
+    )
+    stamp.chmod(0o755)
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    dump = Path(site.state()["BACKUP_SQL"][0])
+    assert dump.name == "upgrade-backup-20261111-120000.sql"
+    content = dump.read_bytes()
+    back = site.upgrade("rollback")
+    assert back.returncode == 0, back.both
+    dumps = sorted(site.deploy.glob("upgrade-backup-*.sql"))
+    assert len(dumps) == 2 and dump in dumps and dump.read_bytes() == content
+    taken = next(d for d in dumps if d != dump)
+    assert taken.name.startswith("upgrade-backup-20261111-120000-") and taken.with_suffix(".env").exists()
+    assert str(taken) in back.stdout  # the rollback names its own dump as the way back
+    assert dump.with_suffix(".env").exists()
+
+
 # --- gate, defect 2: restore-db says what fits the state of the last run -------------------------------
 def test_restore_db_after_a_finished_rollback_names_the_checkout_and_the_command_that_fit(site):
     assert site.upgrade("run", "--with-migrations").returncode == 0

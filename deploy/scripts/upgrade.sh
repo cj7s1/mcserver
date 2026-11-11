@@ -1217,6 +1217,11 @@ backup_database() { # backup_database [KEY WHAT-IS-TRUE-ON-FAILURE]: KEY BACKUP 
         say "  the database is not running: nothing to dump"
         return 0
     fi
+    # never over an earlier dump: a `rollback` (or a second run) in the same second as the run before it would
+    # otherwise replace the dump from before the upgrade, the way back, with one of the upgraded database
+    if [ -e "$sql" ] || [ -e "$env" ] || [ -e "$sql.part" ]; then
+        sql="$BACKUP_DIR/upgrade-backup-$STAMP-$$.sql" env="$BACKUP_DIR/upgrade-backup-$STAMP-$$.env"
+    fi
     (
         umask 077
         docker exec "$pg" sh -c 'pg_dump -U "$POSTGRES_USER" --exclude-table-data=django_session "$POSTGRES_DB"' >"$sql.part" 2>"$TMP/dump.err" &&
