@@ -12,10 +12,11 @@ What the panel knows about it (docs/design/GAME-DEFINITIONS.md 8.2, corrected by
 * The control secret (``Instance.rcon_password``) is written to ``config/rconpw`` before every
   apply (``control_secret_file``); the image passes it to the server on its command line, the agent's
   ``rcon`` driver reads it from the same file.
-* Saves are zip files in ``saves/``. The server always loads ``saves/<save_name>.zip`` and creates it
-  from ``config/map-gen-settings.json`` / ``map-settings.json`` when it does not exist
-  (``GENERATE_NEW_SAVE`` with an explicit ``SAVE_NAME``), so a world reset moves the saves aside and
-  an import puts a zip under that name.
+* Saves are zip files in ``saves/``. The server creates ``saves/<save_name>.zip`` from
+  ``config/map-gen-settings.json`` / ``map-settings.json`` when it does not exist
+  (``GENERATE_NEW_SAVE`` with an explicit ``SAVE_NAME``) and loads the newest save
+  (``LOAD_LATEST_SAVE``: after an unclean exit that is an autosave). A world reset moves every save
+  aside and an import puts a zip under that name as the only save, so it is the newest one.
 * Space Age is chosen once, at creation (``game_options.space_age``); the image enables it by default
   and switching it under an existing save silently converts the save at its next save.
 """
@@ -483,9 +484,13 @@ class FactorioDefinition(GameDefinition):
         return {
             "DLC_SPACE_AGE": "true" if options.get("space_age") else "false",
             # create saves/<SAVE_NAME>.zip when it is missing (first start, after a world reset), and
-            # always load exactly that save (not the newest file by mtime)
+            # load the newest save: after an unclean exit (kill, crash, host power loss) the newest
+            # state is an autosave (_autosaveN.zip), not <SAVE_NAME>.zip. A reset or an import moves
+            # every save aside while the server is stopped, so the new map / the uploaded save is the
+            # only one (and therefore the newest) at the next start; a restore brings back the files
+            # with their times, so the newest save of the backup is loaded.
             "GENERATE_NEW_SAVE": "true",
-            "LOAD_LATEST_SAVE": "false",
+            "LOAD_LATEST_SAVE": "true",
             "SAVE_NAME": self.save_name(instance),
         }
 
@@ -613,6 +618,14 @@ class FactorioDefinition(GameDefinition):
         return {"via": "file", "output": f"Added {name} to {path} (applies when the server starts)"}
 
     # -- software --------------------------------------------------------------------------------
+    software_keys = ("game", "version", "space_age", "image")
+
+    def consistency_note(self, instance: Instance) -> str:
+        return (
+            "the map was saved right before the copy (/server-save, waited for 'Saving finished'); the game is not "
+            "paused, so an autosave during the copy can be in the backup as well"
+        )
+
     def software_state(self, instance: Instance) -> dict[str, Any]:
         return {
             "game": self.id,
@@ -653,7 +666,8 @@ def parse_players(out: str) -> dict[str, Any]:
 class FactorioSaves:
     """The save files of a Factorio server (the ``saves`` model of the definition; design 8.2).
 
-    ``saves/<save_name>.zip`` is the map the server runs. A world reset or an import moves every
+    The newest ``saves/*.zip`` is the map the server runs (``LOAD_LATEST_SAVE``; ``saves/<save_name>.zip``
+    until an autosave is newer). A world reset or an import moves every
     ``saves/*.zip`` aside into ``saves-replaced/<UTC stamp>/`` (kept in the server folder, so they
     are in backups and can be imported again), then the server creates a new map (reset) or loads
     the uploaded zip (import) at its next start.
@@ -678,15 +692,40 @@ class FactorioSaves:
         return self.definition.save_name(instance)
 
     def current_path(self, instance: Instance) -> str:
+        """Where an imported save is put (every other save was moved aside first)."""
         return f"{SAVES_DIR}/{self.current(instance)}{self.extension}"
 
+    def _save_entries(self, client: AgentClient, instance: Instance) -> list[dict[str, Any]]:
+        return [
+            e
+            for e in _entries(client, instance, SAVES_DIR)
+            if e.get("type") == "file"
+            and str(e.get("name") or "").endswith(self.extension)
+            and not str(e.get("name") or "").endswith(".tmp.zip")
+        ]
+
+    def loaded(self, client: AgentClient, instance: Instance, entries: list[dict[str, Any]] | None = None) -> str:
+        """The save the server loads at its next start (and saves into while it runs): the newest one
+        (``LOAD_LATEST_SAVE``); ``<save_name>`` when there is none yet or on a tie."""
+        name = self.current(instance)
+        files = self._save_entries(client, instance) if entries is None else entries
+        if not files:
+            return name
+        newest = max(
+            files,
+            key=lambda e: (e.get("modified") or 0, str(e.get("name")) == f"{name}{self.extension}"),
+        )
+        return str(newest["name"])[: -len(self.extension)]
+
+    def export_path(self, client: AgentClient, instance: Instance) -> str:
+        return f"{SAVES_DIR}/{self.loaded(client, instance)}{self.extension}"
+
     def list(self, client: AgentClient, instance: Instance) -> dict[str, Any]:
-        current = self.current(instance)
+        entries = self._save_entries(client, instance)
+        current = self.loaded(client, instance, entries)
         saves = []
-        for entry in _entries(client, instance, SAVES_DIR):
+        for entry in entries:
             name = str(entry.get("name") or "")
-            if entry.get("type") != "file" or not name.endswith(self.extension) or name.endswith(".tmp.zip"):
-                continue
             stem = name[: -len(self.extension)]
             saves.append(
                 {

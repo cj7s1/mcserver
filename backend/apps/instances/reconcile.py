@@ -11,6 +11,7 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from apps import games
 from apps.console.events import broadcast
 from apps.core.errors import ApiError
 from apps.jobs.models import ACTIVE_STATUSES, Job
@@ -203,6 +204,13 @@ def apply_observation(
     if instance.active_job_id:
         job = Job.objects.filter(pk=instance.active_job_id, status__in=ACTIVE_STATUSES).only("kind").first()
         job_kind = job.kind if job else None
+    if agent_ok and container:
+        definition = games.get_or_none(instance.game)
+        if definition is not None:
+            try:
+                definition.observed(instance, container)
+            except Exception:  # an observation hook never breaks reconciliation
+                log.exception("observation hook of %s failed", instance.pk)
     before = (instance.status, instance.status_detail, instance.container_state, instance.health)
     observed_before = {f: getattr(instance, f) for f in OBSERVED_FIELDS if f != "status_updated_at"}
     newly_installed = False
@@ -223,6 +231,10 @@ def apply_observation(
         ):
             # keep explaining why the server was stopped until the user starts it again
             status, detail = Status.FAILED, before[1]
+        guard = (container or {}).get("guard_stop") or ((container or {}).get("last_run") or {}).get("guard_stop")
+        if isinstance(guard, dict) and status in (Status.STOPPED, Status.FAILED) and not job_kind:
+            # the node agent stopped the server itself (Satisfactory: it answered as unclaimed)
+            detail = f"Stopped by the node agent: {guard.get('message') or guard.get('code') or 'see its log'}"
         instance.status, instance.status_detail = status, detail[:500]
         if restarts >= CRASH_LOOP_AUTOSTOP and instance.desired_state == "running":
             _stop_crash_loop(instance, restarts)

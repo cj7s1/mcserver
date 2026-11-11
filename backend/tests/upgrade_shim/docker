@@ -12,6 +12,9 @@
 #   migs         APP NAME                                           (last applied migration per app)
 #   code/<id>    APP NAME                                           (last migration the code of an image has)
 #   jobs         QUEUED|RUNNING
+#   servers_db   ID|NAME|GAME|PORT|ARCHIVED                         (rows of instances_instance; GAME "-"
+#                while the game column is dropped, ARCHIVED yes|no)
+#   side_games   ID|GAME|PORT                                       (mcpanel_rollback_other_games)
 # Toggles: fail_pull new_pg fail_build fail_up hang_up unhealthy_panel db_down fail_dump
 #          fail_plan irreversible_<app> fail_unmigrate_<app> fail_restore redis_volume
 #          slow_migrations (the panel applies its migrations only while it is being stopped)
@@ -20,6 +23,17 @@
 #          error and leaves the panel container "created"; "always" = every time)
 #          keep_agent (`compose up` leaves a running agent container as it is, whatever the
 #          image name points at now) rebuild_ids (every build gives the images new ids)
+#          games_busy (a job holds a server of another game) fail_archive (archiving fails after
+#          the first server) archive_misses (archiving records only the first server)
+#          games_check_blind (the check sees nothing)
+#
+# `manage rollback_other_games` (the check, `compose run`) and its --archive (`exec` into the panel)
+# work on servers_db and side_games the way the real command does; `migrate --plan` and undoing
+# instances 0005/0006 refuse like their guard while a server of another game is not in side_games
+# (so LOST cannot happen any more unless the guard is gone); undoing instances 0005 drops
+# the game column (a server of another game that is not in side_games: event LOST <id>) after the
+# recorded servers that share a port number got one above 65535 (migration 0007 undone), and fails
+# like the unique index when a number is still shared; applying instances 0007 puts side_games back.
 #
 # `compose up` treats a container that an interrupted `up` left under its temporary name
 # (<12 hex digits>_mcpanel-<service>-1) the way Compose 5.7 does: see the comment there.
@@ -94,8 +108,147 @@ migrate_forward() { # image id: what the panel does when it starts
     while read -r app mig; do
         [ -n "$app" ] || continue
         cur=$(grep "^$app " "$F/migs" | cut -d' ' -f2)
-        if [[ -z "$cur" || "$cur" < "$mig" ]]; then set_mig "$app" "$mig"; fi
+        if [[ -z "$cur" || "$cur" < "$mig" ]]; then
+            set_mig "$app" "$mig"
+            [ "$app" = instances ] && games_forward "$cur" "$mig"
+        fi
     done <"$(code_file "$1")"
+}
+
+# --- the servers of other games (servers_db, side_games) ---------------------------------------
+num() { # migration name -> its number
+    local n=${1%%_*}
+    case "$n" in '' | *[!0-9]*) n=0 ;; esac
+    echo $((10#$n))
+}
+db_write() { # replaces servers_db with standard input
+    cat >"$F/servers_db.tmp"
+    mv "$F/servers_db.tmp" "$F/servers_db"
+}
+games_forward() { # instances went from $1 to $2: 0005 adds the column (default minecraft), 0007 restores
+    [ -f "$F/servers_db" ] || return 0
+    local id name game port archived sgame sport
+    if [ "$(num "$1")" -lt 5 ] && [ "$(num "$2")" -ge 5 ]; then
+        while IFS='|' read -r id name game port archived; do
+            [ "$game" = - ] && game=minecraft
+            printf '%s|%s|%s|%s|%s\n' "$id" "$name" "$game" "$port" "$archived"
+        done <"$F/servers_db" | db_write
+    fi
+    if [ "$(num "$1")" -lt 7 ] && [ "$(num "$2")" -ge 7 ] && [ -f "$F/side_games" ]; then
+        while IFS='|' read -r id name game port archived; do
+            line=$(grep "^$id|" "$F/side_games") && IFS='|' read -r _ sgame sport <<<"$line" && {
+                game=$sgame
+                port=$sport
+                archived=yes
+            }
+            printf '%s|%s|%s|%s|%s\n' "$id" "$name" "$game" "$port" "$archived"
+        done <"$F/servers_db" | db_write
+        event "RESTORE-OTHER-GAMES $(wc -l <"$F/side_games" | tr -d ' ')"
+        rm -f "$F/side_games"
+    fi
+}
+games_unrecorded() { # instances from $1 down to $2 undoes 0005 while servers of other games are not in side_games
+    [ -f "$F/servers_db" ] || return 1
+    [ "$(num "$1")" -ge 5 ] && [ "$(num "$2")" -lt 5 ] || return 1
+    local id name game port archived
+    while IFS='|' read -r id name game port archived; do
+        [ "$game" = minecraft ] || [ "$game" = - ] && continue
+        grep -q "^$id|" "$F/side_games" 2>/dev/null || return 0
+    done <"$F/servers_db"
+    return 1
+}
+games_backward() { # instances goes from $1 down to $2; fails like the guard of 0006 and the unique index
+    [ -f "$F/servers_db" ] || return 0
+    [ "$(num "$1")" -ge 5 ] && [ "$(num "$2")" -lt 5 ] || return 0
+    if games_unrecorded "$1" "$2"; then
+        echo "RuntimeError: Undoing instances 0006 would drop what these servers of other games are"
+        return 1
+    fi
+    local id name game port archived n=65536
+    if [ "$(num "$1")" -ge 7 ] && [ -f "$F/side_games" ]; then # 0007 undone: the rollback ports
+        while IFS='|' read -r id name game port archived; do
+            if grep -q "^$id|" "$F/side_games" && [ "$(cut -d'|' -f4 "$F/servers_db" | grep -c -x "$port")" -gt 1 ]; then
+                port=$n
+                n=$((n + 1))
+            fi
+            printf '%s|%s|%s|%s|%s\n' "$id" "$name" "$game" "$port" "$archived"
+        done <"$F/servers_db" | db_write
+    fi
+    if [ -n "$(cut -d'|' -f4 "$F/servers_db" | sort | uniq -d)" ]; then
+        echo 'django.db.utils.IntegrityError: could not create unique index "unique_game_port_per_node"'
+        return 1
+    fi
+    while IFS='|' read -r id name game port archived; do
+        if [ "$game" != minecraft ] && [ "$game" != - ] && ! grep -q "^$id|" "$F/side_games" 2>/dev/null; then
+            event "LOST $id"
+        fi
+        printf '%s|%s|-|%s|%s\n' "$id" "$name" "$port" "$archived"
+    done <"$F/servers_db" | db_write
+}
+games_report() { # what the real command prints; returns 3 when something must be archived
+    local id name game port archived found=0
+    [ -f "$F/servers_db" ] || return 0
+    while IFS='|' read -r id name game port archived; do
+        [ "$game" = minecraft ] || [ "$game" = - ] && continue
+        [ "$found" = 1 ] || echo "Servers of games other than Minecraft (the version the rollback goes back to does not know them):"
+        found=1
+        echo "  $id  '$name'  $game$([ "$archived" = yes ] && printf ', archived already')"
+    done <"$F/servers_db"
+    if [ -n "$(cut -d'|' -f4 "$F/servers_db" | sort | uniq -d)" ]; then
+        echo "Port numbers several servers of one node share (the old database allows each number once per node):"
+        cut -d'|' -f4 "$F/servers_db" | sort | uniq -d | while read -r port; do echo "  port $port"; done
+        found=1
+    fi
+    [ "$found" = 1 ] && return 3
+    return 0
+}
+games_check() {
+    event "GAMES-CHECK ${*#*rollback_other_games }"
+    if [ -f "$F/games_check_blind" ]; then # a check that misses them: the plan of the undo still refuses
+        echo "No server of another game, no shared port number, no long player name: nothing to do."
+        return 0
+    fi
+    if [ -f "$F/games_busy" ]; then
+        games_report
+        echo "  'busy': an operation is in progress (Backup: busy): wait until it is done"
+        echo "CommandError: the rollback cannot go on now (see above); nothing was changed" >&2
+        return 4
+    fi
+    games_report && {
+        echo "No server of another game, no shared port number, no long player name: nothing to do."
+        return 0
+    }
+    echo "CommandError: the rollback would lose or be refused what is listed above" >&2
+    return 3
+}
+games_archive() {
+    local id name game port archived count=0 failed=0
+    event "GAMES-ARCHIVE ${*#*rollback_other_games }"
+    games_report >/dev/null && return 0
+    exec 3>&1 # what it says; the loop's own output is the new servers_db
+    while IFS='|' read -r id name game port archived; do
+        if [ "$failed" = 0 ] && [ "$game" != minecraft ] && [ "$game" != - ]; then
+            if [ -f "$F/fail_archive" ] && [ "$count" = 1 ]; then
+                echo "  '$name': 'Stop server: $name (before a rollback)' failed: the agent did not answer (toggle)" >&3
+                echo "CommandError: archiving did not finish (see above)" >&2
+                failed=1
+                printf '%s|%s|%s|%s|%s\n' "$id" "$name" "$game" "$port" "$archived"
+                continue
+            fi
+            count=$((count + 1))
+            if [ ! -f "$F/archive_misses" ] || [ "$count" = 1 ]; then
+                grep -q "^$id|" "$F/side_games" 2>/dev/null || printf '%s|%s|%s\n' "$id" "$game" "$port" >>"$F/side_games"
+            fi
+            event "ARCHIVE $id"
+            echo "  '$name': stopped (graceful stop through the agent)" >&2
+            echo "  '$name': archived, recorded" >&3
+            archived=yes
+        fi
+        printf '%s|%s|%s|%s|%s\n' "$id" "$name" "$game" "$port" "$archived"
+    done <"$F/servers_db" >"$F/servers_db.new"
+    mv "$F/servers_db.new" "$F/servers_db"
+    [ "$failed" = 0 ] || return 4
+    echo "Done: $count server(s) archived and recorded in mcpanel_rollback_other_games."
 }
 
 case "${1:-}" in
@@ -180,6 +333,10 @@ case "${1:-}" in
                 panel=$(img_id "$(image_of_service panel)")
                 args="$*"
                 case "$args" in
+                    *"manage rollback_other_games "*)
+                        games_check "$args"
+                        exit $?
+                        ;;
                     *"migrate --check"*)
                         if [ -f "$F/hang_check" ]; then # stays here until the test lets go (or the session is hung up)
                             event "CHECK-WAIT"
@@ -217,7 +374,10 @@ case "${1:-}" in
                                 event "PLAN $app -> $target"
                                 echo "Planned operations:"
                                 echo "$app.$applied"
-                                if [ -f "$F/irreversible_$app" ]; then
+                                if [ "$app" = instances ] && games_unrecorded "$applied" "$target"; then
+                                    # migrations 0005/0006: their guard (apps/instances/migrations/_other_games_guard.py)
+                                    echo "    Raw Python operation -> IRREVERSIBLE (other games)"
+                                elif [ -f "$F/irreversible_$app" ]; then
                                     echo "    Raw Python operation -> IRREVERSIBLE"
                                 else
                                     echo "    Undo Add field x to y"
@@ -229,6 +389,9 @@ case "${1:-}" in
                             echo "django.db.migrations.exceptions.IrreversibleError (toggle)"
                             exit 1
                         }
+                        if [ "$app" = instances ]; then
+                            games_backward "$applied" "$target" || exit 1
+                        fi
                         set_mig "$app" "$target"
                         event "UNMIGRATE $app -> $target"
                         exit 0
@@ -385,6 +548,14 @@ case "${1:-}" in
         shift
         all="$*"
         case "$all" in
+            "python manage.py rollback_other_games --archive "*)
+                [ "$(cfield "$id" 2)" = panel ] && [ "$(cfield "$id" 3)" = running ] || {
+                    echo "Error response from daemon: container $id is not running" >&2
+                    exit 1
+                }
+                games_archive "$all"
+                exit $?
+                ;;
             *_before_restore_*)
                 # $1 $2 $3 = sh -c SCRIPT, then: sh SUFFIX MODE; the dump is on standard input
                 suffix="$5"

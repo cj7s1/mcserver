@@ -69,8 +69,16 @@ def apply_container(
     games.for_instance(instance).before_apply(instance, client)  # panel-owned keys of the game's files
     pull = "newer" if start and client.supports(PULL_NEWER_FEATURE) else "missing"
     ctx.progress(span[0], "Preparing container (pulling the runtime image if needed)", force=True)
-    op = client.apply(instance.id, spec, start=start, pull=pull)
-    result = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(span[0], span[1]))
+    try:
+        op = client.apply(instance.id, spec, start=start, pull=pull)
+        result = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(span[0], span[1]))
+    except AgentError as exc:
+        if not unclaimed_refusal(instance, ctx, exc):
+            raise
+        # the ports are closed now: the same apply without them (the setup claims and publishes again)
+        spec = build_spec(instance)
+        op = client.apply(instance.id, spec, start=start, pull=pull)
+        result = client.wait_operation(op["id"], timeout=3600, on_progress=ctx.agent_progress(span[0], span[1]))
     done = result.get("result") or {}
     # The hash records how the agent really created the container: one made by an agent that is
     # older than the panel does not match the current hash and keeps reading restart-required.
@@ -95,6 +103,21 @@ def apply_container(
     if start or container.get("running"):  # (the agent also starts the replacement of a container that was running)
         _started(instance)
     return done
+
+
+def unclaimed_refusal(instance: Instance, ctx: JobContext | None, exc: AgentError) -> bool:
+    """The agent refused to start or publish a server that is not claimed (409 ``server_unclaimed``,
+    Satisfactory): the definition closes the ports and puts the claim steps back. True when the spec
+    changed, so the caller applies again (unpublished)."""
+    if exc.error_code != "server_unclaimed":
+        return False
+    changed = games.for_instance(instance).mark_unclaimed(instance, str(exc.detail))
+    if changed and ctx is not None:
+        ctx.log(
+            f"warning: {exc.detail} The ports stay closed: the server is started unpublished and its setup "
+            "(claim, join password, publishing) runs again."
+        )
+    return changed
 
 
 def write_control_secret(instance: Instance, client: AgentClient) -> None:
@@ -208,7 +231,16 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
         if definition.retryable_install_exits:
             from .game_handlers import wait_first_start
 
-            wait_first_start(instance, ctx, client, span=(0.95, 0.04))
+            try:
+                wait_first_start(instance, ctx, client, span=(0.95, 0.04))
+            except ConflictError as exc:
+                if exc.error_code == "first_start_timeout" and definition.setup_steps:
+                    # the setup waits for the server to answer (Satisfactory's claim) and goes on then
+                    from .game_handlers import enqueue_setup
+
+                    if enqueue_setup(instance, user=job.user) is not None:
+                        ctx.log("Setup steps follow in their own job once the server is ready")
+                raise
     if definition.setup_steps:
         from .game_handlers import enqueue_setup
 
@@ -246,6 +278,9 @@ def start_server(
     client = AgentClient(instance.node)
     status = client.status(instance.id)
     exists = bool(status.get("exists"))
+    # Satisfactory while its claim is checked again: a container made with published ports is never
+    # started as it is, also not by the jobs that start a server again after their work
+    apply_changes = apply_changes or games.for_instance(instance).must_apply_before_start(instance)
     outdated = exists and apply_changes and (spec_outdated(instance) or not instance.container_spec_hash)
     if exists and not outdated:
         if apply_changes:
@@ -257,11 +292,14 @@ def start_server(
             _started(instance)
             return False
         except AgentError as exc:
-            if exc.error_code != "no_container":
+            if exc.error_code == "server_unclaimed" and unclaimed_refusal(instance, ctx, exc):
+                outdated = True  # recreated below without its ports
+            elif exc.error_code != "no_container":
                 raise
-            # removed between the two requests (a retire that was already on its way)
-            status = client.status(instance.id)
-            exists = bool(status.get("exists"))
+            else:
+                # removed between the two requests (a retire that was already on its way)
+                status = client.status(instance.id)
+                exists = bool(status.get("exists"))
     if outdated:
         ctx.progress(span[0], "Applying configuration")
     else:
@@ -422,6 +460,10 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
             _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
             _started(instance)  # also after a Kill that came in while the server was stopping
         except AgentError as exc:
+            if exc.error_code == "server_unclaimed" and unclaimed_refusal(instance, ctx, exc):
+                ctx.progress(0.2, "Recreating the container without its ports (the claim is checked again)")
+                apply_container(instance, ctx, start=True, span=(0.2, 0.9))
+                return {}
             if exc.error_code != "no_container":
                 raise
             # the server was stopped and its container was removed between the two requests
@@ -534,6 +576,12 @@ def clone(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.05, "Copying server files", force=True)
     exclude_worlds = bool(job.params.get("exclude_worlds"))
     level = world_layout = None
+    other_game = (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME
+    world_folders = games.for_instance(source).world_folders() if exclude_worlds and other_game else ()
+    if other_game:
+        # the agent's world exclusion knows Minecraft's folders only: the game's save folders are
+        # removed from the copy below
+        exclude_worlds = False
     if exclude_worlds:
         # which folders hold the worlds: the agent leaves out these (older agents: the default names)
         from . import world
@@ -551,6 +599,14 @@ def clone(job: Job, ctx: JobContext) -> dict[str, Any]:
             level = world_layout = None  # an older agent does not know these fields
     op = client.clone(source.id, target.id, exclude_worlds=exclude_worlds, level_name=level, layout=world_layout)
     client.wait_operation(op["id"], timeout=7200, on_progress=ctx.agent_progress(0.05, 0.75))
+    if world_folders:
+        ctx.log(f"Leaving out the saves: {', '.join(world_folders)}")
+        for folder in world_folders:
+            try:
+                AgentClient(target.node).delete_files(target.id, [folder], True, timeout=600)
+            except ApiError as exc:
+                if exc.error_code != "not_found":
+                    raise
     target.installed_at = source.installed_at
     target.save(update_fields=["installed_at"])
     ctx.progress(0.85, "Creating container for the clone")
@@ -685,6 +741,21 @@ def start_again(
             code=exc.error_code,
             status_code=exc.status_code,
         ) from exc
+    _continue_setup(job, instance, ctx)
+
+
+def _continue_setup(job: Job, instance: Instance, ctx: JobContext) -> None:
+    """Setup steps that became pending through this job's work (Satisfactory after a restore: the
+    claim is checked again before the ports are published) go on now that the server runs."""
+    if not games.for_instance(instance).setup_steps:
+        return
+    from .game_handlers import enqueue_setup
+
+    try:
+        if enqueue_setup(instance, user=job.user) is not None:
+            ctx.log("Setup steps follow in their own job")
+    except ApiError as exc:
+        ctx.log(f"warning: the setup steps could not be queued: {exc.detail}")
 
 
 WORKER_STOPPED_LEFT_STOPPED = (
@@ -1051,6 +1122,8 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
     if target_node.pk == instance.node_id:
         raise ApiError("The server is already on that node", code="same_node", status_code=409)
     target.info()  # fail fast if the target agent is unreachable or rejects the token
+    # (again: the view checked it) a game other than Minecraft needs its runtime profile on the target
+    games.require_agent_support(instance.game, target, games.for_instance(instance).agent_variant(instance))
     if source.status(instance.id).get("running"):
         # it is started on the target node afterwards, where it does not count yet: check before
         # anything is stopped or copied (and again when its container is created there)

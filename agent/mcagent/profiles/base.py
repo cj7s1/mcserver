@@ -154,6 +154,32 @@ class RuntimeProfile:
     # must be the same number). A spec may publish the container port such a variable names (its
     # value must also match env_values).
     env_ports: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    # Only the agent's instance network (AGENT_INSTANCE_NETWORK): no host network, no other network
+    # a spec may name (Satisfactory: the driver reaches the API there, and an unclaimed server must
+    # not be reachable from anywhere else).
+    instance_network_only: bool = False
+    # The image's own start-up `chown -R` cannot give the files the runtime gid (Satisfactory: when
+    # the gid exists in the image, steam keeps its primary group 1000, so files written during a run
+    # are uid:1000): the agent gives the server folder the runtime uid:gid after every stop and
+    # before every backup (docker_ops.fix_ownership).
+    fix_ownership: bool = False
+
+    def env_port_error(self, env: Mapping[str, str] | None) -> str | None:
+        """Why the ports the ``env_ports`` variables of ``env`` name are refused: such a port must
+        not be one of the profile's own container ports (Satisfactory: a messaging port 7777/tcp
+        would be the HTTPS API's) nor be named twice. None when they are fine."""
+        seen: dict[tuple[int, str], str] = {}
+        for key, value in (env or {}).items():
+            proto = self.env_ports.get(key)
+            if proto is None or not str(value).isdigit():
+                continue
+            port = int(value)
+            if (port, proto) in self.container_ports:
+                return f"{key}={port} collides with the server's own port {port}/{proto}"
+            if (port, proto) in seen:
+                return f"{key} and {seen[(port, proto)]} name the same port {port}/{proto}"
+            seen[(port, proto)] = key
+        return None
 
     def env_error(self, key: str) -> str | None:
         """Why the spec may not set ``key``; None when it may."""

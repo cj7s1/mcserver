@@ -6,7 +6,7 @@ from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.db.models import Prefetch
-from django.http import StreamingHttpResponse
+from django.http import HttpResponse, StreamingHttpResponse
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
@@ -32,11 +32,13 @@ from apps.jobs.serializers import JobSerializer
 from apps.nodes.client import FILE_OPERATION_TIMEOUT, AgentClient, AgentTimeout, AgentUnavailable
 from apps.nodes.models import Node
 
-from . import capacity, power_warnings, properties, services
+from . import capacity, power_warnings, properties, secret_files, services
 from .models import Instance, Schedule, Source
 from .serializers import CreateInstanceSerializer, InstanceSerializer, ScheduleSerializer
 from .spec import image_for
 from .world import RESET_KEEP, SEED_MODES
+
+ARCHIVE_EXCLUDES_FEATURE = "archive_excludes"  # the agent leaves listed files out of a zip
 
 
 def create_other_game(request: Request, data: dict[str, Any], node: Node, definition: Any) -> Response:
@@ -469,6 +471,7 @@ class InstanceCloneView(APIView):
         port = ser.validated_data.get("game_port")
         if (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
             fields["game_options"] = dict(source.game_options or {})
+            fields.update(games.for_instance(source).copied_state(source))
             requested = {source.ports[0]["name"]: port} if port and source.ports else None
             fields["ports"] = services.assign_named_ports(games.for_instance(source), source.node, requested, host_ip="")
             port = int(fields["ports"][0]["host_port"]) if fields["ports"] else 0
@@ -761,12 +764,16 @@ def _properties_text(path: str, content: str, current: dict[str, Any] | None) ->
 
 
 def _is_control_secret_file(instance: Instance, path: str) -> bool:
-    """Whether ``path`` is the file the game reads its control secret from (Factorio: config/rconpw)."""
+    """Whether ``path`` is a file with the game's control secret (Factorio: config/rconpw; see
+    ``secret_files``)."""
+    return secret_files.is_secret(instance, path)
+
+
+def _files_touched(instance: Instance, paths: list[str], why: str) -> None:
+    """Tell the game that files changed outside it (Satisfactory: a change under saved/ may lose the claim)."""
     definition = games.get_or_none(instance.game)
-    secret_file = definition.control_secret_file if definition is not None else None
-    if not secret_file:
-        return False
-    return "/".join(p for p in str(path).replace("\\", "/").split("/") if p and p != ".") == secret_file
+    if definition is not None:
+        definition.files_touched(instance, [secret_files.norm(p) for p in paths], why)
 
 
 class FilesTextView(APIView):
@@ -812,6 +819,7 @@ class FilesTextView(APIView):
                 code="managed_file",
                 status_code=403,
             )
+        _files_touched(instance, [path], "a file was edited")
         client = AgentClient(instance.node)
         create_only = bool(data.get("create_only"))
         current: dict[str, Any] | None = None
@@ -844,9 +852,25 @@ class FilesDownloadView(APIView):
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
         instance = get_instance_for(request.user, pk, "instance.files.read")
         path = request.query_params.get("path", "")
+        secret_files.require_not_secret(instance, path)
         chunks, length, upstream = AgentClient(instance.node).download(instance.id, path)
         filename = path.rsplit("/", 1)[-1] or "download"
         content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        if secret_files.is_bearing(instance, path):
+            # a file with a secret inside (TShock's config.json): masked like the text editor shows it
+            try:
+                data = secret_files.masked_bytes(instance, path, chunks)
+            finally:
+                close = getattr(chunks, "close", None)  # ends the agent's answer when it was not read to the end
+                if close is not None:
+                    close()
+            response = HttpResponse(data, content_type=content_type)
+            response["Content-Disposition"] = content_disposition(filename)
+            response["X-Content-Type-Options"] = "nosniff"
+            audit.record(
+                "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
+            )
+            return response  # type: ignore[return-value]
         response = AgentStreamingResponse(chunks, upstream, content_type=content_type)
         response["Content-Disposition"] = content_disposition(filename)
         if length is not None:
@@ -873,6 +897,9 @@ class FilesUploadView(APIView):
             if not name or name in (".", ".."):
                 raise ValidationError({"file": ["Invalid file name"]})
             targets.append((f, name, f"{directory}/{name}" if directory else name))
+        for _f, _name, target in targets:
+            secret_files.require_not_secret(instance, target)
+        _files_touched(instance, [t for _f, _n, t in targets], "files were uploaded")
         client = AgentClient(instance.node)
         results: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
@@ -914,6 +941,7 @@ class FilesOpView(APIView):
         client = AgentClient(instance.node)
         data = request.data if isinstance(request.data, dict) else {}
         if op == "mkdir":
+            secret_files.require_not_secret(instance, data.get("path", ""))
             result = client.mkdir(instance.id, str(data.get("path", "")), bool(data.get("parents")))
         elif op in ("rename", "delete"):
             return self._long_operation(request, instance, client, op, data)
@@ -921,7 +949,8 @@ class FilesOpView(APIView):
             query = str(data.get("query", ""))
             if len(query) < 2:
                 raise ValidationError({"query": ["Enter at least 2 characters"]})
-            return Response({"results": client.search_files(instance.id, query, str(data.get("path", "")))})
+            results = client.search_files(instance.id, query, str(data.get("path", "")))
+            return Response({"results": secret_files.mask_search_results(instance, results)})
         else:
             raise ApiError("Unknown file operation", code="invalid_action", status_code=404)
         audit.record(f"files.{op}", request=request, instance=instance, target=instance, details=data)
@@ -939,6 +968,10 @@ class FilesOpView(APIView):
         # user removed on purpose; folders and config files are never recorded (packfiles.recordable)
         if op == "rename":
             source, destination = str(data.get("source", "")), str(data.get("destination", ""))
+            # a secret file, or a folder with one, moved elsewhere would be downloadable there
+            secret_files.require_no_secret_inside(instance, source)
+            secret_files.require_no_secret_inside(instance, destination)
+            _files_touched(instance, [source, destination], "files were renamed")
             removed = [source]
             details: dict[str, Any] = {"source": source, "destination": destination, "overwrite": bool(data.get("overwrite"))}
 
@@ -951,6 +984,9 @@ class FilesOpView(APIView):
             if not isinstance(paths, list) or not paths:
                 raise ValidationError({"paths": ["Provide a list of paths"]})
             removed = [str(p) for p in paths][:500]
+            for p in removed:
+                secret_files.require_no_secret_inside(instance, p)
+            _files_touched(instance, removed, "files were deleted")
             details = {"paths": removed, "recursive": bool(data.get("recursive"))}
 
             def run() -> dict[str, Any]:
@@ -1184,6 +1220,7 @@ class ExtractView(APIView):
         strip = data.get("strip", "auto")
         if strip not in ("auto", "none"):
             raise ValidationError({"strip": ["Must be auto or none"]})
+        _files_touched(instance, [str(data.get("destination", ""))], "an archive was extracted")
         job = enqueue(
             "extract_archive",
             title=f"Extract {path.rsplit('/', 1)[-1]}",
@@ -1270,6 +1307,17 @@ def _flag(value: Any, default: bool = False) -> bool:
 RUNNING_STATUSES = ("running", "starting", "installing", "unhealthy", "restarting")
 
 
+def _minecraft_world_only(instance: Instance) -> None:
+    """The world endpoints work on Minecraft's world folders (level-name, dimensions); other games
+    share the capabilities but have their own saves endpoints (409 ``unsupported_by_game``)."""
+    if (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+        definition = games.for_instance(instance)
+        raise ConflictError(
+            f"{definition.label} servers have no Minecraft world; use their saves (Backups -> Saves)",
+            code="unsupported_by_game",
+        )
+
+
 class WorldView(APIView):
     """The world folder (level-name), the folders that exist and their size, plus a zip export link."""
 
@@ -1281,6 +1329,7 @@ class WorldView(APIView):
 
         instance = get_instance_for(request.user, pk, "instance.files.read")
         games.for_instance(instance).require(instance, "world_import_export")
+        _minecraft_world_only(instance)
         flush = world.may_flush(request.user, instance)
         data = world.describe(instance, AgentClient(instance.node), flush=flush)
         perms = request.user.instance_permissions(instance.pk)
@@ -1319,6 +1368,7 @@ class WorldReplaceView(APIView):
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
         games.for_instance(instance).require(instance, "world_import_export")
+        _minecraft_world_only(instance)
         data = request.data
         if not _flag(data.get("confirm")):
             raise ApiError(
@@ -1464,6 +1514,7 @@ class WorldResetView(APIView):
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
         games.for_instance(instance).require(instance, "world_reset")
+        _minecraft_world_only(instance)
         return Response(world.reset_plan(instance, AgentClient(instance.node)))
 
     @extend_schema(request=WorldResetSerializer, responses={202: JobSerializer})
@@ -1473,6 +1524,7 @@ class WorldResetView(APIView):
         instance = get_instance_for(request.user, pk, "instance.restore")
         require(request.user, "instance.files.write", instance)
         games.for_instance(instance).require(instance, "world_reset")
+        _minecraft_world_only(instance)
         ser = WorldResetSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
@@ -1707,7 +1759,18 @@ class FilesArchiveView(APIView):
                 flushed = True
             except ApiError:
                 pass  # not running after all / RCON not ready: download what is on disk
-        chunks, _length, upstream = client.download(instance.id, paths[0] if len(paths) == 1 else paths, endpoint="archive")
+        excludes = secret_files.zip_excludes(instance, paths, request.user)
+        if excludes and not client.supports(ARCHIVE_EXCLUDES_FEATURE):
+            raise ConflictError(
+                "This folder holds files with the server's secrets, and the node's agent is too old to leave them "
+                "out of a zip. Update the agent, or download the other files one by one.",
+                code="agent_outdated",
+            )
+        target = paths[0] if len(paths) == 1 else paths
+        if excludes:
+            chunks, _length, upstream = client.download(instance.id, target, endpoint="archive", exclude=excludes)
+        else:  # (a folder without secrets: the request as before)
+            chunks, _length, upstream = client.download(instance.id, target, endpoint="archive")
         name = (request.query_params.get("name") or "").strip()[:100] or paths[0].strip("/").rsplit("/", 1)[-1] or instance.name
         response = AgentStreamingResponse(chunks, upstream, content_type="application/zip")
         response["Content-Disposition"] = content_disposition(f"{name}.zip")
@@ -1736,6 +1799,9 @@ class MigrateView(APIView):
             raise ApiError(
                 "Migration stops the server and copies all of its files. Confirm to continue.", code="confirmation_required"
             )
+        # before anything is stopped or copied: the target's agent must have the game's runtime profile
+        definition = games.for_instance(instance)
+        games.require_agent_support(instance.game, AgentClient(target), definition.agent_variant(instance))
         # a running server is started on the target node: it must fit there (the job checks it again before copying)
         overcommit = capacity.admit_request(
             instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit"), node=target

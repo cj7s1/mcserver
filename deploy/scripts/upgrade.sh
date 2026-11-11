@@ -58,13 +58,28 @@
 # out, `rollback` and `run --resume`, first remove what a `docker compose up` that was cut off
 # left half-made.
 #
-# `rollback` checks out the recorded revision (detached HEAD), points the image names back at
-# the saved images, undoes the database migrations of the upgrade and brings that layout up.
+# `rollback` first dumps the database as it is (like step 3 of `run`, same folder and names; not
+# with --no-backup): from then on every failure names `restore-db <that dump> --yes` as the way
+# back, and nothing the panel wrote since the upgrade is lost by it. It then checks out the recorded
+# revision (detached HEAD), points the image names back at the saved images, undoes the database
+# migrations of the upgrade and brings that layout up.
 # It asks the upgraded version first whether every migration can be undone and stops nothing if
 # one cannot. After the checkout this script may be gone from disk (older revisions do not have
 # it); `git checkout <branch>` brings it back. With the old version running and the source tree
 # on the branch again, do not run `docker compose up -d` by hand: the compose file of the tree
 # does not fit the images that run (`status` says so whenever the two differ).
+#
+# Going back to a release from before multi-game (it knows only Minecraft servers; its database has
+# no `game` column): undoing the migrations would drop what a server of another game is (game,
+# ports, settings, secrets, setup state), the old panel would take such a server for a Minecraft
+# server, and a UDP and a TCP server that share a port number make undoing them fail. So before it
+# stops anything (also with --dry-run) `rollback` asks the upgraded version
+# (`manage rollback_other_games`) and refuses while such servers exist, listing them and the shared
+# port numbers. With --archive-other-games it first stops each of them through the running panel
+# (its Stop job: the game saves), archives it (its Archive job), disables its schedules and copies
+# its row into the table mcpanel_rollback_other_games, which no migration touches; a server that
+# shares its port number gets a number above 65535 while the old version runs. The next `run`
+# puts it all back (migration instances 0007) and leaves the servers archived.
 #
 # `restore-db FILE` loads a dump written by step 3 into a new database and, when that worked,
 # swaps it with the current one, which is kept under another name. Everything but the database
@@ -82,14 +97,17 @@
 #                       how Redis is moved between the panel container and its own container
 #                       (COMPOSE_PROFILES=external-redis, see .env.example): the redis container
 #                       is created or removed as needed.
-#   --no-backup         run: skip the database dump
+#   --no-backup         run: skip the database dump; rollback: skip its own dump (see below)
 #   --timeout SECONDS   run, rollback: how long to wait for healthy (default 300)
 #   --dry-run           rollback: only show what it would do
+#   --archive-other-games
+#                       rollback: archive the servers of games other than Minecraft first (see above)
 #   --yes               restore-db: do it (without it the command only says what it would do)
 #
 # Files it writes, all in this deploy directory, mode 600 and ignored by git:
 #   upgrade-state.env                   the rollback point (do not edit)
-#   upgrade-backup-<time>.sql / .env    database dump and copy of .env (the newest 3 are kept)
+#   upgrade-backup-<time>.sql / .env    database dump and copy of .env, by `run` and by `rollback` (the
+#                                       newest 3 are kept, and always the two the state file names)
 #   upgrade-log-<time>.log              what a `run`, `rollback` or `restore-db` printed, written
 #                                       from its first change on (a command that refuses or only
 #                                       shows something leaves none; the newest 10 are kept)
@@ -124,6 +142,11 @@ NO_BACKUP=0
 TIMEOUT=300
 DRY=0
 YES=0
+ARCHIVE_OTHER=0   # rollback --archive-other-games
+GAMES_UNDO=""     # rollback: "--undo app=target ..." when the undo takes away what the multi-game release added
+GAMES_ARCHIVE=0   # rollback: ... and servers of other games (or shared port numbers) must be archived first
+GAMES_ARCHIVED=0  # rollback: ... and that was done
+GUARD_REFUSAL="IRREVERSIBLE (other games)" # migrations instances 0005/0006 in `migrate --plan` (_other_games_guard.py)
 RESTORE_FILE=""
 TMP=""
 PROJECT=""
@@ -151,6 +174,8 @@ LOG_HELD=""       # ... and what was printed before that waits here
 LOG_ARGS=""       # the command line, for the first line of the log
 DETACH=""         # set at the first change of a switch (hold_on): how `docker compose` is started from then on
 UP_PROBLEM=""     # bring_up: why the stack is not up
+ROLLBACK_DUMP=""  # rollback: the dump it took at its start ...
+WAY_BACK=""       # ... and the line every failure from then on ends with
 RUNNING_PID=""    # another_runs: the command of this script that is still at work, ...
 RUNNING_LOG=""    # ... its log ...
 RUNNING_WHAT=""   # ... and "<command line> | started <time>"
@@ -178,12 +203,19 @@ warn() {
 }
 die() {
     warn "$*"
+    way_back_note "$*"
     [ -z "$SCRIPT_GONE" ] || warn "$SCRIPT_GONE"
     exit 1
 }
 refuse() {
     warn "$*"
+    way_back_note "$*"
     exit 2
+}
+way_back_note() { # after the dump of a rollback: its way back, unless MESSAGE names it already
+    [ -n "$WAY_BACK" ] || return 0
+    case "$1" in *"$ROLLBACK_DUMP"*) return 0 ;; esac
+    warn "$WAY_BACK"
 }
 
 # The output of a command that belongs on the screen: line by line to the screen and into the
@@ -229,6 +261,7 @@ show_file() { # show_file FILE [LINES]: the last lines of a file a command wrote
 usage() {
     say "usage: ./scripts/upgrade.sh {status|dry-run|run|rollback} [--force] [--with-migrations] [--resume] [--from REV]"
     say "                            [--no-pull] [--no-build] [--no-backup] [--timeout SECONDS] [--dry-run]"
+    say "                            [--archive-other-games]"
     say "       ./scripts/upgrade.sh restore-db FILE [--yes]"
     say "The comment at the top of $0 explains every step."
 }
@@ -289,6 +322,7 @@ on_signal() { # on_signal NAME NUMBER
         esac
     fi
     warn "interrupted by SIG$1 during: ${STEP:-the start}. What is left to do: ./scripts/upgrade.sh status"
+    way_back_note ""
     [ -z "$SCRIPT_GONE" ] || warn "$SCRIPT_GONE"
     exit $((128 + $2))
 }
@@ -1170,8 +1204,8 @@ write_state() { # write_state STATUS=... [MORE LINES]
     mv -f "$tmp" "$STATE_FILE" || die "cannot write $STATE_FILE"
 }
 
-backup_database() {
-    local pg sql="$BACKUP_DIR/upgrade-backup-$STAMP.sql" env="$BACKUP_DIR/upgrade-backup-$STAMP.env" files index
+backup_database() { # backup_database [KEY WHAT-IS-TRUE-ON-FAILURE]: KEY BACKUP (run) or ROLLBACK
+    local key=${1:-BACKUP} unchanged=${2:-$UNCHANGED} pg sql="$BACKUP_DIR/upgrade-backup-$STAMP.sql" env="$BACKUP_DIR/upgrade-backup-$STAMP.env" files index keep
     if [ "$NO_BACKUP" = 1 ]; then
         say "  skipped (--no-backup)"
         return 0
@@ -1187,17 +1221,20 @@ backup_database() {
     ) || {
         rm -f "$sql.part"
         show_file "$TMP/dump.err"
-        die "the database dump failed (see above); $UNCHANGED"
+        die "the database dump failed (see above); $unchanged"
     }
     mv -f "$sql.part" "$sql"
     chmod 600 "$sql" "$env"
     say "  $sql ($(wc -c <"$sql" | tr -d ' ') bytes, without login sessions)"
     say "  $env (copy of .env: its secret key decrypts what the dump holds; keep both private)"
-    state_edit "BACKUP_SQL BACKUP_ENV" "BACKUP_SQL=$sql" "BACKUP_ENV=$env"
-    # keep the newest few (the names sort by time)
+    state_edit "${key}_SQL ${key}_ENV" "${key}_SQL=$sql" "${key}_ENV=$env"
+    [ "$key" = ROLLBACK ] && ROLLBACK_DUMP=$sql
+    # keep the newest few (the names sort by time), and the dumps the state file names
+    keep=" $(state_get BACKUP_SQL) $(state_get ROLLBACK_SQL) "
     files=("$BACKUP_DIR"/upgrade-backup-[0-9]*-[0-9]*.sql)
     for ((index = 0; index < ${#files[@]} - KEEP_BACKUPS; index++)); do
         [ -f "${files[index]}" ] || continue
+        case "$keep" in *" ${files[index]} "*) continue ;; esac
         rm -f "${files[index]}" "${files[index]%.sql}.env"
         say "  removed the old backup ${files[index]##*/}"
     done
@@ -1644,6 +1681,18 @@ other_services() { # services of the project that have a running container, with
 dump_way_back() { # how to get the database of before the upgrade back, as lines for a message
     local sql others
     sql=$(state_get BACKUP_SQL) || sql=""
+    if [ -n "$ROLLBACK_DUMP" ]; then
+        # the dump this rollback took: nothing is lost with it
+        others=$(other_services)
+        printf '%s\n' "         The way back is the database dump this rollback took before it changed anything: nothing the" \
+            "         panel wrote is lost (the servers of other games among it); server files are not touched:"
+        [ -z "$others" ] || printf '           docker compose stop %s\n' "$others"
+        printf '%s\n' "           ./scripts/upgrade.sh restore-db $ROLLBACK_DUMP --yes" \
+            "         and then what restore-db says (it holds the schema of the upgraded version)."
+        [ -z "$sql" ] || printf '%s\n' "         The dump from before the upgrade is older (what the panel wrote since is not in it):" \
+            "           ./scripts/upgrade.sh restore-db $sql --yes, then ./scripts/upgrade.sh rollback"
+        return 0
+    fi
     if [ -z "$sql" ]; then
         printf '%s\n' "         No database dump was taken by that run (--no-backup, or the database was down): the only" \
             "         other way back is a backup of the database of your own."
@@ -1658,9 +1707,12 @@ dump_way_back() { # how to get the database of before the upgrade back, as lines
 }
 
 # Ask the upgraded version whether every migration can be undone: before anything is stopped, and
-# once more when the list changed while the containers were stopping.
+# once more when the list changed while the containers were stopping. Migrations instances 0005/0006
+# answer "IRREVERSIBLE (other games)" while servers of other games are not archived and recorded:
+# with --archive-other-games that is expected before the archive step (GAMES_ARCHIVE=1 and
+# GAMES_ARCHIVED=0), and the plan is asked again after it.
 check_undo_plan() { # check_undo_plan LINES ("<app> <target>") WHAT-IS-TRUE-NOW
-    local name tag bad
+    local name tag bad hint
     while read -r name tag; do
         [ -n "$name" ] || continue
         # </dev/null: `docker compose run` reads its standard input to the end, here the rest of this list
@@ -1668,12 +1720,115 @@ check_undo_plan() { # check_undo_plan LINES ("<app> <target>") WHAT-IS-TRUE-NOW
             show_file "$TMP/plan.out"
             die "could not ask the upgraded version how to undo the migrations of '$name' (see above). $2"
         fi
-        if bad=$(grep -m 1 -F IRREVERSIBLE "$TMP/plan.out"); then
-            refuse "the database migrations of '$name' cannot be undone (${bad#"${bad%%[![:space:]]*}"}). $2
+        bad=$(grep -F IRREVERSIBLE "$TMP/plan.out")
+        if [ "$GAMES_ARCHIVE" = 1 ] && [ "$GAMES_ARCHIVED" = 0 ]; then
+            bad=$(grep -v -F "$GUARD_REFUSAL" <<<"$bad")
+        fi
+        bad=$(head -n 1 <<<"$bad")
+        if [ -n "$bad" ]; then
+            hint=""
+            case "$bad" in
+                *"$GUARD_REFUSAL"*) hint="
+         (Servers of other games are not archived and recorded: ./scripts/upgrade.sh rollback --archive-other-games)" ;;
+            esac
+            refuse "the database migrations of '$name' cannot be undone (${bad#"${bad%%[![:space:]]*}"}). $2$hint
 $(dump_way_back)"
         fi
     done <<<"$1"
     say "  asked the upgraded version: every one of them can be undone"
+}
+
+migration_number() { # migration_number NAME -> its number (0 for "zero" and for a name without one)
+    local n=${1%%_*}
+    case "$n" in '' | *[!0-9]*) n=0 ;; esac
+    printf '%d' "$((10#$n))"
+}
+
+# The "--undo app=target" options of `manage rollback_other_games` when undoing LINES takes away
+# what the multi-game release added: the game column (instances 0005) or the longer player
+# names (metrics 0002). Prints nothing when it does not; fails when the database does not answer.
+games_undo() { # games_undo LINES ("<app> <target>")
+    local now app target name current need args=""
+    now=$(migration_state) || return 1
+    while read -r app target; do
+        case "$app" in
+            instances) need=5 ;;
+            metrics) need=2 ;;
+            *) continue ;;
+        esac
+        current=""
+        while read -r name; do
+            [ "${name%% *}" = "$app" ] && current=${name#* }
+        done <<<"$now"
+        if [ -n "$current" ] && [ "$(migration_number "$current")" -ge "$need" ] && [ "$(migration_number "$target")" -lt "$need" ]; then
+            args="$args --undo $app=$target"
+        fi
+    done <<<"$1"
+    printf '%s' "${args# }"
+}
+
+# Before anything is stopped (also in a dry run): does undoing LINES take away what servers of
+# other games are, or bring back a unique index that servers sharing a port number break? The
+# upgraded version answers (manage rollback_other_games, which lists them). Refuses unless
+# --archive-other-games was given, and also then when a job holds such a server. Sets GAMES_UNDO
+# and GAMES_ARCHIVE.
+check_other_games() { # check_other_games LINES FROM-REVISION
+    local code
+    GAMES_UNDO=$(games_undo "$1") || die "the database does not answer. Nothing was changed."
+    [ -n "$GAMES_UNDO" ] || return 0
+    # shellcheck disable=SC2086 # a list of options
+    dc run --rm --no-deps -T panel manage rollback_other_games $GAMES_UNDO </dev/null >"$TMP/games.out" 2>&1
+    code=$?
+    case "$code" in
+        0)
+            say "  servers of other games: none, and no port number is shared (asked the upgraded version)"
+            return 0
+            ;;
+        3) ;;
+        4)
+            show_file "$TMP/games.out" 400
+            refuse "the rollback cannot go on now (see above). Nothing was changed."
+            ;;
+        *)
+            show_file "$TMP/games.out"
+            die "could not ask the upgraded version about the servers of other games (see above). Nothing was changed."
+            ;;
+    esac
+    show_file "$TMP/games.out" 400
+    if [ "$ARCHIVE_OTHER" = 1 ]; then
+        GAMES_ARCHIVE=1
+        if [ "$DRY" = 1 ]; then
+            say "  --archive-other-games: 'rollback' would stop these servers through the running panel, archive and record"
+            say "  them before it stops anything else."
+        else
+            say "  --archive-other-games: these servers are stopped through the panel, archived and recorded first."
+        fi
+        return 0
+    fi
+    refuse "the version the rollback goes back to ($(short "$2")) knows only Minecraft servers. Undoing the
+         database migrations of this upgrade would remove what the servers listed above are (game, ports,
+         settings, secrets, setup state), the old panel would take them for Minecraft servers, and port
+         numbers that two servers share make undoing the migrations fail. Nothing was changed. Choose one:
+           - keep the new version: nothing to do;
+           - ./scripts/upgrade.sh rollback --archive-other-games
+             stops these servers through the panel (each game saves first), archives them, disables their
+             schedules and keeps what the rollback removes in the database (table mcpanel_rollback_other_games;
+             a server that shares its port number gets a number above 65535 while the old version runs).
+             The next './scripts/upgrade.sh run' puts it all back and leaves them archived;
+           - or the database dump (the servers of other games are not in it: they came with this version):
+$(dump_way_back)"
+}
+
+# Stop, archive and record the servers of other games through the running panel (its own jobs).
+archive_other_games() {
+    local panel
+    panel=$(service_container panel running) || {
+        say "  the panel container is not running, and it is what stops and archives these servers: bring the"
+        say "  upgraded version up first ('./scripts/upgrade.sh status' says how)"
+        return 1
+    }
+    # shellcheck disable=SC2086 # a list of options
+    shown docker exec "$panel" python manage.py rollback_other_games --archive $GAMES_UNDO </dev/null
 }
 
 cmd_rollback() {
@@ -1715,6 +1870,7 @@ cmd_rollback() {
             if [ -n "$undo" ]; then
                 say "  database migrations to undo:"
                 while read -r line; do say "    $line"; done <<<"$undo"
+                check_other_games "$undo" "$from"
                 check_undo_plan "$undo" "Nothing was changed."
             fi
             seen=$undo
@@ -1728,7 +1884,7 @@ cmd_rollback() {
     check_jobs "before the rollback"
     if [ "$DRY" = 1 ]; then
         say ""
-        say "Nothing was changed. To do it: ./scripts/upgrade.sh rollback"
+        say "Nothing was changed. To do it: ./scripts/upgrade.sh rollback$([ "$GAMES_ARCHIVE" = 1 ] && printf ' --archive-other-games')"
         return 0
     fi
 
@@ -1737,6 +1893,26 @@ cmd_rollback() {
     # rollback point from a half-rolled-back stack.
     begin_log
     hold_on
+    step "Dumping the database (the way back if this rollback does not get to its end)"
+    backup_database ROLLBACK "nothing was changed (the upgraded version is still running)"
+    if [ -n "$ROLLBACK_DUMP" ]; then
+        WAY_BACK="the database as it was when this rollback began is in $ROLLBACK_DUMP. To put it back: ./scripts/upgrade.sh restore-db $ROLLBACK_DUMP --yes (it names what must be stopped first, and how to go on)."
+    elif [ "$NO_BACKUP" = 1 ]; then
+        say "  without it a rollback that fails has no way back but the dump from before the upgrade, which"
+        say "  holds nothing the panel wrote since (servers of other games among it)."
+    fi
+    if [ "$GAMES_ARCHIVE" = 1 ]; then
+        # With the stack still running: the panel stops each server through the agent. Until this
+        # is done nothing else changes, and a failure leaves the upgraded version running as it was.
+        step "Archiving the servers of other games (through the running panel)"
+        archive_other_games || die "archiving the servers of other games did not finish (see above). Nothing was stopped
+         and no migration was undone: the upgraded version keeps running. A server named above as archived
+         stays archived (unarchive it in the panel to use it there). Fix what is said above, then run
+         './scripts/upgrade.sh rollback --archive-other-games' again."
+        GAMES_ARCHIVED=1
+        # Undoing 0005/0006 must be possible now; nothing is stopped otherwise.
+        check_undo_plan "$undo" "Nothing was stopped and no migration was undone: the upgraded version keeps running."
+    fi
     OWN_STATE=1
     STEP="the rollback"
     write_state "STATUS=rolling-back"
@@ -1817,6 +1993,12 @@ $(dump_way_back)"
     say "  revision: $(describe_revision "$from")$([ "$from" != "$head" ] && printf ' (detached HEAD)')"
     show_containers
     say ""
+    if [ "$GAMES_ARCHIVE" = 1 ]; then
+        say "The servers of other games are archived, and what they are is kept in the database (table"
+        say "mcpanel_rollback_other_games). Do not unarchive them in this version: it would take them for Minecraft"
+        say "servers. The next './scripts/upgrade.sh run' puts them back, still archived."
+        say ""
+    fi
     if [ "$from" != "$to" ] || [ -n "$SCRIPT_GONE" ]; then
         # Which checkout he is on, and which command is safe in which checkout.
         say "The source tree ($top) is now at the old version, $(short "$from"), as a detached HEAD. It fits"
@@ -2000,6 +2182,7 @@ main() {
             --no-backup) NO_BACKUP=1 ;;
             --dry-run) DRY=1 ;;
             --yes) YES=1 ;;
+            --archive-other-games) ARCHIVE_OTHER=1 ;;
             --from)
                 [ $# -ge 2 ] || die "--from needs a revision"
                 FROM_OPTION="$2"

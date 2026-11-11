@@ -72,12 +72,30 @@ def pending_automatic_steps(instance: Instance) -> list[Any]:
     return out
 
 
+def require_steps_before(instance: Instance, step_id: str) -> None:
+    """Refuse a step whose earlier steps are not done (409 ``setup_order``): e.g. Satisfactory's
+    ``publish`` before the claim would publish an unclaimed server."""
+    definition = games.for_instance(instance)
+    status = definition.setup_status(instance) or {"steps": []}
+    for step in status.get("steps") or []:  # this server's steps, in their order
+        if step["id"] == step_id:
+            return
+        if step["status"] != "done":
+            raise ConflictError(
+                f"Run the setup step '{step.get('label') or step['id']}' first; the steps run in order",
+                code="setup_order",
+                details={"step": step_id, "needs": step["id"]},
+            )
+
+
 def enqueue_setup(instance: Instance, *, user: Any = None, step: str | None = None) -> Job | None:
     """Queue the ``setup`` job (non-exclusive: it takes the lock when it runs, after an install)."""
     from apps.jobs.runner import enqueue
 
     if not pending_automatic_steps(instance) and step is None:
         return None
+    if step is not None:
+        require_steps_before(instance, step)
     return enqueue(
         "setup",
         title=f"Set up {instance.name}",
@@ -101,6 +119,7 @@ def setup(job: Job, ctx: JobContext) -> dict[str, Any]:
         steps = [s for s in steps if s.id == only] or [s for s in definition.setup_steps if s.id == only]
         if not steps:
             raise ApiError(f"Unknown setup step '{only}'", code="invalid_step")
+        require_steps_before(instance, only)  # (again: the state may have changed since it was queued)
     for i, step in enumerate(steps):
         ctx.check_cancelled()
         ctx.progress(0.05 + 0.9 * i / max(len(steps), 1), step.label, force=True)
@@ -168,7 +187,13 @@ def wait_first_start(instance: Instance, ctx: JobContext, client: AgentClient, *
                 )
         ctx.progress(span[0], "Waiting for the first start to finish (the image downloads the game)")
         ctx.sleep_until(time.monotonic() + FIRST_START_POLL)
-    ctx.log("warning: the first start is still running; the server's status shows when it is ready")
+    # not a success: the server never became ready (the job fails; the server goes on starting)
+    raise ConflictError(
+        f"The server did not become ready within {FIRST_START_TIMEOUT // 60} minutes of its first start (the image may "
+        "still be downloading the game). It keeps starting: its status shows when it is ready, and its setup goes on "
+        "then (Overview).",
+        code="first_start_timeout",
+    )
 
 
 # --- saves of games other than Minecraft -------------------------------------------------------------
@@ -207,7 +232,9 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any) -> dict[s
         if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
             raise ConflictError("This server is archived; unarchive it first", code="archived")
         status = client.status(instance.id)
-        if status.get("running"):
+        # a container that Docker restarts (a crash loop) is stopped too: it would start on the saves
+        # while they are replaced
+        if status.get("running") or status.get("restarting") or status.get("status") == "restarting":
             ctx.progress(0.02, "Stopping server", force=True)
             was_running = True
             ctx.remember(stopped_server=True)
@@ -306,6 +333,9 @@ def saves_import(job: Job, ctx: JobContext) -> dict[str, Any]:
         target = _saves(instance).current_path(instance)
         client.rename(instance.id, p["path"], target)
         ctx.log(f"The uploaded save is now {target}")
+        notes = getattr(_saves(instance), "notes", None)
+        for note in notes(instance) if notes is not None else []:
+            ctx.log(f"Note: {note}")
 
     try:
         return _replace_save(job, ctx, what="importing a save", place=place)

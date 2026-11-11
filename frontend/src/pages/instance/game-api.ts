@@ -70,7 +70,8 @@ export function usePutSecrets(instanceId: string) {
   const qc = useQueryClient();
   const invalidate = useInvalidateInstance();
   return useMutation({
-    mutationFn: (values: Record<string, string | null>) => api.put<SecretsResponse>(`/instances/${instanceId}/secrets`, { values }),
+    mutationFn: ({ values, access }: { values: Record<string, string | null>; access?: "open" }) =>
+      api.put<SecretsResponse>(`/instances/${instanceId}/secrets`, access ? { values, access } : { values }),
     onSuccess: (data) => {
       qc.setQueryData(qk.secrets(instanceId), data);
       invalidate(instanceId);

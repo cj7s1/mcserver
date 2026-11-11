@@ -28,6 +28,7 @@ from .integration_support import (
     InstanceTracker,
     Timer,
     container_names,
+    it_ports,
     make_node,
     rcon,
     run_job,
@@ -37,7 +38,7 @@ from .integration_support import (
 AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
 DATA_ROOT = os.environ.get("MCPANEL_IT_AGENT_DATA_ROOT", "/srv/mcpanel-dev")
-PORTS = (25800, 25820)
+PORTS = it_ports((25800, 25820))
 PLUGIN_SLUG = "chunky"  # ~300 KB, no dependencies, needs no network at runtime
 PLUGIN_NAME = "Chunky"
 

@@ -11,6 +11,7 @@ import { Link } from "react-router";
 import { Button } from "@/components/ui/button";
 import { api, errorMessage } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
+import { hasCapability } from "@/lib/games";
 import { qk } from "@/lib/queries";
 import type { Instance, InstanceStatus, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -217,7 +218,8 @@ export function DiagnosticsCard({
   can: (c: PermissionCode) => boolean;
   now: number;
 }) {
-  const allowed = can("instance.console") && !instance.archived_at;
+  // only games with known-problem detection (Minecraft): the others answer 409 unsupported_by_game
+  const allowed = can("instance.console") && !instance.archived_at && hasCapability(instance, "diagnostics");
   const diag = useDiagnostics(instance, allowed);
   const [downloadsOpen, setDownloadsOpen] = useState(false);
   const titleId = useId();

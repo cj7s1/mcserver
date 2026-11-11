@@ -282,6 +282,7 @@ class BackupRestoreNewView(APIView):
             requested = {source.ports[0]["name"]: port} if port and source.ports else None
             extra["ports"] = services.assign_named_ports(games.for_instance(source), repo_node, requested)
             extra["game_options"] = dict(source.game_options or {})
+            extra.update(games.for_instance(source).copied_state(source))
             port = int(extra["ports"][0]["host_port"]) if extra["ports"] else port
         with transaction.atomic():
             if extra:
@@ -364,11 +365,31 @@ class BackupFileDownloadView(APIView):
             raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
         require(request.user, "instance.files.read", instance)
         path = request.query_params.get("path", "")
+        from apps.core.utils import content_disposition
+        from apps.instances import secret_files
+
+        # backups keep the control secret files (restic is encrypted); the browser never serves them
+        secret_files.require_not_secret(instance, path)
         chunks, upstream = backup_agent(backup, instance).backup_download(instance.id, backup.snapshot_id, path)
         filename = (path.rsplit("/", 1)[-1] or "file").replace('"', "").replace("\\", "")
+        if secret_files.is_bearing(instance, path):
+            from django.http import HttpResponse
+
+            try:
+                data = secret_files.masked_bytes(instance, path, chunks)
+            finally:
+                close = getattr(chunks, "close", None)
+                if close is not None:
+                    close()
+            masked = HttpResponse(data, content_type="application/octet-stream")
+            masked["Content-Disposition"] = content_disposition(filename)
+            masked["X-Content-Type-Options"] = "nosniff"
+            audit.record(
+                "backup.file_download", request=request, instance=instance, target=backup, details={"path": path, "masked": True}
+            )
+            return masked
         # streamed chunk by chunk under ASGI; the agent's response is closed when the browser goes away
         response = AgentStreamingResponse(chunks, upstream, content_type="application/octet-stream")
-        from apps.core.utils import content_disposition
 
         response["Content-Disposition"] = content_disposition(filename)
         response["X-Content-Type-Options"] = "nosniff"

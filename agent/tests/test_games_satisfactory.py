@@ -245,7 +245,16 @@ class Container:
 
 
 def driver_for(fake) -> SatisfactoryDriver:
-    return SatisfactoryDriver(port=fake.port, secret_file=satisfactory.TOKEN_FILE)
+    return SatisfactoryDriver(
+        port=fake.port, secret_file=satisfactory.TOKEN_FILE, claim_file=satisfactory.CLAIM_FILE
+    )
+
+
+def write_claim_file(settings, content: bytes = b"claimed settings") -> None:
+    """What the game writes when it is claimed: saved/ServerSettings.7777.sav."""
+    saved = settings.instances_dir / str(IID) / "saved"
+    saved.mkdir(parents=True, exist_ok=True)
+    (saved / "ServerSettings.7777.sav").write_bytes(content)
 
 
 def write_token(settings, token: str) -> None:
@@ -499,14 +508,14 @@ def test_save_names_the_save_after_the_session(settings, fake):
     claimed(settings, fake, drv, c)
     assert drv.game_action(settings, c, "save", {}, 30) == {"save_name": None}  # no game yet
     drv.game_action(settings, c, "new_game", {"session_name": "Ficsit world"}, 60)
-    assert drv.game_action(settings, c, "save", {}, 30) == {"save_name": "Ficsit_world_mcpanel"}
-    assert (
-        sfd.save_name_for("a/b c..d") == "a_b_c_d_mcpanel" and sfd.save_name_for("!!!") == "session_mcpanel"
-    )
+    expected = sfd.save_name_for("Ficsit world")
+    assert drv.game_action(settings, c, "save", {}, 30) == {"save_name": expected}
+    assert expected.startswith("Ficsit_world_") and expected.endswith("_mcpanel")
+    assert sfd.save_name_for("Ficsit_world") == "Ficsit_world_mcpanel"  # plain names keep theirs
     sessions = drv.game_action(settings, c, "sessions", {}, 30)
     assert sessions["current"] == "Ficsit world"
     assert [s["name"] for s in sessions["sessions"][0]["saves"]] == [
-        "Ficsit_world_mcpanel",
+        expected,
         "Ficsit world_autosave_0",
     ]
     assert sessions["sessions"][0]["saves"][0]["build"] == 517554
@@ -759,9 +768,10 @@ def test_publish_guard(settings, fake):
     with pytest.raises(AgentError):  # no container, never claimed through the panel
         drv.publish_guard(settings, IID, None)
     claimed(settings, fake, drv, c)
+    write_claim_file(settings)
     drv.publish_guard(settings, IID, c)
     drv.publish_guard(settings, IID, None)
-    fake.api_down = True  # claimed but still starting: the token file decides
+    c.state = "exited"  # stopped: the claim file and the token decide
     drv.publish_guard(settings, IID, c)
 
 

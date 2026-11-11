@@ -56,10 +56,13 @@ SHUTDOWN_TIMEOUT = 15.0
 LOAD_TIMEOUT = 180.0  # CreateNewGame / LoadGame / UploadSaveGame block while the map loads
 STOP_POLL = 0.5
 MIN_EXIT_WAIT = 5.0  # seconds the stop waits for the exit after Shutdown, at least
+CLAIM_WAIT = 20.0  # how long the publish guard waits for the API of a running server to answer
+CLAIM_PROBE_TIMEOUT = 5.0  # one claim probe (PasswordlessLogin)
 UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 QUERY_MAGIC = 0xF6D5
 STATES = {0: "Offline", 1: "Idle", 2: "Loading", 3: "Playing"}
 SAVE_SUFFIX = "_mcpanel"
+SAVES_DIR = "saved/server"  # the server's save files (``<save name>.sav``), relative to the server folder
 
 NAME_RE = re.compile(r"^[A-Za-z0-9 _.'-]{1,64}$")  # server names the panel sends
 SESSION_RE = re.compile(r"^[A-Za-z0-9 _-]{1,64}$")
@@ -142,10 +145,44 @@ def udp_query(host: str, port: int, timeout: float = 2.0) -> dict[str, Any]:
         raise GameApiError(f"Unexpected UDP query reply: {exc}", "api_error", 502) from exc
 
 
+_HASHED_TAIL_RE = re.compile(r"_[0-9a-f]{8}\Z")
+
+
 def save_name_for(session: str) -> str:
-    """The name of the panel's save of a session (``SaveGame``'s SaveName)."""
-    base = re.sub(r"[^A-Za-z0-9_-]+", "_", session).strip("_")[: 64 - len(SAVE_SUFFIX)] or "session"
-    return base + SAVE_SUFFIX
+    """The name of the panel's save of a session (``SaveGame``'s SaveName), different for every
+    session name (two sessions must never write each other's save).
+
+    A session name of letters, digits, ``_`` and ``-`` that fits keeps ``<session>_mcpanel`` (the
+    name servers had before). Any other one (spaces, other characters, too long, or one that
+    already ends like a hashed name, ``_<8 hex>``) becomes its sanitised start + ``_`` + 8 hex
+    characters of the SHA-256 of the exact session name + ``_mcpanel``: never the name of a plain
+    session, at most 64 characters, matching SAVE_NAME_RE."""
+    import hashlib
+
+    if (
+        re.fullmatch(r"[A-Za-z0-9_-]+", session)
+        and len(session) + len(SAVE_SUFFIX) <= 64
+        and not _HASHED_TAIL_RE.search(session)
+    ):
+        return session + SAVE_SUFFIX
+    digest = hashlib.sha256(session.encode("utf-8", errors="surrogatepass")).hexdigest()[:8]
+    room = 64 - len(SAVE_SUFFIX) - 1 - len(digest)
+    base = re.sub(r"[^A-Za-z0-9_-]+", "_", session).strip("_")[:room].rstrip("_") or "session"
+    return f"{base}_{digest}{SAVE_SUFFIX}"
+
+
+def claim_file_for(game_port: int) -> str:
+    """Where the game keeps the claim of a server with this game port, relative to the server
+    folder (``saved/`` is the game's SaveGames)."""
+    return f"saved/ServerSettings.{int(game_port)}.sav"
+
+
+def _api_not_up(exc: GameApiError) -> bool:
+    """The API does not answer (yet): nothing listens, no answer in time, or an HTTP 5xx without
+    a game error code (the server is loading). Anything else is an answer."""
+    if exc.code in ("api_unavailable", "api_timeout"):
+        return True
+    return exc.api_code is None and exc.http_status is not None and exc.http_status >= 500
 
 
 def _text(value: Any, what: str, pattern: re.Pattern[str]) -> str:
@@ -157,12 +194,28 @@ def _text(value: Any, what: str, pattern: re.Pattern[str]) -> str:
 class SatisfactoryDriver(HttpApiDriver):
     id: ClassVar[str] = "satisfactory-api"
 
+    def __init__(
+        self,
+        *,
+        port: int,
+        scheme: str = "https",
+        secret_file: str | None = None,
+        claim_file: str | None = None,
+    ) -> None:
+        super().__init__(port=port, scheme=scheme, secret_file=secret_file)
+        # the file of the server folder that holds the claim (ServerSettings.<game port>.sav)
+        claim_file = claim_file or claim_file_for(self.port)
+        if claim_file.startswith("/") or ".." in claim_file.split("/"):
+            raise ValueError(f"Invalid claim file {claim_file!r}")
+        self.claim_file = claim_file
+
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> SatisfactoryDriver:
         return cls(
             port=int(options.get("port") or 7777),
             scheme="https",
             secret_file=str(options["secret_file"]) if options.get("secret_file") else None,
+            claim_file=str(options["claim_file"]) if options.get("claim_file") else None,
         )
 
     # --- the API ---------------------------------------------------------------------------------------
@@ -394,32 +447,101 @@ class SatisfactoryDriver(HttpApiDriver):
         return True
 
     # --- claiming and the other operations of the panel -----------------------------------------------------
-    def is_unclaimed(self, settings: Settings, c: Container) -> bool:
+    guards_publish: ClassVar[bool] = True
+
+    def is_unclaimed(self, settings: Settings, c: Container, timeout: float = CLAIM_PROBE_TIMEOUT) -> bool:
         """Whether an InitialAdmin login works (only while nobody claimed the server)."""
         try:
-            self.call(settings, c, "PasswordlessLogin", {"MinimumPrivilegeLevel": "InitialAdmin"}, timeout=10)
+            self.call(
+                settings, c, "PasswordlessLogin", {"MinimumPrivilegeLevel": "InitialAdmin"}, timeout=timeout
+            )
         except GameApiError as exc:
             if exc.api_code == "passwordless_login_not_possible":
                 return False
             raise
         return True
 
+    def claim_state(self, settings: Settings, c: Container) -> str:
+        """``"down"`` while the API does not answer (nobody can claim through it either),
+        ``"unclaimed"`` while an InitialAdmin login works, ``"claimed"`` when the server refuses it
+        with ``passwordless_login_not_possible``. Any other answer (a different TLS certificate
+        than earlier in the run, another error code) raises: the caller fails closed."""
+        try:
+            self.health(settings, c)
+        except GameApiError as exc:
+            if _api_not_up(exc):
+                return "down"
+            raise
+        try:
+            return "unclaimed" if self.is_unclaimed(settings, c) else "claimed"
+        except GameApiError as exc:
+            if _api_not_up(exc):
+                return "down"
+            raise
+
+    def claim_file_present(self, settings: Settings, instance_id: UUID | str) -> bool:
+        """Whether the server folder holds the claim file as a regular, non-empty file. Checked
+        with lstat through SafeRoot: a symbolic link (of the file or of ``saved/``) counts as
+        missing."""
+        from ..safefs import PathError, SafeRoot
+
+        try:
+            entry = SafeRoot(_ops().instance_dir(settings, UUID(str(instance_id)))).stat(self.claim_file)
+        except (PathError, ValueError, OSError) as exc:
+            log.debug("claim file of %s: %s", instance_id, exc)
+            return False
+        return entry.type == "file" and entry.size > 0
+
     def publish_guard(self, settings: Settings, instance_id: UUID, existing: Container | None) -> None:
-        """Never publish an unclaimed server: refused (409 ``server_unclaimed``) when its running
-        container still accepts an InitialAdmin login, or when the server folder holds no API token
-        (the panel never finished claiming it)."""
+        """Never publish an unclaimed server (409 ``server_unclaimed``):
+
+        * the server folder must hold the claim (``saved/ServerSettings.7777.sav``, a regular,
+          non-empty file, no link) and the API token the panel writes before every apply (a
+          token file alone proves nothing: it stays when the claim is lost);
+        * a running (or restarting) container must refuse an InitialAdmin login. The guard waits
+          up to CLAIM_WAIT seconds for its API; when the claim cannot be verified (no answer,
+          an unexpected answer) the publish is refused too (409 ``claim_unverified``).
+
+        A stopped container or none is judged by the files; its next run is checked by the claim
+        guard loop (``claimguard``) as soon as its API answers."""
         message = (
-            "This Satisfactory server is not claimed yet, so its ports are not published "
-            "(whoever reaches an unclaimed server first owns it). Run its setup first."
+            "This Satisfactory server is not claimed, so its ports are not published "
+            "(whoever reaches an unclaimed server first owns it). Run its setup (claim) first."
         )
-        if existing is not None and getattr(existing, "status", None) == "running":
-            try:
-                if self.is_unclaimed(settings, existing):
-                    raise AgentError(message, "server_unclaimed", 409)
-            except GameApiError as exc:
-                log.info("claim check of %s before publishing: %s", instance_id, exc)
+        if not self.claim_file_present(settings, instance_id):
+            raise AgentError(
+                message + f" Its claim ({self.claim_file}) is missing from the server folder.",
+                "server_unclaimed",
+                409,
+            )
         if not self.token_for(settings, instance_id):
             raise AgentError(message, "server_unclaimed", 409)
+        if existing is None or getattr(existing, "status", None) not in ("running", "restarting"):
+            return
+        deadline = time.monotonic() + CLAIM_WAIT
+        while True:
+            try:
+                state = self.claim_state(settings, existing)
+            except AgentError as exc:
+                log.warning("claim check of %s before publishing failed: %s", instance_id, exc)
+                raise AgentError(
+                    "The claim of this Satisfactory server could not be verified (its API answered "
+                    f"unexpectedly: {exc}), so its ports are not published. Try again when the server answers.",
+                    "claim_unverified",
+                    409,
+                ) from exc
+            if state == "unclaimed":
+                raise AgentError(message, "server_unclaimed", 409)
+            if state == "claimed":
+                return
+            if time.monotonic() >= deadline:
+                raise AgentError(
+                    "The claim of this Satisfactory server could not be verified: its API did not answer "
+                    f"within {CLAIM_WAIT:g} s, so its ports are not published. Try again when the server answers.",
+                    "claim_unverified",
+                    409,
+                )
+            time.sleep(1.0)
 
     ACTIONS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -495,9 +617,9 @@ class SatisfactoryDriver(HttpApiDriver):
             except GameApiError as login_exc:
                 if login_exc.api_code == "wrong_password":
                     raise AgentError(
-                        "This server was already claimed with another admin password (not by this panel's "
-                        "control secret). Reset its claim by removing saved/ServerSettings.7777.sav while it is "
-                        "stopped, or set the control secret to that password.",
+                        "This server was claimed with another admin password, not by this panel. Restore a "
+                        "backup taken while this panel owned it, or set the panel's control secret to that "
+                        "admin password; do not delete the server settings file of a published server.",
                         "claimed_elsewhere",
                         409,
                     ) from login_exc
@@ -563,6 +685,14 @@ class SatisfactoryDriver(HttpApiDriver):
     ) -> dict[str, Any]:
         session = _text(params.get("session_name"), "session name", SESSION_RE)
         token = self.api_token(settings, c)
+        # a new game under the name of an existing session would mix its saves into that session
+        existing = self.call(settings, c, "EnumerateSessions", {}, token=token)
+        if any(_key(entry, "sessionName") == session for entry in _key(existing, "sessions") or []):
+            raise AgentError(
+                f"A session named {session!r} already exists on this server; choose another name",
+                "session_exists",
+                409,
+            )
         data = {
             "NewGameData": {
                 "SessionName": session,
@@ -625,6 +755,29 @@ class SatisfactoryDriver(HttpApiDriver):
         load = bool(params.get("load", True))
         token = self.api_token(settings, c)
         instance = (c.labels or {}).get(_ops().LABEL_INSTANCE)
+        try:
+            root = SafeRoot(_ops().instance_dir(settings, UUID(str(instance))))
+        except ValueError as exc:
+            raise AgentError("The container names no server", "invalid_request", 400) from exc
+        # never overwrite a save the server has (the game would replace the file without asking)
+        target = f"{SAVES_DIR}/{name}.sav"
+        try:
+            root.stat(target)
+            exists = True
+        except PathError as exc:
+            if exc.code != "not_found":
+                raise AgentError(f"Cannot check {target}: {exc}", "save_exists", 409) from exc
+            exists = False
+        if exists:
+            raise AgentError(
+                f"A save named {name!r} already exists on this server ({target}); choose another name",
+                "save_exists",
+                409,
+            )
+        if load:
+            # loading the upload replaces the game that runs now: save it first (SaveGame answers once
+            # the file is written; a failure stops the upload)
+            self.save_now(settings, c, min(timeout, SAVE_TIMEOUT))
         import json
 
         boundary = f"mcpanel-{uuidlib.uuid4().hex}"
@@ -646,7 +799,6 @@ class SatisfactoryDriver(HttpApiDriver):
         )
         tail = f"\r\n--{boundary}--\r\n".encode()
         try:
-            root = SafeRoot(_ops().instance_dir(settings, UUID(str(instance))))
             with root.open_read(path) as (fh, size):
                 if size > UPLOAD_MAX_BYTES:
                     raise AgentError("The save file is too large", "too_large", 413)

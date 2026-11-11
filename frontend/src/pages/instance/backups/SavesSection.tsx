@@ -110,6 +110,11 @@ export function SavesSection({
               ))}
             </ul>
           )}
+          {(data?.notes ?? []).map((note) => (
+            <p key={note} className="text-xs text-muted-foreground">
+              {note}
+            </p>
+          ))}
           {(data?.set_aside ?? []).length > 0 && (
             <div className="grid gap-1 text-xs text-muted-foreground">
               <p className="font-medium text-foreground">Moved aside</p>

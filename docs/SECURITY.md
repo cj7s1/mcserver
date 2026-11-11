@@ -367,8 +367,9 @@ has no profile for.
   log download, the last-run record), so console viewers in the panel do not see it; `docker logs`
   on the host still shows it. It only grants RCON, which is reachable from the instance network
   only. The panel writes it to `config/rconpw` before every start (from the server's encrypted
-  control secret); the file editor shows that file masked and refuses to change it, but a user with
-  `instance.files.read` can still download it, and it is in backups.
+  control secret); the file API never hands that file out (download, zips: the agent leaves it out,
+  backup browser) and never writes, renames or deletes it or its folder (403 `managed_file`); it is in
+  backups (restic, encrypted).
 * **Secrets per server** (`Instance.secrets`, for tokens a game needs) are encrypted like the RCON
   password, never returned by the API (only whether each is set), and audited by name only.
 * **Game settings** with secrets (Factorio's game password and factorio.com token in
@@ -431,8 +432,9 @@ Games that take commands on their console only (Terraria) get one line at a time
   apply. The agent's driver reads the token from that file (no symbolic link followed, size-capped);
   it travels only in the query string of requests to the container (TShock's design) and never appears
   in an error message or log line of the agent; the agent also masks it in console text. The text
-  editor shows `config.json` with the token masked; a user with `instance.files.read` can still
-  download the file, and it is in backups (restic, encrypted). It grants superadmin over that TShock
+  editor, downloads (also from the backup browser) and search results show `config.json`, and any
+  file the token was copied into, with the token masked; a zip leaves `config.json` out for users
+  without `instance.configure`. It is in backups (restic, encrypted). It grants superadmin over that TShock
   server only.
 * **The one-time `/setup` code** TShock prints at its first start (it makes whoever types it in game an
   admin) is masked in every console text the agent hands out. The panel creates the owner account itself
@@ -446,21 +448,32 @@ Games that take commands on their console only (Terraria) get one line at a time
 * **Claiming.** An unclaimed Satisfactory server belongs to whoever reaches its API first (a
   passwordless `InitialAdmin` login works until it is claimed). The panel never publishes such a
   server: its spec has no ports until the setup's claim, join-password and new-game steps are done
-  (`setup_state.ports_open`), and the agent refuses an apply that would publish the ports of a
-  Satisfactory server whose running container still accepts an `InitialAdmin` login, or whose server
-  folder holds no API token (409 `server_unclaimed`). The claim runs through the agent over the
+  (`setup_state.ports_open`). Before every start of a Satisfactory container with published ports
+  (apply, start, restart) the agent requires the claim file `saved/ServerSettings.7777.sav` (a non-empty
+  regular file, no symbolic link), the API token file, and, for a running container, an API that answers
+  as claimed within 20 s (409 `server_unclaimed`, or `claim_unverified` when it cannot tell: fail
+  closed). Docker's own restart policy cannot be intercepted, so a loop on the agent probes every run of
+  a running published container as soon as its API answers and stops an unclaimed one at once,
+  recording why (`guard_stop`). The panel closes the ports again (and recreates the container without
+  them before any start) whenever the claim may be lost: a restore, a restore of a path or a snapshot,
+  file uploads, edits, renames, deletes or extracts under `saved/`, the agent's refusal or `guard_stop`,
+  and a re-run of the claim step; the claim, join-password and publish steps then run again. Steps run
+  in order (409 `setup_order`), so `publish` cannot be forced before the claim. A server never joins
+  another network than the agent's instance network. The claim runs through the agent over the
   instance network; the admin password is the server's control secret (encrypted in the database,
   sent to the agent only in the claim request, never written to disk by the panel).
 * **Client logins.** After the claim anyone who reaches the server can still log in as a client
   (and read its state) until a client password is set. The create wizard requires an explicit
   choice: a join password, or "open to anyone who knows the address"; the setup applies it and
-  checks that it took effect. Clearing the password later in Settings means "open".
+  checks that it took effect. Clearing the password later in Settings means "open" and needs that
+  choice in the request (`"access": "open"`; the UI asks first).
 * **API token.** The claim makes a non-expiring API token (`server.GenerateAPIToken`). The agent
   returns it once, in the claim's answer; the panel stores it encrypted (`Instance.secrets`, not
   listed or settable through the secrets API) and writes it to `.mcpanel/api-token` in the server
   folder before every apply, where the agent's driver reads it (no symbolic link followed). Like
-  Factorio's RCON password file, the file editor masks it and refuses to change it, but a user with
-  `instance.files.read` can download it, and it is in backups (restic, encrypted). It grants
+  Factorio's RCON password file and the claim file, the file API never hands it out (download, zip,
+  backup browser, search) and never writes, renames or deletes it or a folder holding it (403
+  `managed_file`; `apps/instances/secret_files.py`); it is in backups (restic, encrypted). It grants
   admin over that game server only, which listens on the instance network and its own published
   ports. The game server itself can read it (it stores its tokens in `saved/ServerSettings.7777.sav`
   anyway). It is never logged; job logs and audit details name steps and keys only.

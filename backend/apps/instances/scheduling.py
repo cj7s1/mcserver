@@ -415,8 +415,13 @@ def execute(sched: Schedule) -> str:
         from apps import games
         from apps.nodes.client import AgentClient
 
-        games.for_instance(inst).require(inst, "console_commands")
-        output = AgentClient(inst.node).command(inst.id, str(sched.payload.get("command", ""))[:1400])
+        definition = games.for_instance(inst)
+        definition.require(inst, "console_commands")
+        command = str(sched.payload.get("command", ""))[:1400]
+        if definition.refuse_stop_commands and definition.is_stop_command(command):
+            # (a schedule saved before such commands were refused) Docker would start the server again
+            return "Refused: this command would make the server exit; use a stop schedule instead"
+        output = AgentClient(inst.node).command(inst.id, command)
         return f"OK: {output[:200]}"
     return f"Unknown action {sched.action}"
 

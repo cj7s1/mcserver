@@ -13,7 +13,6 @@ from apps import games
 from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.instances.handlers import (
-    SOFTWARE_FIELDS,
     Progress,
     apply_container,
     describe_software,
@@ -186,6 +185,10 @@ def run_backup(
     backup.save()
     for w in backup.warnings:
         ctx.log(f"warning: {w}")
+    note = games.for_instance(instance).consistency_note(instance)
+    if backup.consistent and note:
+        # what "consistent" means for this game (Minecraft's own wording is in the agent's log)
+        ctx.log(f"Consistent backup: {note}")
     return backup
 
 
@@ -437,7 +440,10 @@ def backup_software(backup: Backup) -> dict[str, Any] | None:
     for key in ("software", "software_before", "modpack_before"):
         value = meta.get(key)
         if isinstance(value, dict) and value:
-            return {k: v for k, v in value.items() if k in SOFTWARE_FIELDS or k == "game"}
+            # each game keeps its own keys (Minecraft: SOFTWARE_FIELDS; Factorio: version, Space Age; ...)
+            definition = games.get_or_none(str(value.get("game") or games.DEFAULT_GAME))
+            keys = definition.software_keys if definition is not None else ("game",)
+            return {k: v for k, v in value.items() if k in keys or k == "game"}
     return None
 
 
@@ -510,6 +516,8 @@ def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.check_cancelled()
         ctx.progress(0.5, f"Restoring '{backup.name}'", force=True)
         progress.requested()
+        # the files change: Satisfactory checks its claim again before the ports are published
+        games.for_instance(instance).files_touched(instance, [""], "a backup was restored")
         op = client.restore_backup(instance.id, backup.snapshot_id)
         progress.running()
         client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
@@ -652,6 +660,9 @@ def restore_path_job(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.check_cancelled()
         ctx.progress(0.2, f"Restoring {job.params['path']} from '{backup.name}'", force=True)
         progress.requested()
+        games.for_instance(instance).files_touched(
+            instance, ["/".join(p for p in str(job.params["path"]).split("/") if p and p != ".")], "a backup was restored"
+        )
         op = client.backup_restore_path(instance.id, backup.snapshot_id, job.params["path"])
         progress.running()
         client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.2, 0.7))
@@ -772,6 +783,7 @@ def snapshot_restore(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.check_cancelled()
         ctx.progress(0.6, f"Rolling back to snapshot {name}", force=True)
         progress.requested()
+        games.for_instance(instance).files_touched(instance, [""], "a snapshot was restored")
         op = client.restore_snapshot(instance.id, name)
         progress.running()
         done = client.wait_operation(op["id"], timeout=3600)

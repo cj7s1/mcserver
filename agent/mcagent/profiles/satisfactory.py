@@ -16,6 +16,11 @@ What was observed on the real image (``v1.9.11``, 2026-11-10; the spike's sectio
   claim is stored per port (``ServerSettings.<port>.sav``), so another port is a new, unclaimed
   server. The messaging port is advertised to players as it is set, so the panel sets it to the
   host port and publishes it 1:1 (``env_ports``).
+* Ownership: when ``PGID`` is a group the image already has (100 ``users`` on Unraid), init.sh only
+  adds ``steam`` to it; the process keeps the primary group 1000, so every file written during a run
+  is ``<uid>:1000`` until the next start's ``chown -R``. A ``PGID`` the image lacks would become
+  ``steam``'s group, but that is not the runtime gid either, so the agent fixes the ownership itself
+  after every stop and before every backup (``fix_ownership``).
 * Readiness: the UDP Lightweight Query on 7777/udp answers (also while a map loads, when the
   HTTPS API is briefly down).
 * Control: the ``satisfactory-api`` driver (HTTPS API on the instance network, the API token in
@@ -45,6 +50,11 @@ GAME = "satisfactory"
 GAME_PORT = 7777
 DEFAULT_MESSAGING_PORT = 8888
 TOKEN_FILE = ".mcpanel/api-token"  # noqa: S105 - a path, not a token
+# The game's SaveGames folder (a real folder of the server folder: the image symlinks the game's
+# SaveGames to /config/saved from inside gamefiles/) and the file that holds the claim, the admin
+# password and the API tokens. The game stores it per game port, so it is derived from GAME_PORT.
+SAVED_DIR = "saved"
+CLAIM_FILE = f"{SAVED_DIR}/ServerSettings.{GAME_PORT}.sav"
 DEFAULT_IMAGES = ("wolveix/satisfactory-server", "docker.io/wolveix/satisfactory-server")
 TAG_PATTERN = r"v\d{1,3}\.\d{1,3}\.\d{1,4}"
 
@@ -120,11 +130,19 @@ PROFILE = RuntimeProfile(
     hostname_prefix="satisfactory-",
     fetch_hosts=(),
     control="satisfactory-api",
-    control_options=MappingProxyType({"port": GAME_PORT, "secret_file": TOKEN_FILE}),
+    control_options=MappingProxyType(
+        {"port": GAME_PORT, "secret_file": TOKEN_FILE, "claim_file": CLAIM_FILE}
+    ),
     default_backup_excludes=("gamefiles",),
     tag_pattern=TAG_PATTERN,
     env_values=MappingProxyType(ENV_VALUES),
     mount_image_volumes=True,
     install_retry_exits=(5, 8),
     env_ports=MappingProxyType({"SERVERMESSAGINGPORT": "tcp"}),
+    # the driver reaches the HTTPS API at the container's address on the instance network, and an
+    # unclaimed server must stay unreachable from outside: no host network, macvlan or other network
+    instance_network_only=True,
+    # init.sh only adds steam to an existing group (gid 100 on Unraid) and keeps its primary group
+    # 1000, so files written during a run are <uid>:1000 until the next start's chown -R
+    fix_ownership=True,
 )

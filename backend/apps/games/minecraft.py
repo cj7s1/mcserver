@@ -46,6 +46,10 @@ class MinecraftDefinition(GameDefinition):
     memory_model = "jvm"
     capability_set = frozenset(CAPABILITIES)
     stop_words = frozenset({"stop"})
+    # "stop" over RCON exits the server and Docker's restart policy starts it again at once: the REST
+    # command endpoint and schedules refuse it (400 stop_via_power), the console already turns it
+    # into the panel's Stop (real-stack run of 2026-11-11; a deliberate Minecraft change)
+    refuse_stop_commands = True
     flush_command = "save-all flush"
     notes = (
         "Java edition, run on the itzg/minecraft-server image.",
@@ -133,6 +137,12 @@ class MinecraftDefinition(GameDefinition):
         return service
 
     # -- software record of backups ------------------------------------------------------------
+    @property
+    def software_keys(self) -> tuple[str, ...]:  # type: ignore[override]
+        from apps.instances.handlers import SOFTWARE_FIELDS
+
+        return ("game", *SOFTWARE_FIELDS)
+
     def software_state(self, instance: Instance) -> dict[str, Any]:
         from apps.instances.handlers import SOFTWARE_FIELDS
 

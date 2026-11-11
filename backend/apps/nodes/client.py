@@ -347,12 +347,16 @@ class AgentClient:
         return self._json("PUT", f"/v1/instances/{instance_id}/files/text", json=body)
 
     def download(
-        self, instance_id: UUID, path: str | list[str], *, endpoint: str = "download"
+        self, instance_id: UUID, path: str | list[str], *, endpoint: str = "download", exclude: list[str] | None = None
     ) -> tuple[Iterator[bytes], int | None, httpx.Response]:
-        """Stream a file (``download``) or a zip of one or more folders (``archive``)."""
+        """Stream a file (``download``) or a zip of one or more folders (``archive``; ``exclude``: files
+        and folders left out, agents with the ``archive_excludes`` feature)."""
         client = httpx.Client(headers=self.headers, timeout=httpx.Timeout(self.timeout, read=300), verify=self.verify)
+        params: dict[str, Any] = {"path": path}
+        if exclude:
+            params["exclude"] = list(exclude)
         try:
-            req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/{endpoint}", params={"path": path})
+            req = client.build_request("GET", f"{self.base}/v1/instances/{instance_id}/files/{endpoint}", params=params)
             resp = client.send(req, stream=True)
         except httpx.HTTPError as exc:
             client.close()

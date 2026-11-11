@@ -67,7 +67,7 @@ def running(make_instance, fake_agent):  # type: ignore[no-untyped-def]
 # --- agent features ------------------------------------------------------------------------------------
 def test_the_fake_agent_offers_what_the_agent_says_it_offers():
     source = (REPO / "agent" / "mcagent" / "main.py").read_text()
-    match = re.search(r"^FEATURES = \[(.*?)\]", source, re.M)
+    match = re.search(r"^FEATURES = \[(.*?)\]", source, re.M | re.S)
     assert match, "FEATURES not found in agent/mcagent/main.py"
     assert tuple(re.findall(r'"([a-z_]+)"', match.group(1))) == CURRENT_AGENT_FEATURES
 

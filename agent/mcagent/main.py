@@ -39,6 +39,7 @@ from starlette.websockets import WebSocketState
 from . import (
     __version__,
     backups,
+    claimguard,
     docker_ops,
     drivers,
     hashcache,
@@ -125,7 +126,24 @@ TEXT_LIMIT = 5 * 1024 * 1024
 #   game_actions POST /instances/{id}/game/{action}: operations of a game's own control API through its
 #               driver (Satisfactory: claim, client_password, new_game, sessions, save, upload_save, ...);
 #               /ping answers through the driver's own query for such games
-FEATURES = ["retire", "pull_newer", "ping", "clone_level_name", "games", "game_actions"]
+#   claim_guard the agent never runs a published Satisfactory server unclaimed: apply, /start and /restart
+#               answer 409 server_unclaimed (no claim file / token, or the running server is unclaimed) or
+#               409 claim_unverified (its API did not answer or answered unexpectedly); a loop stops a
+#               running published server that turns out unclaimed, and the status (and each entry of
+#               GET /instances, plus "guard_stops" there for servers without a container) carries
+#               guard_stop {code, message, at} for the run it stopped
+#   archive_excludes  GET /files/archive takes exclude= (repeatable, relative to the server folder): those
+#               files and folders are left out of the zip
+FEATURES = [
+    "retire",
+    "pull_newer",
+    "ping",
+    "clone_level_name",
+    "games",
+    "game_actions",
+    "claim_guard",
+    "archive_excludes",
+]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
 LIFECYCLE_LOCK_WAIT = 60.0
@@ -358,6 +376,7 @@ async def _startup() -> None:
     _spawn("restic-startup-unlock", backups.startup_unlock, settings, repos)
     _spawn("leftover-sweep", maintenance.sweep_leftovers, settings, started_at, _busy)
     _spawn("saving-recovery", _saving_recovery_loop, settings, _background_stop)
+    _spawn("claim-guard", claimguard.run, settings, _background_stop)
 
 
 # At most one background pass per folder (four at a time) for /files/hashes calls.
@@ -444,10 +463,35 @@ async def ports() -> dict[str, Any]:
 async def list_instances(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     """Every managed container, and under ``last_runs`` the last-run record (without console
     lines) of every server that has one, by instance id: a stopped server has no container."""
-    return {
-        "containers": await run_in_threadpool(docker_ops.list_managed),
-        "last_runs": await run_in_threadpool(lastrun.summaries, settings),
-    }
+    containers = await run_in_threadpool(docker_ops.list_managed)
+    last_runs = await run_in_threadpool(lastrun.summaries, settings)
+    answer: dict[str, Any] = {"containers": containers, "last_runs": last_runs}
+    # the claim guard's reason for servers without a container (feature claim_guard; only when any)
+    stops = await run_in_threadpool(
+        _guard_stops_without_container, settings, {str(c.get("instance_id")) for c in containers}
+    )
+    if stops:
+        answer["guard_stops"] = stops
+    return answer
+
+
+def _guard_stops_without_container(settings: Settings, with_container: set[str]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        names = os.listdir(claimguard.directory(settings))
+    except OSError:
+        return out
+    for name in names:
+        if not name.endswith(".json") or name[:-5] in with_container:
+            continue
+        try:
+            instance_id = UUID(name[:-5])
+        except ValueError:
+            continue
+        stopped = claimguard.for_status(settings, instance_id, None)
+        if stopped is not None:
+            out[str(instance_id)] = stopped
+    return out
 
 
 @app.post("/v1/instances/{instance_id}/prepare", dependencies=[Depends(require_token)])
@@ -604,6 +648,8 @@ async def apply_spec(
             else:
                 op.update(0.92, "Creating container")
                 c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
+            # a new container: what the claim guard recorded about the old one's run is history now
+            claimguard.clear(settings, instance_id)
             if body.start or was_running:
                 op.update(0.96, "Starting container")
                 docker_ops.start(instance_id)
@@ -686,9 +732,12 @@ async def forget_last_run(instance_id: UUID, settings: Settings = Depends(get_se
 
 
 @app.get("/v1/instances/{instance_id}/status", dependencies=[Depends(require_token)])
-async def instance_status(instance_id: UUID) -> dict[str, Any]:
+async def instance_status(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     """The container's state; for a server without a container ``exists`` is false and
-    ``last_run`` holds its last-run record without the console lines (absent: it never ran)."""
+    ``last_run`` holds its last-run record without the console lines (absent: it never ran).
+    ``guard_stop`` (``{"code", "message", "at"}``, absent otherwise): the claim guard stopped the
+    container's latest run, or the last run (``claimguard``; codes ``server_unclaimed``,
+    ``claim_unverified``)."""
     st = await run_in_threadpool(docker_ops.status, instance_id)
     active = registry.active_for(instance_id)
     st["operation"] = active.as_dict() if active else None
@@ -696,9 +745,11 @@ async def instance_status(instance_id: UUID) -> dict[str, Any]:
 
 
 @app.post("/v1/instances/{instance_id}/start", dependencies=[Depends(require_token)])
-async def start(instance_id: UUID) -> dict[str, Any]:
+async def start(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     """Start the existing container. A server without one (404 ``no_container``) is started
-    with an apply, which creates it."""
+    with an apply, which creates it. 409 ``server_unclaimed`` / ``claim_unverified``: a container
+    with published ports of a server that is not claimed (``docker_ops.start_guard``); 409
+    ``volume_source_invalid``: a folder it mounts from the server folder was replaced."""
     registry.assert_lifecycle_allowed(instance_id)
 
     def _start() -> None:
@@ -741,6 +792,11 @@ async def restart(
     def _restart() -> docker_ops.StopResult:
         # stop and start of the same container: a retire must not remove it in between
         with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            # refused before the stop when the start would be (server folder only: a hung server's
+            # API must not keep it from being restarted), so a refused restart leaves it running
+            docker_ops.start_guard(
+                settings, instance_id, docker_ops.require_container(instance_id), live=False
+            )
             stopped = docker_ops.stop(instance_id, body.timeout if body else None, settings)
             docker_ops.start(instance_id)
             return stopped
@@ -1594,19 +1650,26 @@ async def files_download(
 async def files_archive(
     instance_id: UUID,
     path: list[str] = Query(default=[""]),
+    exclude: list[str] | None = Query(default=None),
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
-    """Download one or more directories (e.g. a world and its dimensions) as a zip streamed on the fly."""
+    """Download one or more directories (e.g. a world and its dimensions) as a zip streamed on the fly.
+    ``exclude`` (repeatable, at most ``MAX_ZIP_EXCLUDES``; feature ``archive_excludes``): paths
+    relative to the server folder whose files (and, for a folder, everything below it) are left
+    out, e.g. a game's control-secret files."""
     from .archive import MAX_ZIP_FOLDERS, stream_zip
 
     if len(path) > MAX_ZIP_FOLDERS:
         raise AgentError(f"At most {MAX_ZIP_FOLDERS} folders can be zipped at once", "invalid_path", 400)
+    excluded = list(exclude) if isinstance(exclude, list) else []  # a direct call leaves the Query default
     root = _root(settings, instance_id)
     for p in path:
         entry = await run_in_threadpool(root.stat, p)
         if entry.type != "directory":
             raise AgentError("Only folders can be downloaded as a zip", "not_a_directory", 400)
-    gen = await run_in_threadpool(lambda: stream_zip(root, path[0] if len(path) == 1 else path))
+    gen = await run_in_threadpool(
+        lambda: stream_zip(root, path[0] if len(path) == 1 else path, exclude=excluded)
+    )
     return ClosingStreamingResponse(gen, media_type="application/zip")  # stops the zip producer
 
 
@@ -1904,17 +1967,23 @@ async def list_backups(instance_id: UUID, settings: Settings = Depends(get_setti
     return {"snapshots": await run_in_threadpool(r.snapshots)}
 
 
-def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]:
-    """The default backup excludes of the server's game (its container's labels, or the game its
-    last-run record names), as absolute paths below the server folder; none for Minecraft, for an
-    unknown game and when Docker cannot be asked."""
+def _server_profile(settings: Settings, instance_id: UUID) -> profiles.RuntimeProfile | None:
+    """The runtime profile of the server's game (its container's labels, or the game its last-run
+    record names); None for an unknown game and when Docker cannot be asked."""
     try:
         status = docker_ops.status(instance_id, settings)
     except Exception as exc:
-        log.debug("backup of %s: the game could not be determined: %s", instance_id, exc)
-        return []
+        log.debug("the game of %s could not be determined: %s", instance_id, exc)
+        return None
     info = status if status.get("exists") else (status.get("last_run") or {})
-    profile = profiles.get(info.get("game") or profiles.DEFAULT_GAME, info.get("variant") or None)
+    return profiles.get(info.get("game") or profiles.DEFAULT_GAME, info.get("variant") or None)
+
+
+def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]:
+    """The default backup excludes of the server's game (``_server_profile``), as absolute paths
+    below the server folder; none for Minecraft, for an unknown game and when Docker cannot be
+    asked."""
+    profile = _server_profile(settings, instance_id)
     if profile is None:
         return []
     source = docker_ops.instance_dir(settings, instance_id)
@@ -1957,6 +2026,16 @@ async def create_backup(
     def _backup(op: Operation) -> dict[str, Any]:
         excludes = list(body.excludes) + _profile_backup_excludes(settings, instance_id)
         with _world_saving_paused(settings, instance_id, body.consistency, op, "backup", 0.02) as saving:
+            profile = _server_profile(settings, instance_id)
+            if profile is not None and profile.fix_ownership:
+                # the backup keeps the owners: the files the save just wrote get the runtime uid:gid
+                # (Satisfactory's are <uid>:1000 while it runs); what the backup leaves out is not walked
+                if (
+                    warning := docker_ops.fix_ownership(
+                        settings, instance_id, tuple(profile.default_backup_excludes)
+                    )
+                ) is not None:
+                    saving.warnings.append(warning)
             op.update(0.06, "Running restic backup")
             summary = restic.backup(
                 source,

@@ -106,10 +106,22 @@ class ControlDriver:
         e.g. Satisfactory's claim; 409 ``action_unsupported`` for a driver without it."""
         raise AgentError(f"This server's game has no operation '{action}'", "action_unsupported", 409)
 
+    # Whether publish_guard does anything: the agent then also checks it before every start of a
+    # container with published ports (docker_ops.start) and watches such containers while they run
+    # (claimguard).
+    guards_publish: ClassVar[bool] = False
+
     def publish_guard(self, settings: Settings, instance_id: UUID, existing: Container | None) -> None:
-        """Called before a container that publishes ports is created (apply): raise to refuse it
-        (Satisfactory: never publish a server that is not claimed). Default: nothing."""
+        """Called before a container that publishes ports is created (apply) or started
+        (``docker_ops.start``): raise to refuse it (Satisfactory: never publish a server that is
+        not claimed). ``existing``: the server's container (None without one). Default: nothing."""
         return None
+
+    def claim_state(self, settings: Settings, c: Container) -> str:
+        """For drivers with ``guards_publish``: ``"down"`` (the control API does not answer yet),
+        ``"claimed"`` or ``"unclaimed"``; raises an AgentError when it answers in an unexpected way
+        (the caller fails closed). Default: ``"claimed"`` (nothing to guard)."""
+        return "claimed"
 
 
 class QueryTarget(tuple):

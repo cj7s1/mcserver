@@ -9,6 +9,7 @@ import { KeyRound, Loader2, RotateCw, Save, Undo2, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
 import { ConfigFieldsForm } from "@/components/ConfigFieldsForm";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Section } from "@/components/PageHeader";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Button } from "@/components/ui/button";
@@ -172,9 +173,9 @@ export function SecretsSection({ instance }: { instance: Instance }) {
   if (query.error) return <ErrorState error={query.error} title="Could not load secrets" onRetry={() => query.refetch()} />;
   const secrets = query.data?.secrets ?? [];
   if (!secrets.length) return null;
-  const submit = async (values: Record<string, string | null>, what: string) => {
+  const submit = async (values: Record<string, string | null>, what: string, access?: "open") => {
     try {
-      await put.mutateAsync(values);
+      await put.mutateAsync({ values, access });
       setDrafts((d) => {
         const n = { ...d };
         for (const k of Object.keys(values)) delete n[k];
@@ -214,10 +215,24 @@ export function SecretsSection({ instance }: { instance: Instance }) {
                 <Button size="sm" onClick={() => submit({ [s.key]: draft }, `${s.label} saved`)} disabled={put.isPending || !draft.trim()}>
                   Save
                 </Button>
-                {s.set && !s.required && (
+                {s.set && !s.required && !s.clear_opens && (
                   <Button size="sm" variant="outline" onClick={() => submit({ [s.key]: null }, `${s.label} cleared`)} disabled={put.isPending}>
                     Clear
                   </Button>
+                )}
+                {s.set && !s.required && s.clear_opens && (
+                  <ConfirmDialog
+                    trigger={
+                      <Button size="sm" variant="outline" disabled={put.isPending}>
+                        Clear
+                      </Button>
+                    }
+                    title={`Clear the ${s.label.toLowerCase()} and open the server?`}
+                    description="Without it anyone who knows the server's address can join. The change applies while the server runs."
+                    confirmLabel="Open the server"
+                    destructive
+                    onConfirm={() => submit({ [s.key]: null }, `${s.label} cleared: the server is open`, "open")}
+                  />
                 )}
               </div>
               {s.help && <p className="text-xs text-muted-foreground">{s.help}</p>}

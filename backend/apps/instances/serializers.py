@@ -394,6 +394,10 @@ class InstanceSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"memory_mb": [f"{self._definition().label} needs at least {self._definition().min_memory_mb} MB"]}
                 )
+            if attrs.get("network") and not self._definition().custom_network:
+                raise serializers.ValidationError(
+                    {"network": [f"{self._definition().label} servers run on the panel's instance network only"]}
+                )
         if self.instance is not None and attrs.keys() & {"memory_mb", "memory_overhead_mb"}:
             probe = Instance(
                 game=self.instance.game,

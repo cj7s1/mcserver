@@ -21,12 +21,12 @@ from typing import Any
 
 import pytest
 
-from .integration_support import InstanceTracker, Timer, make_node, run_job, runtime_owner, wrong_owner
+from .integration_support import InstanceTracker, Timer, disk, it_ports, make_node, run_job, runtime_owner, wrong_owner
 
 AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
 DATA_ROOT = os.environ.get("MCPANEL_IT_AGENT_DATA_ROOT", "/srv/mcpanel-dev")
-PORTS = (25800, 25820)  # never published: the server is not started
+PORTS = it_ports((25800, 25820))  # never published: the server is not started
 TOP = "Old Server"  # the archive's single top-level folder (stripped on import)
 
 pytestmark = [
@@ -123,8 +123,9 @@ def test_import_server_archive(it_node, tracker, owner_api):
         inst_dir = tracker.instance_dir(inst)
         if inst_dir:
             assert wrong_owner([inst_dir], runtime_owner(it_node)) == []
-            assert not (inst_dir.parent / "escape.txt").exists()
-            assert not (inst_dir.parent.parent / "escape.txt").exists()
+            # (the data root is root-only on a real host: through AgentDisk, like the other checks)
+            assert not disk.exists(inst_dir.parent / "escape.txt")
+            assert not disk.exists(inst_dir.parent.parent / "escape.txt")
         else:
             print("[it] MCPANEL_IT_AGENT_DATA_ROOT empty: ownership check SKIPPED", flush=True)
         timer.mark("verified files")

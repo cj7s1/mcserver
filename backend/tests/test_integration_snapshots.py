@@ -24,13 +24,13 @@ from typing import Any
 
 import pytest
 
-from .integration_support import InstanceTracker, Timer, make_node, run_job
+from .integration_support import InstanceTracker, Timer, it_ports, make_node, run_job
 
 AGENT_URL = os.environ.get("MCPANEL_IT_BTRFS_AGENT_URL", "")
 TOKEN = os.environ.get("MCPANEL_IT_BTRFS_TOKEN", "")
 FINGERPRINT = os.environ.get("MCPANEL_IT_BTRFS_FINGERPRINT", "")
 DATA_ROOT = os.environ.get("MCPANEL_IT_BTRFS_DATA_ROOT", "/srv/btrfs-test/data")
-PORTS = (25800, 25820)  # never published: these servers are not started
+PORTS = it_ports((25800, 25820))  # never published: these servers are not started
 
 pytestmark = [
     pytest.mark.integration,

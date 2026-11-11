@@ -31,7 +31,7 @@ from docker.errors import APIError, ImageNotFound, NotFound
 # arguments to the low-level API call; see create_container() for why it is used directly.
 from docker.models.containers import Container, _create_container_args
 
-from . import drivers, lastrun, profiles
+from . import claimguard, drivers, lastrun, profiles
 from .config import Settings, get_settings
 from .drivers.minecraft import GAME_PORT, RCON_PORT, SAVE_BEFORE_STOP, STOP_COMMAND
 from .errors import AgentError
@@ -455,6 +455,22 @@ def image_volume_plan(
     return binds, tmpfs
 
 
+def _ports_distinct(spec: InstanceSpec) -> None:
+    hosts: set[tuple[int, str]] = set()
+    containers: set[tuple[int, str]] = set()
+    for p in spec.ports:
+        if (p.host_port, p.protocol) in hosts:
+            raise AgentError(
+                f"Host port {p.host_port}/{p.protocol} is published twice", "port_collision", 400
+            )
+        if (p.container_port, p.protocol) in containers:
+            raise AgentError(
+                f"Container port {p.container_port}/{p.protocol} is published twice", "port_collision", 400
+            )
+        hosts.add((p.host_port, p.protocol))
+        containers.add((p.container_port, p.protocol))
+
+
 def build_create_kwargs(
     settings: Settings,
     instance_id: UUID,
@@ -471,6 +487,13 @@ def build_create_kwargs(
     profile = profiles.for_spec(spec)
     image = validate_image(settings, spec.image, profile)
     network = spec.network or settings.instance_network
+    if profile.instance_network_only and network != settings.instance_network:
+        raise AgentError(
+            f"{profile.label} servers run only on the agent's instance network "
+            f"({settings.instance_network}), not on '{network}'",
+            "network_not_supported",
+            400,
+        )
     if network not in settings.effective_networks():
         raise AgentError(f"Network '{network}' is not permitted by agent policy", "network_not_allowed", 403)
     if spec.memory_limit_mb > settings.max_memory_mb:
@@ -479,6 +502,8 @@ def build_create_kwargs(
         )
     injected = profile.injected_env(profile, settings, spec)
     _validate_env(profile, spec, injected)
+    if profile.env_ports and (reason := profile.env_port_error(spec.env)) is not None:
+        raise AgentError(reason, "port_collision", 400)
 
     env: dict[str, str] = dict(settings.runtime_extra_env)
     env.update(spec.env)
@@ -498,6 +523,11 @@ def build_create_kwargs(
 
     ports: dict[str, Any] = {}
     if network != "host":
+        if profile.env_ports:
+            # games whose container ports come from variables too (Satisfactory): one host port and
+            # one container port per protocol only once, so nothing named by a variable can land on
+            # the API's port (the generic schema check is per host address; Minecraft's specs keep it)
+            _ports_distinct(spec)
         for p in spec.ports:
             if not (settings.port_min <= p.host_port <= settings.port_max):
                 raise AgentError(
@@ -596,6 +626,13 @@ def declared_volumes(image: str) -> list[str]:
     return sorted(((attrs.get("Config") or {}).get("Volumes") or {}).keys())
 
 
+def uncovered_volumes(kwargs: dict[str, Any], image_volumes: list[str]) -> list[str]:
+    """The VOLUMEs of the image that the create arguments give no bind mount or tmpfs of their own."""
+    covered = {_norm_container_path(v["bind"]) for v in (kwargs.get("volumes") or {}).values()}
+    covered |= {_norm_container_path(t) for t in (kwargs.get("tmpfs") or {})}
+    return [path for path in (_norm_container_path(v) for v in image_volumes) if path not in covered]
+
+
 def prepare_image_volumes(settings: Settings, instance_id: UUID, binds: dict[str, str]) -> None:
     """Create the server-folder subfolders the image volumes are bound to (owned by the runtime
     uid/gid; no symbolic link is followed), so Docker does not create them as root."""
@@ -626,10 +663,23 @@ def create_container(
     ``mount_image_volumes`` the image is inspected for its VOLUMEs first (never for Minecraft)."""
     profile = profiles.for_spec(spec)
     image_volumes = None
-    if profile.mount_image_volumes:
+    if profile.mount_image_volumes or profile.game != profiles.DEFAULT_GAME:
         image_volumes = declared_volumes(validate_image(settings, spec.image, profile))
-        prepare_image_volumes(settings, instance_id, image_volume_plan(profile, image_volumes)[0])
-    kwargs = build_create_kwargs(settings, instance_id, spec, spec_hash, image_volumes)
+    kwargs = build_create_kwargs(
+        settings, instance_id, spec, spec_hash, image_volumes if profile.mount_image_volumes else None
+    )
+    if image_volumes is not None:
+        # fail closed: a declared VOLUME without a mount of its own would become an anonymous volume
+        if uncovered := uncovered_volumes(kwargs, image_volumes):
+            raise AgentError(
+                f"The image declares volumes the {profile.label} profile does not mount "
+                f"({', '.join(uncovered)}); Docker would create anonymous volumes for them, so the "
+                "container is not created",
+                "image_volume_uncovered",
+                409,
+            )
+        if profile.mount_image_volumes:
+            prepare_image_volumes(settings, instance_id, image_volume_plan(profile, image_volumes)[0])
     if name is not None:
         if name not in (container_name(instance_id), replacement_name(instance_id)):
             raise AgentError("Invalid container name", "internal", 500)
@@ -888,8 +938,77 @@ def reattach_recreated_networks(c: Container) -> list[str]:
     return repaired
 
 
-def start(instance_id: UUID) -> None:
+def exposes_ports(c: Container) -> bool:
+    """Whether the container is reachable from outside: published ports (HostConfig.PortBindings)
+    or the host's network."""
+    host_config = (getattr(c, "attrs", None) or {}).get("HostConfig") or {}
+    if host_config.get("NetworkMode") == "host":
+        return True
+    return any(bindings for bindings in (host_config.get("PortBindings") or {}).values())
+
+
+def _bind_sources(c: Container) -> list[str]:
+    attrs = getattr(c, "attrs", None) or {}
+    sources = []
+    for bind in (attrs.get("HostConfig") or {}).get("Binds") or []:
+        source = str(bind).split(":", 1)[0]
+        if source.startswith("/"):
+            sources.append(source)
+    for mount in attrs.get("Mounts") or []:
+        if (mount or {}).get("Type") == "bind" and str(mount.get("Source") or "").startswith("/"):
+            sources.append(str(mount["Source"]))
+    return sources
+
+
+def check_bind_sources(settings: Settings, instance_id: UUID, c: Container) -> None:
+    """Every bind source of the container inside its server folder (the image-volume folders
+    ``.volumes/*`` and subfolders of a mount) must still be a real folder there: Docker resolves
+    the source again at every start and would follow a symbolic link a user put in its place.
+    409 ``volume_source_invalid`` otherwise. The server folder itself is the agent's."""
+    from pathlib import PurePosixPath
+
+    from .safefs import PathError, SafeRoot
+
+    host = PurePosixPath(os.path.normpath(str(host_instance_dir(settings, instance_id))))
+    root = SafeRoot(instance_dir(settings, instance_id))
+    for source in dict.fromkeys(_bind_sources(c)):
+        try:
+            rel = PurePosixPath(os.path.normpath(source)).relative_to(host)
+        except ValueError:
+            continue  # outside the server folder (the CA bundle): the agent's own files
+        if str(rel) in ("", "."):
+            continue
+        problem = None
+        try:
+            if root.stat(str(rel)).type != "directory":
+                problem = "is no longer a folder"
+        except PathError as exc:
+            problem = f"cannot be used ({exc})"
+        if problem is not None:
+            raise AgentError(
+                f"The container mounts {rel} of the server folder, which {problem}; it is not started. "
+                "Put the folder back (or apply the server's configuration again).",
+                "volume_source_invalid",
+                409,
+            )
+
+
+def start_guard(settings: Settings, instance_id: UUID, c: Container, *, live: bool = True) -> None:
+    """What must hold before the container is started: its bind sources (``check_bind_sources``)
+    and, for a container with published ports whose driver guards publishing (Satisfactory), the
+    driver's publish guard (409 ``server_unclaimed`` / ``claim_unverified``). ``live`` False: judge
+    by the server folder only, without probing a running container."""
+    check_bind_sources(settings, instance_id, c)
+    driver = drivers.for_container(c)
+    if driver.guards_publish and exposes_ports(c):
+        driver.publish_guard(settings, instance_id, c if live else None)
+
+
+def start(instance_id: UUID, settings: Settings | None = None) -> None:
+    """Start the existing container, after :func:`start_guard` (every start of the agent goes
+    through here: apply, /start, /restart)."""
     c = require_container(instance_id)
+    start_guard(settings or get_settings(), instance_id, c)
     try:
         reattach_recreated_networks(c)
         c.start()
@@ -1083,9 +1202,38 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
     if not drivers.for_container(c).stop(settings, c, timeout, result):
         c.stop(timeout=timeout)
     result.exit_code = _stopped_exit_code(c)
+    profile = profiles.for_labels(getattr(c, "labels", None))
+    if profile is not None and profile.fix_ownership:
+        instance = (c.labels or {}).get(LABEL_INSTANCE)
+        if instance and (warning := fix_ownership(settings, UUID(str(instance)))) is not None:
+            result.warnings.append(warning)
     for warning in result.warnings:
         log.warning("Stopping %s: %s", c.name, warning)
     return result
+
+
+def fix_ownership(settings: Settings, instance_id: UUID, skip: tuple[str, ...] = ()) -> str | None:
+    """Give the server folder the runtime uid:gid again (``chown -R`` without following links;
+    ``skip``: relative paths left out), for profiles with ``fix_ownership``. Returns a warning
+    instead of raising: a stop or a backup never fails because of it."""
+    from .safefs import PathError, SafeRoot
+
+    try:
+        changed = SafeRoot(instance_dir(settings, instance_id)).chown_tree(
+            int(settings.runtime_uid), int(settings.runtime_gid), skip=skip
+        )
+    except (OSError, PathError) as exc:
+        log.warning("Could not give the server folder of %s the runtime owner: %s", instance_id, exc)
+        return f"The server's files could not be given the owner {settings.runtime_uid}:{settings.runtime_gid}: {exc}"
+    if changed:
+        log.info(
+            "Gave %d entries of the server folder of %s the owner %s:%s",
+            changed,
+            instance_id,
+            settings.runtime_uid,
+            settings.runtime_gid,
+        )
+    return None
 
 
 def _stopped_exit_code(c: Container) -> int | None:
@@ -1415,16 +1563,23 @@ def status(instance_id: UUID, settings: Settings | None = None) -> dict[str, Any
             c.reload()
         except NotFound:  # removed between the two calls
             c = None
+    settings = settings or get_settings()
     if c is None:
         answer: dict[str, Any] = {"exists": False}
-        last_run = lastrun.summary(settings or get_settings(), instance_id)
+        last_run = lastrun.summary(settings, instance_id)
         if last_run is not None:
             answer["last_run"] = last_run
-        return answer
-    return describe(c)
+    else:
+        answer = describe(c)
+    # why the claim guard stopped the server's latest run (claimguard), else absent
+    if (
+        stopped := claimguard.for_status(settings, instance_id, answer if c is not None else None)
+    ) is not None:
+        answer["guard_stop"] = stopped
+    return answer
 
 
-def list_managed() -> list[dict[str, Any]]:
+def list_managed(settings: Settings | None = None) -> list[dict[str, Any]]:
     out = []
     # ignore_removed: docker-py lists the ids and then inspects each container. One that is
     # removed in between (a retire, an apply) must not fail the whole list: the panel would mark
@@ -1436,6 +1591,10 @@ def list_managed() -> list[dict[str, Any]]:
             continue  # an apply's new container before it takes over the name: not the server's yet
         info = describe(c)
         info["instance_id"] = c.labels.get(LABEL_INSTANCE)
+        with contextlib.suppress(ValueError):
+            stopped = claimguard.for_status(settings or get_settings(), UUID(str(info["instance_id"])), info)
+            if stopped is not None:
+                info["guard_stop"] = stopped
         out.append(info)
     return out
 

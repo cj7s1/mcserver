@@ -63,6 +63,14 @@ def compose_file(services: tuple[str, ...]) -> str:
 class Site:
     """A deployment: the git checkout with deploy/.env, and the world the stand-in docker keeps."""
 
+    # the last migration per app of the old revision, and those the new revision adds
+    old_migrations: dict[str, str] = OLD_MIGRATIONS
+    upgrade_migrations: dict[str, str] = UPGRADE_MIGRATIONS
+
+    @property
+    def new_migrations(self) -> dict[str, str]:
+        return {**self.old_migrations, **self.upgrade_migrations}
+
     def __init__(self, tmp_path: Path) -> None:
         self.root = tmp_path / "site"
         self.deploy = self.root / "deploy"
@@ -104,7 +112,7 @@ class Site:
         self.git("init", "-q", "-b", "main")
         (self.root / ".gitignore").write_text("deploy/.env\ndeploy/*.env\ndeploy/*.sql\ndeploy/*.sql.part\n*.log\n")
         (self.deploy / "docker-compose.yml").write_text(compose_file(OLD_SERVICES))
-        for app, name in OLD_MIGRATIONS.items():
+        for app, name in self.old_migrations.items():
             self._migration(app, name)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "old layout")
@@ -115,7 +123,7 @@ class Site:
         (self.deploy / "scripts").mkdir()
         shutil.copy(SCRIPT, self.deploy / "scripts" / "upgrade.sh")
         (self.deploy / "scripts" / "upgrade.sh").chmod(0o755)
-        for app, name in UPGRADE_MIGRATIONS.items():
+        for app, name in self.upgrade_migrations.items():
             self._migration(app, name)
         self.git("add", "-A")
         self.git("commit", "-q", "-m", "new layout")
@@ -152,7 +160,7 @@ class Site:
             name, image_id = image.get(service, ("mcpanel/panel:local", OLD_PANEL))
             rows.append(f"o{n}|{service}|running|False|{name}|{image_id}|healthy")
         self.write("containers", rows)
-        old = [f"{app} {name}" for app, name in sorted(OLD_MIGRATIONS.items())]
+        old = [f"{app} {name}" for app, name in sorted(self.old_migrations.items())]
         self.write("migs", old)
         self.write("code/sha256_panel-old", old)
         for name in ("labels", "events.log", "calls.log", "servers"):
@@ -313,20 +321,20 @@ class Site:
         running = self.containers()
         assert tuple(sorted(running)) == OLD_SERVICES
         assert running["panel"] == OLD_PANEL and running["agent"] == OLD_AGENT and running["postgres"] == OLD_PG
-        assert self.migrations() == OLD_MIGRATIONS
+        assert self.migrations() == self.old_migrations
         assert self.head() == self.old
 
     def assert_old_version_runs_but_tree_is_new(self) -> None:
         running = self.containers()
         assert tuple(sorted(running)) == OLD_SERVICES
-        assert running["panel"] == OLD_PANEL and running["agent"] == OLD_AGENT and self.migrations() == OLD_MIGRATIONS
+        assert running["panel"] == OLD_PANEL and running["agent"] == OLD_AGENT and self.migrations() == self.old_migrations
         assert set(self.container_states().values()) == {"running"}
 
     def assert_new_version_runs(self, revision: str | None = None) -> None:
         running = self.containers()
         assert tuple(sorted(running)) == NEW_SERVICES
         assert running["panel"] == f"sha256:panel-new-{(revision or self.new)[:12]}"
-        assert self.migrations() == NEW_MIGRATIONS
+        assert self.migrations() == self.new_migrations
 
     def assert_rollback_point_is_the_old_version(self) -> None:
         assert self.state()["FROM_REV"] == [self.old]
@@ -337,7 +345,7 @@ class Site:
         for entry in self.state()["IMAGE"]:
             _name, image_id, tag = entry.split("|")
             assert tagged.get(tag) == image_id, f"the rollback tag {tag} is gone or moved"
-        assert [f"{app} {name}" for app, name in sorted(OLD_MIGRATIONS.items())] == self.state()["MIGRATION"]
+        assert [f"{app} {name}" for app, name in sorted(self.old_migrations.items())] == self.state()["MIGRATION"]
 
 
 @pytest.fixture
@@ -1140,3 +1148,221 @@ def test_the_notice_about_one_exited_server_container_is_a_sentence(site):
 def test_no_notice_without_exited_server_containers(site):
     site.write("servers", ["s3|running"])
     assert "Stopped servers" not in site.upgrade("dry-run").stdout
+
+
+# --- rollback to the release before multi-game: servers of other games ---------------------------
+class GamesSite(Site):
+    """The old revision is the last one before multi-game (no `game` column, player names of 16
+    characters); the new one adds instances 0005-0007 and metrics 0002."""
+
+    old_migrations = {**OLD_MIGRATIONS, "instances": "0004_schedule_deferred_at"}
+    upgrade_migrations = {"instances": "0007_restore_other_games", "metrics": "0002_games_phase2"}
+
+    def servers(self) -> dict[str, list[str]]:
+        """id -> [name, game, port, archived]"""
+        return {line.split("|")[0]: line.split("|")[1:] for line in self.read("servers_db")}
+
+
+GAMES_UNDO = "--undo instances=0004_schedule_deferred_at --undo metrics=0001_initial"
+MC_AND_FACTORIO = ["mc1|Survival|minecraft|25600|no", "fa1|Factory|factorio|34197|no"]
+
+
+@pytest.fixture
+def games_site(tmp_path: Path) -> GamesSite:
+    site = GamesSite(tmp_path)
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    site.assert_new_version_runs()
+    site.forget_events()
+    return site
+
+
+def assert_nothing_was_changed_by_the_rollback(site: GamesSite) -> None:
+    site.assert_new_version_runs()
+    assert site.status() == "done" and not site.events("STOP ") and not site.events("UNMIGRATE ")
+    assert not site.events("ARCHIVE ") and not (site.fake / "side_games").exists()
+
+
+def test_rollback_refuses_while_servers_of_other_games_exist_and_lists_them(games_site):
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    logs = site.logs()
+    for args in (("rollback", "--dry-run"), ("rollback",)):
+        result = site.upgrade(*args)
+        assert result.returncode == 2, result.both
+        assert "fa1  'Factory'  factorio" in result.stdout and "mc1" not in result.stdout
+        words = " ".join(result.stderr.split())
+        assert "knows only Minecraft servers" in words and "Nothing was changed. Choose one:" in words
+        assert "keep the new version" in words and "./scripts/upgrade.sh rollback --archive-other-games" in words
+        assert "./scripts/upgrade.sh restore-db " in words  # the database dump way back
+        assert_nothing_was_changed_by_the_rollback(site)
+        # asked before anything was stopped (and before the plan of the undo), with the targets of the rollback
+        assert site.events("GAMES-CHECK ") == [f"GAMES-CHECK {GAMES_UNDO}"]
+        assert site.events()[-1].startswith("GAMES-CHECK ") and not site.events("DUMP")
+        site.forget_events()
+    assert site.logs() == logs  # a refusal writes no log
+    assert site.servers()["fa1"] == ["Factory", "factorio", "34197", "no"]
+
+
+def test_rollback_refuses_when_two_servers_share_a_port_number(games_site):
+    site = games_site
+    # Minecraft's TCP 25600 and Factorio's UDP 25600: allowed now, refused by the old unique index
+    site.write("servers_db", ["mc1|Survival|minecraft|25600|no", "fa1|Factory|factorio|25600|no"])
+    result = site.upgrade("rollback")
+    assert result.returncode == 2, result.both
+    assert "Port numbers several servers of one node share" in result.stdout and "  port 25600" in result.stdout
+    assert "port numbers that two servers share make undoing the migrations fail" in " ".join(result.stderr.split())
+    assert_nothing_was_changed_by_the_rollback(site)
+
+
+def test_a_job_on_a_server_of_another_game_blocks_the_rollback_even_with_archive_other_games(games_site):
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    site.toggle("games_busy")
+    result = site.upgrade("rollback", "--archive-other-games", "--force")
+    assert result.returncode == 2, result.both
+    assert "an operation is in progress" in result.stdout and "the rollback cannot go on now" in result.stderr
+    assert_nothing_was_changed_by_the_rollback(site)
+
+
+def test_archive_other_games_then_rollback_then_run_puts_them_back(games_site):
+    site = games_site
+    site.write("servers_db", ["mc1|Survival|minecraft|25600|no", "fa1|Factory|factorio|25600|no", "te1|Terra|terraria|7777|no"])
+    plan = site.upgrade("rollback", "--archive-other-games", "--dry-run")
+    assert plan.returncode == 0, plan.both
+    assert "'rollback' would stop these servers through the running panel" in plan.stdout
+    assert plan.stdout.rstrip().endswith("To do it: ./scripts/upgrade.sh rollback --archive-other-games")
+    assert_nothing_was_changed_by_the_rollback(site)
+    site.forget_events()
+
+    back = site.upgrade("rollback", "--archive-other-games")
+    assert back.returncode == 0, back.both
+    site.assert_old_version_runs()
+    events = site.events()
+    first_stop = min(i for i, e in enumerate(events) if e.startswith("STOP "))
+    # archived through the running panel, before anything was stopped, then the undo
+    assert events.index(f"GAMES-ARCHIVE --archive {GAMES_UNDO}") < events.index("ARCHIVE fa1") < first_stop
+    assert events.index("ARCHIVE te1") < first_stop < events.index("UNMIGRATE instances -> 0004_schedule_deferred_at")
+    assert not site.events("LOST ")  # without the archive step the shim records the lost game here
+    assert site.servers() == {
+        "mc1": ["Survival", "-", "25600", "no"],
+        "fa1": ["Factory", "-", "65536", "yes"],  # (the rollback port: Survival has 25600)
+        "te1": ["Terra", "-", "7777", "yes"],
+    }
+    assert site.read("side_games") == ["fa1|factorio|25600", "te1|terraria|7777"]
+    log = site.logs()[-1].read_text()
+    assert "==> Archiving the servers of other games (through the running panel)" in log and "'Factory': archived" in log
+    assert "Do not unarchive them in this version" in " ".join(back.stdout.split())
+
+    # upgrade again: the new panel's migration 0007 puts them back, still archived
+    site.git("checkout", "-q", "main")
+    site.next_second()
+    again = site.upgrade("run", "--with-migrations")
+    assert again.returncode == 0, again.both
+    site.assert_new_version_runs()
+    assert site.events("RESTORE-OTHER-GAMES ") == ["RESTORE-OTHER-GAMES 2"]
+    assert site.servers() == {
+        "mc1": ["Survival", "minecraft", "25600", "no"],
+        "fa1": ["Factory", "factorio", "25600", "yes"],
+        "te1": ["Terra", "terraria", "7777", "yes"],
+    }
+    assert not (site.fake / "side_games").exists()
+
+
+def test_archiving_that_fails_stops_nothing_and_says_how_to_go_on(games_site):
+    site = games_site
+    site.write("servers_db", [*MC_AND_FACTORIO, "te1|Terra|terraria|7777|no"])
+    site.toggle("fail_archive")
+    result = site.upgrade("rollback", "--archive-other-games")
+    assert result.returncode == 1, result.both
+    assert site.events("ARCHIVE ") == ["ARCHIVE fa1"] and "the agent did not answer" in result.stdout
+    words = " ".join(result.stderr.split())
+    assert "Nothing was stopped and no migration was undone: the upgraded version keeps running" in words
+    assert "./scripts/upgrade.sh rollback --archive-other-games' again" in words
+    site.assert_new_version_runs()
+    assert site.status() == "done" and not site.events("STOP ") and not site.events("UNMIGRATE ")
+    # once the problem is gone the rollback goes on with what is left
+    site.toggle("fail_archive", False)
+    site.forget_events()
+    back = site.upgrade("rollback", "--archive-other-games")
+    assert back.returncode == 0, back.both
+    site.assert_old_version_runs()
+    assert not site.events("LOST ") and site.read("side_games") == ["fa1|factorio|34197", "te1|terraria|7777"]
+
+
+def test_a_rollback_without_servers_of_other_games_asks_and_goes_on(games_site):
+    site = games_site
+    site.write("servers_db", ["mc1|Survival|minecraft|25600|no"])
+    back = site.upgrade("rollback")
+    assert back.returncode == 0, back.both
+    site.assert_old_version_runs()
+    assert "servers of other games: none" in back.stdout and site.events("GAMES-CHECK ")
+    assert not site.events("GAMES-ARCHIVE ")
+
+
+# --- the rollback's own dump, and the guard of migrations instances 0005/0006 ---------------------
+def rollback_dump(site: Site) -> str:
+    (dump,) = site.state()["ROLLBACK_SQL"]
+    return dump
+
+
+def test_rollback_dumps_the_database_first_and_every_failure_names_that_dump(site):
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    (before_upgrade,) = site.state()["BACKUP_SQL"]
+    site.forget_events()
+    site.toggle("fail_unmigrate_jobs")
+    failed = site.upgrade("rollback")
+    assert failed.returncode == 1, failed.both
+    dump = rollback_dump(site)
+    assert dump != before_upgrade and Path(before_upgrade).exists() and site.state()["BACKUP_SQL"] == [before_upgrade]
+    assert stat.S_IMODE(Path(dump).stat().st_mode) == 0o600 and stat.S_IMODE(Path(dump[:-4] + ".env").stat().st_mode) == 0o600
+    events = site.events()
+    assert events.index("DUMP") < min(i for i, e in enumerate(events) if e.startswith("STOP "))
+    # the way back the message names first is that dump: nothing written since the upgrade is lost
+    words = " ".join(failed.stderr.split())
+    assert words.index(f"./scripts/upgrade.sh restore-db {dump} --yes") < words.index(f"restore-db {before_upgrade} --yes")
+    site.toggle("fail_unmigrate_jobs", False)
+
+    # a failure that has no message of its own about the way back ends with it too
+    site.next_second()
+    site.toggle("fail_up")
+    again = site.upgrade("rollback")
+    assert again.returncode == 1, again.both
+    newer = rollback_dump(site)
+    assert newer != dump and f"./scripts/upgrade.sh restore-db {newer} --yes" in " ".join(again.stderr.split())
+    site.toggle("fail_up", False)
+
+    # --no-backup: no dump, and it says what that means
+    site.git("checkout", "-q", "main")  # (the failed rollback had checked out the old revision already)
+    site.forget_events()
+    plain = site.upgrade("rollback", "--no-backup")
+    assert plain.returncode == 0, plain.both
+    assert not site.events("DUMP") and "skipped (--no-backup)" in plain.stdout and "has no way back but" in plain.stdout
+    site.assert_old_version_runs()
+
+
+def test_the_plan_of_the_undo_refuses_while_servers_of_other_games_are_not_recorded(games_site):
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    site.toggle("games_check_blind")  # even when the check misses them, migrations 0005/0006 do not
+    refused = site.upgrade("rollback")
+    assert refused.returncode == 2, refused.both
+    words = " ".join(refused.stderr.split())
+    assert "migrations of 'instances' cannot be undone (Raw Python operation -> IRREVERSIBLE (other games))" in words
+    assert "not archived and recorded: ./scripts/upgrade.sh rollback --archive-other-games" in words
+    assert_nothing_was_changed_by_the_rollback(site)
+
+
+def test_an_archive_that_misses_a_server_is_caught_by_the_plan_before_anything_is_stopped(games_site):
+    site = games_site
+    site.write("servers_db", [*MC_AND_FACTORIO, "te1|Terra|terraria|7777|no"])
+    site.toggle("archive_misses")
+    refused = site.upgrade("rollback", "--archive-other-games")
+    assert refused.returncode == 2, refused.both
+    assert site.events("ARCHIVE ") == ["ARCHIVE fa1", "ARCHIVE te1"]
+    events = site.events()
+    assert max(i for i, e in enumerate(events) if e.startswith("PLAN instances")) > events.index("ARCHIVE te1")
+    words = " ".join(refused.stderr.split())
+    assert "IRREVERSIBLE (other games)" in words and "Nothing was stopped and no migration was undone" in words
+    assert f"./scripts/upgrade.sh restore-db {rollback_dump(site)} --yes" in words
+    site.assert_new_version_runs()
+    assert site.status() == "done" and not site.events("STOP ") and not site.events("UNMIGRATE ")

@@ -399,6 +399,57 @@ class SafeRoot:
         with self._dir_fd(base) as fd:
             yield from _walk(fd, base, 0)
 
+    def chown_tree(self, uid: int, gid: int, *, skip: tuple[str, ...] = (), max_depth: int = 64) -> int:
+        """Give the root folder and everything below it the owner ``uid:gid`` (what ``chown -R``
+        does), never following a symbolic link (a link itself is changed, not its target). Entries
+        that already have it are not touched; ``skip``: paths relative to the root left out with
+        everything below them. Returns how many entries were changed. Raises OSError (e.g.
+        PermissionError when the agent may not chown)."""
+        skipped = {tuple(split_path(s)) for s in skip if split_path(s)}
+        changed = 0
+
+        def fix(name: str | None, fd: int, st: os.stat_result) -> None:
+            nonlocal changed
+            if st.st_uid == uid and st.st_gid == gid:
+                return
+            if name is None:
+                os.fchown(fd, uid, gid)
+            else:
+                os.chown(name, uid, gid, dir_fd=fd, follow_symlinks=False)
+            changed += 1
+
+        def walk(fd: int, prefix: list[str], depth: int) -> None:
+            if depth > max_depth:
+                return
+            with os.scandir(fd) as it:
+                items = list(it)
+            for de in items:
+                path = (*prefix, de.name)
+                if path in skipped:
+                    continue
+                try:
+                    st = de.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                try:
+                    fix(de.name, fd, st)
+                except FileNotFoundError:
+                    continue
+                if statmod.S_ISDIR(st.st_mode):
+                    try:
+                        cfd = os.open(de.name, DIR_FLAGS, dir_fd=fd)
+                    except OSError:
+                        continue  # replaced by a link or removed meanwhile
+                    try:
+                        walk(cfd, list(path), depth + 1)
+                    finally:
+                        os.close(cfd)
+
+        with self._dir_fd([]) as fd:
+            fix(None, fd, os.fstat(fd))
+            walk(fd, [], 0)
+        return changed
+
     def search(
         self,
         rel: str,

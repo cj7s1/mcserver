@@ -422,7 +422,39 @@ class _PipeWriter:
 MAX_ZIP_FOLDERS = 8
 
 
-def stream_zip(root: SafeRoot, rel: str | list[str], *, max_bytes: int = MAX_TOTAL_BYTES) -> Iterator[bytes]:
+MAX_ZIP_EXCLUDES = 32
+
+
+def _excludes(items: list[str]) -> list[tuple[str, ...]]:
+    if len(items) > MAX_ZIP_EXCLUDES:
+        raise AgentError(f"At most {MAX_ZIP_EXCLUDES} paths can be excluded", "invalid_path", 400)
+    out = []
+    for item in items:
+        if not isinstance(item, str) or item.startswith("/") or item.startswith("\\"):
+            raise AgentError(
+                f"Invalid exclude {item!r}: a path relative to the server folder", "invalid_path", 400
+            )
+        try:
+            parts = split_path(item)
+        except PathError as exc:
+            raise AgentError(f"Invalid exclude {item!r}: {exc}", "invalid_path", 400) from exc
+        if not parts:
+            raise AgentError("The server folder itself cannot be excluded", "invalid_path", 400)
+        out.append(tuple(parts))
+    return out
+
+
+def _is_excluded(parts: list[str], excluded: list[tuple[str, ...]]) -> bool:
+    return any(tuple(parts[: len(ex)]) == ex for ex in excluded)
+
+
+def stream_zip(
+    root: SafeRoot,
+    rel: str | list[str],
+    *,
+    max_bytes: int = MAX_TOTAL_BYTES,
+    exclude: list[str] | None = None,
+) -> Iterator[bytes]:
     """A zip of one or more directories inside the instance, built on the fly.
 
     The folders are walked and their size checked right away (so a too-large folder is an
@@ -434,7 +466,12 @@ def stream_zip(root: SafeRoot, rel: str | list[str], *, max_bytes: int = MAX_TOT
     Only regular files are included (symlinks are never followed); paths in the archive
     are relative to each chosen directory's parent so the folder names are preserved
     (``world/…``, ``world_nether/…``). Several folders must have distinct names.
+
+    ``exclude``: paths relative to the server folder (not to the zipped folder); a file whose
+    path equals one of them or lies below it is left out (at most MAX_ZIP_EXCLUDES; an invalid
+    one, the server folder itself included, is 400 ``invalid_path``).
     """
+    excluded = _excludes(exclude or [])
     rels = [rel] if isinstance(rel, str) else list(rel)
     if not rels or len(rels) > MAX_ZIP_FOLDERS:
         raise AgentError(f"Choose between 1 and {MAX_ZIP_FOLDERS} folders", "invalid_path", 400)
@@ -450,6 +487,8 @@ def stream_zip(root: SafeRoot, rel: str | list[str], *, max_bytes: int = MAX_TOT
     files: list[tuple[str, str, os.stat_result]] = []  # (path, name in the zip, stat)
     for parts, prefix in folders:
         for path, st in root.walk_files("/".join(parts), max_depth=64):
+            if excluded and _is_excluded(split_path(path), excluded):
+                continue
             files.append((path, "/".join([prefix, *split_path(path)[len(parts) :]]), st))
     if sum(st.st_size for _p, _a, st in files) > max_bytes:
         raise AgentError("Folder is too large to download as a zip", "archive_too_large", 413)

@@ -53,6 +53,13 @@ MODPACK = "mcpanel"
 TMODLOADER_TERRARIA = "1.4.4.9"
 CONFIG_FILE = "serverconfig.txt"
 TSHOCK_CONFIG = "config.json"
+# tModLoader keeps the mods' data of a world in <world>.twld next to the .wld; the saves page moves
+# both aside but downloads and imports the .wld only
+TMODLOADER_TWLD_NOTE = (
+    "Download and import carry the .wld file only. tModLoader keeps the mods' data of a world in the .twld file "
+    "next to it: copy Worlds/<name>.twld with the file manager to keep it (an import moves the old .twld aside, "
+    "and the imported world starts without mod data unless you upload its .twld as well)."
+)
 REST_USER = "mcpanel"
 REST_PORT = 7878
 DATA_DIR = {VANILLA: "/opt/terraria/config", TMODLOADER: "/opt/terraria/config", TSHOCK: "/config"}
@@ -622,14 +629,28 @@ class TerrariaDefinition(GameDefinition):
                 client.write_text(instance.id, enabled, "[]\n")
 
     def masked_text(self, instance: Instance, path: str, content: str) -> str:
-        """The text editor's view of a server file: TShock's REST token hidden in config.json."""
+        """The text editor's view of a server file: TShock's REST token hidden in config.json (and in
+        any other file it was copied into)."""
         from apps.instances.spec import rcon_password
 
-        if self.variant(instance) == TSHOCK and path.strip("/") == TSHOCK_CONFIG:
+        if self.variant(instance) == TSHOCK:
             secret = rcon_password(instance)
             if secret and len(secret) >= 8:
                 return content.replace(secret, "********")
         return content
+
+    def consistency_note(self, instance: Instance) -> str:
+        variant = self.variant(instance)
+        if variant == TSHOCK:
+            how = "through TShock's REST API (/v2/world/save, which answers when the world is written)"
+        elif variant == TMODLOADER:
+            how = "with the console's save command (tModLoader prints no end of a save: the agent waited for a newer .twld)"
+        else:
+            how = "with the console's save command (the agent waited for 'Backing up world file')"
+        return f"the world was saved {how} right before the copy; the game is not paused while the files are copied"
+
+    def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
+        return (TSHOCK_CONFIG,) if self.variant(instance) == TSHOCK else ()
 
     # -- setup: the TShock owner account ----------------------------------------------------------------
     def run_setup_step(self, instance: Instance, step: SetupStep, ctx: Any) -> str:
@@ -769,6 +790,8 @@ class TerrariaDefinition(GameDefinition):
         return {"via": "console", "output": output}
 
     # -- software -----------------------------------------------------------------------------------------------
+    software_keys = ("game", "variant", "version", "image")
+
     def software_state(self, instance: Instance) -> dict[str, Any]:
         return {
             "game": self.id,
@@ -887,13 +910,19 @@ class TerrariaSaves:
             set_aside.append({"folder": f"{SET_ASIDE_DIR}/{folder.get('name')}", "files": sorted(files)})
         set_aside.sort(key=lambda f: f["folder"], reverse=True)
         worlds.sort(key=lambda s: (not s["current"], s["name"]))
-        return {
+        answer: dict[str, Any] = {
             "current": current,
             "saves": worlds,
             "set_aside": set_aside,
             "options": {"variant": self.definition.variant(instance), **(instance.game_options or {})},
             "reset_fields": self.describe()["reset_fields"],
         }
+        if notes := self.notes(instance):
+            answer["notes"] = notes
+        return answer
+
+    def notes(self, instance: Instance) -> list[str]:
+        return [TMODLOADER_TWLD_NOTE] if self.definition.variant(instance) == TMODLOADER else []
 
     @staticmethod
     def _is_world_file(name: str) -> bool:

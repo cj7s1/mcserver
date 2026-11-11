@@ -257,6 +257,8 @@ MCPANEL_IT_BTRFS_FINGERPRINT="$FP" uv run pytest -q -m integration -s
 | `MCPANEL_IT_AGENT_CONTAINER` | — | the name of the agent's own container, which must see the data root at the same path. The agent makes its data root `root:root 0750` at every start, so a run as a normal user cannot look into it: the on-disk checks (removal, ownership, the retire test's last-run record) then run there through `docker exec` (`tests/integration_support.py`, `AgentDisk`). Unset, and not root: a test that reaches such a check is **skipped** with a message naming this variable |
 | `MCPANEL_IT_READY_TIMEOUT` | `360` | seconds to wait for a server to become healthy |
 | `MCPANEL_IT_BIND_IP` | `127.0.0.1` | host address the test servers' game ports are published on; the default keeps them off the LAN |
+| `MCPANEL_IT_PORTS` | each module's range (25600-25650, 25800-25820) | `<first>-<last>`: the host port range every integration module uses instead (a host whose ports there are taken) |
+| `MCPANEL_IT_IMAGE_CHANNEL` | — (the panel's `stable`) | the test panel's `runtime_image_channel`, e.g. `pinned:<tag>`, so a run never pulls `stable-javaNN` and moves a tag the host's servers use |
 | `MCPANEL_IT_BTRFS_AGENT_URL`, `_TOKEN`, `_FINGERPRINT` | — (skip) | snapshot tests: an `https://` agent on btrfs, pinned via `Node.tls_fingerprint` |
 | `MCPANEL_IT_BTRFS_DATA_ROOT` | `/srv/btrfs-test/data` | on-disk subvolume checks; empty skips them |
 

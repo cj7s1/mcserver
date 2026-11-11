@@ -22,6 +22,9 @@ READY_TIMEOUT = float(os.environ.get("MCPANEL_IT_READY_TIMEOUT", "360"))
 # Host address the game ports of the test servers are published on. The model's default is
 # 0.0.0.0, which would put every test server on the LAN while the tests run.
 BIND_IP = os.environ.get("MCPANEL_IT_BIND_IP") or "127.0.0.1"
+# The runtime image channel of the test panel (system setting runtime_image_channel), e.g.
+# "pinned:2026.10.0"; empty: the panel's default ("stable", which pulls stable-javaNN).
+IMAGE_CHANNEL = os.environ.get("MCPANEL_IT_IMAGE_CHANNEL", "").strip()
 
 
 class Timer:
@@ -70,7 +73,22 @@ def make_node(name: str, url: str, token: str, *, fingerprint: str = "", ports: 
     if ports:
         SystemSetting.set("port_range_start", ports[0])
         SystemSetting.set("port_range_end", ports[1])
+    if IMAGE_CHANNEL:
+        # e.g. "pinned:2026.10.0": a run never pulls stable-javaNN and moves a tag the host uses
+        SystemSetting.set("runtime_image_channel", IMAGE_CHANNEL)
     return node
+
+
+def it_ports(default: tuple[int, int]) -> tuple[int, int]:
+    """The host port range of a test module: ``MCPANEL_IT_PORTS=<first>-<last>`` overrides every
+    module's default (a host whose ports in the defaults are taken)."""
+    raw = os.environ.get("MCPANEL_IT_PORTS", "").strip()
+    if not raw:
+        return default
+    first, _, last = raw.partition("-")
+    lo, hi = int(first), int(last or first)
+    assert 1024 <= lo <= hi <= 65535, f"MCPANEL_IT_PORTS={raw!r}: expected <first>-<last> between 1024 and 65535"
+    return lo, hi
 
 
 def pick_port(node: Any, ports: tuple[int, int]) -> int:

@@ -48,6 +48,7 @@ from .integration_support import (
     Timer,
     container_names,
     disk,
+    it_ports,
     make_node,
     rcon,
     run_job,
@@ -58,7 +59,7 @@ AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
 DATA_ROOT = os.environ.get("MCPANEL_IT_AGENT_DATA_ROOT", "/srv/mcpanel-dev")
 AGENT_CONTAINER = os.environ.get("MCPANEL_IT_AGENT_CONTAINER", "")
-PORTS = (25600, 25650)
+PORTS = it_ports((25600, 25650))
 BLOCK = (0, 100, 0)
 MARKER = "[mcpanel] ---- end of the run that stopped "
 

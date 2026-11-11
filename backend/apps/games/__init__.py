@@ -155,10 +155,17 @@ def require_agent_support(game_id: str | None, client: AgentClient, variant: str
     game = game_id or DEFAULT_GAME
     if game == DEFAULT_GAME:
         return
-    if client.supports(GAMES_FEATURE) and game in client.games():
+
+    def supported(refresh: bool) -> bool:
+        if GAMES_FEATURE not in client.features(refresh=refresh):
+            return False
+        reported = client.games(refresh=refresh)
         # a variant needs its own profile (Terraria: vanilla, tModLoader, TShock)
-        if not variant or variant in ((client.games().get(game) or {}).get("variants") or []):
-            return
+        return game in reported and (not variant or variant in ((reported.get(game) or {}).get("variants") or []))
+
+    # the cached answer first; before refusing, ask the agent again (it may have been updated since)
+    if supported(False) or supported(True):
+        return
     definition = get_or_none(game)
     label = definition.label if definition is not None and definition.label else game
     raise ConflictError(

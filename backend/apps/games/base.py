@@ -127,6 +127,9 @@ class PortSpec:
     # the name of another port of the game that this one always shares its host port number with
     # (Satisfactory: the HTTPS API on 7777/tcp and the game on 7777/udp); the panel never asks for it
     same_port_as: str = ""
+    # host port numbers this port must never get (Satisfactory's messaging port is published 1:1, so
+    # 7777 would be the container's API port on TCP)
+    avoid: frozenset[int] = frozenset()
 
     def as_dict(self) -> dict[str, Any]:
         data = {
@@ -155,6 +158,9 @@ class SecretSpec:
     # required only when the option (key, value) is chosen (Satisfactory: the client password when
     # access is "password")
     required_when: tuple[str, str] | None = None
+    # clearing it opens the server (Satisfactory's join password): the request must confirm it with
+    # ``"access": "open"`` (``GameDefinition.check_secret_change``), the UI asks first
+    clear_opens: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         data = {"key": self.key, "label": self.label, "help": self.help, "required": self.required, "link": self.link}
@@ -162,6 +168,8 @@ class SecretSpec:
             data["variants"] = list(self.variants)
         if self.required_when:
             data["required_when"] = {"option": self.required_when[0], "value": self.required_when[1]}
+        if self.clear_opens:
+            data["clear_opens"] = True
         return data
 
 
@@ -268,6 +276,9 @@ class GameDefinition:
     clean_exit_codes: frozenset[int] = frozenset({0})
     # the save files of the game (non-Minecraft games; Minecraft has instances/world.py)
     saves: Any = None
+    # whether a server may join another Docker network than the agent's instance network (Satisfactory:
+    # no, its driver reaches the API there and the claim depends on nobody else reaching it first)
+    custom_network: bool = True
     # environment variables an owner may add (Settings -> Environment) for this game; all others are
     # refused (images of other games have variables that download code or run scripts)
     allowed_user_env: frozenset[str] = frozenset({"TZ"})
@@ -448,6 +459,11 @@ class GameDefinition:
         pending with that message and the job ends without failing."""
         raise NotImplementedError(f"{self.id} has no setup step {step.id}")
 
+    def check_secret_change(self, instance: Instance, values: dict[str, Any], request_data: dict[str, Any]) -> None:
+        """Refuse a change of secrets that needs an explicit confirmation (Satisfactory: clearing the join
+        password opens the server, so the request must say ``"access": "open"``)."""
+        return None
+
     def secrets_changed(self, instance: Instance, keys: list[str]) -> None:
         """The owner changed these secrets (Settings); a game whose setup step applies one marks that
         step pending again (Satisfactory: the client password)."""
@@ -611,6 +627,55 @@ class GameDefinition:
         """A server file as the text editor shows it (secrets the game keeps inside a file hidden)."""
         return content
 
+    def consistency_note(self, instance: Instance) -> str:
+        """What a "consistent" backup of this game means, for the backup job's log (Minecraft: none,
+        its saving is paused while restic copies)."""
+        return ""
+
+    def secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        """Server files that hold a control secret (Factorio: config/rconpw): the file API never
+        serves them (download, zip, backup browser), never overwrites, renames or deletes them, and
+        never renames or deletes a folder that contains one (``apps.instances.secret_files``)."""
+        return (self.control_secret_file,) if self.control_secret_file else ()
+
+    def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
+        """Server files with a secret inside (``masked_text`` hides it, e.g. TShock's config.json):
+        downloads are masked, zips leave them out for users without ``instance.configure``."""
+        return ()
+
+    def files_touched(self, instance: Instance, paths: list[str], why: str) -> None:
+        """Server files were changed outside the game (``paths`` relative to the server folder, ""
+        = all of it): a restore, a file upload, rename or delete. Satisfactory: a change under
+        ``saved/`` may have lost the claim, so the setup must check it again before publishing."""
+        return None
+
+    def observed(self, instance: Instance, container: dict[str, Any] | None) -> None:
+        """What the reconciler saw of the server's container (``GET /status`` of the agent)."""
+        return None
+
+    def mark_unclaimed(self, instance: Instance, reason: str) -> bool:
+        """The node agent refused to start or publish the server because it is not claimed (409
+        ``server_unclaimed``): close what must be closed and make the setup run again. Returns whether
+        the next apply differs (then the caller applies again); games without a claim: False."""
+        return False
+
+    def must_apply_before_start(self, instance: Instance) -> bool:
+        """Every start recreates an out-of-date container (not only the Start job's)."""
+        return False
+
+    def copied_state(self, source: Instance) -> dict[str, Any]:
+        """Fields a clone or a server restored from a backup of ``source`` takes over besides its
+        settings, because its copied files depend on them (Satisfactory: the admin password the copied
+        claim was made with, the join password, the API token; the setup runs again)."""
+        return {}
+
+    def world_folders(self) -> tuple[str, ...]:
+        """The folders a clone "without the worlds" leaves out (the saves model's folders)."""
+        if self.saves is None:
+            return ()
+        described = self.saves.describe()
+        return tuple(f for f in (described.get("folder"), described.get("set_aside_folder")) if f)
+
     def version_key(self, version: str) -> tuple[int, ...]:
         """Sort key of an exact version (newer is larger); ValueError when it has no numbers."""
         import re
@@ -649,6 +714,10 @@ class GameDefinition:
         return []
 
     # -- software record of backups ------------------------------------------------------------
+    # The keys of ``software_state`` a backup's record keeps (``backups.handlers.backup_software``):
+    # what ``set_software`` puts back and ``software_differs`` compares. ``game`` is always kept.
+    software_keys: tuple[str, ...] = ("game",)
+
     def software_state(self, instance: Instance) -> dict[str, Any]:
         return {"game": self.id}
 

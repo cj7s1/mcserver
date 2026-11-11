@@ -24,8 +24,24 @@ Codes of games run through an HTTP API (``drivers.http_api``, Satisfactory):
 * ``api_error`` (502, or 409 for the game's state errors such as ``server_claimed``),
   ``api_unauthorized`` / ``api_forbidden`` (409): the game answered with an error (its own
   ``errorCode`` is in the message);
-* ``server_unclaimed`` (409): an apply would publish the ports of a Satisfactory server nobody
-  claimed; ``claimed_elsewhere`` (409): it was claimed with another admin password.
+* ``server_unclaimed`` (409): an apply, start or restart would run a Satisfactory server with
+  published ports that nobody claimed (no claim file ``saved/ServerSettings.7777.sav``, no API
+  token, or the running server still accepts an InitialAdmin login); ``claim_unverified`` (409):
+  the claim of the running server could not be verified (its API did not answer or answered
+  unexpectedly); ``claimed_elsewhere`` (409): it was claimed with another admin password;
+* ``session_exists`` / ``save_exists`` (409): a new game or an imported save would reuse the name
+  of a session or save the server has.
+
+Codes of the container checks:
+
+* ``network_not_supported`` (400): the profile runs on the agent's instance network only;
+* ``port_collision`` (400): a port a variable names collides with a profile port, or a host or
+  container port (per protocol) is published twice (profiles with ``env_ports``);
+* ``image_volume_uncovered`` (409): the image declares a VOLUME the profile does not mount (Docker
+  would create an anonymous volume);
+* ``volume_source_invalid`` (409): a folder of the server folder the container mounts is no longer
+  a real folder (checked before every start);
+* ``console_timeout`` (504): a console exec did not finish in time.
 """
 
 from __future__ import annotations

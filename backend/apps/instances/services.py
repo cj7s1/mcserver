@@ -171,6 +171,8 @@ def assign_named_ports(
                 raise ApiError(f"{spec.label}: the host port must be a number", code="invalid_port") from None
             if not 1024 <= port <= 65535:
                 raise ApiError("Ports must be between 1024 and 65535", code="invalid_port")
+            if port in getattr(spec, "avoid", ()):
+                raise ApiError(f"{spec.label} cannot use port {port}", code="invalid_port", details={"port_name": spec.name})
             key = (port, spec.protocol)
             if key in used or key in taken:
                 what = used.get(key) or f"its own {spec.protocol.upper()} port"
@@ -182,7 +184,15 @@ def assign_named_ports(
         else:
             candidates = [*range(spec.default_host_port, min(65535, spec.default_host_port + NAMED_PORT_SEARCH) + 1)]
             candidates += [p for p in range(start, end + 1) if p not in candidates]
-            port = next((p for p in candidates if all((p, proto) not in used and (p, proto) not in taken for proto in group)), 0)
+            avoid = getattr(spec, "avoid", frozenset())
+            port = next(
+                (
+                    p
+                    for p in candidates
+                    if p not in avoid and all((p, proto) not in used and (p, proto) not in taken for proto in group)
+                ),
+                0,
+            )
             if not port:
                 raise ConflictError(
                     f"No free {spec.protocol.upper()} port for {spec.label}",

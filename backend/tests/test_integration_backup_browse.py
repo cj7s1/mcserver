@@ -23,6 +23,7 @@ from .integration_support import (
     Timer,
     backup_repo_dir,
     disk,
+    it_ports,
     make_node,
     restic_available,
     run_job,
@@ -33,7 +34,7 @@ from .integration_support import (
 AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
 DATA_ROOT = os.environ.get("MCPANEL_IT_AGENT_DATA_ROOT", "/srv/mcpanel-dev")
-PORTS = (25800, 25820)  # never published: the server is not started
+PORTS = it_ports((25800, 25820))  # never published: the server is not started
 
 pytestmark = [
     pytest.mark.integration,

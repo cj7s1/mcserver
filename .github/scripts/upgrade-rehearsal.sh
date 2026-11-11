@@ -10,10 +10,16 @@
 #   -> a run whose `docker compose up` fails after the old workers were removed does not finish:
 #      a second run refuses, `run --resume` finishes it with the rollback point of the old version
 #   -> the new layout, the account and the setting are still there, no old container left
-#   -> rollback: the old layout and the old images again, schema changes undone, data still there.
+#   -> when the old revision is from before multi-game: a Factorio server and a Minecraft server
+#      that share a port number (rows only, no game container); rollback and its dry run refuse
+#      and list them
+#   -> rollback (with --archive-other-games in that case): it dumps the database first; then the
+#      old layout and the old images again, schema changes undone, data still there, the Factorio
+#      server archived and recorded.
 #      While its `docker compose up` replaces the containers the terminal is closed (SIGHUP to the
 #      whole process group): the rollback still finishes
-#   -> run again, with the terminal closed in the same way: the switch still finishes
+#   -> run again, with the terminal closed in the same way: the switch still finishes, and the
+#      Factorio server is a Factorio server again (archived, its settings and secret back)
 #   -> the way back without undoing migrations: restore-db with the dump of that run, then rollback
 #   -> restore-db once more, after that finished rollback: the commands it prints start the old
 #      layout again
@@ -121,6 +127,8 @@ expect_services() {
     ok "running services: $1"
 }
 sql() { docker exec "$(dc ps -q postgres)" sh -c 'psql -X -q -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"' sh "$1"; }
+# Python in the running panel (Django shell); its last line of output
+panel_py() { dc exec -T panel python manage.py shell -v 0 -c "$1" </dev/null | tail -n 1; }
 csrf() { grep mcpanel_csrftoken "$JAR" | tr '\t' ' ' | rev | cut -d' ' -f1 | rev; }
 api() { # api METHOD PATH [JSON] -> HTTP status; body in $OUT
     local method="$1" path="$2" body="${3:-}"
@@ -314,11 +322,63 @@ expect_services "$NEW_SERVICES"
 ok "back to $NEW_SERVICES, no redis container, the rollback point is unchanged"
 data_is_there "Redis inside the panel container again"
 
-say "7. rollback; the terminal is closed while docker compose up brings the old layout back"
-upgrade_in_a_terminal_that_closes 'Container [^ ]+-panel-1 +(Started|Healthy)' rollback || die "upgrade.sh rollback did not finish after its terminal was closed"
+# A rollback to a release from before multi-game (no game column) must not lose other games.
+GAMES=0
+ROLLBACK_FLAGS=""
+if ! g cat-file -e "$OLD_REV:backend/apps/instances/migrations/0005_instance_game.py" 2>/dev/null &&
+    g cat-file -e "HEAD:backend/apps/instances/migrations/0007_restore_other_games.py" 2>/dev/null; then
+    GAMES=1
+    ROLLBACK_FLAGS="--archive-other-games"
+fi
+FACTORIO=rehearsal-factorio
+factorio_row() { sql "SELECT game_port, archived_at IS NOT NULL FROM instances_instance WHERE name = '$FACTORIO'"; }
+factorio_schedule_on() { sql "SELECT bool_or(s.enabled) FROM instances_schedule s JOIN instances_instance i ON i.id = s.instance_id WHERE i.name = '$FACTORIO' AND s.name = 'rehearsal'"; }
+if [ "$GAMES" = 1 ]; then
+    say "6c. a Factorio server and a Minecraft server that share port number 34197 (rows only, no game container)"
+    created=$(panel_py "
+from apps.instances.models import Instance, Schedule
+from apps.nodes.models import Node
+node = Node.default()
+Instance.objects.create(name='rehearsal-mc', node=node, image='itzg/minecraft-server:stable', game_port=34197)
+fa = Instance.objects.create(name='$FACTORIO', node=node, game='factorio', server_type='', minecraft_version='2.0.55',
+    image='factoriotools/factorio:2.0.55-rootless', memory_mb=2048, jvm_flags_preset='none', game_port=34197,
+    ports=[{'name': 'game', 'container_port': 34197, 'protocol': 'udp', 'host_port': 34197}],
+    game_options={'space_age': False, 'save_name': 'world'}, setup_state={'steps': {}})
+fa.set_secret_values({'token': 'rehearsal-secret'})
+fa.save(update_fields=['secrets'])
+Schedule.objects.create(instance=fa, name='rehearsal', action='backup', cron='0 4 * * *')
+print('created', fa.pk)")
+    case "$created" in created\ *) ok "Factorio server ${created#created }, Minecraft server on the same number" ;; *) die "creating the servers failed: $created" ;; esac
+
+    say "6d. rollback and its dry run refuse while a server of another game exists"
+    for dry in --dry-run ""; do
+        # shellcheck disable=SC2086 # empty or one option
+        refusal=$(upgrade rollback $dry 2>&1)
+        code=$?
+        printf '%s\n' "$refusal"
+        [ "$code" = 2 ] || die "rollback $dry should refuse (exit 2) while a Factorio server exists, got $code"
+        case "$refusal" in
+            *"'$FACTORIO'  factorio"*"--archive-other-games"*) ;;
+            *) die "the refusal does not list the Factorio server and name --archive-other-games" ;;
+        esac
+        case "$refusal" in *"'$FACTORIO' (game port 34197) gets 65536"*) ;; *) die "the refusal does not name the shared port number" ;; esac
+    done
+    expect_services "$NEW_SERVICES"
+    [ "$(state STATUS)" = "done" ] || die "the refused rollback changed the state to '$(state STATUS)'"
+    [ "$(factorio_row)" = "34197|f" ] || die "the refused rollback changed the Factorio server: $(factorio_row)"
+    ok "refused (exit 2), listed the server and the shared number; nothing was changed"
+fi
+
+say "7. rollback${ROLLBACK_FLAGS:+ $ROLLBACK_FLAGS}; the terminal is closed while docker compose up brings the old layout back"
+# shellcheck disable=SC2086 # empty or one option
+upgrade_in_a_terminal_that_closes 'Container [^ ]+-panel-1 +(Started|Healthy)' rollback $ROLLBACK_FLAGS || die "upgrade.sh rollback did not finish after its terminal was closed"
 [ "$(state STATUS)" = rolled-back ] || die "the state should be 'rolled-back', it is '$(state STATUS)'"
 tail -n 1 "$(newest_log)" | grep -q 'exit status 0$' || die "the log of the rollback does not end with the exit status 0"
 ok "the rollback finished without its terminal (the log says so: $(newest_log))"
+rollback_dump=$(state ROLLBACK_SQL)
+[ -f "$rollback_dump" ] && [ "$(stat -c %a "$rollback_dump")" = 600 ] || die "the rollback took no dump of the database (mode 600) first: '$rollback_dump'"
+grep -q "accounts_user" "$rollback_dump" || die "the dump of the rollback looks empty"
+ok "the rollback dumped the database before it changed anything: $rollback_dump"
 the_old_version_runs "rollback"
 if [ "$MIGRATES" = 1 ]; then
     pending=$(dc exec -T panel python manage.py showmigrations --plan | grep -c '\[ \]')
@@ -327,6 +387,13 @@ if [ "$MIGRATES" = 1 ]; then
     [ "$pending" = 0 ] || die "the old code sees unapplied migrations"
 fi
 data_is_there "after the rollback"
+if [ "$GAMES" = 1 ]; then
+    [ "$(sql "SELECT count(*) FROM information_schema.columns WHERE table_name = 'instances_instance' AND column_name = 'game'")" = 0 ] || die "the game column should be gone after the rollback"
+    [ "$(factorio_row)" = "65536|t" ] || die "the Factorio server should be archived with the rollback port 65536: $(factorio_row)"
+    [ "$(sql "SELECT game FROM mcpanel_rollback_other_games")" = factorio ] || die "the Factorio server is not recorded"
+    [ "$(factorio_schedule_on)" = f ] || die "the schedule of the Factorio server should be disabled"
+    ok "the Factorio server is archived (game port 65536 while the old version runs), recorded, its schedule off"
+fi
 
 say "8. upgrade again; the terminal is closed while docker compose up replaces the containers"
 g checkout -q "$BRANCH" || die "cannot switch back to $BRANCH"
@@ -336,6 +403,13 @@ grep -q '^==> Done$' "$(newest_log)" || die "the log of the run does not say tha
 ok "the switch finished without its terminal (the log says so: $(newest_log))"
 expect_services "$NEW_SERVICES"
 data_is_there "new layout, second time"
+if [ "$GAMES" = 1 ]; then
+    [ "$(sql "SELECT game || '|' || game_port || '|' || (archived_at IS NOT NULL) || '|' || (ports->0->>'protocol') || '|' || (game_options->>'save_name') FROM instances_instance WHERE name = '$FACTORIO'")" = "factorio|34197|true|udp|world" ] || die "the Factorio server did not come back as it was"
+    [ "$(panel_py "from apps.instances.models import Instance; print(Instance.objects.get(name='$FACTORIO').secret_values)")" = "{'token': 'rehearsal-secret'}" ] || die "the secret of the Factorio server did not come back"
+    [ "$(factorio_schedule_on)" = t ] || die "the schedule of the Factorio server should be enabled again"
+    [ "$(sql "SELECT to_regclass('public.mcpanel_rollback_other_games') IS NULL")" = t ] || die "the side table should be dropped"
+    ok "the Factorio server is back (game, port, ports, options, secret, schedule), still archived; the side table is gone"
+fi
 tags=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^mcpanel-rollback/')
 ok "rollback images kept: $tags (one generation)"
 

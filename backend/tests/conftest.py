@@ -50,7 +50,16 @@ ALLOWED_FETCH_HOSTS = {
 # --------------------------------------------------------------------------------------
 # agent/mcagent/main.py FEATURES of the agent released with this panel (tests/test_contracts_2026_11_10.py
 # checks that the two agree).
-CURRENT_AGENT_FEATURES = ("retire", "pull_newer", "ping", "clone_level_name", "games", "game_actions")
+CURRENT_AGENT_FEATURES = (
+    "retire",
+    "pull_newer",
+    "ping",
+    "clone_level_name",
+    "games",
+    "game_actions",
+    "claim_guard",
+    "archive_excludes",
+)
 # GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; phase 1 had
 # Minecraft only, phase 3 adds Factorio)
 CURRENT_AGENT_GAMES: dict[str, dict[str, Any]] = {
@@ -917,9 +926,12 @@ class FakeAgent:
         return {"path": path, "size": size, "encoding": chosen}
 
     def download(
-        self, instance_id: Any, path: str | list[str], *, endpoint: str = "download"
+        self, instance_id: Any, path: str | list[str], *, endpoint: str = "download", exclude: list[str] | None = None
     ) -> tuple[Iterator[bytes], int | None, Any]:
         iid = str(instance_id)
+        self.archive_excludes_seen = list(exclude or [])
+        if exclude and "archive_excludes" not in self.features:
+            exclude = None  # an older agent ignores the parameter
         if endpoint != "archive":
             data = self._read(iid, path)  # type: ignore[arg-type]
             return iter([data]), len(data), None
@@ -936,6 +948,8 @@ class FakeAgent:
                     raise self._err("Only folders can be downloaded as a zip", "not_a_directory", 400)
                 prefix = parts[-1] if parts else "server"
                 for f, data in sorted(root["files"].items()):
+                    if any(f == x or f.startswith(x + "/") for x in exclude or []):
+                        continue
                     if not rel or f.startswith(rel + "/"):
                         zf.writestr(f"{prefix}/{f[len(rel) + 1 :] if rel else f}", data)
         return iter([buf.getvalue()]), None, None

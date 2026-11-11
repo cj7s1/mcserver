@@ -48,6 +48,7 @@ from django.utils import timezone
 from apps.audit import service as audit
 from apps.core.errors import ApiError
 from apps.instances.models import DesiredState, Instance
+from apps.instances.state import _clean_exit_codes
 from apps.nodes.client import AgentClient, AgentError
 from apps.nodes.models import Node
 
@@ -161,7 +162,9 @@ class Command(BaseCommand):
                 else:
                     counts["stopped"] += 1
                     # 0 = the server shut down by itself; 137/255 = it was killed when the time ran out
-                    how = "" if exit_code in (0, None) else f" (exit code {exit_code}: not a clean stop)"
+                    # (a game's own clean exits count too: Terraria's image exits 143 after its saving SIGTERM)
+                    clean = exit_code in (0, None) or exit_code in _clean_exit_codes(inst)
+                    how = "" if clean else f" (exit code {exit_code}: not a clean stop)"
                     self._say(f"stopped   {inst.name} in {took:.0f} s{how}")
                 self._audit(inst, success=not still_running, details=details)
                 continue

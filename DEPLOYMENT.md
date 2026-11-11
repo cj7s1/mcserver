@@ -195,7 +195,11 @@ A Satisfactory server:
   players) and an x86-64 CPU that is not a generic VM CPU model.
 * runs as root inside the container with exactly CHOWN, DAC_OVERRIDE, SETUID and SETGID: the image
   changes its `steam` user to `MC_UID`/`MC_GID` and drops to it (it cannot run unprivileged as any
-  uid but 1000). The files in the server folder belong to `MC_UID`/`MC_GID`.
+  uid but 1000). The files in the server folder belong to `MC_UID`/`MC_GID`. When the runtime group
+  (`MC_GID`, 100 on Unraid) already exists in the image, the image keeps its own group (1000) for
+  files the game writes while it runs, so the agent gives the server folder the runtime owner
+  (`MC_UID`:`MC_GID`) again after every stop and before every backup; while the server runs, newly
+  written files can show group 1000 on the share.
 * gets three host ports: the **game port on UDP and the same number on TCP** (the server's HTTPS API,
   which the game's Server Manager uses), 7777 by default, and the **reliable messaging port** on
   TCP, 8888 by default. Forward all three. Inside the container the game port stays 7777 (the
@@ -549,9 +553,10 @@ Options:
 | `--from <rev>` | `run`, `dry-run` | The git revision that is deployed now, if the script cannot tell (below). |
 | `--no-pull` | `run` | Build with the base images already on this host (no internet needed). |
 | `--no-build` | `run`, `dry-run` | Only apply a change of `.env` or of the compose files: no pull, no build, no database dump, and the rollback point stays as it is. |
-| `--no-backup` | `run` | Skip the database dump. |
+| `--no-backup` | `run`, `rollback` | Skip the database dump (of `run`: step 3; of `rollback`: the dump it takes first). |
 | `--timeout <seconds>` | `run`, `rollback` | How long to wait for healthy (default 300). |
 | `--dry-run` | `rollback` | Only show what it would do. |
+| `--archive-other-games` | `rollback` | Going back to a release from before multi-game: archive the servers of games other than Minecraft first ("Rollback with servers of other games" below). |
 | `--yes` | `restore-db` | Do it. Without it the command only says what it would do. |
 
 ### Files the script writes
@@ -562,11 +567,12 @@ share it.
 | File | Content |
 |---|---|
 | `upgrade-state.env` | The rollback point and the state of the last run. Do not edit it. |
-| `upgrade-backup-<time>.sql` | The database dump of step 3: users (password hashes), server definitions, schedules, backup metadata and the encrypted secrets. Login sessions are left out. |
+| `upgrade-backup-<time>.sql` | The database dump of step 3 of `run`, or the one `rollback` takes first: users (password hashes), server definitions, schedules, backup metadata and the encrypted secrets. Login sessions are left out. |
 | `upgrade-backup-<time>.env` | A copy of `.env` from the same moment. Its `MCPANEL_SECRET_KEY` decrypts the secrets in the dump, so the two files together are as sensitive as the running panel. |
 | `upgrade-log-<time>.log` | Everything a `run`, `rollback` or `restore-db` printed, the output of `docker compose` included, with the exit status in its last line. It is written from the first change of that command on (with what was printed before); a command that refuses or only shows something leaves none. |
 
-The newest three dumps are kept; older ones are deleted with their `.env` copy. To write the dumps
+The newest three dumps are kept (and always the two the state file names: `BACKUP_SQL` of the last
+`run`, `ROLLBACK_SQL` of the last `rollback`); older ones are deleted with their `.env` copy. To write the dumps
 somewhere else, start the script with `MCPANEL_UPGRADE_BACKUP_DIR=<folder>` set. The newest ten
 logs are kept.
 
@@ -623,12 +629,18 @@ git reflog -n 20     # lines "pull: Fast-forward"; the entry below the first pul
 1. checks that the saved images still exist and that the source tree has no local changes
    (commit or stash them first);
 2. asks the upgraded version whether every database migration of the upgrade can be undone, and
-   stops nothing if one cannot (it then prints the `restore-db` commands). It also refuses
-   while jobs are queued or running (`--force` skips that);
-3. stops everything but the database (up to 2 minutes) and undoes those migrations. The data
+   stops nothing if one cannot (it then prints the `restore-db` commands). When the rollback
+   goes back to a release from before multi-game it asks about the servers of other games too
+   and refuses while there are any (next section). It also refuses while jobs are queued or
+   running (`--force` skips that);
+3. dumps the database as it is now (like step 3 of `run`, mode 600; `--no-backup` skips it and
+   says what that means). From here on every failure names the way back with that dump,
+   `./scripts/upgrade.sh restore-db <that dump> --yes`, which loses nothing the panel wrote since
+   the upgrade; the dump of `run` is older;
+4. stops everything but the database (up to 2 minutes) and undoes those migrations. The data
    stays; only what was written into columns the old version does not have is lost;
-4. checks out the recorded revision (the checkout is then on a detached HEAD);
-5. points the image names back at the saved images and brings the old layout up, without
+5. checks out the recorded revision (the checkout is then on a detached HEAD);
+6. points the image names back at the saved images and brings the old layout up, without
    building (with the same care as step 6 of `run`: leftovers of an `up` that was cut off are
    removed first, and a service that was not started is a failure at once).
 
@@ -656,6 +668,50 @@ Which checkout you are on matters after a rollback, and the rollback says so in 
 
 If you use the Unraid shutdown hook, remove it before you stay on a version without it
 (docs/UNRAID-SHUTDOWN.md).
+
+### Rollback with servers of other games
+
+A release from before multi-game knows only Minecraft servers: its database has no `game` column.
+Undoing the migrations of multi-game would drop what a Factorio, Satisfactory or Terraria server
+is (its game and variant, named ports, pinned settings, secrets, setup state). The old panel
+would then take such a server for a Minecraft server and start the Minecraft image in its folder.
+The old database also allows each game port number only once per node, so a UDP and a TCP server
+that share a number (allowed since multi-game) make undoing the migrations fail. So `rollback`
+(and `rollback --dry-run`) asks the upgraded version first, before it stops anything, and refuses
+while such servers exist. It lists them (id, name, game) and the port numbers that servers share,
+and names the three ways on:
+
+* **Keep the new version.** Nothing to do.
+* **`./scripts/upgrade.sh rollback --archive-other-games`.** With the stack still running, for each
+  server of another game the panel runs its own Stop job (the agent's graceful stop: the game
+  saves first) and its Archive job, disables its schedules and copies its row (the stored
+  ciphertext of its secrets included) into the table `mcpanel_rollback_other_games`. Django's
+  migrations do not manage that table, so the rollback leaves it alone and every later database
+  dump has it. A server that shares its port number with another server of the node gets a
+  number above 65535 while the old version runs (never a real port: the old version cannot
+  publish it); the listing says which. Player-history names longer than 16 characters (the old
+  limit) are put aside in `mcpanel_rollback_player_names`. Only then is the rest of the stack
+  stopped and the migrations undone, after the upgraded version was asked once more whether they
+  can be undone now. A job that holds such a server makes the rollback refuse
+  (also with `--force`); a stop or archive that fails ends the rollback with nothing stopped and no
+  migration undone: the servers archived so far stay archived, and `rollback --archive-other-games`
+  goes on with the rest once the problem is fixed.
+* **The database dump from before the upgrade** (`restore-db`, below). The servers of other games
+  are not in it.
+
+The database migrations guard this themselves: undoing `instances 0006` or `0005` refuses while a
+server of another game exists that the archive step has not recorded (also when they are undone
+by hand with `manage.py migrate`), and `manage.py migrate --plan` shows
+`IRREVERSIBLE (other games)` for them meanwhile, so `rollback` stops nothing.
+
+While the old version runs, leave these servers archived: unarchived, it would take them for
+Minecraft servers. Deleting one there is fine (its folder is deleted, as usual). The next
+`./scripts/upgrade.sh run` puts everything back: the database migration `instances 0007` restores
+each recorded server that still exists (game, variant, ports, settings, secrets, setup state,
+control secret, port number, and the fields the old version may have changed for a Minecraft
+server), enables the schedules the archive step disabled, puts the long player names back and drops
+both tables. The servers stay archived; unarchive them in the panel (check their ports first if
+you created servers while the old version ran).
 
 ### Rollback images: do not prune them
 

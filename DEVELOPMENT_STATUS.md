@@ -1,6 +1,6 @@
 # Development status
 
-_Last updated: 2026-11-11 (Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
+_Last updated: 2026-11-11 (fixes from the review of the multi-game branch, first section below; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
 pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
 all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
@@ -10,6 +10,58 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Review of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
+
+The review of d450d9c (17 findings) is fixed on top of it; unit-tested only (no real containers yet).
+Each fix has a regression test that was checked to fail without it (mutation runs on a scratch copy:
+52 panel mutations, 23 agent mutations, the rollback's Django and shell mutations, one frontend mutation).
+Minecraft's pin tests pass unchanged.
+
+* **Satisfactory never published unclaimed (1):** agent `publish_guard` = claim file
+  `saved/ServerSettings.7777.sav` (lstat, non-empty) + token file + live probe that fails closed
+  (`claim_unverified`), before every start of a published container (`docker_ops.start_guard`); check
+  loop `mcagent/claimguard.py` stops a running published unclaimed server and records `guard_stop`.
+  Panel `mark_unclaimed` on restores, restore-path/snapshot restores, file changes under `saved/`, the
+  agent's refusal or `guard_stop`, and a claim re-run; starts recreate unpublished meanwhile; jobs that
+  start the server again queue the setup. The `claimed_elsewhere` message no longer advises deleting the
+  claim file. Tests: agent `tests/test_claim_guard.py`, panel `tests/test_review_mg_satisfactory.py`.
+* **Factorio (2):** `LOAD_LATEST_SAVE=true`; the saves page and export name the newest save. Tests
+  `tests/test_review_mg_factorio.py`.
+* **Rollback (3):** `upgrade.sh rollback` refuses while servers of other games exist (also `--dry-run`),
+  `--archive-other-games` stops and archives them through the panel's jobs and keeps their rows in a side
+  table; shared port numbers are remapped above 65535 during the rollback and put back by migration
+  `instances/0007_restore_other_games` on the next `run` (needs `run --with-migrations`). Tests
+  `tests/test_rollback_other_games.py`, `tests/test_upgrade_script.py`; rehearsal extended, not run.
+* **Backups (4):** per-game `software_keys`. **Secret files (5):** `apps/instances/secret_files.py`,
+  agent archive `exclude` (feature `archive_excludes`). Tests `tests/test_review_mg_{backups,files}.py`.
+* **Guards and smaller findings (6-17):** `_replace_save`/Satisfactory safety-backup refusals and the
+  "left stopped" path tested; Satisfactory new game refuses existing sessions, imports never take a
+  reserved or existing name, collision-free `_mcpanel` save names, save before a loading upload;
+  clone/restore-as-new take over the claim password and secrets and run the setup; clearing the join
+  password needs `"access": "open"` (UI confirmation); setup steps in order (`setup_order`); instance
+  network only; messaging port never 7777, port collisions refused; Minecraft world endpoints refuse other
+  games; image VOLUMEs fail closed and bind sources are re-checked before every start; console exec
+  bounded; restarting containers stopped before a save is replaced; Satisfactory saves jobs stop a server
+  they started also when it never got ready and save first without a safety backup; the tModLoader `.twld`
+  note; backup log says what "consistent" means; the install job fails at the 30-minute first-start
+  deadline (`first_start_timeout`); clone "without worlds" leaves out each game's save folders; migrate
+  checks the target agent up front; `require_agent_support` asks again before refusing.
+
+Findings of the all-games real-stack run (2026-11-11), fixed the same way: 18 (rollback takes its own
+database dump at its start and names it in every failure; migrations 0005/0006 refuse to be undone while
+servers of other games are not archived), 19 (`host_shutdown` uses the game's clean exit codes: Terraria's
+143 is no "not a clean stop"), 20 (Satisfactory file ownership), 21 (**Minecraft behaviour change on
+purpose**: `POST /command` and command schedules refuse `stop` with `stop_via_power`; the phase 1 pin tests
+pass unchanged), 22 (the Overview asks for diagnostics only for games with the capability), 23 (the
+Satisfactory backup log says the game was saved first), 24 (the wizard's review shows the bind address),
+25 (integration tests: data-root checks through `AgentDisk`, `MCPANEL_IT_PORTS`, `MCPANEL_IT_IMAGE_CHANNEL`).
+
+Open points (to verify on a real stack): when exactly the game writes `saved/ServerSettings.7777.sav`
+after a claim (the publish step needs it on disk; if it is written only at the next autosave or exit,
+`publish` is refused with `server_unclaimed`); the 2 s window of the claim guard loop between the API
+coming up and the stop; whether Factorio's `--start-server-load-latest` ever picks a leftover
+`*.tmp.zip` after a crash; the rollback rehearsal with a Factorio row.
 
 ## Terraria (branch `feature/multi-game`, 2026-11-11)
 

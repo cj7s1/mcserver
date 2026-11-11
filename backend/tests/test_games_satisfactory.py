@@ -419,8 +419,15 @@ def test_changing_the_join_password_reapplies_it(created, clients, game, django_
     assert game.client_password == "new-pass"
     inst.refresh_from_db()
     assert inst.setup_state["steps"]["access"]["status"] == "done" and inst.game_options["access"] == "password"
+    # clearing it opens the server: only with the explicit choice (review 2026-11-10, item 9)
+    resp = clients["owner"].put(url, {"values": {"client_password": None}}, format="json")
+    assert resp.status_code == 400 and resp.json()["error"]["code"] == "confirmation_required"
+    inst.refresh_from_db()
+    assert game.client_password == "new-pass" and inst.game_options["access"] == "password"
+    assert inst.secret_values.get("client_password") == "new-pass"
     with django_capture_on_commit_callbacks(execute=True):
-        clients["owner"].put(url, {"values": {"client_password": None}}, format="json")
+        resp = clients["owner"].put(url, {"values": {"client_password": None}, "access": "open"}, format="json")
+    assert resp.status_code == 200
     inst.refresh_from_db()
     assert game.client_password == "" and inst.game_options["access"] == "open"
     # the API token is not a secret users see or set
@@ -593,7 +600,8 @@ def test_new_game_of_a_stopped_server_starts_and_stops_it(make_instance, fake_ag
     inst = _claimed_instance(make_instance, fake_agent, running=False)
     job = run("saves_reset", inst, django_capture_on_commit_callbacks, settings={"session_name": "Fresh"}, backup=False)
     assert job.status == JobStatus.SUCCEEDED, job.error
-    assert game.actions() == ["new_game"]
+    # no safety backup: the running game is saved first; an existing session's name is refused
+    assert game.actions() == ["save", "sessions", "new_game"]
     assert not fake_agent.containers[str(inst.id)]["running"]
     inst.refresh_from_db()
     assert inst.desired_state == "stopped"

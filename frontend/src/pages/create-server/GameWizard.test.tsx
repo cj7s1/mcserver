@@ -103,6 +103,7 @@ describe("create wizard: Factorio", () => {
     expect(await screen.findByText("A port between 1024 and 65535, or empty for automatic")).toBeInTheDocument();
     await user.clear(port);
     await user.type(port, "34200");
+    await user.type(screen.getByLabelText("Bind address"), "192.0.2.10");
     await user.click(screen.getByRole("button", { name: /Next/ }));
 
     // initial settings from the fields marked `initial`
@@ -115,6 +116,9 @@ describe("create wizard: Factorio", () => {
     expect(await screen.findByRole("heading", { name: /Review & deploy/ })).toBeInTheDocument();
     expect(screen.getByText("Game (UDP)")).toBeInTheDocument();
     expect(screen.getByText("34200")).toBeInTheDocument();
+    // the bind address entered is part of the summary (real-stack run 2026-11-11, item 24)
+    expect(screen.getByText("Bind address")).toBeInTheDocument();
+    expect(screen.getByText("192.0.2.10")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /Deploy server/ }));
 
     expect(post).toHaveBeenCalledTimes(1);
@@ -128,6 +132,7 @@ describe("create wizard: Factorio", () => {
       nightly_backup: true,
       options: { space_age: false },
       ports: { game: 34200 },
+      host_ip: "192.0.2.10",
       settings: { "server-settings": { name: "My factory", game_password: "pw" }, "map-gen-settings": { seed: 123 } },
     });
   });

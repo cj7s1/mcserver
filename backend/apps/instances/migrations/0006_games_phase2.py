@@ -9,6 +9,8 @@ from django.db import migrations, models
 
 import apps.core.crypto
 
+from ._other_games_guard import KeepOtherGames, noop
+
 
 class Migration(migrations.Migration):
     dependencies = [
@@ -46,4 +48,7 @@ class Migration(migrations.Migration):
                 condition=models.Q(("game", "minecraft")), fields=("node", "game_port"), name="unique_game_port_per_node"
             ),
         ),
+        # Last, so that undoing the migration runs it first: it refuses while servers of other games
+        # exist that `upgrade.sh rollback --archive-other-games` has not recorded (_other_games_guard).
+        migrations.RunPython(noop, KeepOtherGames("0006"), elidable=False),
     ]

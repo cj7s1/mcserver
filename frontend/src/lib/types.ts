@@ -267,6 +267,8 @@ export interface InstanceSecret {
   help?: string;
   required?: boolean;
   link?: string;
+  /** Clearing it opens the server to anyone (Satisfactory's join password): confirmed with access "open". */
+  clear_opens?: boolean;
   set: boolean;
 }
 
@@ -292,6 +294,8 @@ export interface SavesInfo {
   set_aside: { folder: string; files: string[] }[];
   options: Record<string, ConfigValue>;
   reset_fields: ConfigField[];
+  /** What the page cannot do for this server (tModLoader: the .twld file is not part of download/import). */
+  notes?: string[];
 }
 
 export type PermissionCode =

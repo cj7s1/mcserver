@@ -357,6 +357,7 @@ class SecretsView(APIView):
             raise ValidationError({"values": ["Provide an object of secrets"]})
         current = instance.secret_values
         known = {s.key for s in definition.secret_specs_for(instance)}
+        definition.check_secret_change(instance, values, request.data)
         for key, value in values.items():
             if definition.secret_spec(str(key)) is None or str(key) not in known:
                 raise ValidationError({"values": [f"Unknown secret '{key}'"]})
@@ -578,7 +579,9 @@ class SavesExportView(APIView):
             live = instance.status in ("running", "unhealthy") and world.may_flush(request.user, instance)
             path, filename, saved = own_export(client, instance, save_first=live)
         else:
-            path = saves.current_path(instance)
+            # the save the server loads and saves into (Factorio: the newest one, e.g. an autosave)
+            export_path = getattr(saves, "export_path", None)
+            path = export_path(client, instance) if export_path is not None else saves.current_path(instance)
             saved = False
         if (
             own_export is None
@@ -604,9 +607,7 @@ class SavesExportView(APIView):
                 pass  # not running after all: download what is on disk
         chunks, _length, upstream = client.download(instance.id, path)
         response = AgentStreamingResponse(chunks, upstream, content_type=getattr(saves, "content_type", "application/zip"))
-        response["Content-Disposition"] = content_disposition(
-            filename or f"{instance.name}-{saves.current(instance)}{saves.extension}"
-        )
+        response["Content-Disposition"] = content_disposition(filename or f"{instance.name}-{path.rsplit('/', 1)[-1]}")
         response["X-Content-Type-Options"] = "nosniff"
         audit.record(
             "files.download",

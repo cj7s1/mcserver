@@ -36,6 +36,7 @@ from .integration_support import (
     READY_TIMEOUT,
     InstanceTracker,
     Timer,
+    it_ports,
     make_node,
     rcon,
     restic_available,
@@ -46,7 +47,7 @@ from .integration_support import (
 AGENT_URL = os.environ.get("MCPANEL_IT_AGENT_URL", "")
 AGENT_TOKEN = os.environ.get("MCPANEL_IT_AGENT_TOKEN", "dev-agent-token")
 DATA_ROOT = os.environ.get("MCPANEL_IT_AGENT_DATA_ROOT", "/srv/mcpanel-dev")
-PORTS = (25600, 25650)
+PORTS = it_ports((25600, 25650))
 BLOCK = (0, 100, 0)  # air in a flat world
 NEW_SEED = 2026110923
 SEED_ANSWER = re.compile(r"Seed: \[(-?\d+)\]")

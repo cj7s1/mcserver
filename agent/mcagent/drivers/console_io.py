@@ -129,19 +129,46 @@ def _docker_api() -> Any:
     return docker_ops.client().api
 
 
-def exec_line(c: Container, template: Sequence[str], line: str, *, user: str | None) -> None:
+def exec_line(
+    c: Container, template: Sequence[str], line: str, *, user: str | None, timeout: float | None = None
+) -> None:
     """Run the profile's argv with ``line`` through Docker's exec API (no TTY, no stdin, not
-    privileged) and wait for it; 502 ``console_failed`` when the program exits non-zero."""
+    privileged) and wait for it, at most ``timeout`` seconds (default EXEC_TIMEOUT): 504
+    ``console_timeout`` after that (the request ends, and the caller's console lock with it; the
+    program may still finish inside the container), 502 ``console_failed`` when it exits non-zero."""
     api = _docker_api()
     argv = exec_argv(template, line)
-    try:
-        created = api.exec_create(
-            c.id, argv, stdout=True, stderr=True, stdin=False, tty=False, privileged=False, user=user or ""
+    limit = EXEC_TIMEOUT if timeout is None else timeout
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            created = api.exec_create(
+                c.id,
+                argv,
+                stdout=True,
+                stderr=True,
+                stdin=False,
+                tty=False,
+                privileged=False,
+                user=user or "",
+            )
+            box["output"] = api.exec_start(created["Id"], detach=False, tty=False, stream=False)
+            box["code"] = (api.exec_inspect(created["Id"]) or {}).get("ExitCode")
+        except BaseException as exc:
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, name="console-exec", daemon=True)
+    worker.start()
+    worker.join(limit)
+    if worker.is_alive():
+        raise AgentError(
+            f"The server's console did not take the line within {limit:g} s", "console_timeout", 504
         )
-        output = api.exec_start(created["Id"], detach=False, tty=False, stream=False)
-        code = (api.exec_inspect(created["Id"]) or {}).get("ExitCode")
-    except Exception as exc:
+    if "error" in box:
+        exc = box["error"]
         raise AgentError(f"Could not write to the server's console: {exc}", "console_failed", 502) from exc
+    output, code = box.get("output"), box.get("code")
     if code != 0:
         text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output or "")
         text = " ".join(text.split())[:200]

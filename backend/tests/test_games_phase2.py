@@ -175,7 +175,7 @@ def test_factorio_spec(factorio, settings):
             "TZ": "UTC",
             "DLC_SPACE_AGE": "false",
             "GENERATE_NEW_SAVE": "true",
-            "LOAD_LATEST_SAVE": "false",
+            "LOAD_LATEST_SAVE": "true",
             "SAVE_NAME": "world",
         },
         "memory_limit_mb": 2048,  # plain: no JVM overhead
@@ -668,6 +668,7 @@ def save_zip(name: str = "world") -> bytes:
 def test_saves_list_and_reset(clients, factorio, fake_agent, django_capture_on_commit_callbacks):
     fake_agent.put_file(factorio.id, "saves/world.zip", b"current")
     fake_agent.put_file(factorio.id, "saves/_autosave1.zip", b"auto")
+    fake_agent.fs[str(factorio.id)]["mtime"]["saves/_autosave1.zip"] -= 60  # older than world.zip (the loaded save)
     fake_agent.put_file(factorio.id, "config/map-gen-settings.json", json.dumps({"seed": None, "width": 0}))
     start_container(fake_agent, factorio)
     data = clients["viewer"].get(f"/api/instances/{factorio.id}/saves").json()

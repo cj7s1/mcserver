@@ -407,13 +407,34 @@ What the generic pieces do:
   the profile (agent, absolute: Factorio's `temp/`) and the definition (panel: `*.tmp.zip`).
 * **Image VOLUMEs**: for profiles with `mount_image_volumes` the agent inspects the image and mounts
   every declared VOLUME that is not a profile mount into `<server folder>/.volumes/...` (or a tmpfs
-  the profile names), so Docker never creates an anonymous volume outside the server folder.
+  the profile names), so Docker never creates an anonymous volume outside the server folder. For every
+  profile but Minecraft's a declared VOLUME without its own bind or tmpfs is refused at create
+  (`image_volume_uncovered`), and before every start and restart every bind source inside the server
+  folder (`.volumes/*` included) must still be a real directory reached without symbolic links
+  (`volume_source_invalid`): a start re-resolves bind sources, a file user could have replaced them.
 * **First start of images that download the game**: a definition can name `retryable_install_exits`
   (SteamCMD's exit 5/8); the install job then waits for the first start and starts the container
-  again up to `install_attempts` times (`game_handlers.wait_first_start`).
+  again up to `install_attempts` times (`game_handlers.wait_first_start`). A first start that is not
+  ready after 30 minutes fails the install job (`first_start_timeout`; the server goes on starting and
+  the setup job is queued to go on once it answers).
+* **Rollback to a revision without games** (`upgrade.sh rollback`, see DEPLOYMENT.md): refused while
+  servers of other games exist, unless `--archive-other-games` (`manage.py rollback_other_games`) stops
+  and archives them through the panel's jobs and keeps their rows in a side table outside Django's
+  migrations; migration `instances/0007_restore_other_games` puts them back (archived) on the next upgrade.
+* **Minecraft's world endpoints** (`/world`, `/world/replace`, `/world/reset`) refuse other games (409
+  `unsupported_by_game`): they share the capabilities with the saves endpoints. A clone "without the
+  worlds" of another game deletes the definition's save folders from the copy (`world_folders`).
+* **Backups' software record** keeps each definition's `software_keys` (Factorio: version, Space Age;
+  Terraria: variant, version; Satisfactory: none), so a "Before update" backup sets the version back. The
+  backup job's log says what "consistent" means for the game (`consistency_note`: saved right before the
+  copy, not paused).
+* **Agent support**: `games.require_agent_support` asks the agent again (no cache) before it refuses, and
+  a migration checks the target node's agent before anything is stopped.
 * **Exits from inside the game**: Factorio's `/quit` exits 0, which Docker's restart policy would
   restart. The console turns stop words into the panel's Stop; `POST /command` and schedule commands
-  refuse them for games with `refuse_stop_commands` (400 `stop_via_power`).
+  refuse them for games with `refuse_stop_commands` (400 `stop_via_power`). Minecraft too since the
+  real-stack run of 2026-11-11: `stop` over RCON exits the server and Docker started it again (a
+  deliberate change; a `stop` command schedule saved earlier is skipped with a note).
 * **Variants with their own data** (Terraria): one agent profile per variant (`(game, variant)`), a
   spec names `variant`; `/v1/info` lists each variant's images and control under
   `variant_profiles`, and the panel checks the variant too (`require_agent_support(..., variant)`).
@@ -428,7 +449,8 @@ What the generic pieces do:
   agent runs), or `stdin`, the line written through Docker's attach API to a container created with
   `stdin_open`. Every line is sanitised (printable, length-capped; with the `tmux` guard no key names,
   no leading `-`, no trailing `;`) and written under a per-server console lock; the reply is the log
-  read after the write (bounded), so a command answers with what the server printed meanwhile.
+  read after the write (bounded), so a command answers with what the server printed meanwhile. The exec
+  is bounded by `console_io.EXEC_TIMEOUT` (504 `console_timeout`; the console lock is released).
 * **The container's process** can be fixed by a profile (`entrypoint`, `command`, `working_dir`;
   fixed environment through `injected_env`), never by a spec: TShock runs its server binary directly
   as the runtime uid:gid instead of the image's root bootstrap script.
@@ -442,6 +464,17 @@ What the generic pieces do:
   follows the game's rule (Factorio: `<exact version>-rootless`). Minecraft keeps
   `runtime_image_repository` / `runtime_image_channel`. The agent must allow the repository
   (`AGENT_GAME_<ID>_IMAGES`, default: the profile's list).
+* **Secret files** (`apps/instances/secret_files.py`; `definition.secret_paths` /
+  `secret_bearing_paths`): files with a control secret (Factorio `config/rconpw`, Satisfactory
+  `.mcpanel/api-token` and its claim `saved/ServerSettings.7777.sav`) are never downloaded (also not
+  from the backup browser, not in a zip: the agent leaves them out, feature `archive_excludes`; an
+  older agent's zip of a folder with one is refused), never written, overwritten, renamed or deleted
+  through the file API, and no folder holding one is renamed or deleted. Files with a secret inside
+  (TShock's `config.json`) are masked like the editor in downloads and search results, and left out of
+  zips for users without `instance.configure`. Backups keep them (restic is encrypted).
+* **Files changed outside the game** (`definition.files_touched`): restores, restore-path, snapshot
+  restores and the file manager's uploads, edits, renames, deletes and extracts tell the definition
+  which paths changed (Satisfactory: anything under `saved/` closes the ports, see below).
 * **Saves** of games other than Minecraft (`definition.saves`; Factorio `FactorioSaves`):
   `GET /saves`, `POST /saves/reset` (job `saves_reset`), `POST /saves/import` (job `saves_import`),
   `GET /saves/export`. Reset and import stop the server, take a safety backup, move every save into
@@ -454,9 +487,12 @@ What the generic pieces do:
 server folder at `/factorio`, 34197/udp published, RCON 27015/tcp internal only. The panel writes the
 control secret (`Instance.rcon_password`) to `config/rconpw` before every apply
 (`handlers.write_control_secret`); the image passes it to the server, the agent's `rcon` driver reads
-it from the file. The file editor shows that file masked and refuses to write it. The server always
-loads `saves/world.zip` (`SAVE_NAME`, `LOAD_LATEST_SAVE=false`) and creates it from
-`config/map-gen-settings.json` when it is missing (`GENERATE_NEW_SAVE=true`). Space Age
+it from the file. The file API never hands that file out or changes it (see "Secret files" above). The
+server loads the newest save (`LOAD_LATEST_SAVE=true`: after an unclean exit that is an autosave,
+`_autosaveN.zip`, not the stale `world.zip`) and creates `saves/world.zip` (`SAVE_NAME`) from
+`config/map-gen-settings.json` when it is missing (`GENERATE_NEW_SAVE=true`). A reset or an import moves
+every zip aside while the server is stopped, so the new map or the upload is the only, and newest, save;
+a restore brings the files back with their times. The saves page and its download name the newest save. Space Age
 (`DLC_SPACE_AGE`) is chosen at creation and pinned in `game_options`. Versions come from Docker Hub's
 `*-rootless` tags and factorio.com's latest stable release; a software update changes the exact tag
 (pre-update backup, downgrade only when confirmed).
@@ -478,14 +514,19 @@ Ports: the game (UDP) and the HTTPS API (TCP) share one host port number (`PortS
 container port stays 7777 because the claim is stored per game port (`ServerSettings.<port>.sav`). The
 reliable-messaging port is advertised to players as the server knows it, so the definition sets
 `SERVERMESSAGINGPORT` to the host port and publishes it 1:1; the profile allows a container port that
-such a variable names (`RuntimeProfile.env_ports`).
+such a variable names (`RuntimeProfile.env_ports`). That port never takes 7777 (the container's API port
+on TCP; `PortSpec.avoid` on the panel, `env_port_error` on the agent), and for profiles with `env_ports`
+the agent refuses duplicate host or container (port, protocol) pairs (`port_collision`). The server runs
+on the agent's instance network only (`custom_network = False` on the panel, `instance_network_only` on
+the agent, 400 `network_not_supported`).
 
 Control is the `satisfactory-api` driver (`agent/mcagent/drivers/satisfactory.py`) on the generic
 `http-api` base (`drivers/http_api.py`): HTTPS to the container's address on the instance network, a TLS
 context of its own that accepts the self-signed certificate for that hop only (pinned per container run),
 bounded timeouts and answer sizes, the API token read from `.mcpanel/api-token` in the server folder.
 Errors usually come back as HTTP 200 with an `errorCode`, so every answer is checked. Saves are
-`SaveGame` as `<session>_mcpanel` (204 once written; the newest save of the session is what the server
+`SaveGame` as `<session>_mcpanel` (a session name with other characters than letters, digits, `_`, `-`,
+or a long one: `<sanitised>_<8 hex of its hash>_mcpanel`, so two sessions never share a save; 204 once written; the newest save of the session is what the server
 loads at its next start); stop = SaveGame, `Shutdown`, wait for the exit, then `docker stop` (a no-op for
 an exited container); signals end the game without saving. Readiness is the agent's `udp-query` probe
 (the Lightweight Query answers while a map loads, when the HTTPS API is briefly down). `/ping` answers
@@ -501,15 +542,41 @@ an API token (returned once; stored in `Instance.secrets["api_token"]`, written 
 every apply through `control_secret_value`), then the join password (or the explicit "open" choice) is
 applied and checked, a game is created unless one exists, and the `publish` step recreates the container
 with its ports. A step that needs a running server raises `SetupWaiting` (pending, the job ends quietly);
-the Start job enqueues the pending steps. The agent's `publish_guard` refuses an apply with ports while
-the running container still accepts an InitialAdmin login or the folder has no token. Changing the join
-password in Settings re-runs the `access` step (`secrets_changed`).
+the Start job enqueues the pending steps; a step whose earlier steps are not done is refused (409
+`setup_order`). Changing the join password in Settings re-runs the `access` step (`secrets_changed`);
+clearing it needs `"access": "open"` in the request (the UI asks first; `SecretSpec.clear_opens`).
+
+The published container is never left running unclaimed (feature `claim_guard`):
+
+* The agent's `publish_guard` runs before every start of a container with published ports (apply,
+  `/start`, `/restart`; `docker_ops.start_guard`): the claim file `saved/ServerSettings.7777.sav` must be
+  a non-empty regular file (lstat, no symbolic link), the token file must exist, and a running container's
+  API is probed (up to 20 s): unclaimed -> 409 `server_unclaimed`, no answer or an unexpected one -> 409
+  `claim_unverified` (fail closed). A refused `/restart` stops nothing.
+* Docker's own `on-failure` restart cannot be intercepted, so a check loop on the agent
+  (`mcagent/claimguard.py`, every 2 s) probes each run of a running published container as soon as its
+  API answers; an unclaimed (or unexpectedly answering) server is stopped at once (no save) and the
+  agent records why (`guard_stop` in `/status`, kept outside the server folder).
+* The panel closes the ports (`mark_unclaimed`: `ports_open` false, `claim`, `access`, `publish`
+  pending) whenever the claim may be lost: a restore, a restore-path or snapshot restore, a file upload,
+  edit, rename, delete or extract under `saved/` (`files_touched`), a `guard_stop` the reconciler sees
+  (`observed`), a 409 `server_unclaimed` from the agent (`handlers.unclaimed_refusal`; the apply is then
+  made again without ports), and a re-run of the claim step (which first recreates a published
+  container without ports). While the ports are closed every start recreates a published container
+  unpublished (`must_apply_before_start`), and a job that started the server again queues the setup.
+* A clone or a server restored as new takes over the admin password, the secrets and a fresh setup
+  (`copied_state`): its copied claim is logged into, it makes its own API token and publishes after its
+  setup. A clone "without the worlds" leaves out `saved/server/` and `backups/` (`world_folders`).
 
 Settings are two virtual config "files" (`is_virtual_config`): launch settings kept in
 `game_options["launch"]` and passed as the image's variables (restart), and the server options read
 from and written to the API while it runs. Saves (`SatisfactorySaves`) run their own jobs
-(`run_reset`, `run_import`, `export`): a stopped server is started for them and stopped again, a safety
-backup comes first, and the earlier sessions stay in `saved/server/`.
+(`run_reset`, `run_import`, `export`): a stopped server is started for them and stopped again (also when
+it never got ready), a safety backup comes first (without one the running game is saved first), and the
+earlier sessions stay in `saved/server/`. A new game under an existing session's name is refused
+(`session_exists`, panel and agent); an import never takes a name the game or the panel writes later
+(`*_autosave_<n>`, `*_mcpanel`), never overwrites a file (`save_exists`), and the agent saves the running
+game before it loads the upload.
 
 ### Terraria
 

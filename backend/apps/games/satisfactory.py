@@ -30,6 +30,7 @@ What the panel knows about it (docs/design/GAME-DEFINITIONS.md 4.5 and 8.5, corr
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -44,6 +45,8 @@ if TYPE_CHECKING:
     from apps.jobs.runner import JobContext
     from apps.nodes.client import AgentClient
 
+log = logging.getLogger(__name__)
+
 GAME = "satisfactory"
 DEFAULT_REPOSITORY = "wolveix/satisfactory-server"
 # the image the panel release runs (exact tag; verified on real containers, see TESTING.md)
@@ -52,6 +55,10 @@ BRANCH = "stable"
 GAME_PORT = 7777
 MESSAGING_PORT = 8888
 TOKEN_FILE = ".mcpanel/api-token"
+# the claim (admin password, API tokens, the server's certificate) of the game port the container
+# uses: always 7777 inside the container (ARCHITECTURE.md "Satisfactory")
+CLAIM_FILE = f"saved/ServerSettings.{GAME_PORT}.sav"
+CLAIM_DIR = "saved"
 TOKEN_SECRET = "api_token"
 CLIENT_PASSWORD = "client_password"
 SAVES_DIR = "saved/server"
@@ -59,6 +66,9 @@ SAVE_SUFFIX = ".sav"
 API_WAIT = 30 * 60  # seconds the claim waits for the first start (SteamCMD download) to finish
 SESSION_RE = re.compile(r"^[A-Za-z0-9 _-]{1,64}$")
 SAVE_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# names the game (``<session>_autosave_<n>``) or the panel (``<session>_mcpanel``, the agent's SaveGame)
+# write to later: an imported save never gets one
+RESERVED_SAVE_NAME = re.compile(r"(_autosave_\d+|_mcpanel)$", re.IGNORECASE)
 SERVER_NAME_CHARS = re.compile(r"[^A-Za-z0-9 _.'-]+")
 
 ACCESS_OPTION = GameOption(
@@ -187,6 +197,22 @@ SESSION_FIELD = {
 }
 
 
+# the steps that run again when the claim may be lost (mark_unclaimed); new_game keeps an existing game
+RECLAIM_STEPS = ("claim", "access", "publish")
+
+
+def _touches_claim(path: str) -> bool:
+    """``path`` (normalised, relative to the server folder) is ``saved/``, inside it, or a folder above it."""
+    return not path or path == CLAIM_DIR or path.startswith(CLAIM_DIR + "/")
+
+
+def guard_stop_of(container: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The agent's record that it stopped this server's container (or its last run) itself."""
+    c = container or {}
+    guard = c.get("guard_stop") or (c.get("last_run") or {}).get("guard_stop")
+    return guard if isinstance(guard, dict) else None
+
+
 def server_name_for(instance: Instance) -> str:
     """The name the server is claimed with (the API accepts letters, digits and a few signs here)."""
     name = " ".join(SERVER_NAME_CHARS.sub(" ", instance.name or "").split())[:64].strip()
@@ -241,6 +267,7 @@ class SatisfactoryDefinition(GameDefinition):
             "tcp",
             MESSAGING_PORT,
             "TCP port the server advertises to players for reliable messages (Satisfactory's default is 8888).",
+            avoid=frozenset({GAME_PORT}),  # published 1:1: 7777/tcp inside the container is the API
         ),
     )
     options = (ACCESS_OPTION,)
@@ -251,12 +278,14 @@ class SatisfactoryDefinition(GameDefinition):
             "Players enter it in the game to join. Clearing it later opens the server to anyone who knows its address.",
             required=False,
             required_when=("access", "password"),
+            clear_opens=True,
         ),
     )
     setup_steps = SETUP_STEPS
     min_memory_mb = 8192
     default_stop_timeout = 120
     control_secret_file = TOKEN_FILE
+    custom_network = False
     retryable_install_exits = frozenset({5, 8})
     install_attempts = 4
     allowed_user_env = frozenset({"TZ"})
@@ -329,6 +358,62 @@ class SatisfactoryDefinition(GameDefinition):
         """Whether the setup published the ports (claim, join password and game done)."""
         return bool((instance.setup_state or {}).get("ports_open"))
 
+    def must_apply_before_start(self, instance: Instance) -> bool:
+        """A container made while the ports were published is recreated (unpublished) before any start
+        once the claim must be checked again (``mark_unclaimed``)."""
+        return not self.ports_open(instance)
+
+    def mark_unclaimed(self, instance: Instance, reason: str) -> bool:
+        """The claim may be lost (a restore, a change under ``saved/``, the agent found the server
+        unclaimed, the claim step runs again): close the ports (the next apply recreates the container
+        unpublished) and make the claim, the join password and the publishing run again. Returns
+        whether the ports were open (the spec changed)."""
+        from django.utils import timezone
+
+        from apps.instances.models import Instance as InstanceModel
+
+        instance.refresh_from_db(fields=["setup_state"])
+        state = dict(instance.setup_state or {})
+        steps = dict(state.get("steps") or {})
+        was_open = bool(state.get("ports_open"))
+        now = timezone.now().isoformat()
+        for step_id in RECLAIM_STEPS:
+            steps[step_id] = {"status": "pending", "at": now, "message": reason[:500]}
+        state["steps"] = steps
+        state["ports_open"] = False
+        if was_open:
+            state["closed_reason"] = reason[:500]
+        instance.setup_state = state
+        InstanceModel.objects.filter(pk=instance.pk).update(setup_state=state)
+        if was_open:
+            log.warning("Satisfactory server %s: ports closed until the claim is checked again (%s)", instance.pk, reason)
+        return was_open
+
+    def copied_state(self, source: Instance) -> dict[str, Any]:
+        """A clone or a server restored as new has the source's claim in its copied ``saved/``: it keeps
+        the admin password (the control secret) and the secrets, and runs the whole setup again
+        (claim = log in with that password and make its own API token; nothing is published before)."""
+        return {"rcon_password": source.rcon_password, "secrets": source.secrets, "setup_state": {}}
+
+    def world_folders(self) -> tuple[str, ...]:
+        # saved/server: the sessions; backups/: the image's copy of them taken at every start
+        return (SAVES_DIR, "backups")
+
+    def secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        # the API token, and the claim itself (admin password, tokens, the server's certificate)
+        return (TOKEN_FILE, CLAIM_FILE)
+
+    def files_touched(self, instance: Instance, paths: list[str], why: str) -> None:
+        """A change under ``saved/`` (or of the whole folder) may have lost or replaced the claim."""
+        if any(_touches_claim(p) for p in paths):
+            self.mark_unclaimed(instance, f"{why[:1].upper()}{why[1:]} under {CLAIM_DIR}/; the claim is checked again")
+
+    def observed(self, instance: Instance, container: dict[str, Any] | None) -> None:
+        """The agent stopped the server because it answered as unclaimed (``guard_stop``)."""
+        guard = guard_stop_of(container)
+        if guard and self.ports_open(instance):
+            self.mark_unclaimed(instance, str(guard.get("message") or "The node agent found the server unclaimed"))
+
     def game_env(self, instance: Instance) -> dict[str, str]:
         launch = self.launch_values(instance)
         env = {
@@ -352,12 +437,27 @@ class SatisfactoryDefinition(GameDefinition):
             return []
         out = super().spec_ports(instance)
         messaging = self._messaging_port(instance)
+        if messaging == GAME_PORT or any(
+            p.get("protocol") == "tcp" and int(p.get("host_port") or 0) == messaging and p.get("name") != "messaging"
+            for p in instance.ports or []
+            if isinstance(p, dict)
+        ):
+            raise ConflictError(
+                f"The messaging port {messaging}/tcp collides with the server's API port (7777/tcp in the container, "
+                "the game port's number on the host); choose another messaging port",
+                code="port_conflict",
+            )
         for entry, spec in zip(out, self.ports, strict=True):
             if spec.name == "messaging":
                 entry["container_port"] = messaging
         return out
 
     def build_spec(self, instance: Instance) -> dict[str, Any]:
+        if instance.network:
+            raise ConflictError(
+                "Satisfactory servers run on the panel's instance network only; clear the server's Docker network",
+                code="network_not_allowed",
+            )
         spec = super().build_spec(instance)
         # Shutdown makes the game exit 0: Docker must not start it again (unless-stopped/always would)
         spec["restart_policy"] = "no" if instance.restart_policy == "no" else "on-failure"
@@ -403,9 +503,16 @@ class SatisfactoryDefinition(GameDefinition):
             ctx.sleep_until(time.monotonic() + 3)
 
     def _setup_claim(self, instance: Instance, ctx: Any, client: AgentClient) -> str:
-        from apps.instances.handlers import write_control_secret
+        from apps.instances.handlers import _recreate, write_control_secret
         from apps.instances.spec import rcon_password
 
+        if self.ports_open(instance) and self.mark_unclaimed(
+            instance, "The claim step runs again; the ports stay closed until the setup is done"
+        ):
+            # a re-run on a published server: unpublished first, so the claim is never made (or lost) in public
+            instance.refresh_from_db()
+            ctx.progress(0.05, "Recreating the container without its ports before the claim", force=True)
+            _recreate(ctx.job, instance, ctx, client, running=True, start=True, span=(0.05, 0.1))
         self._wait_ready(instance, ctx, client)
         name = server_name_for(instance)
         result = client.game_action(
@@ -456,6 +563,15 @@ class SatisfactoryDefinition(GameDefinition):
         instance.refresh_from_db()
         ctx.progress(0.9, "Recreating the container with its ports published (the game is saved first)", force=True)
         _recreate(ctx.job, instance, ctx, client, running=True, start=True, span=(0.9, 0.95))
+        instance.refresh_from_db(fields=["setup_state", "ports"])
+        if not self.ports_open(instance):
+            # the agent refused: the server answered as unclaimed (handlers.unclaimed_refusal closed the
+            # ports again and put the claim back); it was started unpublished
+            raise ConflictError(
+                "The node agent refused to publish the server because it is not claimed; the claim runs again "
+                "with the next setup",
+                code="server_unclaimed",
+            )
         ports = ", ".join(f"{p['host_port']}/{p['protocol']}" for p in instance.ports or [])
         return f"Ports published: {ports}"
 
@@ -478,6 +594,20 @@ class SatisfactoryDefinition(GameDefinition):
         options["session_name"] = session
         instance.game_options = options
         InstanceModel.objects.filter(pk=instance.pk).update(game_options=options)
+
+    def check_secret_change(self, instance: Instance, values: dict[str, Any], request_data: dict[str, Any]) -> None:
+        """Clearing the join password opens the server to anyone who knows its address: only with an
+        explicit ``"access": "open"`` in the request (the UI asks first)."""
+        if CLIENT_PASSWORD not in values or values[CLIENT_PASSWORD] not in (None, ""):
+            return
+        if not instance.secret_values.get(CLIENT_PASSWORD) and (instance.game_options or {}).get("access") == "open":
+            return  # open already
+        if request_data.get("access") != "open":
+            raise ApiError(
+                "Clearing the join password opens the server to anyone who knows its address. Confirm that with "
+                '"access": "open", or enter a new password.',
+                code="confirmation_required",
+            )
 
     def secrets_changed(self, instance: Instance, keys: list[str]) -> None:
         """A new (or cleared) join password is applied by the setup's ``access`` step again; a cleared
@@ -563,7 +693,15 @@ class SatisfactoryDefinition(GameDefinition):
                 result["online"] = {"error": str(exc.detail)}
         return result
 
+    def consistency_note(self, instance: Instance) -> str:
+        return (
+            "the game was saved through its API right before the copy (SaveGame answered once the file was written); "
+            "the game is not paused, so an autosave during the copy can be in the backup as well"
+        )
+
     # -- software (no update: the server follows the stable branch) ---------------------------------
+    software_keys = ("game",)  # nothing a restore could set back
+
     def software_state(self, instance: Instance) -> dict[str, Any]:
         return {"game": self.id, "branch": BRANCH, "image": instance.image}
 
@@ -705,14 +843,10 @@ class SatisfactorySaves:
         return f"{SAVES_DIR}/{newest['name']}", f"{instance.name}-{newest['name']}", False
 
     # -- the jobs -------------------------------------------------------------------------------
-    def _running_for_job(self, job: Job, ctx: JobContext, instance: Instance, client: AgentClient) -> bool:
-        """Make sure the server runs (start it when it is stopped) and its API answers; returns whether
-        it was running before."""
+    def _running_for_job(self, job: Job, ctx: JobContext, instance: Instance, client: AgentClient, was_running: bool) -> None:
+        """Make sure the server runs (start it when it is stopped) and its API answers."""
         from apps.instances.handlers import start_server
 
-        if not instance.secret_values.get(TOKEN_SECRET):
-            raise ConflictError("Finish the server's setup (claim) first", code="setup_needed")
-        was_running = bool(client.status(instance.id).get("running"))
         if not was_running:
             ctx.progress(0.03, "Starting the server for this (it is stopped again afterwards)", force=True)
             start_server(instance, ctx, span=(0.03, 0.1))
@@ -720,7 +854,6 @@ class SatisfactorySaves:
             self.definition._wait_ready(instance, ctx, client, timeout=15 * 60)
         except SetupWaiting as exc:
             raise ConflictError(str(exc), code="not_running") from exc
-        return was_running
 
     def _stop_again(self, ctx: JobContext, instance: Instance, client: AgentClient) -> None:
         from apps.instances.handlers import _log_stop, _set_desired
@@ -783,9 +916,19 @@ class SatisfactorySaves:
         if instance.archived_at:
             raise ConflictError("This server is archived; unarchive it first", code="archived")
         client = AgentClient(instance.node)
-        was_running = self._running_for_job(job, ctx, instance, client)
+        if not instance.secret_values.get(TOKEN_SECRET):
+            raise ConflictError("Finish the server's setup (claim) first", code="setup_needed")
+        was_running = bool(client.status(instance.id).get("running"))
         try:
+            # inside the try: a server started for this job is stopped again also when it never got ready
+            self._running_for_job(job, ctx, instance, client, was_running)
             safety_id = self._safety_backup(job, ctx, instance, what)
+            if safety_id is None:
+                # no safety backup: the running game is saved first (SaveGame), so the session it played
+                # keeps its newest state on disk before another one is created or loaded
+                ctx.progress(0.6, "Saving the running game first", force=True)
+                saved = client.game_action(instance.id, "save", {}, timeout=120).get("save_name")
+                ctx.log(f"Saved the running game as {SAVES_DIR}/{saved}{SAVE_SUFFIX}" if saved else "No game was loaded to save")
             ctx.check_cancelled()
             ctx.progress(0.7, what.capitalize(), force=True)
             result = act(job, ctx, instance, client)
@@ -803,6 +946,15 @@ class SatisfactorySaves:
         session = str(settings.get("session_name") or "").strip() or session_name_for(instance)
         if not SESSION_RE.fullmatch(session):
             raise ApiError("Session names use letters, digits, spaces, _ and - (at most 64)", code="invalid_setting")
+        existing = {
+            str(s.get("name") or "") for s in client.game_action(instance.id, "sessions", {}, timeout=60).get("sessions") or []
+        }
+        if session in existing:
+            # a new game under an existing session's name writes its autosaves over that session's
+            raise ConflictError(
+                f"The server already has a session '{session}'; choose another name for the new game",
+                code="session_exists",
+            )
         client.game_action(instance.id, "new_game", {"session_name": session}, timeout=300)
         self.definition._remember_session(instance, session)
         ctx.log(f"New game '{session}'; the earlier sessions' saves stay in {SAVES_DIR}/")
@@ -810,10 +962,13 @@ class SatisfactorySaves:
 
     def _import(self, job: Job, ctx: JobContext, instance: Instance, client: AgentClient) -> dict[str, Any]:
         params = job.params or {}
-        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(params.get("name") or "imported").rsplit(".", 1)[0]).strip("_")[:50]
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "_", str(params.get("name") or "imported").rsplit(".", 1)[0]).strip("_")[:40]
         name = stem or "imported"
+        if RESERVED_SAVE_NAME.search(name):
+            # the game's autosaves and the panel's saves are written under such names later
+            name = f"{name}_import"
         existing = {str(e["name"])[: -len(SAVE_SUFFIX)] for e in self._files(client, instance)}
-        if name in existing:  # never overwrite a save of the server
+        if name in existing:  # never overwrite a save of the server (the agent refuses it as well)
             name = f"{name}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"[:64]
         result = client.game_action(
             instance.id, "upload_save", {"path": params["path"], "save_name": name, "load": True}, timeout=420

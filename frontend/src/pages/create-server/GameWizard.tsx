@@ -399,6 +399,7 @@ export function GameWizard({
                   `${p.label} (${sharedPortsLabel(game.ports ?? [], p).toUpperCase()})`,
                   (state.ports[p.name] ?? "").trim() || `automatic (${p.default_host_port} when free)`,
                 ]),
+                ["Bind address", state.hostIp.trim() || "Panel default"],
               ]}
             />
           </Section>
