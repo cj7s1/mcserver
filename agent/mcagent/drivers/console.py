@@ -194,7 +194,10 @@ class ConsoleDriver(ControlDriver):
             printed = self._write_unlocked(c, line)
             redact = _ops().log_redactor(settings, c)
             if self.exec_reply == "stdout":
-                lines = console_io.output_lines(printed or "")[-console_io.OUTPUT_MAX_LINES :]
+                lines = console_io.output_lines(printed or "")
+                if self.guard == "screen":  # screen's own notes are not the server's reply
+                    lines = [ln for ln in lines if not console_io.SCREEN_NOISE.match(ln.strip())]
+                lines = lines[-console_io.OUTPUT_MAX_LINES :]
                 out = "\n".join(lines)
                 return redact(out) if redact is not None and out else out
             out = console_io.read_output(c, since, min(float(timeout), self.output_wait), redact=redact)

@@ -67,7 +67,13 @@ _TMUX_KEY_FAMILIES = re.compile(
 )
 
 
-SCREEN_REFUSED = ("^", "\\")
+# `screen -X stuff` reads ^X as a control key, \ooo and \r as escapes and $NAME / ${NAME} as the session's
+# environment (the end-to-end run of 2026-11-11: `$HOME` arrived as /data): refused, never escaped (screen's
+# own escaping is not reliable across its versions)
+SCREEN_REFUSED = ("^", "\\", "$")
+# what screen itself prints to the helper's stdout (not the server's reply): a dead session socket of the
+# container's previous run (`docker restart` keeps /run/hkmp/screen)
+SCREEN_NOISE = re.compile(r"^Remove dead screens with 'screen -wipe'\.$")
 GUARDS = (None, "tmux", "screen")
 
 
@@ -106,11 +112,13 @@ def sanitise_line(text: str, *, max_len: int = DEFAULT_MAX_LINE, guard: str | No
         if is_tmux_key(line):
             raise refused(f"'{line}' would be sent as a key, not as text")
     elif guard == "screen":
-        # `screen -X stuff` reads ^X as a control key and \ooo / \r as escapes: HKMP's helper types
-        # the line with it, and 'announce x^Mlist' ran a second command (probe of 2026-11-10)
+        # `screen -X stuff` reads ^X as a control key, \ooo / \r as escapes and $NAME as a variable: HKMP's
+        # helper types the line with it, and 'announce x^Mlist' ran a second command (probe of 2026-11-10)
         for ch in SCREEN_REFUSED:
             if ch in line:
-                raise refused(f"it contains '{ch}', which the console would read as a key or an escape")
+                raise refused(
+                    f"it contains '{ch}', which the console would read as a key, an escape or a variable"
+                )
     elif guard is not None:
         raise ValueError(f"Unknown console guard {guard!r}")
     return line

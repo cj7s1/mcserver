@@ -2046,27 +2046,85 @@ def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]
 
 
 def _carry_over_excluded(settings: Settings, instance_id: UUID, current: Path, restored: Path) -> list[str]:
-    """Move the folders the game's profile leaves out of backups (re-downloadable: Satisfactory's
-    2.8 GB ``gamefiles/``) from the server folder into the restored tree, which does not have them,
-    so a restore does not throw them away (the image would download them again at the next start).
-    A rename only: across file systems (a btrfs subvolume or ZFS dataset per server) they are left
-    behind and the next start downloads them; that is a warning, never an error."""
+    """Move what the game's profile leaves out of backups (re-downloadable game files: Satisfactory's
+    2.8 GB ``gamefiles/``, Palworld's ``PalServer.sh`` and ``*.so``, CS2's ``game/**/*.vpk``) from the
+    server folder into the restored tree, which does not have it, so a restore does not throw it away
+    (the image would download it again at the next start, and Palworld's image even takes a missing
+    ``PalServer.sh`` for "not installed"). Folders, files and the matches of glob patterns (``*`` and
+    ``**``, as restic matched them when it left them out) are carried; symbolic links never, and
+    nothing is moved through a link (a link the game made inside its folder could point anywhere):
+    every component of the source and of the destination's parents must be a real folder. A rename
+    only: across file systems (a btrfs subvolume or ZFS dataset per server) they are left behind and
+    the next start downloads them; that is a warning, never an error."""
     warnings: list[str] = []
+    root = docker_ops.instance_dir(settings, instance_id)
     for absolute in _profile_backup_excludes(settings, instance_id):
-        rel = os.path.relpath(absolute, docker_ops.instance_dir(settings, instance_id))
-        if rel.startswith("..") or "*" in rel or "?" in rel:
+        pattern = os.path.relpath(absolute, root)
+        if pattern.startswith("..") or os.path.isabs(pattern):
             continue
-        src, dst = current / rel, restored / rel
-        if not src.is_dir() or src.is_symlink() or dst.exists() or dst.is_symlink():
-            continue
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            os.rename(src, dst)
-        except OSError as exc:
-            warnings.append(
-                f"{rel}/ (not in backups) could not be kept and is downloaded again at the next start: {exc}"
-            )
+        for rel in _excluded_matches(current, pattern):
+            src, dst = current / rel, restored / rel
+            if os.path.lexists(dst) or not _real_parents(current, rel, include_last=True):
+                continue
+            try:
+                if not _make_real_parents(restored, rel):
+                    continue
+                os.rename(src, dst)
+            except OSError as exc:
+                warnings.append(
+                    f"{rel} (not in backups) could not be kept and is downloaded again at the next start: {exc}"
+                )
     return warnings
+
+
+def _excluded_matches(current: Path, pattern: str) -> list[str]:
+    """Paths below ``current`` (relative, sorted) that an exclude ``pattern`` names: the path itself, or
+    the matches of its ``*``/``?``/``[...]``/``**`` parts. Symbolic links are never followed or returned."""
+    if not any(ch in pattern for ch in "*?["):
+        return (
+            [pattern] if os.path.lexists(current / pattern) and not (current / pattern).is_symlink() else []
+        )
+    try:
+        found = current.glob(pattern, recurse_symlinks=False)
+        out = sorted({str(p.relative_to(current)) for p in found if not p.is_symlink()})
+    except (OSError, ValueError):
+        return []
+    return out
+
+
+def _real_parents(base: Path, rel: str, *, include_last: bool = False) -> bool:
+    """Whether every folder on the way from ``base`` to ``rel`` (and ``rel`` itself with
+    ``include_last``) exists as a real directory or file, never a symbolic link."""
+    parts = Path(rel).parts
+    path = base
+    for i, part in enumerate(parts):
+        path = path / part
+        last = i == len(parts) - 1
+        if last and not include_last:
+            break
+        try:
+            st = os.lstat(path)
+        except OSError:
+            return False
+        if stat.S_ISLNK(st.st_mode) or (not last and not stat.S_ISDIR(st.st_mode)):
+            return False
+    return True
+
+
+def _make_real_parents(base: Path, rel: str) -> bool:
+    """Create the missing folders of ``rel``'s parent below ``base``; False when one of them is a link or
+    not a folder (the restored tree comes from a backup of the server folder: a link there is the game's)."""
+    path = base
+    for part in Path(rel).parts[:-1]:
+        path = path / part
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            os.mkdir(path)
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            return False
+    return True
 
 
 @app.post("/v1/instances/{instance_id}/backups", dependencies=[Depends(require_token)])

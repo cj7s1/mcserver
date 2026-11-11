@@ -660,7 +660,20 @@ def test_extraction_skips_the_games_protected_paths(agent_settings):
 
 # --- consoles: the screen guard (HKMP) ---------------------------------------------------------------
 @pytest.mark.parametrize(
-    "line", ["announce x^Mlist", "announce y\\015list", "say \\r", "^C", "a\rb", "   ", "\t"]
+    "line",
+    [
+        "announce x^Mlist",
+        "announce y\\015list",
+        "say \\r",
+        "^C",
+        "a\rb",
+        "   ",
+        "\t",
+        # screen substitutes the session's environment (end-to-end run: $HOME arrived as /data)
+        "announce $HOME",
+        "announce ${PATH}",
+        "announce costs 5$",
+    ],
 )
 def test_screen_guard_refuses_keys_and_escapes(line):
     with pytest.raises(AgentError) as exc:
@@ -704,6 +717,19 @@ def test_hkmp_reply_is_the_helpers_output(settings, monkeypatch):
     out = driver.command_sync(settings, ExecContainer(), "list", 10)
     assert out == "[INFO] list\n[INFO] Online players (1): Hornet"
     assert calls == [(("hkmp", "{line}"), "list", "99:100")]
+
+
+def test_hkmp_reply_leaves_out_screens_own_notes(settings, monkeypatch):
+    # after `docker restart` the previous run's dead session socket is still there: screen says so first
+    monkeypatch.setattr(
+        console_io,
+        "exec_line",
+        lambda c, t, line, *, user, timeout=None: (
+            "Remove dead screens with 'screen -wipe'.\n[INFO] list\n[INFO] Online players (0): \n"
+        ),
+    )
+    out = drivers.for_profile(hkmp.PROFILE).command_sync(settings, ExecContainer(), "list", 10)
+    assert out == "[INFO] list\n[INFO] Online players (0):"
 
 
 def test_hkmp_broadcast_announces(settings, monkeypatch):
@@ -861,3 +887,96 @@ def test_srcds_wrong_password_is_unavailable():
     fake = SrcdsFake(password="the-right-one-000000")
     with pytest.raises(rcon.RconUnavailable, match="authentication failed"):
         rcon.run_command_sync("127.0.0.1", fake.port, PASSWORD, "status", timeout=3, connect_timeout=3)
+
+
+# --- restore keeps the files and glob matches a backup leaves out (end-to-end run, BUG-2) ---------------------
+def _restore_dirs(settings, monkeypatch, game):
+    monkeypatch.setattr(docker_ops, "status", lambda _iid, _s=None: {"exists": True, "game": game})
+    current = docker_ops.instance_dir(settings, IID)
+    current.mkdir(parents=True)
+    restored = settings.staging_dir / "restore-x"
+    restored.mkdir(parents=True)
+    return current, restored
+
+
+def test_restore_keeps_palworlds_excluded_files_and_patterns(settings, monkeypatch):
+    current, restored = _restore_dirs(settings, monkeypatch, "palworld")
+    for rel in (
+        "PalServer.sh",
+        "steamclient.so",
+        "Manifest_DebugFiles_Linux.txt",
+        "DefaultPalWorldSettings.ini",
+    ):
+        (current / rel).write_text(rel)
+    (current / "Pal" / "Binaries" / "Linux").mkdir(parents=True)
+    (current / "Pal" / "Binaries" / "Linux" / "PalServer-Linux-Shipping").write_text("bin")
+    (current / "Pal" / "Saved" / "SaveGames").mkdir(parents=True)
+    (current / "Pal" / "Saved" / "SaveGames" / "old.sav").write_text("old")  # in the backup: not carried
+    (restored / "Pal" / "Saved" / "SaveGames").mkdir(parents=True)
+    (restored / "Pal" / "Saved" / "SaveGames" / "Level.sav").write_text("restored")
+    assert main._carry_over_excluded(settings, IID, current, restored) == []
+    for rel in (
+        "PalServer.sh",
+        "steamclient.so",
+        "Manifest_DebugFiles_Linux.txt",
+        "DefaultPalWorldSettings.ini",
+    ):
+        assert (restored / rel).read_text() == rel and not (current / rel).exists()
+    assert (restored / "Pal" / "Binaries" / "Linux" / "PalServer-Linux-Shipping").read_text() == "bin"
+    assert not (restored / "Pal" / "Saved" / "SaveGames" / "old.sav").exists()
+    assert (restored / "Pal" / "Saved" / "SaveGames" / "Level.sav").read_text() == "restored"
+
+
+def test_restore_carries_nested_glob_matches_without_following_links(settings, monkeypatch, tmp_path):
+    current, restored = _restore_dirs(settings, monkeypatch, "cs2")
+    (current / "game" / "csgo" / "cfg").mkdir(parents=True)
+    (current / "game" / "csgo" / "pak01_000.vpk").write_text("vpk")
+    (current / "game" / "csgo" / "cfg" / "server.cfg").write_text("cfg")
+    (current / "game" / "bin" / "linuxsteamrt64").mkdir(parents=True)
+    (current / "game" / "bin" / "linuxsteamrt64" / "cs2").write_text("bin")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "host.vpk").write_text("host")
+    os.symlink(outside, current / "game" / "sneaky")  # a link the game made: never followed
+    (restored / "game" / "csgo" / "cfg").mkdir(parents=True)
+    (restored / "game" / "csgo" / "cfg" / "server.cfg").write_text("restored cfg")
+    assert main._carry_over_excluded(settings, IID, current, restored) == []
+    assert (restored / "game" / "csgo" / "pak01_000.vpk").read_text() == "vpk"
+    assert (restored / "game" / "bin" / "linuxsteamrt64" / "cs2").read_text() == "bin"
+    assert (restored / "game" / "csgo" / "cfg" / "server.cfg").read_text() == "restored cfg"
+    assert (outside / "host.vpk").read_text() == "host" and not (restored / "game" / "sneaky").exists()
+    # a link in the restored tree (from a backup) is never moved through
+    current2, restored2 = current, settings.staging_dir / "restore-y"
+    restored2.mkdir()
+    (current2 / "game" / "csgo" / "pak01_001.vpk").write_text("vpk1")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    os.symlink(target, restored2 / "game")
+    assert main._carry_over_excluded(settings, IID, current2, restored2) == []
+    assert not any(target.iterdir()) and (current2 / "game" / "csgo" / "pak01_001.vpk").exists()
+
+
+def test_restore_carries_the_excluded_files_of_every_six_game(settings, monkeypatch):
+    """Every exclude of the six profiles is either carried or harmless: nothing that is not excluded moves."""
+    for game, profile in (
+        ("rust", rust.PROFILE),
+        ("hkmp", hkmp.PROFILE),
+        ("project-zomboid", zomboid.PROFILE),
+        ("valheim", valheim.PROFILE),
+    ):
+        current, restored = _restore_dirs(settings, monkeypatch, game)
+        made = []
+        for rel in profile.default_backup_excludes:
+            path = current / rel.replace("*", "x")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(rel)
+            made.append(rel.replace("*", "x"))
+        (current / "keep.txt").write_text("not excluded")
+        assert main._carry_over_excluded(settings, IID, current, restored) == [], game
+        for rel in made:
+            assert (restored / rel).exists() and not (current / rel).exists(), (game, rel)
+        assert (current / "keep.txt").exists() and not (restored / "keep.txt").exists(), game
+        import shutil
+
+        shutil.rmtree(current)
+        shutil.rmtree(restored)
