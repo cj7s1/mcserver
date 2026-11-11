@@ -1,0 +1,1392 @@
+{
+ "catalog": {
+  "factorio": {
+   "capabilities": [
+    "broadcast",
+    "config_files",
+    "consistent_backups",
+    "console_commands",
+    "player_actions",
+    "players",
+    "software_update",
+    "world_import_export",
+    "world_reset"
+   ],
+   "command_hint": "Commands start with / (for example /players online); a line without / is a chat message.",
+   "config_files": [
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "group": "Listing",
+       "initial": true,
+       "key": "name",
+       "label": "Server name",
+       "type": "string"
+      },
+      {
+       "group": "Listing",
+       "initial": true,
+       "key": "description",
+       "label": "Description",
+       "type": "string"
+      },
+      {
+       "default": false,
+       "group": "Listing",
+       "help": "Needs a factorio.com username and token below. Off by default: only players who know the address join.",
+       "initial": true,
+       "key": "visibility.public",
+       "label": "List publicly on the Factorio server browser",
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "group": "Listing",
+       "key": "visibility.lan",
+       "label": "Announce on the local network",
+       "type": "bool"
+      },
+      {
+       "group": "Listing",
+       "key": "username",
+       "label": "factorio.com username (public listing)",
+       "type": "string"
+      },
+      {
+       "group": "Listing",
+       "help": "From https://factorio.com/profile. Stored in the server folder (config/server-settings.json).",
+       "key": "token",
+       "label": "factorio.com token (public listing)",
+       "secret": true,
+       "type": "string"
+      },
+      {
+       "group": "Access",
+       "help": "Players need it to join. Empty: no password.",
+       "initial": true,
+       "key": "game_password",
+       "label": "Game password",
+       "secret": true,
+       "type": "string"
+      },
+      {
+       "default": true,
+       "group": "Access",
+       "key": "require_user_verification",
+       "label": "Only players with a factorio.com account",
+       "type": "bool"
+      },
+      {
+       "default": 0,
+       "group": "Access",
+       "help": "0 = unlimited; admins can always join.",
+       "initial": true,
+       "key": "max_players",
+       "label": "Max players",
+       "max": 65535,
+       "min": 0,
+       "type": "int"
+      },
+      {
+       "default": "admins-only",
+       "group": "Access",
+       "key": "allow_commands",
+       "label": "Who may use console commands in game",
+       "options": [
+        "admins-only",
+        "true",
+        "false"
+       ],
+       "type": "enum"
+      },
+      {
+       "default": 10,
+       "group": "Saving",
+       "initial": true,
+       "key": "autosave_interval",
+       "label": "Autosave every (minutes)",
+       "max": 1440,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "default": 5,
+       "group": "Saving",
+       "key": "autosave_slots",
+       "label": "Autosave slots",
+       "max": 100,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "default": true,
+       "group": "Gameplay",
+       "key": "auto_pause",
+       "label": "Pause the game while nobody is online",
+       "type": "bool"
+      },
+      {
+       "default": 0,
+       "group": "Gameplay",
+       "key": "afk_autokick_interval",
+       "label": "Kick idle players after (minutes, 0 = never)",
+       "max": 10000,
+       "min": 0,
+       "type": "int"
+      },
+      {
+       "default": true,
+       "group": "Gameplay",
+       "key": "only_admins_can_pause_the_game",
+       "label": "Only admins can pause",
+       "type": "bool"
+      }
+     ],
+     "help": "Applied when the server starts.",
+     "id": "server-settings",
+     "label": "Server settings",
+     "managed_keys": [],
+     "path": "config/server-settings.json",
+     "secret_keys": [
+      "game_password",
+      "token",
+      "password"
+     ]
+    },
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "help": "Empty: random. Used only when a new map is created (first start or a world reset).",
+       "initial": true,
+       "key": "seed",
+       "label": "Map seed",
+       "max": 4294967295,
+       "min": 0,
+       "nullable": true,
+       "restart": false,
+       "type": "int"
+      },
+      {
+       "default": 0,
+       "key": "width",
+       "label": "Map width (tiles, 0 = infinite)",
+       "max": 2000000,
+       "min": 0,
+       "restart": false,
+       "type": "int"
+      },
+      {
+       "default": 0,
+       "key": "height",
+       "label": "Map height (tiles, 0 = infinite)",
+       "max": 2000000,
+       "min": 0,
+       "restart": false,
+       "type": "int"
+      },
+      {
+       "default": false,
+       "initial": true,
+       "key": "peaceful_mode",
+       "label": "Peaceful mode",
+       "restart": false,
+       "type": "bool"
+      },
+      {
+       "default": 1,
+       "key": "starting_area",
+       "label": "Starting area size (multiplier)",
+       "max": 6,
+       "min": 0.16,
+       "restart": false,
+       "type": "number"
+      }
+     ],
+     "help": "Used only when a new map is created: the first start and a world reset. They do not change the current map.",
+     "id": "map-gen-settings",
+     "label": "New map settings",
+     "managed_keys": [],
+     "path": "config/map-gen-settings.json",
+     "secret_keys": []
+    },
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "default": true,
+       "key": "pollution.enabled",
+       "label": "Pollution",
+       "restart": false,
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "enemy_evolution.enabled",
+       "label": "Enemy evolution",
+       "restart": false,
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "enemy_expansion.enabled",
+       "label": "Enemy expansion",
+       "restart": false,
+       "type": "bool"
+      }
+     ],
+     "help": "Used only when a new map is created (the file is the image's example until the first start).",
+     "id": "map-settings",
+     "label": "Map rules for new maps",
+     "managed_keys": [],
+     "path": "config/map-settings.json",
+     "secret_keys": []
+    }
+   ],
+   "default_memory_mb": 2048,
+   "default_stop_timeout": 120,
+   "has_versions": true,
+   "id": "factorio",
+   "keeps_command_slash": true,
+   "label": "Factorio",
+   "memory_model": "plain",
+   "min_memory_mb": 1024,
+   "notes": [
+    "Headless server on the factoriotools/factorio image, pinned to an exact version: players need the same version.",
+    "Players connect over UDP; forward the UDP port on your router for players outside your network.",
+    "No account is needed to run it; a public listing needs a factorio.com token."
+   ],
+   "options": [
+    {
+     "default": false,
+     "help": "Enables the Space Age expansion (and Quality, Elevated rails). Players need to own it to join. Chosen once: switching it under an existing save converts the save.",
+     "key": "space_age",
+     "label": "Space Age",
+     "pinned": true,
+     "type": "bool"
+    }
+   ],
+   "player_list_labels": {
+    "bans": "Bans",
+    "ops": "Admins",
+    "whitelist": "Whitelist"
+   },
+   "player_name_pattern": "^[A-Za-z0-9_.-]{1,60}$",
+   "ports": [
+    {
+     "container_port": 34197,
+     "default_host_port": 34197,
+     "help": "Players connect to this UDP port (Factorio's default is 34197).",
+     "label": "Game",
+     "name": "game",
+     "protocol": "udp"
+    }
+   ],
+   "stop_words": [
+    "/quit"
+   ],
+   "variants": [],
+   "world": {
+    "extension": ".zip",
+    "folder": "saves",
+    "kind": "saves",
+    "reset_fields": [
+     {
+      "help": "Empty: random. Used only when a new map is created (first start or a world reset).",
+      "initial": true,
+      "key": "seed",
+      "label": "Map seed",
+      "max": 4294967295,
+      "min": 0,
+      "nullable": true,
+      "restart": false,
+      "type": "int"
+     },
+     {
+      "default": false,
+      "initial": true,
+      "key": "peaceful_mode",
+      "label": "Peaceful mode",
+      "restart": false,
+      "type": "bool"
+     }
+    ],
+    "set_aside_folder": "saves-replaced"
+   }
+  },
+  "minecraft": {
+   "capabilities": [
+    "broadcast",
+    "consistent_backups",
+    "console_commands",
+    "content",
+    "diagnostics",
+    "eula",
+    "jvm",
+    "modpacks",
+    "player_actions",
+    "players",
+    "properties",
+    "query",
+    "software_update",
+    "world_import_export",
+    "world_reset"
+   ],
+   "default_memory_mb": 4096,
+   "id": "minecraft",
+   "label": "Minecraft",
+   "memory_model": "jvm",
+   "notes": [
+    "Java edition, run on the itzg/minecraft-server image.",
+    "Memory is the Java heap; the container gets extra room for off-heap memory."
+   ],
+   "variants": [
+    {
+     "id": "VANILLA",
+     "label": "Vanilla"
+    },
+    {
+     "id": "PAPER",
+     "label": "Paper"
+    },
+    {
+     "id": "PURPUR",
+     "label": "Purpur"
+    },
+    {
+     "id": "FOLIA",
+     "label": "Folia"
+    },
+    {
+     "id": "FABRIC",
+     "label": "Fabric"
+    },
+    {
+     "id": "QUILT",
+     "label": "Quilt"
+    },
+    {
+     "id": "FORGE",
+     "label": "Forge"
+    },
+    {
+     "id": "NEOFORGE",
+     "label": "NeoForge"
+    },
+    {
+     "id": "MODRINTH",
+     "label": "Modrinth modpack"
+    },
+    {
+     "id": "AUTO_CURSEFORGE",
+     "label": "CurseForge modpack"
+    },
+    {
+     "id": "FTBA",
+     "label": "Feed The Beast modpack"
+    },
+    {
+     "id": "CUSTOM",
+     "label": "Custom server jar"
+    }
+   ]
+  },
+  "satisfactory": {
+   "capabilities": [
+    "config_files",
+    "consistent_backups",
+    "players",
+    "query",
+    "world_import_export",
+    "world_reset"
+   ],
+   "config_files": [
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "default": 4,
+       "help": "More than 4 players needs more memory (16 GB recommended for big factories).",
+       "initial": true,
+       "key": "max_players",
+       "label": "Max players",
+       "max": 127,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "default": 5,
+       "key": "autosave_slots",
+       "label": "Rotating autosaves",
+       "max": 100,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "default": 30,
+       "key": "max_tick_rate",
+       "label": "Max tick rate",
+       "max": 120,
+       "min": 10,
+       "type": "int"
+      },
+      {
+       "default": 30,
+       "key": "timeout",
+       "label": "Connection timeout (seconds)",
+       "max": 300,
+       "min": 5,
+       "type": "int"
+      },
+      {
+       "default": true,
+       "key": "server_streaming",
+       "label": "Server streaming",
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "seasonal_events",
+       "label": "Seasonal events (FICSMAS)",
+       "type": "bool"
+      }
+     ],
+     "help": "Kept by the panel and passed to the server at its start (restart to apply).",
+     "id": "launch",
+     "label": "Launch settings",
+     "managed_keys": [],
+     "path": "(container settings)",
+     "secret_keys": []
+    },
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "default": 300,
+       "key": "FG.AutosaveInterval",
+       "label": "Autosave every (seconds)",
+       "max": 7200,
+       "min": 60,
+       "restart": false,
+       "type": "int"
+      },
+      {
+       "default": true,
+       "key": "FG.DSAutoPause",
+       "label": "Pause while nobody is online",
+       "restart": false,
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "FG.DSAutoSaveOnDisconnect",
+       "label": "Save when a player leaves",
+       "restart": false,
+       "type": "bool"
+      },
+      {
+       "default": "1",
+       "key": "FG.NetworkQuality",
+       "label": "Network quality (0 low to 3 ultra)",
+       "options": [
+        "0",
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "default": false,
+       "key": "FG.SendGameplayData",
+       "label": "Send gameplay data to Coffee Stain",
+       "restart": false,
+       "type": "bool"
+      }
+     ],
+     "help": "Read from and written to the running server through its API; they apply at once. Shown while the server runs.",
+     "id": "server-options",
+     "label": "Server options",
+     "managed_keys": [],
+     "path": "(server API)",
+     "secret_keys": []
+    }
+   ],
+   "default_memory_mb": 12288,
+   "default_stop_timeout": 120,
+   "fixed_version": {
+    "help": "Players' game clients update themselves, so the server always runs the current stable build: it checks for an update at every start. There is no version to choose.",
+    "id": "stable",
+    "label": "Steam stable branch"
+   },
+   "id": "satisfactory",
+   "label": "Satisfactory",
+   "memory_model": "plain",
+   "min_memory_mb": 8192,
+   "notes": [
+    "Dedicated server on the wolveix/satisfactory-server image; the game (about 2.9 GB) is downloaded on the first start and checked for updates at every start, so players' clients and the server stay on Steam's stable build. 'Update' means restart.",
+    "Needs at least 8 GB of memory (12 GB by default, 16 GB for big factories or more than 4 players).",
+    "The panel claims the server before publishing its ports and asks you to choose a join password or an open server. Forward the game port on UDP and TCP, and the messaging port on TCP."
+   ],
+   "options": [
+    {
+     "default": null,
+     "help": "Satisfactory lets anyone who reaches the server log in as a client until a client password is set. Choose explicitly: a join password (enter it on the last step), or open to anyone who knows the address.",
+     "key": "access",
+     "label": "Who may join",
+     "option_labels": {
+      "open": "Open to anyone who knows the address",
+      "password": "A join password"
+     },
+     "options": [
+      "password",
+      "open"
+     ],
+     "pinned": false,
+     "type": "enum"
+    }
+   ],
+   "player_list_labels": {},
+   "player_name_pattern": "^[A-Za-z0-9_]{1,16}$",
+   "ports": [
+    {
+     "container_port": 7777,
+     "default_host_port": 7777,
+     "help": "Players connect to this port (UDP). The server's API uses the same number on TCP.",
+     "label": "Game",
+     "name": "game",
+     "protocol": "udp"
+    },
+    {
+     "container_port": 7777,
+     "default_host_port": 7777,
+     "help": "The HTTPS API the game client's Server Manager talks to: always the same number as the game port.",
+     "label": "Server API",
+     "name": "api",
+     "protocol": "tcp",
+     "same_port_as": "game"
+    },
+    {
+     "container_port": 8888,
+     "default_host_port": 8888,
+     "help": "TCP port the server advertises to players for reliable messages (Satisfactory's default is 8888).",
+     "label": "Reliable messaging",
+     "name": "messaging",
+     "protocol": "tcp"
+    }
+   ],
+   "secrets": [
+    {
+     "clear_opens": true,
+     "help": "Players enter it in the game to join. Clearing it later opens the server to anyone who knows its address.",
+     "key": "client_password",
+     "label": "Join password (client password)",
+     "link": "",
+     "required": false,
+     "required_when": {
+      "option": "access",
+      "value": "password"
+     }
+    }
+   ],
+   "setup_steps": [
+    {
+     "help": "Whoever reaches an unclaimed Satisfactory server first owns it, so the panel claims it through its API on the internal network before any port is published. The admin password is this server's control secret; the panel keeps an API token for itself (encrypted).",
+     "id": "claim",
+     "kind": "auto",
+     "label": "Claim the server",
+     "secret": null
+    },
+    {
+     "help": "Sets the client password you chose, or confirms that the server is open to anyone who knows its address.",
+     "id": "access",
+     "kind": "auto",
+     "label": "Join password",
+     "secret": null
+    },
+    {
+     "help": "Keeps the game the server plays; without one it loads the newest save of the server's session (or the newest save there is), and creates a new game only when there is no save at all.",
+     "id": "new_game",
+     "kind": "auto",
+     "label": "Load or create the game",
+     "secret": null
+    },
+    {
+     "help": "Recreates the container with the game, API and messaging ports published. Until then nobody outside the panel can reach the server.",
+     "id": "publish",
+     "kind": "auto",
+     "label": "Publish the ports",
+     "secret": null
+    }
+   ],
+   "variants": [],
+   "world": {
+    "extension": ".sav",
+    "folder": "saved/server",
+    "kind": "saves",
+    "reset_fields": [
+     {
+      "help": "The name of the new game (letters, digits, spaces, _ and -). Empty: the server's name and the date.",
+      "key": "session_name",
+      "label": "Session name",
+      "nullable": true,
+      "type": "string"
+     }
+    ],
+    "set_aside_folder": "",
+    "via_api": true
+   }
+  },
+  "terraria": {
+   "capabilities": [
+    "broadcast",
+    "config_files",
+    "consistent_backups",
+    "console_commands",
+    "player_actions",
+    "players",
+    "query",
+    "software_update",
+    "world_import_export",
+    "world_reset"
+   ],
+   "command_hint": "Terraria console commands, e.g. playing, say Hello, save, time (TShock: any of its commands).",
+   "config_files": [
+    {
+     "codec": "kv",
+     "fields": [
+      {
+       "default": "2",
+       "help": "1 = small, 2 = medium, 3 = large. Used only when a new world is created (the first start or a world reset).",
+       "initial": true,
+       "key": "autocreate",
+       "label": "World size (for a new world)",
+       "options": [
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "default": "0",
+       "help": "0 = classic, 1 = expert, 2 = master, 3 = journey. Used only when a new world is created.",
+       "initial": true,
+       "key": "difficulty",
+       "label": "Difficulty (for a new world)",
+       "options": [
+        "0",
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "help": "Empty: random. Text or a number; also Terraria's secret seeds. Used only when a new world is created.",
+       "initial": true,
+       "key": "seed",
+       "label": "World seed (for a new world)",
+       "nullable": true,
+       "restart": false,
+       "type": "string"
+      },
+      {
+       "default": 8,
+       "initial": true,
+       "key": "maxplayers",
+       "label": "Max players",
+       "max": 255,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "help": "Players need it to join. Empty: no password.",
+       "initial": true,
+       "key": "password",
+       "label": "Server password",
+       "nullable": true,
+       "secret": true,
+       "type": "string"
+      },
+      {
+       "initial": true,
+       "key": "motd",
+       "label": "Message of the day",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "default": "1",
+       "help": "1 = kick players the server thinks are cheating.",
+       "key": "secure",
+       "label": "Cheat protection",
+       "options": [
+        "0",
+        "1"
+       ],
+       "type": "enum"
+      },
+      {
+       "default": "en-US",
+       "key": "language",
+       "label": "Server language",
+       "options": [
+        "en-US",
+        "de-DE",
+        "it-IT",
+        "fr-FR",
+        "es-ES",
+        "ru-RU",
+        "zh-Hans",
+        "pt-BR",
+        "pl-PL"
+       ],
+       "type": "enum"
+      }
+     ],
+     "help": "Read when the server starts. World, port and paths are managed by MCPanel.",
+     "id": "serverconfig",
+     "label": "Server config (serverconfig.txt)",
+     "managed_keys": [
+      "banlist",
+      "modpack",
+      "modpath",
+      "port",
+      "upnp",
+      "world",
+      "worldname",
+      "worldpath"
+     ],
+     "path": "serverconfig.txt",
+     "secret_keys": [
+      "password"
+     ],
+     "variants": [
+      "vanilla"
+     ]
+    },
+    {
+     "codec": "kv",
+     "fields": [
+      {
+       "default": "2",
+       "help": "1 = small, 2 = medium, 3 = large. Used only when a new world is created (the first start or a world reset).",
+       "initial": true,
+       "key": "autocreate",
+       "label": "World size (for a new world)",
+       "options": [
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "default": "0",
+       "help": "0 = classic, 1 = expert, 2 = master, 3 = journey. Used only when a new world is created.",
+       "initial": true,
+       "key": "difficulty",
+       "label": "Difficulty (for a new world)",
+       "options": [
+        "0",
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "help": "Empty: random. Text or a number; also Terraria's secret seeds. Used only when a new world is created.",
+       "initial": true,
+       "key": "seed",
+       "label": "World seed (for a new world)",
+       "nullable": true,
+       "restart": false,
+       "type": "string"
+      },
+      {
+       "default": 8,
+       "initial": true,
+       "key": "maxplayers",
+       "label": "Max players",
+       "max": 255,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "help": "Players need it to join. Empty: no password.",
+       "initial": true,
+       "key": "password",
+       "label": "Server password",
+       "nullable": true,
+       "secret": true,
+       "type": "string"
+      },
+      {
+       "initial": true,
+       "key": "motd",
+       "label": "Message of the day",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "default": "1",
+       "help": "1 = kick players the server thinks are cheating.",
+       "key": "secure",
+       "label": "Cheat protection",
+       "options": [
+        "0",
+        "1"
+       ],
+       "type": "enum"
+      },
+      {
+       "default": "en-US",
+       "key": "language",
+       "label": "Server language",
+       "options": [
+        "en-US",
+        "de-DE",
+        "it-IT",
+        "fr-FR",
+        "es-ES",
+        "ru-RU",
+        "zh-Hans",
+        "pt-BR",
+        "pl-PL"
+       ],
+       "type": "enum"
+      }
+     ],
+     "help": "Read when the server starts. World, port and paths are managed by MCPanel.",
+     "id": "serverconfig",
+     "label": "Server config (serverconfig.txt)",
+     "managed_keys": [
+      "banlist",
+      "modpack",
+      "modpath",
+      "port",
+      "upnp",
+      "world",
+      "worldname",
+      "worldpath"
+     ],
+     "path": "serverconfig.txt",
+     "secret_keys": [
+      "password"
+     ],
+     "variants": [
+      "tmodloader"
+     ]
+    },
+    {
+     "codec": "kv",
+     "fields": [
+      {
+       "default": "2",
+       "help": "1 = small, 2 = medium, 3 = large. Used only when a new world is created (the first start or a world reset).",
+       "initial": true,
+       "key": "autocreate",
+       "label": "World size (for a new world)",
+       "options": [
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "default": "0",
+       "help": "0 = classic, 1 = expert, 2 = master, 3 = journey. Used only when a new world is created.",
+       "initial": true,
+       "key": "difficulty",
+       "label": "Difficulty (for a new world)",
+       "options": [
+        "0",
+        "1",
+        "2",
+        "3"
+       ],
+       "restart": false,
+       "type": "enum"
+      },
+      {
+       "help": "Empty: random. Text or a number; also Terraria's secret seeds. Used only when a new world is created.",
+       "initial": true,
+       "key": "seed",
+       "label": "World seed (for a new world)",
+       "nullable": true,
+       "restart": false,
+       "type": "string"
+      }
+     ],
+     "help": "Read when the server starts. World, port and paths are managed by MCPanel.",
+     "id": "serverconfig",
+     "label": "Server config (serverconfig.txt)",
+     "managed_keys": [
+      "banlist",
+      "modpack",
+      "modpath",
+      "port",
+      "upnp",
+      "world",
+      "worldname",
+      "worldpath"
+     ],
+     "path": "serverconfig.txt",
+     "secret_keys": [
+      "password"
+     ],
+     "variants": [
+      "tshock"
+     ]
+    },
+    {
+     "codec": "json",
+     "fields": [
+      {
+       "initial": true,
+       "key": "Settings.ServerName",
+       "label": "Server name",
+       "nullable": true,
+       "type": "string"
+      },
+      {
+       "help": "Players need it to join. Empty: no password.",
+       "initial": true,
+       "key": "Settings.ServerPassword",
+       "label": "Server password",
+       "nullable": true,
+       "secret": true,
+       "type": "string"
+      },
+      {
+       "default": 8,
+       "initial": true,
+       "key": "Settings.MaxSlots",
+       "label": "Max players",
+       "max": 255,
+       "min": 1,
+       "type": "int"
+      },
+      {
+       "default": false,
+       "key": "Settings.RequireLogin",
+       "label": "Players must log in to an account",
+       "type": "bool"
+      },
+      {
+       "default": false,
+       "key": "Settings.EnableWhitelist",
+       "label": "Whitelist (whitelist.txt, by IP)",
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "Settings.SpawnProtection",
+       "label": "Spawn protection",
+       "type": "bool"
+      },
+      {
+       "default": true,
+       "key": "Settings.AutoSave",
+       "label": "Autosave",
+       "type": "bool"
+      },
+      {
+       "default": 10,
+       "help": "Kept in backups/ (not in the panel's backups).",
+       "key": "Settings.BackupInterval",
+       "label": "TShock's own world backups every (minutes, 0 = off)",
+       "max": 10080,
+       "min": 0,
+       "type": "int"
+      }
+     ],
+     "help": "Read when the server starts. The REST API settings and the game port are managed by MCPanel.",
+     "id": "tshock",
+     "label": "TShock (config.json)",
+     "managed_keys": [
+      "Settings.ApplicationRestTokens",
+      "Settings.EnableTokenEndpointAuthentication",
+      "Settings.LogRest",
+      "Settings.RestApiEnabled",
+      "Settings.RestApiPort",
+      "Settings.ServerPort"
+     ],
+     "path": "config.json",
+     "secret_keys": [
+      "Settings.ServerPassword"
+     ],
+     "variants": [
+      "tshock"
+     ]
+    }
+   ],
+   "default_memory_mb": 1536,
+   "default_stop_timeout": 60,
+   "has_versions": true,
+   "id": "terraria",
+   "label": "Terraria",
+   "memory_model": "plain",
+   "min_memory_mb": 1024,
+   "notes": [
+    "Three flavours: the official server, tModLoader (mods) and TShock (accounts, permissions, REST API).",
+    "Players connect over TCP 7777; forward the TCP port on your router for players outside your network."
+   ],
+   "options": [
+    {
+     "default": "world",
+     "help": "The world file's name (Worlds/<name>.wld): letters, digits, - and _. Chosen once.",
+     "key": "world_name",
+     "label": "World name",
+     "pinned": true,
+     "type": "string"
+    },
+    {
+     "default": "owner",
+     "help": "The in-game account the panel creates in the owner group (log in with /login <account> <password>).",
+     "key": "owner_account",
+     "label": "TShock owner account",
+     "pinned": true,
+     "type": "string",
+     "variants": [
+      "tshock"
+     ]
+    }
+   ],
+   "player_list_labels": {
+    "bans": "Bans (by IP)"
+   },
+   "player_name_pattern": "(?=.{1,20}$)[^\\s\"\\\\/\\x00-\\x1f][^\"\\\\\\x00-\\x1f\\x7f]*(?<!\\s)",
+   "ports": [
+    {
+     "container_port": 7777,
+     "default_host_port": 7777,
+     "help": "Players connect to this TCP port (Terraria's default is 7777).",
+     "label": "Game",
+     "name": "game",
+     "protocol": "tcp"
+    }
+   ],
+   "secrets": [
+    {
+     "help": "The password of the owner account the panel creates in TShock (at least 4 characters). Stored encrypted.",
+     "key": "owner_password",
+     "label": "TShock owner password",
+     "link": "",
+     "required": false,
+     "variants": [
+      "tshock"
+     ]
+    }
+   ],
+   "setup_steps": [
+    {
+     "help": "Creates the in-game owner account over TShock's REST API, so the one-time /setup code is not needed.",
+     "id": "owner_account",
+     "kind": "secret",
+     "label": "Create the TShock owner account",
+     "secret": "owner_password"
+    }
+   ],
+   "stop_words": [
+    "exit",
+    "exit-nosave",
+    "off",
+    "off-nosave"
+   ],
+   "variants": [
+    {
+     "capabilities": [
+      "broadcast",
+      "config_files",
+      "consistent_backups",
+      "console_commands",
+      "player_actions",
+      "players",
+      "software_update",
+      "world_import_export",
+      "world_reset"
+     ],
+     "default_memory_mb": 1536,
+     "game_version": null,
+     "id": "vanilla",
+     "label": "Terraria (vanilla)",
+     "notes": [
+      "The official dedicated server (PassiveLemon's image), pinned to an exact version: players need the same version.",
+      "Commands go to its console; there is no remote admin protocol."
+     ],
+     "player_list_labels": {
+      "bans": "Bans (by IP)"
+     },
+     "stop_words": [
+      "exit",
+      "exit-nosave"
+     ]
+    },
+    {
+     "capabilities": [
+      "broadcast",
+      "config_files",
+      "consistent_backups",
+      "console_commands",
+      "player_actions",
+      "players",
+      "software_update",
+      "world_import_export",
+      "world_reset"
+     ],
+     "default_memory_mb": 3072,
+     "game_version": "1.4.4.9",
+     "id": "tmodloader",
+     "label": "tModLoader",
+     "notes": [
+      "tModLoader is built on Terraria 1.4.4.9: players need the tModLoader client (Steam); vanilla clients on newer Terraria versions cannot join.",
+      "The first start of every new container downloads the .NET runtime from Microsoft (internet needed, slower start).",
+      "Mods: put .tmod files and enabled.json into ModPacks/mcpanel/Mods/ with the file manager (a mod manager comes later)."
+     ],
+     "player_list_labels": {
+      "bans": "Bans (by IP)"
+     },
+     "stop_words": [
+      "exit",
+      "exit-nosave"
+     ]
+    },
+    {
+     "capabilities": [
+      "broadcast",
+      "config_files",
+      "consistent_backups",
+      "console_commands",
+      "player_actions",
+      "players",
+      "query",
+      "software_update",
+      "world_import_export",
+      "world_reset"
+     ],
+     "default_memory_mb": 1536,
+     "game_version": null,
+     "id": "tshock",
+     "label": "TShock",
+     "notes": [
+      "TShock adds accounts, permissions, bans and a REST API; it runs without any Linux capability.",
+      "The panel creates the in-game owner account for you (no /setup code needed): log in with /login."
+     ],
+     "player_list_labels": {},
+     "stop_words": [
+      "exit",
+      "exit-nosave",
+      "off",
+      "off-nosave"
+     ]
+    }
+   ],
+   "world": {
+    "extension": ".wld",
+    "folder": "Worlds",
+    "kind": "worlds",
+    "reset_fields": [
+     {
+      "default": "2",
+      "help": "1 = small, 2 = medium, 3 = large.",
+      "initial": true,
+      "key": "autocreate",
+      "label": "World size",
+      "options": [
+       "1",
+       "2",
+       "3"
+      ],
+      "restart": false,
+      "type": "enum"
+     },
+     {
+      "default": "0",
+      "help": "0 = classic, 1 = expert, 2 = master, 3 = journey. Used only when a new world is created.",
+      "initial": true,
+      "key": "difficulty",
+      "label": "Difficulty",
+      "options": [
+       "0",
+       "1",
+       "2",
+       "3"
+      ],
+      "restart": false,
+      "type": "enum"
+     },
+     {
+      "help": "Empty: random. Text or a number.",
+      "initial": true,
+      "key": "world_seed",
+      "label": "World seed",
+      "nullable": true,
+      "restart": false,
+      "type": "string"
+     }
+    ],
+    "set_aside_folder": "Worlds-replaced"
+   }
+  }
+ },
+ "specs": {
+  "factorio": {
+   "env": {
+    "DLC_SPACE_AGE": "true",
+    "GENERATE_NEW_SAVE": "true",
+    "LOAD_LATEST_SAVE": "true",
+    "SAVE_NAME": "world",
+    "TZ": "Europe/Berlin"
+   },
+   "game": "factorio",
+   "image": "factoriotools/factorio:2.1.23-rootless",
+   "memory_limit_mb": 2048,
+   "name": "Factory",
+   "ports": [
+    {
+     "container_port": 34197,
+     "host_ip": "0.0.0.0",
+     "host_port": 34197,
+     "protocol": "udp"
+    }
+   ],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "unless-stopped",
+   "stop_timeout": 120
+  },
+  "satisfactory-closed": {
+   "env": {
+    "AUTOSAVENUM": "5",
+    "DISABLESEASONALEVENTS": "false",
+    "MAXPLAYERS": "6",
+    "MAXTICKRATE": "30",
+    "SERVERMESSAGINGPORT": "8888",
+    "SERVERSTREAMING": "true",
+    "TIMEOUT": "30",
+    "TZ": "Europe/Berlin"
+   },
+   "game": "satisfactory",
+   "image": "wolveix/satisfactory-server:v1.9.11",
+   "memory_limit_mb": 12288,
+   "name": "Ficsit",
+   "ports": [],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "no",
+   "stop_timeout": 120
+  },
+  "satisfactory-open": {
+   "env": {
+    "AUTOSAVENUM": "5",
+    "DISABLESEASONALEVENTS": "false",
+    "MAXPLAYERS": "4",
+    "MAXTICKRATE": "30",
+    "SERVERMESSAGINGPORT": "8898",
+    "SERVERSTREAMING": "true",
+    "TIMEOUT": "30",
+    "TZ": "Europe/Berlin"
+   },
+   "game": "satisfactory",
+   "image": "wolveix/satisfactory-server:v1.9.11",
+   "memory_limit_mb": 12288,
+   "name": "Ficsit open",
+   "ports": [
+    {
+     "container_port": 7777,
+     "host_ip": "0.0.0.0",
+     "host_port": 7787,
+     "protocol": "udp"
+    },
+    {
+     "container_port": 7777,
+     "host_ip": "0.0.0.0",
+     "host_port": 7787,
+     "protocol": "tcp"
+    },
+    {
+     "container_port": 8898,
+     "host_ip": "0.0.0.0",
+     "host_port": 8898,
+     "protocol": "tcp"
+    }
+   ],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "no",
+   "stop_timeout": 120
+  },
+  "terraria-tmodloader": {
+   "env": {
+    "MODPACK": "mcpanel",
+    "TZ": "Europe/Berlin"
+   },
+   "game": "terraria",
+   "image": "passivelemon/terraria-docker:tmodloader-2026.09.3.1",
+   "memory_limit_mb": 1536,
+   "name": "Terra tmodloader",
+   "ports": [
+    {
+     "container_port": 7777,
+     "host_ip": "0.0.0.0",
+     "host_port": 7778,
+     "protocol": "tcp"
+    }
+   ],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "unless-stopped",
+   "stop_timeout": 60,
+   "variant": "tmodloader"
+  },
+  "terraria-tshock": {
+   "env": {
+    "TZ": "Europe/Berlin"
+   },
+   "game": "terraria",
+   "image": "ryshe/terraria:tshock-1.4.5.8-6.2.1",
+   "memory_limit_mb": 1536,
+   "name": "Terra tshock",
+   "ports": [
+    {
+     "container_port": 7777,
+     "host_ip": "0.0.0.0",
+     "host_port": 7779,
+     "protocol": "tcp"
+    }
+   ],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "unless-stopped",
+   "stop_timeout": 60,
+   "variant": "tshock"
+  },
+  "terraria-vanilla": {
+   "env": {
+    "TZ": "Europe/Berlin"
+   },
+   "game": "terraria",
+   "image": "passivelemon/terraria-docker:terraria-1.4.5.7",
+   "memory_limit_mb": 1536,
+   "name": "Terra vanilla",
+   "ports": [
+    {
+     "container_port": 7777,
+     "host_ip": "0.0.0.0",
+     "host_port": 7777,
+     "protocol": "tcp"
+    }
+   ],
+   "rcon_password": "pppppppppppppppppppppppppppppppp",
+   "restart_policy": "unless-stopped",
+   "stop_timeout": 60,
+   "variant": "vanilla"
+  }
+ }
+}
