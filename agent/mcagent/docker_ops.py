@@ -1189,14 +1189,20 @@ class StopResult:
     # nothing was stopped (the container was not running) or Docker did not say. After /restart
     # the container status describes the new run, so this is the only place it is reported.
     exit_code: int | None = None
+    # the server had not become ready in this run (still installing): stopped at once, nothing to save
+    # (``RuntimeProfile.not_ready_stop_timeout``); only sent when true
+    not_ready: bool = False
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "flushed": self.flushed,
             "stop_sent_via_rcon": self.stop_sent_via_rcon,
             "warnings": list(self.warnings),
             "exit_code": self.exit_code,
         }
+        if self.not_ready:
+            data["not_ready"] = True
+        return data
 
 
 def _flush_before_stop(
@@ -1316,7 +1322,9 @@ class _RconStopCourier:
                 result.warnings.append(self._warning)
 
 
-def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> StopResult:
+def graceful_stop(
+    settings: Settings, c: Container, timeout: int | None, *, not_ready: bool = False
+) -> StopResult:
     """Stop a container the way the panel means it, through the control driver of its game.
 
     The driver saves first and makes sure the stop arrives where it can (Minecraft,
@@ -1325,6 +1333,12 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
     driver without a stop of its own gets a plain ``docker stop`` with the timeout. A failure to
     save is a warning, never an error.
 
+    A server that has not become ready in this run (``never_ready``: the image still downloads or
+    installs the game) of a profile with ``not_ready_stop_timeout`` is stopped at once instead: no
+    save, ``docker stop`` with that short timeout. ``not_ready``: the panel says it never saw the
+    server ready in this run (it was still waiting for its first start), needed when this agent did
+    not watch the whole run.
+
     A container that is not running is left alone. Docker errors of ``docker stop`` propagate.
     """
     result = StopResult()
@@ -1332,10 +1346,14 @@ def graceful_stop(settings: Settings, c: Container, timeout: int | None) -> Stop
     if c.status not in ("running", "restarting", "paused"):
         return result
     timeout = timeout or default_stop_timeout(c)
-    if not drivers.for_container(c).stop(settings, c, timeout, result):
+    profile = profiles.for_labels(getattr(c, "labels", None))
+    if profile is not None and never_ready(c, profile, panel_says=not_ready):
+        result.not_ready = True
+        log.info("Stopping %s at once: it has not become ready in this run (nothing to save)", c.name)
+        c.stop(timeout=int(profile.not_ready_stop_timeout or timeout))
+    elif not drivers.for_container(c).stop(settings, c, timeout, result):
         c.stop(timeout=timeout)
     result.exit_code = _stopped_exit_code(c)
-    profile = profiles.for_labels(getattr(c, "labels", None))
     if profile is not None and profile.fix_ownership:
         instance = (c.labels or {}).get(LABEL_INSTANCE)
         if instance and (warning := fix_ownership(settings, UUID(str(instance)))) is not None:
@@ -1386,10 +1404,12 @@ def _stopped_exit_code(c: Container) -> int | None:
     return code if isinstance(code, int) and not isinstance(code, bool) else None
 
 
-def stop(instance_id: UUID, timeout: int | None, settings: Settings | None = None) -> StopResult:
+def stop(
+    instance_id: UUID, timeout: int | None, settings: Settings | None = None, *, not_ready: bool = False
+) -> StopResult:
     c = require_container(instance_id)
     try:
-        return graceful_stop(settings or get_settings(), c, timeout)
+        return graceful_stop(settings or get_settings(), c, timeout, not_ready=not_ready)
     except NotFound as exc:
         if container_is_gone(exc):
             # A stop takes no lock: the container of a server that was not running can be retired
@@ -1486,6 +1506,47 @@ _health_lock = threading.Lock()
 # (container id, StartedAt) -> state of the probe for that run
 _health_state: dict[tuple[str, str], dict[str, Any]] = {}
 _HEALTH_STATE_MAX = 512
+
+
+# runs (container id, StartedAt) whose readiness probe succeeded at least once: a later failing probe (a
+# hiccup of A2S) does not make them "never ready". Kept apart from _health_state (which is cleared when full).
+_ready_runs: dict[tuple[str, str], float] = {}
+_READY_RUNS_MAX = 4096
+# when this agent process started: of a run that started before, it may have missed the ready moment
+AGENT_STARTED = time.time()
+
+
+def _mark_ready(key: tuple[str, str], now: float) -> None:
+    with _health_lock:
+        if key in _ready_runs:
+            return
+        if len(_ready_runs) >= _READY_RUNS_MAX:
+            _ready_runs.pop(next(iter(_ready_runs)))  # the oldest run
+        _ready_runs[key] = now
+
+
+def never_ready(c: Container, profile: RuntimeProfile, *, panel_says: bool = False) -> bool:
+    """Whether the container's current run has not become ready (``not_ready_stop_timeout`` profiles only):
+    its readiness probe never succeeded in this run, also not now (probed again). For a run that started
+    before this agent process, the agent may have missed the ready moment: then only when the panel says
+    so (``panel_says``: its job was still waiting for the first start). Never raises (False on doubt)."""
+    if profile.not_ready_stop_timeout is None or profile.health.kind not in profiles.AGENT_SIDE_HEALTH:
+        return False
+    try:
+        described = describe(c)
+        started_raw = str(described.get("started_at") or "")
+        if (str(c.id), started_raw) in _ready_runs:
+            return False
+        health, _output = agent_health(c, profile, described)
+        if health == "healthy" or health is None:
+            return False
+        started = _timestamp(started_raw)
+    except Exception as exc:
+        log.debug("readiness of %s before its stop not known: %s", getattr(c, "name", "?"), exc)
+        return False
+    if started is None or started.timestamp() < AGENT_STARTED:
+        return panel_says
+    return True
 
 
 def _health_entry(key: tuple[str, str]) -> dict[str, Any]:
@@ -1670,6 +1731,7 @@ def agent_health(
     if health.kind == "a2s":
         what = f"agent probe a2s: A2S_INFO on UDP port {env_port(c, health.port_env, health.port)}"
     if ok:
+        _mark_ready(key, now)
         return "healthy", f"{what} ok"
     running_for = None if started is None else now - started.timestamp()
     if running_for is not None and running_for > health.start_period_s:

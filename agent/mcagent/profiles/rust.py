@@ -154,6 +154,8 @@ PROFILE = RuntimeProfile(
         {"RUST_SERVER_PORT": "udp", "RUST_SERVER_QUERYPORT": "udp", "RUST_APP_PORT": "tcp"}
     ),
     restart_policy="no",
+    # a stop before the server was ever ready (still downloading the game): nothing to save, no waiting
+    not_ready_stop_timeout=steam.NOT_READY_STOP_TIMEOUT,
     strict_env=True,
     image_digests=IMAGE_DIGESTS,
     redact_env=("RUST_RCON_PASSWORD",),

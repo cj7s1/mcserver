@@ -201,6 +201,8 @@ PROFILE = RuntimeProfile(
     clean_exit_codes=(0, 143),
     env_ports=MappingProxyType({"CS2_PORT": "udp", "TV_PORT": "udp"}),
     restart_policy="no",
+    # a stop before the server was ever ready (still downloading the game): nothing to save, no waiting
+    not_ready_stop_timeout=steam.NOT_READY_STOP_TIMEOUT,
     strict_env=True,
     prepare_start=prepare_start,
     init=True,

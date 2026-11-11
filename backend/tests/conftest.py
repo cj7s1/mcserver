@@ -61,6 +61,8 @@ CURRENT_AGENT_FEATURES = (
     "archive_excludes",
     "extract_protected",
     "claim_marker",
+    "backup_game_hint",
+    "stop_not_ready",
 )
 # GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; phase 1 had
 # Minecraft only, phase 3 adds Factorio)
@@ -205,6 +207,10 @@ class FakeAgent:
         self.failed_operations: dict[str, tuple[str, str]] = {}
         # optional callable(instance_id, command) -> output | None (None = default output)
         self.command_handler: Callable[[str, str], str | None] | None = None
+        # what the panel sent with stops and with backup/restore requests (fix round 3)
+        self.stop_requests: list[dict[str, Any]] = []
+        self.backup_games: list[dict[str, str] | None] = []
+        self.restore_games: list[dict[str, str] | None] = []
         self.start_healthy = True
         # restic exit code 3 ("some files could not be read"): the backup succeeds with these warnings
         self.backup_warnings: list[str] = []
@@ -734,8 +740,11 @@ class FakeAgent:
             answer["stop"] = info
         return answer
 
-    def stop(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
+    def stop(self, instance_id: Any, timeout: int | None = None, *, not_ready: bool = False) -> dict[str, Any]:
+        self.stop_requests.append({"timeout": timeout, "not_ready": not_ready})
         info = self._graceful_stop(self._container(str(instance_id)))
+        if not_ready and "stop_not_ready" in self.features:
+            info = {**info, "flushed": False, "not_ready": True, "exit_code": 137}
         return self._with_stop(instance_id, info)
 
     def restart(self, instance_id: Any, timeout: int | None = None) -> dict[str, Any]:
@@ -1611,9 +1620,17 @@ class FakeAgent:
         return [{k: v for k, v in s.items() if k != "tree"} for s in self.repos.get(str(instance_id), [])]
 
     def create_backup(
-        self, instance_id: Any, backup_id: str, *, tags: list[str], consistency: str = "auto", excludes: list[str] | None = None
+        self,
+        instance_id: Any,
+        backup_id: str,
+        *,
+        tags: list[str],
+        consistency: str = "auto",
+        excludes: list[str] | None = None,
+        game: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         iid = str(instance_id)
+        self.backup_games.append(game)
         if iid not in self.fs:
             raise self._err("Instance has no data directory", "not_found", 404)
         if failed := self._injected("backup", iid):
@@ -1673,8 +1690,11 @@ class FakeAgent:
             },
         )
 
-    def restore_backup(self, instance_id: Any, snapshot_id: str, target_instance_id: Any = None) -> dict[str, Any]:
+    def restore_backup(
+        self, instance_id: Any, snapshot_id: str, target_instance_id: Any = None, *, game: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         src = str(instance_id)
+        self.restore_games.append(game)
         target = str(target_instance_id) if target_instance_id else src
         if self.containers.get(target, {}).get("running"):
             raise self._err("Stop the target server before restoring", "target_running", 409)

@@ -980,3 +980,163 @@ def test_restore_carries_the_excluded_files_of_every_six_game(settings, monkeypa
 
         shutil.rmtree(current)
         shutil.rmtree(restored)
+
+
+# --- a stop before the server was ever ready (end-to-end re-test, BUG-9) ----------------------------------------
+def _iso(ts: float) -> str:
+    from datetime import UTC, datetime
+
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class RunContainer:
+    """A running container of a game whose readiness the agent probes (log or A2S)."""
+
+    def __init__(self, game: str, log: str = "", started: float | None = None):
+        import time as _time
+
+        self.id = f"c-{game}"
+        self.name = f"mcpanel-{game}"
+        self.status = "running"
+        self.labels = {"io.mcpanel.instance": str(IID), "io.mcpanel.game": game}
+        self.log = log
+        self.attrs = {
+            "Config": {"Env": [], "Image": "x"},
+            "State": {
+                "Status": "running",
+                "Running": True,
+                "StartedAt": _iso(_time.time() if started is None else started),
+                "ExitCode": 0,
+            },
+            "NetworkSettings": {"Networks": {"mcpanel_instances": {"IPAddress": "10.1.2.9"}}, "Ports": {}},
+            "HostConfig": {},
+        }
+        self.stopped_with = None
+
+    def reload(self):
+        pass
+
+    def logs(self, **_kwargs):
+        return self.log.encode()
+
+    def stop(self, timeout):
+        self.stopped_with = timeout
+        self.status = "exited"
+        self.attrs["State"].update({"Status": "exited", "Running": False, "ExitCode": 137})
+
+
+@pytest.fixture
+def no_driver_stop(monkeypatch):
+    """The driver's own stop (save first, then the usual timeout), recorded instead of run."""
+    calls = []
+
+    def fake(self, settings, c, timeout, result):
+        calls.append(timeout)
+        c.stop(timeout)
+        return True
+
+    for cls in {
+        type(drivers.for_profile(p)) for p in (zomboid.PROFILE, palworld.PROFILE, rust.PROFILE, hkmp.PROFILE)
+    }:
+        monkeypatch.setattr(cls, "stop", fake)
+    monkeypatch.setattr(docker_ops, "fix_ownership", lambda *a, **k: None)
+    return calls
+
+
+def test_a_server_still_downloading_is_stopped_at_once(settings, no_driver_stop):
+    c = RunContainer("project-zomboid", log="Downloading depot 380871\n 45.2% ...\n")
+    result = docker_ops.graceful_stop(settings, c, 120)
+    assert c.stopped_with == zomboid.PROFILE.not_ready_stop_timeout == 5 and no_driver_stop == []
+    assert result.not_ready and result.as_dict()["not_ready"] is True and result.exit_code == 137
+
+
+def test_a_ready_server_keeps_its_usual_stop(settings, no_driver_stop):
+    c = RunContainer("project-zomboid", log="LOG : General , 1> *** SERVER STARTED ****\n")
+    result = docker_ops.graceful_stop(settings, c, 120)
+    assert no_driver_stop == [120] and not result.not_ready and "not_ready" not in result.as_dict()
+
+
+def test_a_server_once_ready_is_never_taken_for_installing(settings, no_driver_stop, monkeypatch):
+    # Rust answered A2S earlier in this run; at the stop its query does not answer: still the usual stop
+    c = RunContainer("rust")
+    monkeypatch.setattr(docker_ops, "_probe_a2s", lambda *a: True)
+    assert docker_ops.describe(c)["health"] == "healthy"
+    monkeypatch.setattr(docker_ops, "_probe_a2s", lambda *a: False)
+    docker_ops._health_state.clear()  # (the probe's cache: the next look probes again)
+    docker_ops.graceful_stop(settings, c, 180)
+    assert no_driver_stop == [180]
+
+
+def test_a_run_from_before_the_agent_needs_the_panels_word(settings, no_driver_stop, monkeypatch):
+    import time as _time
+
+    monkeypatch.setattr(docker_ops, "AGENT_STARTED", _time.time())  # the agent restarted during the run
+    c = RunContainer("palworld", log="Downloading update (4.6 GB)\n", started=_time.time() - 600)
+    docker_ops.graceful_stop(settings, c, 60)
+    assert no_driver_stop == [60]  # it may have missed the ready moment: the usual stop
+    c = RunContainer("palworld", log="Downloading update (4.6 GB)\n", started=_time.time() - 600)
+    result = docker_ops.graceful_stop(settings, c, 60, not_ready=True)  # the panel still waited for it
+    assert c.stopped_with == 5 and result.not_ready
+
+
+def test_games_without_the_rule_keep_their_stop(settings, no_driver_stop):
+    assert hkmp.PROFILE.not_ready_stop_timeout is None
+    for name in ("minecraft", "factorio", "satisfactory"):
+        assert profiles.get(name).not_ready_stop_timeout is None, name
+    c = RunContainer("hkmp")
+    docker_ops.graceful_stop(settings, c, 40, not_ready=True)
+    assert no_driver_stop == [40]
+
+
+def test_stop_request_takes_the_panels_word():
+    from mcagent.schemas import StopRequest
+
+    assert StopRequest(timeout=30, not_ready=True).not_ready and not StopRequest().not_ready
+    assert "stop_not_ready" in main.FEATURES and "backup_game_hint" in main.FEATURES
+
+
+# --- backups of a server without container or last-run record (end-to-end re-test, BUG-10) -----------------------
+def test_the_panels_game_names_the_profile_of_a_server_that_never_ran(settings, monkeypatch):
+    monkeypatch.setattr(
+        docker_ops, "status", lambda _iid, _s=None: {"exists": False, "game": None, "last_run": None}
+    )
+    assert main._server_profile(settings, IID).game == "minecraft"  # (as before: no hint, no game)
+    assert main._server_profile(settings, IID, ("palworld", None)) is palworld.PROFILE
+    assert main._server_profile(settings, IID, ("no-such-game", None)).game == "minecraft"
+    excludes = main._profile_backup_excludes(settings, IID, ("palworld", None))
+    assert any(e.endswith("/PalServer.sh") for e in excludes) and any(
+        e.endswith("/Pal/Content") for e in excludes
+    )
+    # a container or a last-run record is the truth: the request's game does not change it
+    monkeypatch.setattr(docker_ops, "status", lambda _iid, _s=None: {"exists": True, "game": "rust"})
+    assert main._server_profile(settings, IID, ("palworld", None)) is rust.PROFILE
+    monkeypatch.setattr(
+        docker_ops, "status", lambda _iid, _s=None: {"exists": False, "last_run": {"game": "valheim"}}
+    )
+    assert main._server_profile(settings, IID, ("palworld", None)) is valheim.PROFILE
+
+
+def test_restore_of_a_server_that_never_ran_keeps_the_games_files(settings, monkeypatch):
+    monkeypatch.setattr(
+        docker_ops, "status", lambda _iid, _s=None: {"exists": False, "game": None, "last_run": None}
+    )
+    current = docker_ops.instance_dir(settings, IID)
+    current.mkdir(parents=True)
+    (current / "PalServer.sh").write_text("sh")
+    restored = settings.staging_dir / "restore-z"
+    restored.mkdir(parents=True)
+    assert main._carry_over_excluded(settings, IID, current, restored) == []
+    assert not (restored / "PalServer.sh").exists()  # (without the game: Minecraft, nothing excluded)
+    assert main._carry_over_excluded(settings, IID, current, restored, ("palworld", None)) == []
+    assert (restored / "PalServer.sh").read_text() == "sh"
+
+
+def test_backup_and_restore_requests_take_a_checked_game():
+    from mcagent.schemas import BackupRequest, RestoreRequest
+
+    body = BackupRequest(backup_id="b1", game="palworld")
+    assert (body.game, body.variant) == ("palworld", None) and BackupRequest(backup_id="b1").game is None
+    assert RestoreRequest(snapshot_id="abcdef12", game="project-zomboid").game == "project-zomboid"
+    for bad in ("../x", "Palworld", "a" * 40, "x y"):
+        with pytest.raises(ValidationError):
+            BackupRequest(backup_id="b1", game=bad)

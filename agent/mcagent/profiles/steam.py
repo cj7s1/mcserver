@@ -30,6 +30,8 @@ PORT = r"[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0
 TZ = r"[A-Za-z][A-Za-z0-9_+-]{0,31}(?:/[A-Za-z0-9_+-]{1,32}){0,2}"
 # passwords and tokens that end up in a URL path, a shell line or a sed expression
 ALNUM_SECRET = r"[A-Za-z0-9]{16,64}"  # noqa: S105 - a value pattern
+# Docker's stop timeout while a server has not become ready in its run (``RuntimeProfile.not_ready_stop_timeout``)
+NOT_READY_STOP_TIMEOUT = 5
 
 
 def allow_list(label: str, allowed: frozenset[str], why: str) -> EnvPolicy:
@@ -70,6 +72,7 @@ __all__ = [
     "ALNUM_SECRET",
     "BOOL",
     "BOOL_ANY_CASE",
+    "NOT_READY_STOP_TIMEOUT",
     "PORT",
     "TZ",
     "ZERO_ONE",

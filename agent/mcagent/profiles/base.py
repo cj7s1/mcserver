@@ -198,6 +198,12 @@ class RuntimeProfile:
     env_port_offsets: Mapping[str, tuple[tuple[int, str], ...]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    # The Docker stop timeout (seconds) of a stop while the server has not become ready in its current run
+    # (an agent-side readiness probe that never succeeded: the image is still downloading or installing the
+    # game, so there is no world to save): SIGTERM, then SIGKILL after this many seconds, without the
+    # driver's save. None (every game before the six): the usual stop. The images of PZ (DepotDownloader)
+    # and Rust (SteamCMD) defer their SIGTERM trap until the download ends (end-to-end run: 61 s, 4.8 GB).
+    not_ready_stop_timeout: int | None = None
     # A spec that sets a variable the agent injects is refused (400 ``env_not_allowed``) instead of
     # having its value silently replaced: the six newer games, whose fixed variables switch off
     # what downloads or runs code (CS2_ADDITIONAL_ARGS, RUST_OXIDE_ENABLED, ...). Defaults the agent

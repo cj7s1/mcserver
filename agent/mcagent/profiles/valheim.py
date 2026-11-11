@@ -112,6 +112,8 @@ PROFILE = RuntimeProfile(
     env_ports=MappingProxyType({"SERVER_PORT": "udp"}),
     env_port_offsets=MappingProxyType({"SERVER_PORT": ((1, "udp"), (2, "udp"))}),
     restart_policy="no",
+    # a stop before the server was ever ready (still downloading the game): nothing to save, no waiting
+    not_ready_stop_timeout=steam.NOT_READY_STOP_TIMEOUT,
     strict_env=True,
     redact_env=("SERVER_PASS",),
 )

@@ -138,6 +138,9 @@ class ApplySpecRequest(BaseModel):
 
 class StopRequest(BaseModel):
     timeout: int | None = Field(default=None, ge=1, le=900)
+    # the panel never saw the server ready in this run (its job still waited for the first start):
+    # see docker_ops.graceful_stop. Older agents ignore the field (a usual stop).
+    not_ready: bool = False
 
 
 class CommandRequest(BaseModel):
@@ -192,11 +195,18 @@ class DeleteDataRequest(BaseModel):
     confirm: UUID  # must equal the instance id, a deliberate second key
 
 
+GAME_ID_PATTERN = r"^[a-z0-9-]{1,32}$"
+
+
 class BackupRequest(BaseModel):
     backup_id: str = Field(pattern=r"^[A-Za-z0-9-]{1,64}$")
     tags: list[str] = Field(default_factory=list, max_length=8)
     consistency: Literal["auto", "require", "none"] = "auto"
     excludes: list[str] = Field(default_factory=list, max_length=64)
+    # the server's game as the panel knows it, for a server without a container or last-run record (created
+    # stopped, filled by an import): the agent then takes its own profile of that game (main._server_profile)
+    game: str | None = Field(default=None, pattern=GAME_ID_PATTERN)
+    variant: str | None = Field(default=None, pattern=GAME_ID_PATTERN)
 
     @field_validator("tags", "excludes")
     @classmethod
@@ -210,6 +220,9 @@ class BackupRequest(BaseModel):
 class RestoreRequest(BaseModel):
     snapshot_id: str = Field(pattern=r"^[a-f0-9]{8,64}$")
     target_instance_id: UUID | None = None  # None => restore in place
+    # as for BackupRequest: the game whose excluded files a restore in place keeps (main._carry_over_excluded)
+    game: str | None = Field(default=None, pattern=GAME_ID_PATTERN)
+    variant: str | None = Field(default=None, pattern=GAME_ID_PATTERN)
 
 
 class ForgetRequest(BaseModel):

@@ -85,6 +85,12 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
         raise ValueError(f"Profile {profile.game}: an a2s health check needs a port or a port variable")
     if profile.health.port_env is not None and not _ENV_NAME_RE.match(profile.health.port_env):
         raise ValueError(f"Profile {profile.game}: invalid health port variable {profile.health.port_env!r}")
+    if profile.not_ready_stop_timeout is not None and (
+        not 1 <= int(profile.not_ready_stop_timeout) <= 60 or profile.health.kind not in AGENT_SIDE_HEALTH
+    ):
+        raise ValueError(
+            f"Profile {profile.game}: a stop before the server is ready needs 1-60 s and an agent-side readiness probe"
+        )
     for digest in profile.image_digests:
         if not _DIGEST_RE.match(digest):
             raise ValueError(f"Profile {profile.game}: invalid image digest {digest!r}")

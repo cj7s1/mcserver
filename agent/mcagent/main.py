@@ -149,6 +149,10 @@ FEATURES = [
     "archive_excludes",
     "extract_protected",
     "claim_marker",
+    # backup/restore requests may name the server's game (for a server without container or last-run record)
+    "backup_game_hint",
+    # a stop may say the server never became ready in this run (StopRequest.not_ready)
+    "stop_not_ready",
 ]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
@@ -797,7 +801,11 @@ async def stop(
     (``docker_ops.flush_timeout``) plus a few seconds.
     """
     registry.assert_lifecycle_allowed(instance_id)
-    result = await run_in_threadpool(docker_ops.stop, instance_id, body.timeout if body else None, settings)
+    result = await run_in_threadpool(
+        lambda: docker_ops.stop(
+            instance_id, body.timeout if body else None, settings, not_ready=bool(body and body.not_ready)
+        )
+    )
     status = await run_in_threadpool(docker_ops.status, instance_id)
     status["stop"] = result.as_dict()
     return status
@@ -822,7 +830,9 @@ async def restart(
             docker_ops.start_guard(
                 settings, instance_id, docker_ops.require_container(instance_id), live=False
             )
-            stopped = docker_ops.stop(instance_id, body.timeout if body else None, settings)
+            stopped = docker_ops.stop(
+                instance_id, body.timeout if body else None, settings, not_ready=bool(body and body.not_ready)
+            )
             docker_ops.start(instance_id)
             return stopped
 
@@ -2022,30 +2032,48 @@ async def list_backups(instance_id: UUID, settings: Settings = Depends(get_setti
     return {"snapshots": await run_in_threadpool(r.snapshots)}
 
 
-def _server_profile(settings: Settings, instance_id: UUID) -> profiles.RuntimeProfile | None:
+GameHint = tuple[str | None, str | None]
+
+
+def _server_profile(
+    settings: Settings, instance_id: UUID, hint: GameHint = (None, None)
+) -> profiles.RuntimeProfile | None:
     """The runtime profile of the server's game (its container's labels, or the game its last-run
-    record names); None for an unknown game and when Docker cannot be asked."""
+    record names); None for an unknown game and when Docker cannot be asked. A server with neither
+    (created stopped, its never-started container retired) takes the game the panel names in its
+    request (``hint`` = (game, variant)), as long as this agent has a profile of it; else Minecraft."""
     try:
         status = docker_ops.status(instance_id, settings)
     except Exception as exc:
         log.debug("the game of %s could not be determined: %s", instance_id, exc)
         return None
-    info = status if status.get("exists") else (status.get("last_run") or {})
+    if status.get("exists"):
+        info = status
+    elif status.get("last_run"):
+        info = status["last_run"]
+    else:
+        game, variant = hint
+        hinted = profiles.get(game, variant) if game else None
+        return hinted or profiles.get(profiles.DEFAULT_GAME)
     return profiles.get(info.get("game") or profiles.DEFAULT_GAME, info.get("variant") or None)
 
 
-def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]:
+def _profile_backup_excludes(
+    settings: Settings, instance_id: UUID, hint: GameHint = (None, None)
+) -> list[str]:
     """The default backup excludes of the server's game (``_server_profile``), as absolute paths
     below the server folder; none for Minecraft, for an unknown game and when Docker cannot be
     asked."""
-    profile = _server_profile(settings, instance_id)
+    profile = _server_profile(settings, instance_id, hint)
     if profile is None:
         return []
     source = docker_ops.instance_dir(settings, instance_id)
     return [str(source / rel) for rel in profile.default_backup_excludes]
 
 
-def _carry_over_excluded(settings: Settings, instance_id: UUID, current: Path, restored: Path) -> list[str]:
+def _carry_over_excluded(
+    settings: Settings, instance_id: UUID, current: Path, restored: Path, hint: GameHint = (None, None)
+) -> list[str]:
     """Move what the game's profile leaves out of backups (re-downloadable game files: Satisfactory's
     2.8 GB ``gamefiles/``, Palworld's ``PalServer.sh`` and ``*.so``, CS2's ``game/**/*.vpk``) from the
     server folder into the restored tree, which does not have it, so a restore does not throw it away
@@ -2058,7 +2086,7 @@ def _carry_over_excluded(settings: Settings, instance_id: UUID, current: Path, r
     the next start downloads them; that is a warning, never an error."""
     warnings: list[str] = []
     root = docker_ops.instance_dir(settings, instance_id)
-    for absolute in _profile_backup_excludes(settings, instance_id):
+    for absolute in _profile_backup_excludes(settings, instance_id, hint):
         pattern = os.path.relpath(absolute, root)
         if pattern.startswith("..") or os.path.isabs(pattern):
             continue
@@ -2137,9 +2165,10 @@ async def create_backup(
     restic = Restic(settings, instance_id)
 
     def _backup(op: Operation) -> dict[str, Any]:
-        excludes = list(body.excludes) + _profile_backup_excludes(settings, instance_id)
+        hint = (body.game, body.variant)
+        excludes = list(body.excludes) + _profile_backup_excludes(settings, instance_id, hint)
         with _world_saving_paused(settings, instance_id, body.consistency, op, "backup", 0.02) as saving:
-            profile = _server_profile(settings, instance_id)
+            profile = _server_profile(settings, instance_id, hint)
             if profile is not None and profile.fix_ownership:
                 # the backup keeps the owners: the files the save just wrote get the runtime uid:gid
                 # (Satisfactory's are <uid>:1000 while it runs); what the backup leaves out is not walked
@@ -2222,7 +2251,9 @@ async def restore_backup(
             remove_tree(staging)
             raise
         if target_id == instance_id and target_dir.exists():
-            warnings.extend(_carry_over_excluded(settings, instance_id, target_dir, staging))
+            warnings.extend(
+                _carry_over_excluded(settings, instance_id, target_dir, staging, (body.game, body.variant))
+            )
         op.update(0.94, "Swapping restored files into place")
         moved = False
         try:
