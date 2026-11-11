@@ -97,6 +97,8 @@ class ConsoleDriver(ControlDriver):
         save_timeout: float = 120.0,
         broadcast: str | None = "say {text}",
         output_wait: float = 1.5,
+        exec_reply: str | None = None,
+        refused_lines: Sequence[str] = (),
     ) -> None:
         if transport not in ("exec", "stdin"):
             raise ValueError(f"Unknown console transport {transport!r}")
@@ -108,8 +110,12 @@ class ConsoleDriver(ControlDriver):
                 raise ValueError("exec_user_env names the uid and the gid variable")
         else:
             self.exec_argv = None
-        if guard not in (None, "tmux"):
+        if guard not in console_io.GUARDS:
             raise ValueError(f"Unknown console guard {guard!r}")
+        if exec_reply not in (None, "stdout") or (exec_reply is not None and transport != "exec"):
+            raise ValueError(
+                "exec_reply is 'stdout' (an exec console whose program prints the reply) or None"
+            )
         if not 1 <= int(max_line_len) <= 4096:
             raise ValueError("max_line_len must be between 1 and 4096")
         if save_done_file is not None and (
@@ -128,6 +134,12 @@ class ConsoleDriver(ControlDriver):
         self.save_timeout = float(save_timeout)
         self.broadcast_template = broadcast
         self.output_wait = float(output_wait)
+        # "stdout": the exec program prints the server's reply itself (HKMP's helper returns what
+        # the server appended to its log), so that is the reply; None: read the container log
+        self.exec_reply = exec_reply
+        # whole lines that are refused (HKMP's helper runs its own subcommands, e.g. ``check``
+        # asks GitHub, instead of typing them into the console)
+        self.refused_lines = frozenset(refused_lines)
 
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> ConsoleDriver:
@@ -135,7 +147,10 @@ class ConsoleDriver(ControlDriver):
 
     # --- writing a line ----------------------------------------------------------------------------
     def sanitise(self, text: str) -> str:
-        return console_io.sanitise_line(text, max_len=self.max_line_len, guard=self.guard)
+        line = console_io.sanitise_line(text, max_len=self.max_line_len, guard=self.guard)
+        if line in self.refused_lines:
+            raise console_io.refused(f"'{line}' is not a console command of this server")
+        return line
 
     def exec_user(self, c: Container) -> str | None:
         """``uid:gid`` the exec runs as: the values of ``exec_user_env`` in the container's own
@@ -162,12 +177,13 @@ class ConsoleDriver(ControlDriver):
             self._write_unlocked(c, line)
         return line
 
-    def _write_unlocked(self, c: Container, line: str) -> None:
+    def _write_unlocked(self, c: Container, line: str) -> str | None:
+        """Write the line; the exec program's output (exec transport), else None."""
         if self.transport == "exec":
             assert self.exec_argv is not None
-            console_io.exec_line(c, self.exec_argv, line, user=self.exec_user(c))
-        else:
-            console_io.write_stdin(c, line)
+            return console_io.exec_line(c, self.exec_argv, line, user=self.exec_user(c))
+        console_io.write_stdin(c, line)
+        return None
 
     # --- commands --------------------------------------------------------------------------------------
     def command_sync(self, settings: Settings, c: Container, text: str, timeout: float) -> str:
@@ -175,8 +191,12 @@ class ConsoleDriver(ControlDriver):
         key = str((c.labels or {}).get(_ops().LABEL_INSTANCE) or c.id)
         with console_io.console_lock(key):
             since = time.time() - 0.05
-            self._write_unlocked(c, line)
+            printed = self._write_unlocked(c, line)
             redact = _ops().log_redactor(settings, c)
+            if self.exec_reply == "stdout":
+                lines = console_io.output_lines(printed or "")[-console_io.OUTPUT_MAX_LINES :]
+                out = "\n".join(lines)
+                return redact(out) if redact is not None and out else out
             out = console_io.read_output(c, since, min(float(timeout), self.output_wait), redact=redact)
         return out
 

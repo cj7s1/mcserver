@@ -63,9 +63,36 @@ class RconCommands:
     # a regular expression of the log line that says a save is complete, for games whose save
     # command answers before the save is written (Factorio: "Saving finished")
     save_done_log: str | None = None
+    # sent through RCON before ``docker stop`` when RCON answers, without waiting for a reply (the
+    # server closes the connection as it quits): games with nothing to save whose shell entrypoint
+    # does not pass the stop signal on in a useful way (CS2: ``quit``)
+    quit_before_stop: str | None = None
+
+
+def a2s_query(target: tuple[str, int]) -> Any:
+    """The async query of a :class:`~mcagent.drivers.base.QueryTarget` that asks A2S at ``target``:
+    what ``GET /ping`` answers (``online``, ``max``, ``sample``, ``version``, ``motd``, ...); 502
+    ``ping_failed`` when the server does not answer A2S (yet)."""
+
+    async def query(timeout: float) -> dict[str, Any]:
+        import asyncio
+
+        from .. import a2s
+
+        try:
+            return await asyncio.to_thread(a2s.status, target[0], target[1], timeout)
+        except a2s.A2SError as exc:
+            raise AgentError(
+                f"The server did not answer the status query: {exc}", "ping_failed", 502
+            ) from exc
+
+    return query
 
 
 SECRET_FILE_MAX_BYTES = 256
+QUIT_REPLY_WAIT = 2.0  # quit_before_stop: how long to wait for a reply (usually the connection drops)
+QUIT_GRACE = 10.0  # ... and how long the server may take to exit before the stop signal
+QUIT_POLL = 0.25
 # how far back (seconds) the wait for save_done_log looks from the moment the command is sent
 SAVE_LOG_SLACK = 0.2
 
@@ -81,6 +108,9 @@ class RconDriver(ControlDriver):
         commands: RconCommands,
         max_command_len: int = rcon_client.MAX_COMMAND_LEN,
         secret_file: str | None = None,
+        port_env: str | None = None,
+        a2s_port: int | None = None,
+        a2s_port_env: str | None = None,
     ) -> None:
         if not 1 <= port <= 65535 or not (secret_env or secret_file):
             raise ValueError(
@@ -88,12 +118,20 @@ class RconDriver(ControlDriver):
             )
         if secret_file is not None and (secret_file.startswith("/") or ".." in secret_file.split("/")):
             raise ValueError(f"Invalid RCON secret file {secret_file!r}")
+        if a2s_port is not None and not 1 <= a2s_port <= 65535:
+            raise ValueError("Invalid A2S port")
         self.port = port
         self.secret_env = secret_env
         self.secret_file = secret_file
         self.commands = commands
         self.max_command_len = max_command_len
         self.resume_label = commands.resume_saving[0].command if commands.resume_saving else "resume saving"
+        # the container variable that names the RCON port (CS2: RCON listens on the game port's
+        # number over TCP, and the game port is set 1:1 through CS2_PORT); ``port`` without it
+        self.port_env = port_env
+        # where the status query (GET /ping) asks A2S; none: no status query
+        self.a2s_port = a2s_port
+        self.a2s_port_env = a2s_port_env
 
     @classmethod
     def from_options(cls, options: dict[str, Any]) -> RconDriver:
@@ -113,6 +151,7 @@ class RconDriver(ControlDriver):
                 pause_saving=steps("pause_saving"),
                 resume_saving=steps("resume_saving"),
                 save_done_log=commands.get("save_done_log"),
+                quit_before_stop=commands.get("quit_before_stop"),
             )
         return cls(
             port=int(options["port"]),
@@ -120,6 +159,9 @@ class RconDriver(ControlDriver):
             secret_file=str(options["secret_file"]) if options.get("secret_file") else None,
             commands=commands,
             max_command_len=int(options.get("max_command_len") or rcon_client.MAX_COMMAND_LEN),
+            port_env=str(options["port_env"]) if options.get("port_env") else None,
+            a2s_port=int(options["a2s_port"]) if options.get("a2s_port") else None,
+            a2s_port_env=str(options["a2s_port_env"]) if options.get("a2s_port_env") else None,
         )
 
     # --- where RCON is ---------------------------------------------------------------------------
@@ -156,17 +198,38 @@ class RconDriver(ControlDriver):
         password = self.secret(settings, c)
         if not password:
             raise AgentError("Container has no RCON password configured", "rcon_unavailable", 409)
+        port = self.rcon_port(c)
         info = ops.describe(c)
         if settings.rcon_mode == "published":
             for p in info["ports"]:
-                if p["container_port"] == self.port:
+                if p["container_port"] == port and (self.port_env is None or p["protocol"] == "tcp"):
                     return "127.0.0.1", p["host_port"], password
             raise AgentError("RCON port is not published", "rcon_unavailable", 409)
         if c.attrs.get("HostConfig", {}).get("NetworkMode") == "host":
-            return "127.0.0.1", self.port, password
+            return "127.0.0.1", port, password
         if not info["ip_address"]:
             raise AgentError("Container has no IP address", "rcon_unavailable", 409)
-        return info["ip_address"], self.port, password
+        return info["ip_address"], port, password
+
+    def rcon_port(self, c: Container) -> int:
+        """The container port RCON listens on: the value of ``port_env`` when the profile names one
+        (and it is a port), else ``port``."""
+        if self.port_env is None:
+            return self.port
+        return int(_ops().env_port(c, self.port_env, self.port) or self.port)
+
+    # --- status query (A2S) ------------------------------------------------------------------------
+    def query_endpoint(self, settings: Settings, c: Container) -> tuple[str, int]:
+        """With ``a2s_port``/``a2s_port_env``: the A2S query of the game (players, limit, map,
+        version) for ``GET /ping``; without: no status query (409 ``ping_unavailable``)."""
+        if self.a2s_port is None and self.a2s_port_env is None:
+            return super().query_endpoint(settings, c)
+        from .base import QueryTarget
+
+        target = _ops().a2s_target(c, self.a2s_port, self.a2s_port_env, settings)
+        if target is None:
+            raise AgentError("The server's query port cannot be reached", "ping_unavailable", 409)
+        return QueryTarget(target[0], target[1], a2s_query(target))
 
     # --- commands --------------------------------------------------------------------------------
     async def command(self, settings: Settings, c: Container, text: str, timeout: float) -> str:
@@ -225,6 +288,8 @@ class RconDriver(ControlDriver):
                         )
                 if not answered and cmds.stop is not None:
                     courier = ops._RconStopCourier(c.id, c.name, target, cmds.stop)
+                if cmds.quit_before_stop is not None:
+                    self._quit_first(c, target, cmds.quit_before_stop, timeout, result)
         if courier is not None:
             courier.start()
         try:
@@ -233,6 +298,39 @@ class RconDriver(ControlDriver):
             if courier is not None:
                 courier.finish(result)
         return True
+
+    @staticmethod
+    def _quit_first(
+        c: Container, target: tuple[str, int, str], command: str, timeout: int, result: StopResult
+    ) -> None:
+        """Send ``command`` (CS2: ``quit``) and give the server up to QUIT_GRACE seconds to exit
+        before the signal. Never raises: the signal follows in any case."""
+        ops = _ops()
+        host, port, password = target
+        try:
+            rcon_client.run_command_sync(
+                host, port, password, command, timeout=QUIT_REPLY_WAIT, connect_timeout=ops.RCON_PROBE_TIMEOUT
+            )
+        except rcon_client.RconUnavailable as exc:
+            result.warnings.append(
+                f"{command} could not be sent before the stop (RCON is not available): {exc}"
+            )
+            return
+        except rcon_client.RconError:
+            pass  # sent; a server that quits closes the connection before it answers
+        except Exception as exc:
+            log.warning("Sending %s to %s before its stop failed: %s", command, c.name, exc)
+            return
+        result.stop_sent_via_rcon = True
+        deadline = time.monotonic() + min(QUIT_GRACE, max(1.0, timeout / 2))
+        while time.monotonic() < deadline:
+            try:
+                c.reload()
+            except Exception:
+                return  # gone or Docker trouble: docker stop decides
+            if c.status != "running":
+                return
+            time.sleep(QUIT_POLL)
 
     # --- saving ----------------------------------------------------------------------------------
     @property

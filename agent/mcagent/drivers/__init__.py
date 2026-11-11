@@ -15,9 +15,11 @@ from .base import ControlDriver, NoControlDriver, QueryTarget, Report, Send, Wai
 from .console import ConsoleDriver
 from .http_api import GameApiError, HttpApiDriver
 from .minecraft import MinecraftDriver
+from .palworld import PalworldDriver
 from .rcon import RconCommands, RconDriver, RconStep
 from .satisfactory import SatisfactoryDriver
 from .tshock import TShockDriver
+from .webrcon import WebRconDriver
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -31,6 +33,7 @@ __all__ = [
     "HttpApiDriver",
     "MinecraftDriver",
     "NoControlDriver",
+    "PalworldDriver",
     "QueryTarget",
     "RconCommands",
     "RconDriver",
@@ -40,6 +43,7 @@ __all__ = [
     "Send",
     "TShockDriver",
     "WaitLog",
+    "WebRconDriver",
     "for_container",
     "for_labels",
     "for_profile",
@@ -56,6 +60,8 @@ FACTORIES: dict[str, Callable[[dict[str, Any]], ControlDriver]] = {
     SatisfactoryDriver.id: SatisfactoryDriver.from_options,
     ConsoleDriver.id: ConsoleDriver.from_options,
     TShockDriver.id: TShockDriver.from_options,
+    PalworldDriver.id: PalworldDriver.from_options,
+    WebRconDriver.id: WebRconDriver.from_options,
 }
 _NONE = NoControlDriver()
 

@@ -72,7 +72,11 @@ class RconClient:
             raise RconUnavailable(f"Cannot connect to RCON at {self.host}:{self.port}: {exc}") from exc
         try:
             req_id = await self._send(TYPE_AUTH, self.password)
-            resp_id, _type, _payload = await self._read_packet(self.timeout)
+            resp_id, ptype, _payload = await self._read_packet(self.timeout)
+            if ptype == TYPE_RESPONSE:
+                # Source dedicated servers (CS2) send an empty RESPONSE_VALUE before the auth answer
+                # (type 2); Minecraft and Factorio answer with the auth answer alone
+                resp_id, ptype, _payload = await self._read_packet(self.timeout)
         except RconError as exc:
             raise RconUnavailable(str(exc)) from exc
         if resp_id == -1 or resp_id != req_id:

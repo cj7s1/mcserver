@@ -203,7 +203,12 @@ def http_request(
         resp = conn.getresponse()
         data = bytearray()
         while True:
-            sock.settimeout(remaining())
+            # a server that closes the connection after its answer (HTTP/1.0, "Connection: close")
+            # leaves http.client to close the socket once the body is read: no timeout to set then
+            if sock.fileno() != -1:
+                sock.settimeout(remaining())
+            elif time.monotonic() >= deadline:
+                raise TimeoutError("deadline")
             chunk = resp.read(_READ_CHUNK)
             if not chunk:
                 break

@@ -11,6 +11,8 @@ dependencies = [
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.18",
     "cryptography>=44",
+    # WebRCON (Rust); also installed through uvicorn[standard], declared because the agent uses it
+    "websockets>=15",
 ]
 
 [dependency-groups]

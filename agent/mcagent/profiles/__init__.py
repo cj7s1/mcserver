@@ -1,7 +1,9 @@
 """The runtime profiles this agent has, and how a spec or a container selects one.
 
-Registered: Minecraft (``minecraft.py``), Factorio (``factorio.py``) and Satisfactory
-(``satisfactory.py``). A spec without ``game`` (every panel
+Registered: Minecraft (``minecraft.py``), Factorio (``factorio.py``), Satisfactory
+(``satisfactory.py``), Terraria (``terraria.py``, three variants) and the six games of
+``feature/more-games``: Palworld, Valheim, Project Zomboid (``zomboid.py``), HKMP, CS2 and Rust
+(shared pieces in ``steam.py``). A spec without ``game`` (every panel
 before multi-game support, and every Minecraft spec of a current one) is Minecraft; a container
 without the ``io.mcpanel.game`` label is Minecraft as well, so existing containers keep their
 labels and their spec-hash label unchanged.
@@ -15,7 +17,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..errors import AgentError
-from . import factorio, minecraft, satisfactory, terraria
+from . import cs2, factorio, hkmp, minecraft, palworld, rust, satisfactory, terraria, valheim, zomboid
 from .base import AGENT_SIDE_HEALTH, IMPLEMENTED_HEALTH, Health, Mount, RuntimeProfile, UserModel
 
 if TYPE_CHECKING:
@@ -45,6 +47,8 @@ DEFAULT_GAME = minecraft.GAME
 LABEL_GAME = "io.mcpanel.game"
 LABEL_VARIANT = "io.mcpanel.variant"
 _ID_RE = re.compile(r"^[a-z0-9-]{1,32}$")
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,127}$")
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 # (game, variant) -> profile; a variant of None is the profile for a spec without a variant.
 PROFILES: dict[tuple[str, str | None], RuntimeProfile] = {}
@@ -75,6 +79,26 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
         raise ValueError(
             f"Profile {profile.game}: a udp-query health check needs a port, a payload and a pattern"
         )
+    if profile.health.kind == "a2s" and not (
+        (profile.health.port and 1 <= profile.health.port <= 65535) or profile.health.port_env
+    ):
+        raise ValueError(f"Profile {profile.game}: an a2s health check needs a port or a port variable")
+    if profile.health.port_env is not None and not _ENV_NAME_RE.match(profile.health.port_env):
+        raise ValueError(f"Profile {profile.game}: invalid health port variable {profile.health.port_env!r}")
+    for digest in profile.image_digests:
+        if not _DIGEST_RE.match(digest):
+            raise ValueError(f"Profile {profile.game}: invalid image digest {digest!r}")
+    for key in profile.redact_env:
+        if not _ENV_NAME_RE.match(key):
+            raise ValueError(f"Profile {profile.game}: invalid variable name {key!r} in redact_env")
+    for rel in profile.protected_paths:
+        if not rel or rel.startswith("/") or any(p in ("", ".", "..") for p in rel.split("/")):
+            raise ValueError(f"Profile {profile.game}: invalid protected path {rel!r}")
+    for key, offsets in profile.env_port_offsets.items():
+        if key not in profile.env_ports or any(
+            not (isinstance(o, int) and o > 0 and proto in ("tcp", "udp")) for o, proto in offsets
+        ):
+            raise ValueError(f"Profile {profile.game}: invalid derived ports for {key}")
     if profile.health.kind == "driver":
         from ..drivers import ControlDriver
         from ..drivers import get as get_driver
@@ -136,10 +160,24 @@ register(factorio.PROFILE)
 register(satisfactory.PROFILE)
 for _profile in terraria.PROFILES:
     register(_profile)
+for _profile in (palworld.PROFILE, valheim.PROFILE, zomboid.PROFILE, hkmp.PROFILE, cs2.PROFILE, rust.PROFILE):
+    register(_profile)
 
 
 def get(game: str | None, variant: str | None = None) -> RuntimeProfile | None:
     return PROFILES.get((game or DEFAULT_GAME, variant or None))
+
+
+def owned_reserved_env(game: str | None, variant: str | None) -> frozenset[str]:
+    """Variables the schema reserves for the agent (``schemas.RESERVED_ENV``) that this game's
+    profile names as a port variable (Valheim's image reads its game port from ``SERVER_PORT``):
+    a spec of that game may set them, every other spec may not."""
+    from ..schemas import RESERVED_ENV
+
+    profile = get(game, variant)
+    if profile is None:
+        return frozenset()
+    return frozenset(key for key in profile.env_ports if key in RESERVED_ENV)
 
 
 def for_spec(spec: InstanceSpec) -> RuntimeProfile:
@@ -231,6 +269,25 @@ def info(settings: Settings) -> dict[str, Any]:
                 "never_publish": [[port, proto] for port, proto in profile.never_publish],
                 "health": profile.health.kind,
                 "install_retry_exits": list(profile.install_retry_exits),
+                # only for the games that have them (the entries of the other games stay as they were)
+                **({"image_digests": list(profile.image_digests)} if profile.image_digests else {}),
+                # games whose every port comes from a variable (1:1 ports): {variable: protocol}
+                # and the ports derived from a variable ({variable: [[offset, protocol], ...]})
+                **(
+                    {
+                        "env_ports": dict(profile.env_ports),
+                        "env_port_offsets": {
+                            k: [list(o) for o in v] for k, v in profile.env_port_offsets.items()
+                        },
+                    }
+                    if profile.env_ports and not profile.container_ports
+                    else {}
+                ),
+                **(
+                    {"clean_exit_codes": list(profile.clean_exit_codes)}
+                    if profile.clean_exit_codes != (0,) and not profile.variants
+                    else {}
+                ),
             },
         )
         for variant in profile.variants:

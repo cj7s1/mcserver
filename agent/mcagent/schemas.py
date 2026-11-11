@@ -87,7 +87,9 @@ class InstanceSpec(BaseModel):
         for key, value in env.items():
             if not ENV_KEY_RE.match(key):
                 raise ValueError(f"Invalid environment variable name: {key!r}")
-            if key.upper() in RESERVED_ENV:
+            # a reserved name some game's image reads as its port (Valheim: SERVER_PORT) is checked
+            # with the spec's game below; every other reserved name is refused here
+            if key.upper() in RESERVED_ENV and key not in _game_owned_env():
                 raise ValueError(f"Environment variable {key} is managed by the agent")
             if "\x00" in value or len(value) > MAX_ENV_VALUE:
                 raise ValueError(f"Invalid value for {key}")
@@ -102,6 +104,26 @@ class InstanceSpec(BaseModel):
                 raise ValueError(f"Duplicate host port mapping {p.host_ip}:{p.host_port}/{p.protocol}")
             seen.add(key)
         return self
+
+    @model_validator(mode="after")
+    def _reserved_for_this_game(self) -> InstanceSpec:
+        from . import profiles
+
+        owned = profiles.owned_reserved_env(self.game, self.variant)
+        for key in self.env:
+            if key.upper() in RESERVED_ENV and key not in owned:
+                raise ValueError(f"Environment variable {key} is managed by the agent")
+        return self
+
+
+def _game_owned_env() -> frozenset[str]:
+    """Every reserved name that some game's profile names as a port variable (exact spelling)."""
+    from . import profiles
+
+    owned: set[str] = set()
+    for profile in profiles.all_profiles():
+        owned |= profiles.owned_reserved_env(profile.game, profile.variants[0] if profile.variants else None)
+    return frozenset(owned)
 
 
 class ApplySpecRequest(BaseModel):

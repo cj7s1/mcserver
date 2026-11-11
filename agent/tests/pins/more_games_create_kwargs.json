@@ -1,0 +1,637 @@
+{
+ "palworld": {
+  "spec_hash": "3cd3a390eacd1caf",
+  "kwargs": {
+   "image": "thijsvanloef/palworld-server-docker:v2.8.1",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "palworld-6a1d2c3b",
+   "environment": {
+    "TZ": "Europe/Berlin",
+    "PORT": "8215",
+    "PUBLIC_PORT": "8215",
+    "PLAYERS": "16",
+    "SERVER_NAME": "Pal Island",
+    "COMMUNITY": "false",
+    "ADMIN_PASSWORD": "admin-Secret_123",
+    "EXP_RATE": "1.5",
+    "IS_PVP": "False",
+    "PUID": "99",
+    "PGID": "100",
+    "REST_API_ENABLED": "true",
+    "REST_API_PORT": "8212",
+    "RCON_ENABLED": "false",
+    "BACKUP_ENABLED": "false",
+    "AUTO_UPDATE_ENABLED": "false",
+    "AUTO_REBOOT_ENABLED": "false",
+    "AUTO_PAUSE_ENABLED": "false",
+    "MOD_ENABLED": "false",
+    "ENABLE_PLAYER_LOGGING": "false",
+    "DISABLE_GENERATE_SETTINGS": "false",
+    "LOG_FORMAT_TYPE": "Text",
+    "QUERY_PORT": "27015"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "3cd3a390eacd1caf",
+    "io.mcpanel.stop-timeout": "60",
+    "io.mcpanel.game": "palworld"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d": {
+     "bind": "/palworld",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "8215/udp": [
+     [
+      "0.0.0.0",
+      8215
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "16384m",
+   "memswap_limit": "16384m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ },
+ "palworld_defaults": {
+  "spec_hash": "f13c4bef1154f6cb",
+  "kwargs": {
+   "image": "thijsvanloef/palworld-server-docker:v2.8.1",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "palworld-6a1d2c3b",
+   "environment": {
+    "PUID": "99",
+    "PGID": "100",
+    "REST_API_ENABLED": "true",
+    "REST_API_PORT": "8212",
+    "RCON_ENABLED": "false",
+    "BACKUP_ENABLED": "false",
+    "AUTO_UPDATE_ENABLED": "false",
+    "AUTO_REBOOT_ENABLED": "false",
+    "AUTO_PAUSE_ENABLED": "false",
+    "MOD_ENABLED": "false",
+    "ENABLE_PLAYER_LOGGING": "false",
+    "DISABLE_GENERATE_SETTINGS": "false",
+    "LOG_FORMAT_TYPE": "Text",
+    "PORT": "8211",
+    "QUERY_PORT": "27015",
+    "ADMIN_PASSWORD": "Zr8Kq2Lm5Nx7Pv3Tw9Yb4Hc6Jd1Fg0Se"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "f13c4bef1154f6cb",
+    "io.mcpanel.stop-timeout": "120",
+    "io.mcpanel.game": "palworld"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d": {
+     "bind": "/palworld",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "8211/udp": [
+     [
+      "0.0.0.0",
+      8211
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "8192m",
+   "memswap_limit": "8192m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ },
+ "valheim": {
+  "spec_hash": "0715e22702886159",
+  "kwargs": {
+   "image": "ghcr.io/community-valheim-tools/valheim-server:1.4.1",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "valheim-6a1d2c3b",
+   "environment": {
+    "TZ": "UTC",
+    "SERVER_NAME": "Viking Hall",
+    "SERVER_PORT": "2460",
+    "WORLD_NAME": "Midgard",
+    "SERVER_PASS": "skal-2026",
+    "SERVER_PUBLIC": "false",
+    "CROSSPLAY": "true",
+    "SERVER_ARGS": "-saveinterval 600 -preset hard",
+    "PUID": "99",
+    "PGID": "100",
+    "BACKUPS": "false",
+    "UPDATE_CRON": "",
+    "RESTART_CRON": "",
+    "UPDATE_IF_IDLE": "false",
+    "STATUS_HTTP": "false",
+    "SUPERVISOR_HTTP": "false"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "0715e22702886159",
+    "io.mcpanel.stop-timeout": "120",
+    "io.mcpanel.game": "valheim"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/config": {
+     "bind": "/config",
+     "mode": "rw"
+    },
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/opt": {
+     "bind": "/opt/valheim",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "2460/udp": [
+     [
+      "0.0.0.0",
+      2460
+     ]
+    ],
+    "2461/udp": [
+     [
+      "0.0.0.0",
+      2461
+     ]
+    ],
+    "2462/udp": [
+     [
+      "0.0.0.0",
+      2462
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "8192m",
+   "memswap_limit": "8192m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "SETUID",
+    "SETGID",
+    "KILL"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ },
+ "project_zomboid": {
+  "spec_hash": "ab81b0beb0a54ce2",
+  "kwargs": {
+   "image": "indifferentbroccoli/projectzomboid-server-docker:v1.2.0",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "zomboid-6a1d2c3b",
+   "environment": {
+    "TZ": "UTC",
+    "SERVER_NAME": "knox",
+    "DEFAULT_PORT": "16300",
+    "UDP_PORT": "16301",
+    "MAX_PLAYERS": "12",
+    "MEMORY_XMX_GB": "6",
+    "ADMIN_PASSWORD": "zombie-Admin-1",
+    "PUID": "99",
+    "PGID": "100",
+    "ADMIN_USERNAME": "admin",
+    "RCON_PORT": "27015",
+    "CONFIG_DIR": "/project-zomboid-config",
+    "STEAM_VAC": "true",
+    "USE_STEAM": "true",
+    "VM_ARGS": "",
+    "MEMORY_XMS_GB": "",
+    "FIX_MOD_CASE": "false",
+    "RCON_PASSWORD": "Zr8Kq2Lm5Nx7Pv3Tw9Yb4Hc6Jd1Fg0Se"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "ab81b0beb0a54ce2",
+    "io.mcpanel.stop-timeout": "120",
+    "io.mcpanel.game": "project-zomboid"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/game": {
+     "bind": "/project-zomboid",
+     "mode": "rw"
+    },
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/data": {
+     "bind": "/project-zomboid-config",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "16300/udp": [
+     [
+      "0.0.0.0",
+      16300
+     ]
+    ],
+    "16301/udp": [
+     [
+      "0.0.0.0",
+      16301
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "8192m",
+   "memswap_limit": "8192m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ },
+ "hkmp": {
+  "spec_hash": "043640dd574c4a8d",
+  "kwargs": {
+   "image": "maximalmax90/hkmpserver:v2.4.3-2",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "hkmp-6a1d2c3b",
+   "environment": {
+    "TZ": "UTC",
+    "PORT": "2223",
+    "FULL_SYNC": "true",
+    "PUID": "99",
+    "PGID": "100",
+    "STOP_TIMEOUT": "30"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "043640dd574c4a8d",
+    "io.mcpanel.stop-timeout": "40",
+    "io.mcpanel.game": "hkmp"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d": {
+     "bind": "/data",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "2223/udp": [
+     [
+      "0.0.0.0",
+      2223
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "512m",
+   "memswap_limit": "512m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "SETUID",
+    "SETGID"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   }
+  }
+ },
+ "cs2": {
+  "spec_hash": "c1d2d7b2d95a25ce",
+  "kwargs": {
+   "image": "joedwards32/cs2:5.0.1",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "cs2-6a1d2c3b",
+   "environment": {
+    "TZ": "UTC",
+    "CS2_SERVERNAME": "Dust Club",
+    "CS2_PORT": "27030",
+    "TV_PORT": "27031",
+    "TV_ENABLE": "1",
+    "CS2_MAXPLAYERS": "12",
+    "CS2_GAMEALIAS": "competitive",
+    "CS2_STARTMAP": "de_dust2",
+    "CS2_LAN": "0",
+    "SRCDS_TOKEN": "0123456789ABCDEF0123456789ABCDEF",
+    "CS2_CFG_URL": "",
+    "CS2_LOG_HTTP_URL": "",
+    "CS2_ADDITIONAL_ARGS": "",
+    "CS2_RCON_PORT": "",
+    "CS2_IP": "0.0.0.0",
+    "TV_PW": "",
+    "TV_RELAY_PW": "daaafb53f1dc05947204376f",
+    "CS2_RCONPW": "Zr8Kq2Lm5Nx7Pv3Tw9Yb4Hc6Jd1Fg0Se"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "c1d2d7b2d95a25ce",
+    "io.mcpanel.stop-timeout": "30",
+    "io.mcpanel.game": "cs2"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d": {
+     "bind": "/home/steam/cs2-dedicated",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "27030/udp": [
+     [
+      "0.0.0.0",
+      27030
+     ]
+    ],
+    "27031/udp": [
+     [
+      "0.0.0.0",
+      27031
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "4096m",
+   "memswap_limit": "4096m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "user": "1000:1000",
+   "init": true,
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ },
+ "rust": {
+  "spec_hash": "75717e657499465c",
+  "kwargs": {
+   "image": "didstopia/rust-server@sha256:c60a3ab044eb69019616951087834468aed478a11b449391376b23db05ddc38a",
+   "name": "mcpanel-6a1d2c3b4e5f",
+   "hostname": "rust-6a1d2c3b",
+   "environment": {
+    "TZ": "UTC",
+    "RUST_SERVER_NAME": "Wipe Day",
+    "RUST_SERVER_IDENTITY": "main",
+    "RUST_SERVER_PORT": "28100",
+    "RUST_SERVER_QUERYPORT": "28101",
+    "RUST_APP_PORT": "28102",
+    "RUST_SERVER_WORLDSIZE": "3500",
+    "RUST_SERVER_SEED": "12345",
+    "RUST_SERVER_MAXPLAYERS": "50",
+    "PUID": "99",
+    "PGID": "100",
+    "RUST_SERVER_STARTUP_ARGUMENTS": "-batchmode -load -nographics +server.secure 1",
+    "RUST_RCON_WEB": "1",
+    "RUST_RCON_PORT": "28016",
+    "RUST_RCON_SECURE_WEBSOCKET": "0",
+    "RUST_UPDATE_CHECKING": "0",
+    "RUST_HEARTBEAT": "0",
+    "RUST_OXIDE_ENABLED": "0",
+    "RUST_OXIDE_UPDATE_ON_BOOT": "0",
+    "RUST_SERVER_LEVELURL": "",
+    "ENABLE_PASSWORDLESS_SUDO": "false",
+    "RUST_SERVER_URL": "",
+    "RUST_RCON_PASSWORD": "Zr8Kq2Lm5Nx7Pv3Tw9Yb4Hc6Jd1Fg0Se"
+   },
+   "labels": {
+    "io.mcpanel.managed": "true",
+    "io.mcpanel.instance": "6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d",
+    "io.mcpanel.name": "Pinned",
+    "io.mcpanel.spec-hash": "75717e657499465c",
+    "io.mcpanel.stop-timeout": "180",
+    "io.mcpanel.game": "rust"
+   },
+   "volumes": {
+    "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d": {
+     "bind": "/steamcmd/rust",
+     "mode": "rw"
+    }
+   },
+   "ports": {
+    "28100/udp": [
+     [
+      "0.0.0.0",
+      28100
+     ]
+    ],
+    "28101/udp": [
+     [
+      "0.0.0.0",
+      28101
+     ]
+    ],
+    "28102/tcp": [
+     [
+      "0.0.0.0",
+      28102
+     ]
+    ]
+   },
+   "network": "mcpanel_instances",
+   "mem_limit": "16384m",
+   "memswap_limit": "16384m",
+   "pids_limit": 8192,
+   "restart_policy": {
+    "Name": "no"
+   },
+   "stop_signal": "SIGTERM",
+   "stop_timeout": 20,
+   "stdin_open": false,
+   "tty": false,
+   "detach": true,
+   "security_opt": [
+    "no-new-privileges:true"
+   ],
+   "cap_drop": [
+    "ALL"
+   ],
+   "cap_add": [
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "SETUID",
+    "SETGID"
+   ],
+   "log_config": {
+    "Type": "json-file",
+    "Config": {
+     "max-size": "20m",
+     "max-file": "5"
+    }
+   },
+   "healthcheck": {
+    "test": [
+     "NONE"
+    ]
+   }
+  }
+ }
+}

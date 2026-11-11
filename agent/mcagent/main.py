@@ -405,14 +405,27 @@ async def _shutdown() -> None:
 
 def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
     """The server folder for the file API: the claim marker and the start wrapper cannot be written
-    through it, and a change under ``saved/`` removes the claim marker (``claimmarker.GuardedRoot``)."""
+    through it, and a change under ``saved/`` removes the claim marker (``claimmarker.GuardedRoot``).
+    For a game with protected paths (CS2's start hooks) those are refused too, and files are
+    written as the game's owner (CS2: 1000:1000; every other game: the runtime uid/gid)."""
+    uid, gid = docker_ops.server_owner(settings, instance_id)
     return claimmarker.GuardedRoot(
         docker_ops.instance_dir(settings, instance_id),
-        settings.runtime_uid,
-        settings.runtime_gid,
+        uid,
+        gid,
         settings=settings,
         instance_id=instance_id,
+        protected=docker_ops.server_protected_paths(settings, instance_id),
     )
+
+
+def _with_game_protected(settings: Settings, instance_id: UUID, protected: Any) -> Any:
+    """The panel's protected paths of an extraction plus the game's own (none for most games: the
+    panel's list is passed on unchanged then)."""
+    own = docker_ops.server_protected_paths(settings, instance_id)
+    if not own:
+        return protected
+    return [*(protected or []), *(p for p in own if p not in (protected or []))]
 
 
 def _spec_hash(spec: Any) -> str:
@@ -936,6 +949,8 @@ async def delete_data(
             docker_ops.remove_stale_replacement(instance_id)  # left by an interrupted apply
             docker_ops.remove_container(instance_id, timeout=30, settings=settings, save_last_run=False)
         record_warning = None
+        with contextlib.suppress(OSError):
+            docker_ops.forget_server_game(settings, instance_id)  # only some games have one
         try:
             lastrun.delete(settings, instance_id)
         except OSError as exc:
@@ -1871,7 +1886,8 @@ async def files_extract(
                 strip=body.strip,
                 overwrite=body.overwrite,
                 progress=lambda p, m: op.update(p * 0.98, m),
-                protected=body.protected,
+                # the game's own protected paths (CS2's start hooks) are skipped like the panel's
+                protected=_with_game_protected(settings, instance_id, body.protected),
             )
         finally:
             # also when the extraction failed: an uploaded archive must not stay in the folder

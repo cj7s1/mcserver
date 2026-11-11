@@ -27,7 +27,10 @@ class UserModel:
     ``drop_privileges_env``: the image starts as root and drops to the uid/gid given in the
     environment variables ``uid_env`` / ``gid_env`` (itzg: ``UID`` / ``GID``); the agent injects
     them. ``fixed``: the agent sets the container's ``user`` to ``uid:gid`` (None = the agent's
-    runtime uid/gid), for images that run unprivileged.
+    runtime uid/gid), for images that run unprivileged. A literal ``uid``/``gid`` (CS2's image
+    works only as 1000:1000) also makes it the owner of the server folder: the agent gives the
+    folder that owner before every create and start and writes its files as that owner
+    (``RuntimeProfile.literal_owner``, ``docker_ops.server_owner``).
     """
 
     kind: Literal["drop_privileges_env", "fixed"]
@@ -61,20 +64,27 @@ class Health:
     An agent-side probe that has not succeeded reads "starting" for ``start_period_s`` after the
     start and "unhealthy" afterwards; the container gets no Docker health check (``NONE``, so an
     image HEALTHCHECK cannot interfere).
+
+    ``a2s`` (Valve's Source query, ``mcagent.a2s``): A2S_INFO to ``port``/udp of the container, with
+    the challenge handshake; healthy on a valid ``I`` reply. ``port_env``: a variable of the
+    container that names the port instead (games whose ports are set 1:1 through the environment;
+    ``port`` is the fallback when the variable is missing). Re-checked at most every few seconds.
     """
 
-    kind: Literal["cmd", "image", "tcp", "udp-query", "log", "driver"]
+    kind: Literal["cmd", "image", "tcp", "udp-query", "log", "driver", "a2s"]
     argv: tuple[str, ...] = ()
     port: int | None = None
     pattern: str | None = None
     start_period_s: int = 600
     # udp-query: the datagram sent to the port
     payload: bytes = b""
+    # a2s: the container variable that holds the query port (the value of `port` without it)
+    port_env: str | None = None
 
 
-IMPLEMENTED_HEALTH = frozenset({"cmd", "image", "tcp", "log", "udp-query", "driver"})
+IMPLEMENTED_HEALTH = frozenset({"cmd", "image", "tcp", "log", "udp-query", "driver", "a2s"})
 # probes the agent runs itself (no Docker health check)
-AGENT_SIDE_HEALTH = frozenset({"tcp", "log", "udp-query", "driver"})
+AGENT_SIDE_HEALTH = frozenset({"tcp", "log", "udp-query", "driver", "a2s"})
 
 EnvPolicy = Callable[[str], str | None]
 InjectedEnv = Callable[["RuntimeProfile", "Settings", "InstanceSpec"], dict[str, str]]
@@ -169,19 +179,67 @@ class RuntimeProfile:
     # Run before every create and every start the agent makes (Satisfactory: writes the start
     # wrapper, the container's entrypoint, into the server folder).
     prepare_start: Callable[[Settings, Any], None] | None = None
+    # Docker's init process (tini) as PID 1, for images whose shell entrypoint ignores SIGTERM
+    # (CS2: bash as PID 1 does not forward it, so every stop would wait for the timeout).
+    init: bool = False
+    # Image references by digest (``<repository>@sha256:<hex>``) a spec may use, for images
+    # without usable version tags (Rust: only ``latest``): the repository must still be allowed
+    # and the digest must be one of these. Without any, digests are refused (tags only).
+    image_digests: tuple[str, ...] = ()
+    # Container variables whose values (at least 4 characters) are replaced by ``********`` in every
+    # log text the agent hands out (GET logs, the stream, console history, last-run records,
+    # console replies): passwords and tokens the image prints (PZ's launcher logs -adminpassword).
+    redact_env: tuple[str, ...] = ()
+    # Paths relative to the server folder that the file API never writes, uploads, renames onto
+    # or deletes (CS2: pre.sh/post.sh, sourced as code at every start; server.cfg, generated).
+    protected_paths: tuple[str, ...] = ()
+    # Further ports an ``env_ports`` variable names, as (offset, protocol) from its value
+    # (Valheim: the query port is the game port + 1, crossplay + 2).
+    env_port_offsets: Mapping[str, tuple[tuple[int, str], ...]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    # A spec that sets a variable the agent injects is refused (400 ``env_not_allowed``) instead of
+    # having its value silently replaced: the six newer games, whose fixed variables switch off
+    # what downloads or runs code (CS2_ADDITIONAL_ARGS, RUST_OXIDE_ENABLED, ...). Defaults the agent
+    # injects only when the spec lacks them (1:1 ports, the control secret) are never both.
+    strict_env: bool = False
 
-    def env_port_error(self, env: Mapping[str, str] | None) -> str | None:
-        """Why the ports the ``env_ports`` variables of ``env`` name are refused: such a port must
-        not be one of the profile's own container ports (Satisfactory: a messaging port 7777/tcp
-        would be the HTTPS API's) nor be named twice. None when they are fine."""
-        seen: dict[tuple[int, str], str] = {}
+    @property
+    def literal_owner(self) -> tuple[int, int] | None:
+        """(uid, gid) the profile fixes for its container whatever the agent's runtime ids are (CS2's
+        image works only as 1000:1000); None when the server runs as the runtime uid/gid."""
+        if self.user.kind == "fixed" and self.user.uid is not None and self.user.gid is not None:
+            return int(self.user.uid), int(self.user.gid)
+        return None
+
+    def env_named_ports(self, env: Mapping[str, str] | None) -> list[tuple[int, str, str]]:
+        """(port, protocol, name) of every container port the ``env_ports`` variables of ``env``
+        name, with the ports ``env_port_offsets`` derive from them."""
+        out: list[tuple[int, str, str]] = []
         for key, value in (env or {}).items():
             proto = self.env_ports.get(key)
             if proto is None or not str(value).isdigit():
                 continue
             port = int(value)
+            out.append((port, proto, key))
+            for offset, derived in self.env_port_offsets.get(key, ()):
+                out.append((port + offset, derived, f"{key}+{offset}"))
+        return out
+
+    def env_port_error(self, env: Mapping[str, str] | None) -> str | None:
+        """Why the ports the ``env_ports`` variables of ``env`` name are refused: such a port must
+        not be one of the profile's own container ports (Satisfactory: a messaging port 7777/tcp
+        would be the HTTPS API's) or one it never publishes (an internal port such as an RCON or
+        REST port), and not be named twice. None when they are fine."""
+        seen: dict[tuple[int, str], str] = {}
+        for port, proto, key in self.env_named_ports(env):
+            if "+" in key and not 1 <= port <= 65535:  # a derived port (the value itself has a pattern)
+                return f"{key} names the port {port}, which does not exist"
             if (port, proto) in self.container_ports:
                 return f"{key}={port} collides with the server's own port {port}/{proto}"
+            for internal, internal_proto in self.never_publish:
+                if internal == port and internal_proto in (None, proto):
+                    return f"{key}={port} collides with the server's internal port {port}/{proto}"
             if (port, proto) in seen:
                 return f"{key} and {seen[(port, proto)]} name the same port {port}/{proto}"
             seen[(port, proto)] = key
@@ -213,11 +271,7 @@ class RuntimeProfile:
         for port, proto in self.never_publish:
             if port == container_port and proto in (None, protocol):
                 return f"Container port {container_port}/{protocol} is never published"
-        named = {
-            (int(value), self.env_ports[key])
-            for key, value in (env or {}).items()
-            if key in self.env_ports and str(value).isdigit()
-        }
+        named = {(port, proto) for port, proto, _key in self.env_named_ports(env)}
         if (
             not self.allow_extra_ports
             and (container_port, protocol) not in self.container_ports

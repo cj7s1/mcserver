@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 LINE = "{line}"
 DEFAULT_MAX_LINE = 256
 EXEC_TIMEOUT = 15.0
+EXEC_OUTPUT_MAX = 256 * 1024
 CONSOLE_LOCK_WAIT = 30.0
 OUTPUT_POLL = 0.2
 OUTPUT_QUIET = 0.5
@@ -64,6 +65,10 @@ _TMUX_KEY_FAMILIES = re.compile(
     r"User\d+|0x[0-9a-f]+)$",
     re.IGNORECASE,
 )
+
+
+SCREEN_REFUSED = ("^", "\\")
+GUARDS = (None, "tmux", "screen")
 
 
 def refused(reason: str) -> AgentError:
@@ -100,6 +105,12 @@ def sanitise_line(text: str, *, max_len: int = DEFAULT_MAX_LINE, guard: str | No
             raise refused("it ends with ';'")
         if is_tmux_key(line):
             raise refused(f"'{line}' would be sent as a key, not as text")
+    elif guard == "screen":
+        # `screen -X stuff` reads ^X as a control key and \ooo / \r as escapes: HKMP's helper types
+        # the line with it, and 'announce x^Mlist' ran a second command (probe of 2026-11-10)
+        for ch in SCREEN_REFUSED:
+            if ch in line:
+                raise refused(f"it contains '{ch}', which the console would read as a key or an escape")
     elif guard is not None:
         raise ValueError(f"Unknown console guard {guard!r}")
     return line
@@ -131,11 +142,12 @@ def _docker_api() -> Any:
 
 def exec_line(
     c: Container, template: Sequence[str], line: str, *, user: str | None, timeout: float | None = None
-) -> None:
+) -> str:
     """Run the profile's argv with ``line`` through Docker's exec API (no TTY, no stdin, not
     privileged) and wait for it, at most ``timeout`` seconds (default EXEC_TIMEOUT): 504
     ``console_timeout`` after that (the request ends, and the caller's console lock with it; the
-    program may still finish inside the container), 502 ``console_failed`` when it exits non-zero."""
+    program may still finish inside the container), 502 ``console_failed`` when it exits non-zero.
+    Returns what the program printed (stdout and stderr, at most EXEC_OUTPUT_MAX bytes)."""
     api = _docker_api()
     argv = exec_argv(template, line)
     limit = EXEC_TIMEOUT if timeout is None else timeout
@@ -169,14 +181,17 @@ def exec_line(
         exc = box["error"]
         raise AgentError(f"Could not write to the server's console: {exc}", "console_failed", 502) from exc
     output, code = box.get("output"), box.get("code")
+    if isinstance(output, bytes):
+        output = output[-EXEC_OUTPUT_MAX:]
+    text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output or "")
     if code != 0:
-        text = output.decode("utf-8", errors="replace") if isinstance(output, bytes) else str(output or "")
-        text = " ".join(text.split())[:200]
+        brief = " ".join(text.split())[:200]
         raise AgentError(
-            f"The server's console did not take the line (exit code {code}){': ' + text if text else ''}",
+            f"The server's console did not take the line (exit code {code}){': ' + brief if brief else ''}",
             "console_failed",
             502,
         )
+    return text
 
 
 def write_stdin(c: Container, line: str) -> None:

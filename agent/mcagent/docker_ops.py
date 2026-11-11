@@ -143,11 +143,39 @@ def split_image(image: str) -> tuple[str, str]:
     return repo, tag
 
 
+_DIGEST_REF_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def split_reference(image: str) -> tuple[str, str, bool]:
+    """(repository, tag or digest, whether it is a digest) of ``repository:tag`` or
+    ``repository@sha256:<hex>`` (400 ``invalid_image`` for a malformed digest reference)."""
+    if "@" not in image:
+        repo, tag = split_image(image)
+        return repo, tag, False
+    repo, _, digest = image.partition("@")
+    last = repo.rsplit("/", 1)[-1]
+    if not repo or ":" in last or not _DIGEST_REF_RE.match(digest):
+        raise AgentError("Invalid image digest reference", "invalid_image")
+    return repo, digest, True
+
+
 def validate_image(settings: Settings, image: str, profile: RuntimeProfile | None = None) -> str:
-    """``repository:tag`` of an image the profile (default: Minecraft's) allows."""
-    repo, tag = split_image(image)
+    """``repository:tag`` of an image the profile (default: Minecraft's) allows, or
+    ``repository@sha256:<hex>`` for a profile with ``image_digests`` that lists the digest."""
     profile = profile or profiles.get(profiles.DEFAULT_GAME)
     assert profile is not None
+    if "@" in image and profile.image_digests:
+        repo, digest, _ = split_reference(image)
+        if repo not in profiles.allowed_images(settings, profile):
+            raise AgentError(
+                f"Image repository '{repo}' is not in the agent allow-list", "image_not_allowed", 403
+            )
+        if digest not in profile.image_digests:
+            raise AgentError(
+                f"Image digest '{digest}' is not one {profile.label} servers can run", "invalid_image"
+            )
+        return f"{repo}@{digest}"
+    repo, tag = split_image(image)
     if repo not in profiles.allowed_images(settings, profile):
         raise AgentError(
             f"Image repository '{repo}' is not in the agent allow-list", "image_not_allowed", 403
@@ -227,7 +255,7 @@ def _image_repos(attrs: dict[str, Any]) -> set[str]:
 
 def _repo_of(reference: str | None) -> str | None:
     try:
-        return split_image(reference)[0] if reference else None
+        return split_reference(reference)[0] if reference else None
     except AgentError:
         return None
 
@@ -321,7 +349,8 @@ def remember_pull(settings: Settings, image: str, now: float | None = None) -> N
 
 
 def pull_image(image: str, progress: Any = None) -> None:
-    repo, tag = split_image(image)
+    # a digest reference (repo@sha256:...) is pulled with the digest as Docker's "tag" parameter
+    repo, tag, _ = split_reference(image)
     api = client().api
     layers: dict[str, tuple[int, int]] = {}
     for event in api.pull(repo, tag=tag, stream=True, decode=True):
@@ -394,9 +423,10 @@ def label_safe_name(name: str) -> str:
 
 def _validate_env(profile: RuntimeProfile, spec: InstanceSpec, injected: dict[str, str]) -> None:
     """The profile's environment policy, re-validated here (never rely on the panel). A key the
-    agent injects itself is not refused: the injected value replaces it."""
+    agent injects itself is not refused: the injected value replaces it (except for profiles with
+    ``strict_env``, which refuse it)."""
     for key, value in spec.env.items():
-        if key in injected:
+        if key in injected and not profile.strict_env:
             continue
         reason = profile.env_error(key)
         if reason is None:
@@ -502,7 +532,14 @@ def build_create_kwargs(
         )
     injected = profile.injected_env(profile, settings, spec)
     _validate_env(profile, spec, injected)
-    if profile.env_ports and (reason := profile.env_port_error(spec.env)) is not None:
+    # what the image reads (the injected values win): the ports its variables name are checked on it
+    effective_env = {**spec.env, **injected}
+    for key, value in injected.items():
+        # a value the agent derives from the spec (CS2's RCON password from rcon_password) keeps to
+        # the same pattern a spec's value of that variable would have to match
+        if (reason := profile.env_value_error(key, value)) is not None:
+            raise AgentError(reason, "env_not_allowed", 400)
+    if profile.env_ports and (reason := profile.env_port_error(effective_env)) is not None:
         raise AgentError(reason, "port_collision", 400)
 
     env: dict[str, str] = dict(settings.runtime_extra_env)
@@ -535,7 +572,7 @@ def build_create_kwargs(
                     "port_not_allowed",
                     403,
                 )
-            if (reason := profile.port_error(p.container_port, p.protocol, spec.env)) is not None:
+            if (reason := profile.port_error(p.container_port, p.protocol, effective_env)) is not None:
                 raise AgentError(reason, "port_not_allowed", 403)
             key = f"{p.container_port}/{p.protocol}"
             ports.setdefault(key, []).append((p.host_ip, p.host_port))
@@ -599,6 +636,8 @@ def build_create_kwargs(
         kwargs["command"] = list(profile.command)
     if profile.working_dir is not None:
         kwargs["working_dir"] = profile.working_dir
+    if profile.init:
+        kwargs["init"] = True  # Docker's tini as PID 1 (only for profiles that ask for it)
     hc = spec.healthcheck
     if profile.health.kind == "cmd":
         kwargs["healthcheck"] = {
@@ -657,6 +696,62 @@ def prepare_image_volumes(settings: Settings, instance_id: UUID, binds: dict[str
             ) from exc
 
 
+# --- what the file API must know about a server's game (literal owner, protected paths) ------------------
+SERVER_GAME_DIR = "server-games"
+
+
+def _server_game_file(settings: Settings, instance_id: UUID) -> Path:
+    return settings.state_dir / SERVER_GAME_DIR / f"{instance_id}.json"
+
+
+def remember_server_game(settings: Settings, instance_id: UUID, spec: InstanceSpec) -> None:
+    """Record the game of a server whose profile changes what the file API does (a literal owner or
+    protected paths), in the agent's state folder (never in the server folder, where the file API
+    could forge it). Written at every create; other games write nothing."""
+    profile = profiles.for_spec(spec)
+    if profile.literal_owner is None and not profile.protected_paths:
+        return
+    path = _server_game_file(settings, instance_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"game": spec.game, "variant": spec.variant}, fh)
+    os.replace(tmp, path)
+
+
+def forget_server_game(settings: Settings, instance_id: UUID) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        _server_game_file(settings, instance_id).unlink()
+
+
+def server_profile(settings: Settings, instance_id: UUID) -> RuntimeProfile | None:
+    """The profile :func:`remember_server_game` recorded for the server; None for every server whose
+    game needs no record (and before its first create). Never raises."""
+    try:
+        data = json.loads(_server_game_file(settings, instance_id).read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("game"), str):
+        return None
+    variant = data.get("variant")
+    return profiles.get(data["game"], variant if isinstance(variant, str) else None)
+
+
+def server_owner(settings: Settings, instance_id: UUID) -> tuple[int, int]:
+    """(uid, gid) the agent gives files it writes into the server folder: the profile's literal
+    owner (CS2: 1000:1000), else the runtime uid/gid."""
+    profile = server_profile(settings, instance_id)
+    owner = profile.literal_owner if profile is not None else None
+    return owner or (int(settings.runtime_uid), int(settings.runtime_gid))
+
+
+def server_protected_paths(settings: Settings, instance_id: UUID) -> tuple[str, ...]:
+    """Paths of the server folder the file API must not write, rename onto or delete."""
+    profile = server_profile(settings, instance_id)
+    return profile.protected_paths if profile is not None else ()
+
+
 def create_container(
     settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str, *, name: str | None = None
 ) -> Container:
@@ -682,11 +777,18 @@ def create_container(
             )
         if profile.mount_image_volumes:
             prepare_image_volumes(settings, instance_id, image_volume_plan(profile, image_volumes)[0])
+    # profile mounts of subfolders (Valheim's config/ and opt/): made by the agent as real folders
+    # owned by the runtime ids, never by Docker (as root, following a link put in their place)
+    subfolders = {m.container_path: m.subdir for m in profile.mounts if m.subdir not in ("", ".")}
+    if subfolders:
+        prepare_image_volumes(settings, instance_id, subfolders)
     if name is not None:
         if name not in (container_name(instance_id), replacement_name(instance_id)):
             raise AgentError("Invalid container name", "internal", 500)
         kwargs["name"] = name
-    if profile.prepare_start is not None:
+    if profile.literal_owner is not None or profile.protected_paths:
+        remember_server_game(settings, instance_id, spec)
+    if profile.prepare_start is not None or profile.literal_owner is not None:
         prepare_start(settings, instance_id, profile)
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
@@ -1009,13 +1111,22 @@ def start_guard(settings: Settings, instance_id: UUID, c: Container, *, live: bo
 
 
 def prepare_start(settings: Settings, instance_id: UUID, profile: RuntimeProfile | None) -> None:
-    """The profile's ``prepare_start`` (Satisfactory: its start wrapper); a failure refuses the start."""
-    from .safefs import PathError
+    """The profile's ``prepare_start`` (Satisfactory: its start wrapper) and, for a profile with a
+    literal owner (CS2: 1000:1000), that owner for the whole server folder (files the agent wrote
+    as the runtime uid/gid meanwhile: restores, clones, uploads); a failure refuses the start."""
+    from .safefs import PathError, SafeRoot
 
-    if profile is None or profile.prepare_start is None:
+    if profile is None or (profile.prepare_start is None and profile.literal_owner is None):
         return
     try:
-        profile.prepare_start(settings, instance_id)
+        if (owner := profile.literal_owner) is not None:
+            changed = SafeRoot(instance_dir(settings, instance_id)).chown_tree(owner[0], owner[1])
+            if changed:
+                log.info(
+                    "Gave %d entries of the server folder of %s the owner %s:%s", changed, instance_id, *owner
+                )
+        if profile.prepare_start is not None:
+            profile.prepare_start(settings, instance_id)
     except (OSError, PathError) as exc:
         raise AgentError(
             f"Could not prepare the server folder for the start ({exc}); the server is not started",
@@ -1458,6 +1569,40 @@ def _probe_udp(c: Container, health: Any, settings: Settings) -> bool:
     return re.search(str(health.pattern or ""), reply.decode("latin-1"), re.DOTALL) is not None
 
 
+def env_port(c: Container, port_env: str | None, default: int | None) -> int | None:
+    """The port the container's variable ``port_env`` names (games whose ports are set 1:1 through
+    the environment), else ``default``."""
+    if port_env:
+        value = container_env(c).get(port_env, "")
+        if value.isdigit() and 1 <= int(value) <= 65535:
+            return int(value)
+    return default
+
+
+def a2s_target(
+    c: Container, port: int | None, port_env: str | None, settings: Settings
+) -> tuple[str, int] | None:
+    """(host, port) of the container's A2S query port as the agent reaches it; None without one."""
+    resolved = env_port(c, port_env, port)
+    if resolved is None:
+        return None
+    return container_address(c, resolved, "udp", settings)
+
+
+def _probe_a2s(c: Container, health: Any, settings: Settings) -> bool:
+    """A2S_INFO (with the challenge handshake) to the container's query port; ready on a valid reply."""
+    from . import a2s
+
+    target = a2s_target(c, health.port, health.port_env, settings)
+    if target is None:
+        return False
+    try:
+        a2s.info(target[0], target[1], timeout=HEALTH_UDP_TIMEOUT)
+    except a2s.A2SError:
+        return False
+    return True
+
+
 def _log_matches(c: Container, pattern: re.Pattern[str], since: float | None) -> bool:
     kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "timestamps": False, "tail": HEALTH_LOG_TAIL}
     if since is not None:
@@ -1499,7 +1644,7 @@ def agent_health(
                 ok = _log_matches(c, re.compile(str(health.pattern)), since)
                 entry["checked"] = now
                 entry["ok"] = ok
-        elif health.kind in ("tcp", "udp-query", "driver"):
+        elif health.kind in ("tcp", "udp-query", "driver", "a2s"):
             at = entry.get("at")
             if at is not None and 0 <= now - at < HEALTH_TCP_CACHE_SECONDS:
                 ok = bool(entry.get("ok"))
@@ -1508,6 +1653,8 @@ def agent_health(
                     ok = _probe_tcp(c, int(health.port or 0), get_settings())
                 elif health.kind == "udp-query":
                     ok = _probe_udp(c, health, get_settings())
+                elif health.kind == "a2s":
+                    ok = _probe_a2s(c, health, get_settings())
                 else:
                     ok = bool(drivers.for_profile(profile).ready(get_settings(), c))
                 entry["ok"], entry["at"] = ok, now
@@ -1520,6 +1667,8 @@ def agent_health(
         "udp-query": f"UDP query on port {health.port}",
         "driver": f"{profile.control} readiness",
     }.get(health.kind, health.kind)
+    if health.kind == "a2s":
+        what = f"agent probe a2s: A2S_INFO on UDP port {env_port(c, health.port_env, health.port)}"
     if ok:
         return "healthy", f"{what} ok"
     running_for = None if started is None else now - started.timestamp()
@@ -1552,22 +1701,45 @@ def wait_for_log(c: Container, pattern: str, since: float, timeout: float) -> bo
 REDACTED = "********"
 
 
+REDACT_MIN_LENGTH = 4  # shorter values would hide ordinary words of the log
+
+
+def container_env(c: Container) -> dict[str, str]:
+    """The container's environment as Docker reports it (Config.Env), last value wins."""
+    env: dict[str, str] = {}
+    for item in ((getattr(c, "attrs", None) or {}).get("Config") or {}).get("Env") or []:
+        key, sep, value = str(item).partition("=")
+        if sep:
+            env[key] = value
+    return env
+
+
 def log_redactor(settings: Settings, c: Container) -> Any:
-    """A function that hides the control secret in console text of container ``c``, or None when
-    its profile prints none (Minecraft). The secret (and whatever the profile's
-    log_redact_patterns match) becomes ``********``."""
+    """A function that hides secrets in console text of container ``c``, or None when its profile
+    prints none (Minecraft). The control secret (``redact_secret_in_logs``), the values of the
+    profile's ``redact_env`` variables of at least REDACT_MIN_LENGTH characters, and whatever the
+    profile's log_redact_patterns match become ``********``."""
     profile = profiles.for_labels(c.labels)
-    if profile is None or not profile.redact_secret_in_logs:
+    if profile is None or not (profile.redact_secret_in_logs or profile.redact_env):
         return None
-    try:
-        secret = drivers.for_profile(profile).secret(settings, c)
-    except Exception as exc:
-        log.debug("control secret of %s not readable for redaction: %s", c.name, exc)
-        secret = None
+    secrets_: list[str] = []
+    if profile.redact_secret_in_logs:
+        try:
+            secret = drivers.for_profile(profile).secret(settings, c)
+        except Exception as exc:
+            log.debug("control secret of %s not readable for redaction: %s", c.name, exc)
+            secret = None
+        if secret:
+            secrets_.append(secret)
+    if profile.redact_env:
+        env = container_env(c)
+        secrets_.extend(env[key] for key in profile.redact_env if env.get(key))
+    # longest first: a secret that contains another one is hidden as a whole
+    secrets_ = sorted({s for s in secrets_ if len(s) >= REDACT_MIN_LENGTH}, key=len, reverse=True)
     patterns = [re.compile(p) for p in profile.log_redact_patterns]
 
     def redact(text: str) -> str:
-        if secret and len(secret) >= 4:
+        for secret in secrets_:
             text = text.replace(secret, REDACTED)
         for pattern in patterns:
             text = pattern.sub(lambda m: (m.group(1) if m.groups() else "") + REDACTED, text)

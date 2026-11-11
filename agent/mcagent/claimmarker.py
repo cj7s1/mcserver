@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from .safefs import PathError, SafeRoot
+from .safefs import PathError, SafeRoot, split_path
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -302,11 +302,20 @@ class GuardedRoot(SafeRoot):
     ``saved/`` (or of the whole folder) removes the marker first (the claim may be lost)."""
 
     def __init__(
-        self, root: Any, uid: int | None, gid: int | None, *, settings: Settings, instance_id: UUID
+        self,
+        root: Any,
+        uid: int | None,
+        gid: int | None,
+        *,
+        settings: Settings,
+        instance_id: UUID,
+        protected: tuple[str, ...] = (),
     ) -> None:
         super().__init__(root, uid, gid)
         self._settings = settings
         self._instance_id = instance_id
+        # the game's own protected paths (runtime profile ``protected_paths``: CS2's start hooks)
+        self._protected = tuple(tuple(split_path(p)) for p in protected if split_path(p))
 
     def _refuse_managed(self, rel: str) -> None:
         if is_managed(rel):
@@ -315,6 +324,16 @@ class GuardedRoot(SafeRoot):
                 "managed_file",
                 403,
             )
+        if self._protected:
+            parts = tuple(split_path(rel))
+            for path in self._protected:
+                if parts[: len(path)] == path:
+                    raise PathError(
+                        f"{'/'.join(path)} is managed by the node agent for this game (it is run or "
+                        "rewritten at every start); it cannot be changed through the file manager",
+                        "managed_file",
+                        403,
+                    )
 
     def _changed(self, *paths: str) -> None:
         files_changed(self._settings, self._instance_id, list(paths), "a file operation")
@@ -342,6 +361,8 @@ class GuardedRoot(SafeRoot):
 
     def delete(self, rel: str, *, recursive: bool = False) -> None:
         # deleting the marker (or .mcpanel/) only removes a verification: the start is refused then
+        if self._protected:
+            self._refuse_managed(rel)
         self._changed(rel)
         super().delete(rel, recursive=recursive)
 
