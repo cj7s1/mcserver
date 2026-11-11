@@ -1,0 +1,608 @@
+{
+ "kwargs": {
+  "factorio": {
+   "spec_hash": "b46580ad1f19d4e8",
+   "kwargs": {
+    "image": "factoriotools/factorio:2.1.24-rootless",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "factorio-0b8e3f6a",
+    "environment": {
+     "TZ": "Europe/Berlin",
+     "DLC_SPACE_AGE": "true",
+     "LOAD_LATEST_SAVE": "true",
+     "PORT": "34197",
+     "RCON_PORT": "27015"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "b46580ad1f19d4e8",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "factorio"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/factorio",
+      "mode": "rw"
+     }
+    },
+    "ports": {
+     "34197/udp": [
+      [
+       "0.0.0.0",
+       34200
+      ]
+     ]
+    },
+    "network": "mcpanel_instances",
+    "mem_limit": "4096m",
+    "memswap_limit": "4096m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "unless-stopped"
+    },
+    "stop_signal": "SIGTERM",
+    "stop_timeout": 20,
+    "stdin_open": false,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "user": "99:100",
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    }
+   }
+  },
+  "satisfactory": {
+   "spec_hash": "4f67c9095ca4142a",
+   "kwargs": {
+    "image": "wolveix/satisfactory-server:v1.9.11",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "satisfactory-0b8e3f6a",
+    "environment": {
+     "TZ": "UTC",
+     "MAXPLAYERS": "4",
+     "SERVERMESSAGINGPORT": "8890",
+     "PUID": "99",
+     "PGID": "100",
+     "SERVERGAMEPORT": "7777",
+     "MCPANEL_PORTS_PUBLISHED": "1"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "4f67c9095ca4142a",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "satisfactory"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/config",
+      "mode": "rw"
+     }
+    },
+    "ports": {
+     "7777/tcp": [
+      [
+       "0.0.0.0",
+       7790
+      ]
+     ],
+     "7777/udp": [
+      [
+       "0.0.0.0",
+       7790
+      ]
+     ],
+     "8890/tcp": [
+      [
+       "0.0.0.0",
+       8890
+      ]
+     ]
+    },
+    "network": "mcpanel_instances",
+    "mem_limit": "12288m",
+    "memswap_limit": "12288m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "no"
+    },
+    "stop_signal": "SIGINT",
+    "stop_timeout": 20,
+    "stdin_open": false,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [
+     "CHOWN",
+     "DAC_OVERRIDE",
+     "SETUID",
+     "SETGID"
+    ],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "entrypoint": [
+     "/bin/sh",
+     "/config/.mcpanel/start-guard.sh"
+    ],
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    }
+   }
+  },
+  "satisfactory_unpublished": {
+   "spec_hash": "5d9bd5ffea458d76",
+   "kwargs": {
+    "image": "wolveix/satisfactory-server:v1.9.11",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "satisfactory-0b8e3f6a",
+    "environment": {
+     "PUID": "99",
+     "PGID": "100",
+     "SERVERGAMEPORT": "7777",
+     "MCPANEL_PORTS_PUBLISHED": "0"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "5d9bd5ffea458d76",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "satisfactory"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/config",
+      "mode": "rw"
+     }
+    },
+    "ports": {},
+    "network": "mcpanel_instances",
+    "mem_limit": "4096m",
+    "memswap_limit": "4096m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "no"
+    },
+    "stop_signal": "SIGINT",
+    "stop_timeout": 20,
+    "stdin_open": false,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [
+     "CHOWN",
+     "DAC_OVERRIDE",
+     "SETUID",
+     "SETGID"
+    ],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "entrypoint": [
+     "/bin/sh",
+     "/config/.mcpanel/start-guard.sh"
+    ],
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    }
+   }
+  },
+  "terraria_vanilla": {
+   "spec_hash": "2a83de7f5a9e89b5",
+   "kwargs": {
+    "image": "passivelemon/terraria-docker:terraria-1.4.4.9",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "terraria-0b8e3f6a",
+    "environment": {
+     "TZ": "UTC",
+     "PUID": "99",
+     "PGID": "99",
+     "SERVERCONFIG": "1"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "2a83de7f5a9e89b5",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "terraria",
+     "io.mcpanel.variant": "vanilla"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/opt/terraria/config",
+      "mode": "rw"
+     }
+    },
+    "ports": {
+     "7777/tcp": [
+      [
+       "0.0.0.0",
+       7777
+      ]
+     ]
+    },
+    "network": "mcpanel_instances",
+    "mem_limit": "4096m",
+    "memswap_limit": "4096m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "unless-stopped"
+    },
+    "stop_signal": "SIGTERM",
+    "stop_timeout": 20,
+    "stdin_open": false,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [
+     "CHOWN",
+     "DAC_OVERRIDE",
+     "FOWNER",
+     "SETUID",
+     "SETGID"
+    ],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    }
+   }
+  },
+  "terraria_tmodloader": {
+   "spec_hash": "b517a70c4086bc87",
+   "kwargs": {
+    "image": "passivelemon/terraria-docker:tmodloader-2025.8.3.1",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "terraria-0b8e3f6a",
+    "environment": {
+     "TZ": "UTC",
+     "MODPACK": "MyPack",
+     "PUID": "99",
+     "PGID": "99",
+     "SERVERCONFIG": "1"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "b517a70c4086bc87",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "terraria",
+     "io.mcpanel.variant": "tmodloader"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/opt/terraria/config",
+      "mode": "rw"
+     }
+    },
+    "ports": {
+     "7777/tcp": [
+      [
+       "0.0.0.0",
+       7778
+      ]
+     ]
+    },
+    "network": "mcpanel_instances",
+    "mem_limit": "4096m",
+    "memswap_limit": "4096m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "unless-stopped"
+    },
+    "stop_signal": "SIGTERM",
+    "stop_timeout": 20,
+    "stdin_open": false,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [
+     "CHOWN",
+     "DAC_OVERRIDE",
+     "FOWNER",
+     "SETUID",
+     "SETGID"
+    ],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    }
+   }
+  },
+  "terraria_tshock": {
+   "spec_hash": "20904aedf6f8d290",
+   "kwargs": {
+    "image": "ryshe/terraria:tshock-1.4.4.9-5.2.4",
+    "name": "mcpanel-0b8e3f6a2c4d",
+    "hostname": "tshock-0b8e3f6a",
+    "environment": {
+     "TZ": "UTC",
+     "HOME": "/tmp",
+     "DOTNET_BUNDLE_EXTRACT_BASE_DIR": "/tmp"
+    },
+    "labels": {
+     "io.mcpanel.managed": "true",
+     "io.mcpanel.instance": "0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b",
+     "io.mcpanel.name": "Pinned",
+     "io.mcpanel.spec-hash": "20904aedf6f8d290",
+     "io.mcpanel.stop-timeout": "90",
+     "io.mcpanel.game": "terraria",
+     "io.mcpanel.variant": "tshock"
+    },
+    "volumes": {
+     "/mnt/cache/appdata/mcpanel/instances/0b8e3f6a-2c4d-4e5f-8a9b-0c1d2e3f4a5b": {
+      "bind": "/config",
+      "mode": "rw"
+     }
+    },
+    "ports": {
+     "7777/tcp": [
+      [
+       "0.0.0.0",
+       7779
+      ]
+     ]
+    },
+    "network": "mcpanel_instances",
+    "mem_limit": "4096m",
+    "memswap_limit": "4096m",
+    "pids_limit": 8192,
+    "restart_policy": {
+     "Name": "unless-stopped"
+    },
+    "stop_signal": "SIGINT",
+    "stop_timeout": 20,
+    "stdin_open": true,
+    "tty": false,
+    "detach": true,
+    "security_opt": [
+     "no-new-privileges:true"
+    ],
+    "cap_drop": [
+     "ALL"
+    ],
+    "cap_add": [],
+    "log_config": {
+     "Type": "json-file",
+     "Config": {
+      "max-size": "20m",
+      "max-file": "5"
+     }
+    },
+    "user": "99:100",
+    "entrypoint": [
+     "/tshock/TShock.Server"
+    ],
+    "command": [
+     "-configpath",
+     "/config",
+     "-logpath",
+     "/config/logs",
+     "-additionalplugins",
+     "/plugins",
+     "-config",
+     "/config/serverconfig.txt"
+    ],
+    "working_dir": "/tmp",
+    "healthcheck": {
+     "test": [
+      "NONE"
+     ]
+    },
+    "tmpfs": {
+     "/root/.local/share/Terraria/Worlds": "rw,nosuid,nodev",
+     "/tshock/ServerPlugins": "rw,nosuid,nodev",
+     "/tshock/logs": "rw,nosuid,nodev"
+    }
+   }
+  }
+ },
+ "info": {
+  "factorio": {
+   "variants": [],
+   "images": [
+    "factoriotools/factorio",
+    "docker.io/factoriotools/factorio"
+   ],
+   "control": "rcon",
+   "ports": [
+    [
+     34197,
+     "udp"
+    ]
+   ],
+   "never_publish": [
+    [
+     27015,
+     null
+    ]
+   ],
+   "health": "log",
+   "install_retry_exits": []
+  },
+  "satisfactory": {
+   "variants": [],
+   "images": [
+    "wolveix/satisfactory-server",
+    "docker.io/wolveix/satisfactory-server"
+   ],
+   "control": "satisfactory-api",
+   "ports": [
+    [
+     7777,
+     "tcp"
+    ],
+    [
+     7777,
+     "udp"
+    ]
+   ],
+   "never_publish": [],
+   "health": "udp-query",
+   "install_retry_exits": [
+    5,
+    8
+   ]
+  },
+  "terraria": {
+   "variants": [
+    "vanilla",
+    "tmodloader",
+    "tshock"
+   ],
+   "images": [
+    "passivelemon/terraria-docker",
+    "docker.io/passivelemon/terraria-docker",
+    "ryshe/terraria",
+    "docker.io/ryshe/terraria"
+   ],
+   "control": "console",
+   "ports": [
+    [
+     7777,
+     "tcp"
+    ]
+   ],
+   "never_publish": [
+    [
+     7878,
+     null
+    ]
+   ],
+   "health": "log",
+   "install_retry_exits": [],
+   "variant_profiles": {
+    "vanilla": {
+     "images": [
+      "passivelemon/terraria-docker",
+      "docker.io/passivelemon/terraria-docker"
+     ],
+     "control": "console",
+     "ports": [
+      [
+       7777,
+       "tcp"
+      ]
+     ],
+     "never_publish": [],
+     "health": "log",
+     "clean_exit_codes": [
+      0,
+      143
+     ]
+    },
+    "tmodloader": {
+     "images": [
+      "passivelemon/terraria-docker",
+      "docker.io/passivelemon/terraria-docker"
+     ],
+     "control": "console",
+     "ports": [
+      [
+       7777,
+       "tcp"
+      ]
+     ],
+     "never_publish": [],
+     "health": "log",
+     "clean_exit_codes": [
+      0,
+      143
+     ]
+    },
+    "tshock": {
+     "images": [
+      "ryshe/terraria",
+      "docker.io/ryshe/terraria"
+     ],
+     "control": "tshock-rest",
+     "ports": [
+      [
+       7777,
+       "tcp"
+      ]
+     ],
+     "never_publish": [
+      [
+       7878,
+       null
+      ]
+     ],
+     "health": "log",
+     "clean_exit_codes": [
+      0
+     ]
+    }
+   }
+  }
+ }
+}
