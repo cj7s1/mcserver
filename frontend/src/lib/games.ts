@@ -27,7 +27,7 @@ const MINECRAFT_BASE: readonly GameCapability[] = [
   "world_reset",
 ];
 
-const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft", factorio: "Factorio" };
+const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft", factorio: "Factorio", terraria: "Terraria", satisfactory: "Satisfactory" };
 
 export function gameId(i: Pick<Instance, "game">): string {
   return i.game || MINECRAFT;
@@ -87,6 +87,10 @@ const VARIANT_LABELS: Record<string, string> = {
   AUTO_CURSEFORGE: "CurseForge modpack",
   FTBA: "FTB modpack",
   CUSTOM: "Custom",
+  // Terraria's variants (lower-case ids)
+  vanilla: "Vanilla",
+  tmodloader: "tModLoader",
+  tshock: "TShock",
 };
 
 const VARIANT_COLORS: Record<string, string> = {
@@ -98,6 +102,9 @@ const VARIANT_COLORS: Record<string, string> = {
   QUILT: "from-fuchsia-500/30 to-fuchsia-700/30 text-fuchsia-700 dark:text-fuchsia-300",
   FORGE: "from-orange-500/30 to-orange-800/30 text-orange-700 dark:text-orange-300",
   NEOFORGE: "from-orange-400/30 to-red-700/30 text-orange-700 dark:text-orange-200",
+  vanilla: "from-lime-500/30 to-green-700/30 text-green-700 dark:text-green-300",
+  tmodloader: "from-indigo-500/30 to-indigo-700/30 text-indigo-700 dark:text-indigo-300",
+  tshock: "from-rose-500/30 to-rose-700/30 text-rose-700 dark:text-rose-300",
 };
 
 const FALLBACK_COLOR = "from-zinc-500/30 to-zinc-700/30 text-zinc-700 dark:text-zinc-300";

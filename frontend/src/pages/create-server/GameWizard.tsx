@@ -37,9 +37,14 @@ import {
   initialFields,
   initialGameState,
   memoryMb,
+  secretRequiredNow,
   validateGameStep,
+  variantView,
+  wizardVariants,
   type GameWizardState,
 } from "./gameWizardModel";
+import { FixedVersion } from "./FixedVersion";
+import { sharedPortsLabel } from "./shared-ports";
 import { Field, Stepper, SummaryList } from "./WizardBits";
 import type { CreateResponse, FieldErrors, StepId } from "./wizardModel";
 
@@ -56,7 +61,7 @@ function fileErrors(errors: FieldErrors, file: string): Record<string, string> {
 }
 
 export function GameWizard({
-  game,
+  game: catalogGame,
   nightlyBackupAllowed,
   onBackToGame,
 }: {
@@ -66,14 +71,19 @@ export function GameWizard({
 }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const [state, setState] = useState<GameWizardState>(() => initialGameState(game));
+  const [state, setState] = useState<GameWizardState>(() => initialGameState(catalogGame));
+  // a game with variants (Terraria): everything below is what the chosen variant has
+  const variants = wizardVariants(catalogGame);
+  const variantInfo = variants.find((v) => v.id === state.variant);
+  const game = variantView(catalogGame, state.variant);
   const [step, setStep] = useState<StepId>("software");
   const [reached, setReached] = useState(1);
   const [attempted, setAttempted] = useState<Set<StepId>>(() => new Set());
   const [serverErrors, setServerErrors] = useState<FieldErrors>({});
   const headingRef = useRef<HTMLHeadingElement>(null);
-  const versions = useGameVersionCatalog(game.id, game.has_versions !== false);
-  const version = effectiveVersion(state, versions.data);
+  const versions = useGameVersionCatalog(game.id, game.has_versions !== false && !game.fixed_version, state.variant);
+  // a game without versions to choose (Satisfactory follows Steam's stable branch) sends its fixed id
+  const version = game.fixed_version?.id ?? effectiveVersion(state, versions.data);
   const nodes = useWizardNodes();
   const ports = useNodePorts(state.node);
   const idx = STEP_IDS.indexOf(step);
@@ -86,6 +96,12 @@ export function GameWizard({
 
   const patch = (p: Partial<GameWizardState>) => {
     setState((s) => ({ ...s, ...p }));
+    setServerErrors({});
+  };
+  const chooseVariant = (variant: string) => {
+    // another variant has other versions, options, settings and secrets: start those over
+    const fresh = initialGameState(catalogGame, variant);
+    setState((s) => ({ ...fresh, name: s.name, hostIp: s.hostIp, ports: s.ports, node: s.node, description: s.description, group: s.group, start: s.start, nightlyBackup: s.nightlyBackup }));
     setServerErrors({});
   };
   const clientErrors = attempted.has(step) ? validateGameStep(step, game, state, version) : {};
@@ -173,9 +189,46 @@ export function GameWizard({
       </h2>
 
       {step === "software" && (
-        <Section title={`${game.label} version`} description={notesText(game) || "Players need exactly the same version as the server."}>
+        <Section
+          title={variants.length ? `${game.label} variant and version` : `${game.label} version`}
+          description={variants.length ? "Players need exactly the same game version as the server." : notesText(game) || "Players need exactly the same version as the server."}
+        >
           <div className="grid gap-5">
-            {game.has_versions === false || versions.isError ? (
+            {variants.length > 0 && (
+              <div className="grid gap-2">
+                <Field id="game-variant" label="Variant" error={errors.variant} hint="Fixed once the server exists.">
+                  <Select value={state.variant ?? ""} onValueChange={chooseVariant}>
+                    <SelectTrigger id="game-variant" className="w-full sm:max-w-xs">
+                      <SelectValue placeholder="Choose a variant" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {variants.map((v) => (
+                        <SelectItem key={v.id} value={v.id}>
+                          {v.label}
+                          {v.game_version ? ` (${catalogGame.label} ${v.game_version})` : ""}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                {variantInfo?.game_version && (
+                  <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200" role="note">
+                    {variantInfo.label} runs on {catalogGame.label} {variantInfo.game_version}: players need the {variantInfo.label} client, and
+                    vanilla clients on newer {catalogGame.label} versions cannot join.
+                  </p>
+                )}
+                {(variantInfo?.notes ?? []).length > 0 && (
+                  <ul className="grid list-disc gap-1 pl-5 text-xs text-muted-foreground" aria-label={`About ${variantInfo?.label}`}>
+                    {(variantInfo?.notes ?? []).map((n) => (
+                      <li key={n}>{n}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+            {game.fixed_version ? (
+              <FixedVersion info={game.fixed_version} />
+            ) : game.has_versions === false || versions.isError ? (
               <Field
                 id="game-version"
                 label="Version"
@@ -258,7 +311,8 @@ export function GameWizard({
           </Section>
           <Section title="Network" description="Host ports players connect to. Empty = the game's usual port when it is free, else the next free one.">
             <div className="grid gap-4">
-              {(game.ports ?? []).map((p) => {
+              {/* a port that always has another one's number (Satisfactory's API on TCP) is not asked for */}
+              {(game.ports ?? []).filter((p) => !p.same_port_as).map((p) => {
                 const id = `game-port-${p.name}`;
                 const t = (state.ports[p.name] ?? "").trim();
                 const used = t ? ports.data?.in_use.find((u) => u.port === Number(t)) : undefined;
@@ -270,7 +324,7 @@ export function GameWizard({
                       <span className="flex items-center gap-2">
                         {p.label}
                         <Badge variant="outline" className="font-mono uppercase">
-                          {p.protocol}
+                          {sharedPortsLabel(game.ports ?? [], p)}
                         </Badge>
                       </span>
                     }
@@ -333,15 +387,16 @@ export function GameWizard({
             <SummaryList
               rows={[
                 ["Game", game.label],
-                ["Version", version || "—"],
+                ...(variantInfo ? [["Variant", variantInfo.label] as [string, string]] : []),
+                ["Version", (versions.data?.versions.find((v) => v.id === version)?.label ?? version) || "—"],
                 ...(game.options ?? []).map((o): [string, string] => {
                   const parsed = fromText(o, state.options[o.key] ?? "");
                   return [o.label, "error" in parsed ? "—" : displayValue(o, parsed.value)];
                 }),
                 ["Name", state.name.trim() || defaultName(game, version)],
                 ["Memory", Number.isFinite(mem) ? formatMemoryMb(mem) : "—"],
-                ...(game.ports ?? []).map((p): [string, string] => [
-                  `${p.label} (${p.protocol.toUpperCase()})`,
+                ...(game.ports ?? []).filter((p) => !p.same_port_as).map((p): [string, string] => [
+                  `${p.label} (${sharedPortsLabel(game.ports ?? [], p).toUpperCase()})`,
                   (state.ports[p.name] ?? "").trim() || `automatic (${p.default_host_port} when free)`,
                 ]),
               ]}
@@ -359,7 +414,7 @@ export function GameWizard({
                         <KeyRound className="size-3.5" aria-hidden /> {s.label}
                       </span>
                     }
-                    optional={!s.required}
+                    optional={!s.required && !secretRequiredNow(s, state)}
                     error={errors[`secrets.${s.key}`]}
                     hint={s.help}
                   >

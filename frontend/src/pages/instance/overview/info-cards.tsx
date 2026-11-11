@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { displayValue } from "@/lib/game-config";
 import { gameLabel, isMinecraft, knownVariantLabel } from "@/lib/games";
 import { useGameInfo } from "../game-api";
+import { BranchVersion } from "./BranchVersion";
 import { ConnectionPorts } from "../network/GameNetwork";
 import { CopyButton, capitalize } from "./overview-utils";
 
@@ -194,6 +195,7 @@ export function SoftwareCard({ instance, canConfigure }: { instance: Instance; c
 /** Software of a server of another game: game, version, pinned options, image, memory limit. */
 function GameSoftwareCard({ instance: i, canConfigure }: { instance: Instance; canConfigure: boolean }) {
   const game = useGameInfo(i);
+  const canControl = (i.permissions ?? []).includes("instance.control");
   const pinned = (game?.options ?? []).filter((o) => o.pinned || (i.game_options && o.key in i.game_options));
   return (
     <Section
@@ -204,7 +206,9 @@ function GameSoftwareCard({ instance: i, canConfigure }: { instance: Instance; c
       {i.description && <p className="mb-3 text-sm text-muted-foreground">{i.description}</p>}
       <dl className="grid grid-cols-[minmax(6.5rem,auto)_1fr] gap-x-4 gap-y-2 text-sm">
         <Row label="Game">{gameLabel(i)}</Row>
-        <Row label="Version">{i.minecraft_version || "—"}</Row>
+        <Row label="Version">
+          {game?.fixed_version ? <BranchVersion instance={i} info={game.fixed_version} canControl={canControl} /> : i.minecraft_version || "—"}
+        </Row>
         {pinned.map((o) => (
           <Row key={o.key} label={o.label}>
             {displayValue(o, i.game_options?.[o.key])}

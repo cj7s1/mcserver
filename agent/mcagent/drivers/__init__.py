@@ -11,9 +11,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .base import ControlDriver, NoControlDriver, Report, Send, WaitLog
+from .base import ControlDriver, NoControlDriver, QueryTarget, Report, Send, WaitLog
+from .console import ConsoleDriver
+from .http_api import GameApiError, HttpApiDriver
 from .minecraft import MinecraftDriver
 from .rcon import RconCommands, RconDriver, RconStep
+from .satisfactory import SatisfactoryDriver
+from .tshock import TShockDriver
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -21,14 +25,20 @@ if TYPE_CHECKING:
     from ..profiles import RuntimeProfile
 
 __all__ = [
+    "ConsoleDriver",
     "ControlDriver",
+    "GameApiError",
+    "HttpApiDriver",
     "MinecraftDriver",
     "NoControlDriver",
+    "QueryTarget",
     "RconCommands",
     "RconDriver",
     "RconStep",
     "Report",
+    "SatisfactoryDriver",
     "Send",
+    "TShockDriver",
     "WaitLog",
     "for_container",
     "for_labels",
@@ -42,6 +52,10 @@ FACTORIES: dict[str, Callable[[dict[str, Any]], ControlDriver]] = {
     NoControlDriver.id: lambda _options: NoControlDriver(),
     MinecraftDriver.id: lambda _options: MinecraftDriver(),
     RconDriver.id: RconDriver.from_options,
+    HttpApiDriver.id: HttpApiDriver.from_options,
+    SatisfactoryDriver.id: SatisfactoryDriver.from_options,
+    ConsoleDriver.id: ConsoleDriver.from_options,
+    TShockDriver.id: TShockDriver.from_options,
 }
 _NONE = NoControlDriver()
 

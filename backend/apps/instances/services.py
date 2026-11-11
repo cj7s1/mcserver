@@ -148,6 +148,11 @@ def assign_named_ports(
     start, end = port_range()
     out: list[dict[str, Any]] = []
     for spec in definition.ports:
+        if getattr(spec, "same_port_as", ""):
+            out.append(_same_port(definition, spec, out, requested.get(spec.name), used, taken, previous.get(spec.name)))
+            continue
+        # a port whose number another port shares (Satisfactory's 7777 for UDP and TCP): free for all
+        group = [spec.protocol] + [s.protocol for s in definition.ports if getattr(s, "same_port_as", "") == spec.name]
         want = requested.get(spec.name)
         ip = host_ip
         if isinstance(want, dict):
@@ -177,7 +182,7 @@ def assign_named_ports(
         else:
             candidates = [*range(spec.default_host_port, min(65535, spec.default_host_port + NAMED_PORT_SEARCH) + 1)]
             candidates += [p for p in range(start, end + 1) if p not in candidates]
-            port = next((p for p in candidates if (p, spec.protocol) not in used and (p, spec.protocol) not in taken), 0)
+            port = next((p for p in candidates if all((p, proto) not in used and (p, proto) not in taken for proto in group)), 0)
             if not port:
                 raise ConflictError(
                     f"No free {spec.protocol.upper()} port for {spec.label}",
@@ -191,6 +196,41 @@ def assign_named_ports(
             entry["host_ip"] = ip
         out.append(entry)
     return out
+
+
+def _same_port(
+    definition: Any,
+    spec: Any,
+    out: list[dict[str, Any]],
+    want: Any,
+    used: dict[tuple[int, str], str],
+    taken: set[tuple[int, str]],
+    previous: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The entry of a port that always has the host port of another one (``PortSpec.same_port_as``).
+    A requested number other than that is refused, unless it is the port's current number (an
+    editor that sends every port unchanged)."""
+    leader = next((e for e in out if e["name"] == spec.same_port_as), None)
+    if leader is None:
+        raise ValueError(f"{definition.id}: port {spec.name} must come after {spec.same_port_as}")
+    port = int(leader["host_port"])
+    if isinstance(want, dict):
+        want = want.get("host_port")
+    if want not in (None, "", 0) and str(want) not in (str(port), str((previous or {}).get("host_port"))):
+        raise ApiError(f"{spec.label} always uses the same port number as the game port ({port})", code="invalid_port")
+    key = (port, spec.protocol)
+    if key in used or key in taken:
+        raise ConflictError(
+            f"{spec.protocol.upper()} port {port} is already used by {used.get(key) or 'this server'}; "
+            f"{definition.label} needs it for {spec.label} too",
+            code="port_conflict",
+            details={"port": port, "protocol": spec.protocol, "name": spec.name, "port_name": spec.same_port_as},
+        )
+    taken.add(key)
+    entry = {"name": spec.name, "container_port": spec.container_port, "protocol": spec.protocol, "host_port": port}
+    if leader.get("host_ip"):
+        entry["host_ip"] = leader["host_ip"]
+    return entry
 
 
 def ipaddress_ok(value: str) -> str:

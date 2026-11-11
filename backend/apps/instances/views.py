@@ -89,7 +89,7 @@ class InstanceListView(APIView):
         game = data.get("game") or games.DEFAULT_GAME
         if game != games.DEFAULT_GAME:
             # the node's agent must have the game's runtime profile (409 agent_lacks_game)
-            games.require_agent_support(game, AgentClient(node))
+            games.require_agent_support(game, AgentClient(node), data.get("variant") or None)
             return create_other_game(request, data, node, games.get(game))
         fields: dict[str, Any] = {
             "name": data["name"],
@@ -792,6 +792,10 @@ class FilesTextView(APIView):
             return Response(_non_utf8_preview(client, instance, path))
         latin1 = bool(answer.pop("legacy_latin1", False))
         not_utf8 = False if latin1 else _not_utf8(client, instance, path, answer)
+        definition = games.get_or_none(instance.game)
+        if definition is not None and isinstance(answer.get("content"), str):
+            # a secret the game keeps inside one of its files (TShock's REST token in config.json)
+            answer["content"] = definition.masked_text(instance, path, answer["content"])
         return Response({**answer, **({"encoding": "iso-8859-1"} if latin1 else {}), "binary_or_non_utf8": not_utf8})
 
     @extend_schema(request=dict, responses={200: dict})

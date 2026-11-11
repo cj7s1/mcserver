@@ -679,9 +679,12 @@ class CreateInstanceSerializer(serializers.Serializer):
     def _validate_other_game(self, attrs: dict[str, Any]) -> dict[str, Any]:
         """A server of a game other than Minecraft (contract B5): its version, memory, options and settings."""
         definition = games.get(attrs["game"])
+        if attrs.get("variant") and attrs["variant"] not in {v.id for v in definition.variants}:
+            choices = ", ".join(v.id for v in definition.variants)
+            raise serializers.ValidationError({"variant": [f"Choose a {definition.label} variant: {choices}"]})
         if definition.has_versions and not attrs.get("version"):
             raise serializers.ValidationError({"version": [f"Choose a {definition.label} version"]})
-        memory = attrs.get("memory_mb") or definition.default_memory_mb()
+        memory = attrs.get("memory_mb") or definition.default_memory_mb_for(attrs.get("variant") or None)
         if memory < definition.min_memory_mb:
             raise serializers.ValidationError({"memory_mb": [f"{definition.label} needs at least {definition.min_memory_mb} MB"]})
         attrs["memory_mb"] = memory

@@ -152,7 +152,7 @@ server shows **restart required** after a change and gets the new image at its n
 
 ### Factorio servers
 
-The create wizard asks for the game first (Minecraft or Factorio). A Factorio server:
+The create wizard asks for the game first (Minecraft, Factorio, Satisfactory or Terraria). A Factorio server:
 
 * runs `factoriotools/factorio:<exact version>-rootless` (about 1 GB per version on disk), as
   `MC_UID`/`MC_GID` with no capabilities. Clients must run the same version: the version is pinned
@@ -179,6 +179,98 @@ The create wizard asks for the game first (Minecraft or Factorio). A Factorio se
 A registry mirror for the Factorio image is set in System settings (`runtime_images`, for example
 `{"factorio": {"repository": "registry.example/factorio"}}`); the agent must allow it too
 (`AGENT_GAME_FACTORIO_IMAGES` in the agent's environment, comma-separated).
+
+### Satisfactory servers
+
+A Satisfactory server:
+
+* runs `wolveix/satisfactory-server` at the tag this panel release pins (`v1.9.11`). The image
+  downloads the game (about 2.9 GB, 2.8 GB on disk in `gamefiles/`) with SteamCMD on the first start
+  and checks it at every start (about 12 s on an NVMe drive). Clients and server must run the same
+  build, so the server follows Steam's stable branch: there is no version to choose and no
+  software update; **Update now** on the Overview is a restart. SteamCMD fails now and then
+  ("Timed out", exit 5; "Missing configuration", exit 8): the first start is retried (4 starts in
+  all), and the container's restart policy retries later starts.
+* needs at least **8 GB** of memory (12 GB by default; 16 GB for big factories or more than 4
+  players) and an x86-64 CPU that is not a generic VM CPU model.
+* runs as root inside the container with exactly CHOWN, DAC_OVERRIDE, SETUID and SETGID: the image
+  changes its `steam` user to `MC_UID`/`MC_GID` and drops to it (it cannot run unprivileged as any
+  uid but 1000). The files in the server folder belong to `MC_UID`/`MC_GID`.
+* gets three host ports: the **game port on UDP and the same number on TCP** (the server's HTTPS API,
+  which the game's Server Manager uses), 7777 by default, and the **reliable messaging port** on
+  TCP, 8888 by default. Forward all three. Inside the container the game port stays 7777 (the
+  server's claim is stored per game port); the messaging port is set to the host port, because the
+  server tells players that number.
+* is **claimed by the panel before any port is published**: whoever reaches an unclaimed server
+  first owns it. The install starts the server with no published port; the setup steps (Overview:
+  "Setup needed") then claim it through the agent on the internal network with the server's control
+  secret as admin password, store an API token for the panel, set the join password (or confirm an
+  open server: the wizard makes you choose), create the game and only then recreate the container
+  with its ports published. A server created stopped is set up at its first start.
+* has its settings in Settings -> Game settings: launch settings (max players, autosaves, tick
+  rate, ...; applied at the next start) and, while it runs, the server options read from and
+  written to its API (autosave interval, pause when empty, ...). The join password is in the same
+  tab under Secrets; changing it applies it to the running server.
+* keeps its saves in `saved/server/*.sav`. Backups -> Saves lists them by session, downloads the
+  current game (saved first), imports a `.sav` and starts a new game; import and new game go through
+  the running server's API after a safety backup (a stopped server is started for it and stopped
+  again), and the previous sessions stay. Backups leave out `gamefiles/`, and a restore keeps the
+  game files that are on disk.
+* is stopped by saving through its API and calling its `Shutdown` function (it never saves on a
+  signal); its container uses the restart policy `on-failure`, because a clean shutdown exits 0.
+* needs an agent of this release (`agent_lacks_game` otherwise).
+
+A registry mirror is set like Factorio's (`runtime_images`: `{"satisfactory": {"repository": "..."}}`,
+`AGENT_GAME_SATISFACTORY_IMAGES` on the agent).
+
+### Terraria servers
+
+The wizard asks for the **variant** first; it cannot be changed later.
+
+| Variant | Image (exact tags only) | Container | Memory (default) |
+|---|---|---|---|
+| Vanilla (the official server) | `passivelemon/terraria-docker:terraria-<version>` | root with CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID; drops to `MC_UID` | 1.5 GB |
+| tModLoader | `passivelemon/terraria-docker:tmodloader-<version>` | the same | 3 GB |
+| TShock | `ryshe/terraria:tshock-<terraria>-<tshock>` | `MC_UID:MC_GID`, **no capability** | 1.5 GB |
+
+* Clients must run the same game version: the version is pinned and changed in Settings -> Software
+  (pre-update backup; going back needs a confirmation). The lists come from Docker Hub's tags (the
+  panel needs internet access). **tModLoader is built on Terraria 1.4.4.9**: its players need the
+  tModLoader client, and vanilla clients on newer versions cannot join it. TShock is offered from
+  TShock 6 on.
+* tModLoader downloads the .NET runtime from Microsoft every time its container is created (the
+  first start after a create, an update or a settings change that recreates it): it needs internet
+  access then, and that start takes 10-20 s longer. Mods: `.tmod` files and `enabled.json` in
+  `ModPacks/mcpanel/Mods/` (file manager; a mod manager comes later).
+* One **TCP** port, 7777 when it is free (else the next free one above it); forward it on your
+  router. TShock's REST API (7878) is never published.
+* The panel writes `serverconfig.txt` (Settings -> Game settings: world size, difficulty and seed for
+  a new world, max players, password, message of the day) and owns the keys `world`, `worldpath`,
+  `worldname`, `port`, `banlist` (and tModLoader's `modpack`/`modpath`), which it puts back before
+  every start. TShock also has `config.json` (server name, password, max players, login, whitelist,
+  autosave, its own backups); the panel owns its REST settings and the game port there.
+* The world is `Worlds/<world name>.wld` (tModLoader adds `.twld`); the name is chosen in the
+  wizard. Backups -> Saves downloads it (the running server saves first), imports a `.wld` (checked:
+  a Terraria world file) or creates a new world with size, difficulty and seed; both move the
+  previous world files into `Worlds-replaced/` after a safety backup.
+* **TShock owner account:** enter an owner password in the wizard (or later in Settings -> Game
+  settings -> Secrets); the setup step creates the account (default name `owner`) through TShock's
+  REST API once the server is ready. Log in in game with `/login <account> <password>`. TShock's
+  one-time `/setup` code is then not needed (the console shows it masked; TShock switches it off at
+  its next start).
+* `exit` (and TShock's `off`) in the console run the panel's Stop instead. The stop saves:
+  PassiveLemon's image on SIGTERM (5 s warning in game, then save; exit code 143, a clean stop for
+  this image), TShock on SIGINT (exit 0).
+* On Unraid (`MC_UID`/`MC_GID` 99:100) the vanilla and tModLoader files belong to 99:**99**: the
+  image creates its group from the gid and fails when that gid already exists in the image (100 is
+  `users` there), so the agent uses the uid as the group id in that case. TShock's files belong to
+  99:100.
+* Needs an agent of this release with the variant's profile (`agent_lacks_game` otherwise).
+
+A registry mirror for PassiveLemon's image is set in System settings (`runtime_images`:
+`{"terraria": {"repository": "..."}}`; TShock keeps `ryshe/terraria`). The agent allows images per
+variant with `AGENT_GAME_TERRARIA_<VARIANT>_IMAGES` (e.g. `AGENT_GAME_TERRARIA_TSHOCK_IMAGES`), else
+`AGENT_GAME_TERRARIA_IMAGES`, else the profile's own repository.
 
 ### Memory
 

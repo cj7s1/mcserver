@@ -83,7 +83,7 @@ export function ConfigFieldControl({
         <SelectContent>
           {(field.options ?? []).map((o) => (
             <SelectItem key={o} value={o}>
-              {o}
+              {field.option_labels?.[o] ?? o}
             </SelectItem>
           ))}
         </SelectContent>

@@ -30,7 +30,9 @@ export function GameSoftwareTab({ instance, can, onDirtyChange }: TabProps) {
   const qc = useQueryClient();
   const invalidate = useInvalidateInstance();
   const game = useGameInfo(instance);
-  const versions = useGameVersionCatalog(gameId(instance));
+  // a game whose variants have their own versions (Terraria) lists the variant's
+  const variant = game?.variants?.some((v) => v.id === instance.server_type && v.default_memory_mb !== undefined) ? instance.server_type : null;
+  const versions = useGameVersionCatalog(gameId(instance), true, variant);
   const [target, setTarget] = useState<string | null>(null);
   const [backup, setBackup] = useState(true);
   const [startAfter, setStartAfter] = useState(false);

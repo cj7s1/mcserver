@@ -54,11 +54,13 @@ class Health:
     (``docker_ops.agent_health``, reported as the container's ``health`` by ``describe``):
     ``tcp`` (a TCP connect to ``port`` of the container, re-checked at most every few seconds)
     and ``log`` (``pattern``, a regular expression, printed by the container since it started;
-    once seen, the run stays healthy). An agent-side probe that has not succeeded reads
-    "starting" for ``start_period_s`` after the start and "unhealthy" afterwards; the container
-    gets no Docker health check (``NONE``, so an image HEALTHCHECK cannot interfere).
-    ``udp-query`` and ``driver`` are named by the design but not implemented: a profile that
-    names one is refused when it is registered.
+    once seen, the run stays healthy), ``udp-query`` (``payload`` sent as one datagram to
+    ``port``/udp of the container; healthy when a reply arrives whose bytes, read as latin-1,
+    match ``pattern``) and ``driver`` (the control driver's ``ready()``, e.g. an HTTP API's health
+    function); ``tcp``, ``udp-query`` and ``driver`` are re-checked at most every few seconds.
+    An agent-side probe that has not succeeded reads "starting" for ``start_period_s`` after the
+    start and "unhealthy" afterwards; the container gets no Docker health check (``NONE``, so an
+    image HEALTHCHECK cannot interfere).
     """
 
     kind: Literal["cmd", "image", "tcp", "udp-query", "log", "driver"]
@@ -66,11 +68,13 @@ class Health:
     port: int | None = None
     pattern: str | None = None
     start_period_s: int = 600
+    # udp-query: the datagram sent to the port
+    payload: bytes = b""
 
 
-IMPLEMENTED_HEALTH = frozenset({"cmd", "image", "tcp", "log"})
+IMPLEMENTED_HEALTH = frozenset({"cmd", "image", "tcp", "log", "udp-query", "driver"})
 # probes the agent runs itself (no Docker health check)
-AGENT_SIDE_HEALTH = frozenset({"tcp", "log"})
+AGENT_SIDE_HEALTH = frozenset({"tcp", "log", "udp-query", "driver"})
 
 EnvPolicy = Callable[[str], str | None]
 InjectedEnv = Callable[["RuntimeProfile", "Settings", "InstanceSpec"], dict[str, str]]
@@ -136,6 +140,20 @@ class RuntimeProfile:
     redact_secret_in_logs: bool = False
     # Regular expressions whose match is replaced by its first group + "********".
     log_redact_patterns: tuple[str, ...] = ()
+    # The container's process, fixed by the profile (None: the image's own). Never taken from a
+    # spec: an image whose default entrypoint needs privileges can be run unprivileged by naming
+    # its server binary here (TShock). ``working_dir`` replaces the image's WORKDIR.
+    entrypoint: tuple[str, ...] | None = None
+    command: tuple[str, ...] | None = None
+    working_dir: str | None = None
+    # Exit codes of a correct, saving stop of the game (Terraria's image exits 143 after SIGTERM);
+    # informational for the panel (GET /v1/info, only when it differs from (0,)).
+    clean_exit_codes: tuple[int, ...] = (0,)
+    # Variables that name a container port the image listens on, with its protocol (Satisfactory's
+    # SERVERMESSAGINGPORT: the server advertises that port to players, so container and host port
+    # must be the same number). A spec may publish the container port such a variable names (its
+    # value must also match env_values).
+    env_ports: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
     def env_error(self, key: str) -> str | None:
         """Why the spec may not set ``key``; None when it may."""
@@ -155,11 +173,23 @@ class RuntimeProfile:
             return f"Image tag '{tag}' is not a tag {self.label} servers can run"
         return None
 
-    def port_error(self, container_port: int, protocol: str) -> str | None:
-        """Why a spec may not publish this container port; None when it may."""
+    def port_error(
+        self, container_port: int, protocol: str, env: Mapping[str, str] | None = None
+    ) -> str | None:
+        """Why a spec may not publish this container port; None when it may. ``env``: the spec's
+        environment, for the ports ``env_ports`` variables name."""
         for port, proto in self.never_publish:
             if port == container_port and proto in (None, protocol):
                 return f"Container port {container_port}/{protocol} is never published"
-        if not self.allow_extra_ports and (container_port, protocol) not in self.container_ports:
+        named = {
+            (int(value), self.env_ports[key])
+            for key, value in (env or {}).items()
+            if key in self.env_ports and str(value).isdigit()
+        }
+        if (
+            not self.allow_extra_ports
+            and (container_port, protocol) not in self.container_ports
+            and (container_port, protocol) not in named
+        ):
             return f"Container port {container_port}/{protocol} is not a port of {self.label}"
         return None

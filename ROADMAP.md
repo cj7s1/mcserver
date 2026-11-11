@@ -145,8 +145,8 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Phase 3: Factorio (rootless image, UDP port, RCON driver with a password file, Space Age pinned, saves:
       export / import / new map, players, software update to another exact tag). Real containers on a desktop
       (2026-11-10); not run on Unraid
-- [ ] Console-write primitive (Terraria via the image's `inject`, TShock via stdin): not built yet
-- [ ] Phase 4: Terraria (vanilla, tModLoader), then TShock
+- [x] Console-write primitive (Terraria via the image's `inject` through a fixed exec argv, TShock via stdin)
+- [x] Phase 4: Terraria (vanilla, tModLoader, TShock): verified on real containers, not yet on Unraid
 - [ ] Phase 5: Satisfactory (HTTPS API driver, claiming before ports are published)
 - [ ] Later: DST, a decision on Stardew Valley, per-game mods (Factorio mod portal first)
 

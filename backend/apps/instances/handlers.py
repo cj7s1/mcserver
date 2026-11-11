@@ -61,11 +61,12 @@ def apply_container(
         return {"skipped": "archived"}
     client = AgentClient(instance.node)
     # a server of another game needs an agent with that game's runtime profile (409 agent_lacks_game)
-    games.require_agent_support(instance.game, client)
+    games.require_agent_support(instance.game, client, games.for_instance(instance).agent_variant(instance))
     if start and admit:
         admit_memory(instance, ctx, client)
     spec = build_spec(instance)
     write_control_secret(instance, client)
+    games.for_instance(instance).before_apply(instance, client)  # panel-owned keys of the game's files
     pull = "newer" if start and client.supports(PULL_NEWER_FEATURE) else "missing"
     ctx.progress(span[0], "Preparing container (pulling the runtime image if needed)", force=True)
     op = client.apply(instance.id, spec, start=start, pull=pull)
@@ -104,12 +105,14 @@ def write_control_secret(instance: Instance, client: AgentClient) -> None:
     path = definition.control_secret_file if definition is not None else None
     if not path:
         return
-    from .spec import rcon_password
-
+    # the control secret (Factorio); Satisfactory: its API token, nothing before the claim
+    value = definition.control_secret_value(instance)
+    if value is None:
+        return
     parent = path.rsplit("/", 1)[0] if "/" in path else ""
     if parent:
         client.mkdir(instance.id, parent, parents=True)
-    client.write_text(instance.id, path, rcon_password(instance) + "\n")
+    client.write_text(instance.id, path, value + "\n")
 
 
 CLONE_LEVEL_NAME_FEATURE = "clone_level_name"  # clone leaves out exactly the world named by level_name / layout
@@ -305,6 +308,12 @@ def start(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = _instance(job)
     _set_desired(instance, DesiredState.RUNNING)
     start_server(instance, ctx, apply_changes=True)
+    if games.for_instance(instance).setup_steps:
+        # setup steps that waited for a running server (Satisfactory's claim) go on now
+        from .game_handlers import enqueue_setup
+
+        if enqueue_setup(instance, user=job.user) is not None:
+            ctx.log("Setup steps follow in their own job")
     return {}
 
 
@@ -338,6 +347,8 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
     for warning in info.get("warnings") or []:
         ctx.log(f"warning: {warning}")
     exit_code = info.get("exit_code")
+    if exit_code not in (0, None, 137) and exit_code in _clean_exit_codes(ctx):
+        return  # e.g. Terraria's image: 143 after its saving SIGTERM handler
     if exit_code == 137:
         ctx.log("warning: the server did not stop in time and was killed (exit code 137); its last changes may not be saved")
     elif exit_code not in (0, None):
@@ -346,6 +357,16 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
             f"warning: the server did not shut down cleanly (exit code {exit_code}): it was ended when its time to stop "
             "ran out, or it failed while stopping. Its last changes may not be saved; see the end of the console log"
         )
+
+
+def _clean_exit_codes(ctx: JobContext) -> frozenset[int]:
+    """Exit codes of a clean stop of the job's server (0; Terraria's image also 143)."""
+    try:
+        game = Instance.objects.filter(pk=ctx.job.instance_id).values_list("game", flat=True).first()
+    except Exception:  # the log line is a note only
+        game = None
+    definition = games.get_or_none(game)
+    return definition.clean_exit_codes if definition is not None else frozenset({0})
 
 
 def _save_command(ctx: JobContext) -> str:

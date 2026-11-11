@@ -5,7 +5,7 @@
 
 
 A self-hosted Minecraft **Java Edition** server manager for a Docker host (more hosts can be added as
-nodes), which also runs **Factorio** servers. It's designed for Unraid first and also runs on any Linux Docker host. It combines
+nodes), which also runs **Factorio**, **Satisfactory** and **Terraria** servers. It's designed for Unraid first and also runs on any Linux Docker host. It combines
 Prism-Launcher-style instance management with game-panel administration, and it is built around
 **easy modpack servers**: search for *Better MC*, pick a release, choose RAM and a port, and deploy.
 
@@ -18,6 +18,18 @@ Prism-Launcher-style instance management with game-panel administration, and it 
   chosen once, UDP port, game settings form, saves: download, import, new map with a seed). Each
   game is a reviewed definition in the panel plus a runtime profile in the agent; the UI shows only
   what a game supports.
+- **Satisfactory:** dedicated server on the stable branch (the game is downloaded on the first start
+  and updated at every start), claimed by the panel through its API before any port is published,
+  an explicit choice between a join password and an open server, player count, saves through the
+  server's API (new game, import and download of `.sav` files), server options and launch settings,
+  backups without the 2.8 GB game files. 8 GB of memory at least.
+- **Terraria:** three variants, each pinned to an exact image tag: the official server (vanilla),
+  tModLoader (built on Terraria 1.4.4.9; its players need the tModLoader client) and TShock
+  (accounts and permissions; it runs with no Linux capability, and the panel creates its in-game
+  owner account over TShock's REST API, so no `/setup` code is needed). TCP port 7777 by default,
+  console commands, online players (kick; ban and unban by IP for vanilla/tModLoader), consistent
+  backups, `serverconfig.txt` (and TShock's `config.json`) as a form, worlds: download, import of a
+  `.wld`, new world with size, difficulty and seed.
 - **Servers:** Vanilla, Paper, Purpur, Folia, Fabric, Quilt, Forge, NeoForge. Versions come from the
   official metadata services, and Java is picked automatically from Mojang's requirements.
 - **Modpacks:** Modrinth, CurseForge (with or without an API key) and Feed The Beast. Releases are

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar
+from uuid import UUID
 
 from ..errors import AgentError
 
@@ -91,6 +92,37 @@ class ControlDriver:
     def secret(self, settings: Settings, c: Container) -> str | None:
         """The secret the agent uses to reach the server (RCON password); None without one."""
         return None
+
+    # --- drivers with a channel of their own (HTTP APIs) ------------------------------------------
+    def channel(self, settings: Settings, instance_id: UUID) -> Send | None:
+        """The ``send`` the saving pause and the save use for this driver; None: RCON
+        (``main._rcon``). An HTTP API driver returns a sender that runs its own operations."""
+        return None
+
+    def game_action(
+        self, settings: Settings, c: Container, action: str, params: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        """An operation of the game's own control API (``POST /instances/{id}/game/{action}``),
+        e.g. Satisfactory's claim; 409 ``action_unsupported`` for a driver without it."""
+        raise AgentError(f"This server's game has no operation '{action}'", "action_unsupported", 409)
+
+    def publish_guard(self, settings: Settings, instance_id: UUID, existing: Container | None) -> None:
+        """Called before a container that publishes ports is created (apply): raise to refuse it
+        (Satisfactory: never publish a server that is not claimed). Default: nothing."""
+        return None
+
+
+class QueryTarget(tuple):
+    """(host, port) of a status query, with the driver's own query attached: ``query(timeout)``
+    is an async callable answering like the server list ping (``online``, ``max``, ``sample``,
+    ``version``, ``motd``, ``latency_ms``). Unpacks like a plain (host, port)."""
+
+    query: Any
+
+    def __new__(cls, host: str, port: int, query: Any) -> QueryTarget:
+        obj = super().__new__(cls, (host, port))
+        obj.query = query
+        return obj
 
 
 class NoControlDriver(ControlDriver):

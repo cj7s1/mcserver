@@ -133,7 +133,8 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
   const labels = listLabels(data, game?.player_list_labels);
   const pattern = game?.player_name_pattern;
   const online = data.online;
-  const lists: ListKey[] = ["whitelist", "ops", "bans"];
+  // only the lists the game has: an answer with labels names them (Terraria: bans only; TShock: none)
+  const lists: ListKey[] = (["whitelist", "ops", "bans"] as ListKey[]).filter((l) => !data.labels || l in data.labels);
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4">
       <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">

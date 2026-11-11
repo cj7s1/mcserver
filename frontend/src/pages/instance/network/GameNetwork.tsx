@@ -18,6 +18,7 @@ import { gameLabel } from "@/lib/games";
 import { qk, useInvalidateInstance } from "@/lib/queries";
 import type { ConnectionPort, Instance } from "@/lib/types";
 import { usePorts } from "../backups/backup-utils";
+import { useGameInfo } from "../game-api";
 import { CopyButton } from "./ConnectionPanel";
 import { portsPatch, rowsFromPorts, validateNamedPorts, type NamedPortRow } from "./named-ports";
 
@@ -140,7 +141,10 @@ const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|[0-9a-fA-F:.]{2,45})$/;
 export function GameNetwork({ instance, canEdit }: { instance: Instance; canEdit: boolean }) {
   const qc = useQueryClient();
   const invalidate = useInvalidateInstance();
-  const saved = rowsFromPorts(instance.ports ?? []);
+  // a port that always has another one's number (Satisfactory's API on TCP) follows it: not edited
+  const game = useGameInfo(instance);
+  const followers = new Set((game?.ports ?? []).filter((p) => p.same_port_as).map((p) => p.name));
+  const saved = rowsFromPorts(instance.ports ?? []).filter((r) => !followers.has(r.name));
   const [rows, setRows] = useState<NamedPortRow[] | null>(null);
   const [hostIp, setHostIp] = useState<string | null>(null);
   const current = rows ?? saved;

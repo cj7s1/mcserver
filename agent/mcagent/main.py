@@ -66,6 +66,7 @@ from .schemas import (
     DeleteRequest,
     ExtractRequest,
     ForgetRequest,
+    GameActionRequest,
     MkdirRequest,
     PrepareInstanceRequest,
     RenameRequest,
@@ -121,7 +122,10 @@ TEXT_LIMIT = 5 * 1024 * 1024
 #   games       the spec takes game/variant (absent = minecraft) and selects a runtime profile; GET
 #               /v1/info lists the profiles under "games"; a spec of a game without a profile is
 #               refused with 400 unknown_game
-FEATURES = ["retire", "pull_newer", "ping", "clone_level_name", "games"]
+#   game_actions POST /instances/{id}/game/{action}: operations of a game's own control API through its
+#               driver (Satisfactory: claim, client_password, new_game, sessions, save, upload_save, ...);
+#               /ping answers through the driver's own query for such games
+FEATURES = ["retire", "pull_newer", "ping", "clone_level_name", "games", "game_actions"]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
 LIFECYCLE_LOCK_WAIT = 60.0
@@ -574,6 +578,9 @@ async def apply_spec(
                 last = lastrun.summary(settings, instance_id) or {}
                 previous_image, previous_ref = last.get("image_id"), last.get("image")
             docker_ops.remove_stale_replacement(instance_id)
+            if body.spec.ports and (body.spec.network or settings.instance_network) != "host":
+                # e.g. Satisfactory: a server is never published before it is claimed
+                drivers.for_profile(profile).publish_guard(settings, instance_id, existing)
             if existing is not None:
                 was_running = existing.status in ("running", "restarting")
                 op.update(0.88, "Creating the new container")
@@ -769,7 +776,16 @@ async def ping(instance_id: UUID, settings: Settings = Depends(get_settings)) ->
     protocol (still starting)."""
     # the container's driver says where its query listens (409 ping_unavailable without one); the
     # query itself is the server list ping, the only one there is so far (Minecraft's)
-    host, port = await run_in_threadpool(docker_ops.game_endpoint, settings, instance_id)
+    target = await run_in_threadpool(docker_ops.game_endpoint, settings, instance_id)
+    host, port = target
+    own_query = getattr(target, "query", None)  # a driver with a query of its own (drivers.QueryTarget)
+    if own_query is not None:
+        try:
+            return await asyncio.wait_for(own_query(PING_TIMEOUT), PING_TIMEOUT + 1)
+        except TimeoutError as exc:
+            raise AgentError(
+                "The server did not answer the status query in time", "ping_timeout", 504
+            ) from exc
     try:
         return await asyncio.wait_for(slp.ping(host, port, timeout=PING_TIMEOUT), PING_TIMEOUT)
     except TimeoutError as exc:
@@ -798,6 +814,29 @@ async def command(
     except RconError as exc:
         raise AgentError(str(exc), "rcon_failed", 502) from exc
     return {"output": output}
+
+
+GAME_ACTION_TIMEOUT = 600.0
+
+
+@app.post("/v1/instances/{instance_id}/game/{action}", dependencies=[Depends(require_token)])
+async def game_action(
+    instance_id: UUID,
+    action: str = PathParam(pattern=r"^[a-z][a-z0-9_]{0,31}$"),
+    body: GameActionRequest | None = None,
+    settings: Settings = Depends(get_settings),
+) -> dict[str, Any]:
+    """An operation of the running server's own control API, through its driver (feature
+    ``game_actions``; Satisfactory: ``claim``, ``client_password``, ``new_game``, ``sessions``,
+    ``save``, ``upload_save``, ``load_game``, ``options``, ``apply_options``, ``status``). The driver
+    validates ``params``; 409 ``not_running`` without a running server, 409 ``action_unsupported``
+    for an operation its game does not have. Bounded by ``timeout`` (at most 600 s)."""
+    request = body or GameActionRequest()
+    c = await run_in_threadpool(docker_ops.running_container, instance_id)
+    driver = drivers.for_container(c)
+    timeout = min(request.timeout, GAME_ACTION_TIMEOUT)
+    result = await run_in_threadpool(driver.game_action, settings, c, action, dict(request.params), timeout)
+    return {"result": result}
 
 
 @app.delete("/v1/instances/{instance_id}/data", dependencies=[Depends(require_token)])
@@ -1882,6 +1921,30 @@ def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]
     return [str(source / rel) for rel in profile.default_backup_excludes]
 
 
+def _carry_over_excluded(settings: Settings, instance_id: UUID, current: Path, restored: Path) -> list[str]:
+    """Move the folders the game's profile leaves out of backups (re-downloadable: Satisfactory's
+    2.8 GB ``gamefiles/``) from the server folder into the restored tree, which does not have them,
+    so a restore does not throw them away (the image would download them again at the next start).
+    A rename only: across file systems (a btrfs subvolume or ZFS dataset per server) they are left
+    behind and the next start downloads them; that is a warning, never an error."""
+    warnings: list[str] = []
+    for absolute in _profile_backup_excludes(settings, instance_id):
+        rel = os.path.relpath(absolute, docker_ops.instance_dir(settings, instance_id))
+        if rel.startswith("..") or "*" in rel or "?" in rel:
+            continue
+        src, dst = current / rel, restored / rel
+        if not src.is_dir() or src.is_symlink() or dst.exists() or dst.is_symlink():
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(src, dst)
+        except OSError as exc:
+            warnings.append(
+                f"{rel}/ (not in backups) could not be kept and is downloaded again at the next start: {exc}"
+            )
+    return warnings
+
+
 @app.post("/v1/instances/{instance_id}/backups", dependencies=[Depends(require_token)])
 async def create_backup(
     instance_id: UUID, body: BackupRequest, settings: Settings = Depends(get_settings)
@@ -1965,6 +2028,8 @@ async def restore_backup(
         except BaseException:
             remove_tree(staging)
             raise
+        if target_id == instance_id and target_dir.exists():
+            warnings.extend(_carry_over_excluded(settings, instance_id, target_dir, staging))
         op.update(0.94, "Swapping restored files into place")
         moved = False
         try:
@@ -2328,7 +2393,8 @@ def _world_saving_paused(
     state = _SavingState(running=bool(status.get("running")))
     driver = drivers.for_status(status)
     save_off_sent = False
-    send = _sender(settings, instance_id)
+    # an HTTP API driver saves over its own channel; RCON drivers over main._rcon
+    send = driver.channel(settings, instance_id) or _sender(settings, instance_id)
 
     def send_pausing(command: str, timeout: float) -> None:
         nonlocal save_off_sent

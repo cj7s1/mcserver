@@ -6,10 +6,11 @@ import { ErrorState, LoadingState } from "@/components/States";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
-import { gameLabel, isMinecraft } from "@/lib/games";
+import { gameLabel, hasCapability, isMinecraft } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
 import { GamePlayers } from "./players/GamePlayers";
 import { OnlinePlayers } from "./players/OnlinePlayers";
+import { PlayerCount } from "./players/PlayerCount";
 import { PlayerLists } from "./players/PlayerLists";
 import { useAvatarPreference, usePlayers } from "./players/player-utils";
 import { WhitelistSettings } from "./players/WhitelistSettings";
@@ -39,7 +40,9 @@ function ModeNote({ running }: { running: boolean }) {
 
 export default function Players() {
   const { instance, can } = useInstanceContext();
-  // other games: their own lists and labels (players/GamePlayers.tsx); Minecraft: as before
+  // other games: their own lists and labels (players/GamePlayers.tsx), or a count only (Satisfactory);
+  // Minecraft: as before
+  if (!isMinecraft(instance) && !hasCapability(instance, "player_actions")) return <PlayerCount instance={instance} />;
   if (!isMinecraft(instance)) return <GamePlayers instance={instance} canManage={can("instance.players") && !instance.archived_at} />;
   return <MinecraftPlayers />;
 }

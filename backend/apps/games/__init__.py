@@ -1,8 +1,9 @@
 """Game definitions and their registry (docs/design/GAME-DEFINITIONS.md).
 
 ``get(id)``, ``all()`` and ``for_instance(instance)`` return the definition objects
-(``base.GameDefinition``). Built-in games: Minecraft (``minecraft.MinecraftDefinition``) and Factorio
-(``factorio.FactorioDefinition``). They are registered on first use, so importing this package
+(``base.GameDefinition``). Built-in games: Minecraft (``minecraft.MinecraftDefinition``), Factorio
+(``factorio.FactorioDefinition``), Terraria (``terraria.TerrariaDefinition``) and Satisfactory
+(``satisfactory.SatisfactoryDefinition``). They are registered on first use, so importing this package
 loads no models. To add a game: a module with a ``GameDefinition`` subclass, registered in
 ``_load`` below, and the matching runtime profile in the agent (agent/mcagent/profiles/).
 """
@@ -26,6 +27,7 @@ from .base import (
     PortSpec,
     SecretSpec,
     SetupStep,
+    SetupWaiting,
     Variant,
 )
 
@@ -47,6 +49,7 @@ __all__ = [
     "PortSpec",
     "SecretSpec",
     "SetupStep",
+    "SetupWaiting",
     "UnknownGame",
     "Variant",
     "all",
@@ -80,9 +83,13 @@ def _load() -> None:
     _loaded = True
     from .factorio import FactorioDefinition
     from .minecraft import MinecraftDefinition
+    from .satisfactory import SatisfactoryDefinition
+    from .terraria import TerrariaDefinition
 
     _registry.setdefault(DEFAULT_GAME, MinecraftDefinition())
     _registry.setdefault(FactorioDefinition.id, FactorioDefinition())
+    _registry.setdefault(SatisfactoryDefinition.id, SatisfactoryDefinition())
+    _registry.setdefault(TerrariaDefinition.id, TerrariaDefinition())
 
 
 def register(definition: GameDefinition) -> GameDefinition:
@@ -94,7 +101,7 @@ def register(definition: GameDefinition) -> GameDefinition:
     return definition
 
 
-BUILT_IN = (DEFAULT_GAME, "factorio")
+BUILT_IN = (DEFAULT_GAME, "factorio", "terraria", "satisfactory")
 
 
 def unregister(game_id: str) -> None:
@@ -136,7 +143,7 @@ def capabilities(instance: Instance) -> frozenset[str]:
     return definition.capabilities(instance) if definition is not None else frozenset()
 
 
-def require_agent_support(game_id: str | None, client: AgentClient) -> None:
+def require_agent_support(game_id: str | None, client: AgentClient, variant: str | None = None) -> None:
     """Refuse to create or start a server of a non-Minecraft game on an agent without its runtime
     profile (409 ``agent_lacks_game``).
 
@@ -149,7 +156,9 @@ def require_agent_support(game_id: str | None, client: AgentClient) -> None:
     if game == DEFAULT_GAME:
         return
     if client.supports(GAMES_FEATURE) and game in client.games():
-        return
+        # a variant needs its own profile (Terraria: vanilla, tModLoader, TShock)
+        if not variant or variant in ((client.games().get(game) or {}).get("variants") or []):
+            return
     definition = get_or_none(game)
     label = definition.label if definition is not None and definition.label else game
     raise ConflictError(

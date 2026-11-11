@@ -137,18 +137,16 @@ def create_other_game(request: Request, data: dict[str, Any], node: Node, defini
 # --- software update --------------------------------------------------------------------------------
 def game_software_update(request: Request, instance: Instance) -> Response:
     """``POST /software`` for another game: ``{"version", "backup", "start", "allow_downgrade"}`` (B10)."""
-    from apps.games.factorio import version_key
-
     definition = _other_game(instance)
     if instance.archived_at:
         raise ConflictError("Unarchive this server before updating or starting it", code="archived")
     data = request.data if isinstance(request.data, dict) else {}
-    version = definition.validate_version(str(data.get("version") or ""))
+    version = definition.validate_version(str(data.get("version") or ""), definition.agent_variant(instance))
     current = instance.minecraft_version
     if version == current:
         raise ApiError(f"The server already runs {definition.label} {version}", code="same_version")
     try:
-        downgrade = version_key(version) < version_key(current)
+        downgrade = definition.version_key(version) < definition.version_key(current)
     except ValueError:
         downgrade = False
     if downgrade and data.get("allow_downgrade") is not True:
@@ -225,6 +223,12 @@ def _describe_file(cfg: Any, text: str | None) -> dict[str, Any]:
     return {**cfg.as_dict(), "exists": text is not None, "values": values, "redacted_keys": redacted, "error": error}
 
 
+def _describe_values(cfg: Any, values: dict[str, Any]) -> dict[str, Any]:
+    """A config the definition keeps itself or reads from the game's API (``is_virtual_config``)."""
+    shown, redacted = codecs.masked(cfg, values)
+    return {**cfg.as_dict(), "exists": True, "values": shown, "redacted_keys": redacted, "error": None}
+
+
 class ConfigFilesView(APIView):
     """``GET /api/instances/<id>/config``: the game's config files with their schema and values (B6)."""
 
@@ -234,7 +238,17 @@ class ConfigFilesView(APIView):
         definition = _other_game(instance)
         definition.require(instance, "config_files")
         client = AgentClient(instance.node)
-        files = [_describe_file(cfg, _read(client, instance, cfg.path)) for cfg in definition.config_files() if cfg.fields]
+        files = []
+        for cfg in definition.config_files_for(instance):
+            if not cfg.fields:
+                continue
+            if definition.is_virtual_config(cfg):
+                # values the panel keeps itself or reads from the game's API (Satisfactory); None: not now
+                values = definition.virtual_config_values(client, instance, cfg)
+                if values is not None:
+                    files.append(_describe_values(cfg, values))
+                continue
+            files.append(_describe_file(cfg, _read(client, instance, cfg.path)))
         return Response({"files": files})
 
 
@@ -246,7 +260,7 @@ class ConfigFileView(APIView):
         instance = get_instance_for(request.user, pk, "instance.configure")
         definition = _other_game(instance)
         definition.require(instance, "config_files")
-        cfg = definition.config_file(file_id)
+        cfg = definition.config_file_for(instance, file_id)
         if cfg is None or not cfg.fields:
             raise ApiError("Unknown config file", code="not_found", status_code=404)
         values = request.data.get("values") if isinstance(request.data, dict) else None
@@ -260,6 +274,8 @@ class ConfigFileView(APIView):
         except ValueError as exc:
             raise ValidationError({"values": [str(exc)]}) from exc
         client = AgentClient(instance.node)
+        if definition.is_virtual_config(cfg):
+            return self._patch_virtual(request, instance, definition, client, cfg, validated)
         current = _read(client, instance, cfg.path)
         before = _file_values(cfg, current)
         codec = codecs.get(cfg.codec)
@@ -289,6 +305,33 @@ class ConfigFileView(APIView):
             }
         )
 
+    def _patch_virtual(
+        self, request: Request, instance: Instance, definition: Any, client: AgentClient, cfg: Any, validated: dict[str, Any]
+    ) -> Response:
+        before = definition.virtual_config_values(client, instance, cfg)
+        if before is None:
+            raise ConflictError(f"{cfg.label} can be changed only while the server runs", code="not_running")
+        changed = sorted(k for k, v in validated.items() if before.get(k) != v)
+        after = definition.write_virtual_config(client, instance, cfg, {k: validated[k] for k in changed}) if changed else before
+        audit.record(
+            "instance.config_updated",
+            request=request,
+            instance=instance,
+            target=instance,
+            details={"file": cfg.file_id, "keys": changed[:50]},
+        )
+        restart = any((cfg.field(k) or {}).get("restart", True) for k in changed)
+        shown = _describe_values(cfg, after)
+        return Response(
+            {
+                "file": shown,
+                "values": shown["values"],
+                "redacted_keys": shown["redacted_keys"],
+                "changed": changed,
+                "restart_required": restart and instance.status in RUNNING,
+            }
+        )
+
 
 # --- secrets and setup -----------------------------------------------------------------------------
 class SecretsView(APIView):
@@ -296,7 +339,7 @@ class SecretsView(APIView):
 
     def _answer(self, instance: Instance, definition: Any) -> dict[str, Any]:
         values = instance.secret_values
-        return {"secrets": [{**s.as_dict(), "set": bool(values.get(s.key))} for s in definition.secret_specs]}
+        return {"secrets": [{**s.as_dict(), "set": bool(values.get(s.key))} for s in definition.secret_specs_for(instance)]}
 
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
@@ -313,8 +356,9 @@ class SecretsView(APIView):
         if not isinstance(values, dict):
             raise ValidationError({"values": ["Provide an object of secrets"]})
         current = instance.secret_values
+        known = {s.key for s in definition.secret_specs_for(instance)}
         for key, value in values.items():
-            if definition.secret_spec(str(key)) is None:
+            if definition.secret_spec(str(key)) is None or str(key) not in known:
                 raise ValidationError({"values": [f"Unknown secret '{key}'"]})
             if value is None or value == "":
                 current.pop(str(key), None)
@@ -324,6 +368,7 @@ class SecretsView(APIView):
                 current[str(key)] = value
         instance.set_secret_values(current)
         instance.save(update_fields=["secrets", "updated_at"])
+        definition.secrets_changed(instance, sorted(str(k) for k in values))
         # the names only, never the values
         audit.record(
             "instance.secrets_updated", request=request, instance=instance, target=instance, details={"keys": sorted(values)}
@@ -418,7 +463,8 @@ class SavesResetView(APIView):
         data = ser.validated_data
         if data["confirm_name"] != instance.name:
             raise ApiError("Type the server name exactly to confirm resetting its world", code="confirmation_required")
-        cfg = definition.config_file("map-gen-settings")
+        reset_config = getattr(_saves_model, "reset_config", None)
+        cfg = reset_config(instance) if reset_config is not None else definition.config_file("map-gen-settings")
         settings_values: dict[str, Any] = {}
         if data["settings"]:
             if cfg is None:
@@ -479,7 +525,8 @@ class SavesImportView(APIView):
         upload = request.FILES.get("file")
         if upload is None:
             raise ValidationError({"file": ["Choose a save file"]})
-        if reason := _looks_like_save(upload, saves.extension):
+        validate = getattr(saves, "validate_upload", None)
+        if reason := (validate(upload) if validate is not None else _looks_like_save(upload, saves.extension)):
             raise ValidationError({"file": [reason]})
         raw_backup = request.data.get("backup")
         backup = bool(SystemSetting.get("pre_restore_backup")) if raw_backup in (None, "") else str(raw_backup).lower() == "true"
@@ -524,9 +571,21 @@ class SavesExportView(APIView):
         instance = get_instance_for(request.user, pk, "instance.files.read")
         definition, saves = _saves(instance, "world_import_export")
         client = AgentClient(instance.node)
-        path = saves.current_path(instance)
-        saved = False
-        if instance.status in ("running", "unhealthy") and definition.flush_command and world.may_flush(request.user, instance):
+        own_export = getattr(saves, "export", None)
+        filename = None
+        if own_export is not None:
+            # a game that saves through its API and names its saves itself (Satisfactory)
+            live = instance.status in ("running", "unhealthy") and world.may_flush(request.user, instance)
+            path, filename, saved = own_export(client, instance, save_first=live)
+        else:
+            path = saves.current_path(instance)
+            saved = False
+        if (
+            own_export is None
+            and instance.status in ("running", "unhealthy")
+            and definition.flush_command
+            and world.may_flush(request.user, instance)
+        ):
             try:
                 before = client.stat_file(instance.id, path).get("modified")
             except ApiError:
@@ -544,8 +603,10 @@ class SavesExportView(APIView):
             except ApiError:
                 pass  # not running after all: download what is on disk
         chunks, _length, upstream = client.download(instance.id, path)
-        response = AgentStreamingResponse(chunks, upstream, content_type="application/zip")
-        response["Content-Disposition"] = content_disposition(f"{instance.name}-{saves.current(instance)}{saves.extension}")
+        response = AgentStreamingResponse(chunks, upstream, content_type=getattr(saves, "content_type", "application/zip"))
+        response["Content-Disposition"] = content_disposition(
+            filename or f"{instance.name}-{saves.current(instance)}{saves.extension}"
+        )
         response["X-Content-Type-Options"] = "nosniff"
         audit.record(
             "files.download",

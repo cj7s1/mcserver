@@ -48,11 +48,17 @@ export function SavesSection({
   const data = query.data;
   const resetFields = data?.reset_fields?.length ? data.reset_fields : game?.world?.reset_fields;
   const extension = game?.world?.extension ?? ".zip";
+  // Satisfactory: a new game, an import and the download go through the running server's API
+  const viaApi = !!game?.world?.via_api;
 
   return (
     <Section
       title="Saves"
-      description="The map the server loads, and the saves a new map or an import moved aside."
+      description={
+        viaApi
+          ? "The server's saves by session. A new game, an import and the download go through the running server (a stopped server is started for it and stopped again); older sessions stay."
+          : "The map the server loads, and the saves a new map or an import moved aside."
+      }
       actions={
         <>
           {canImportExport && canDownload && data?.current && (
@@ -69,7 +75,7 @@ export function SavesSection({
           )}
           {canReset && canChange && (
             <Button size="sm" variant="destructive" onClick={() => setDialog("reset")} disabled={busy || archived}>
-              <Eraser /> New map…
+              <Eraser /> {viaApi ? "New game…" : "New map…"}
             </Button>
           )}
         </>
@@ -95,6 +101,7 @@ export function SavesSection({
                   <span className="min-w-0 truncate font-mono" title={s.path}>
                     {s.name}
                   </span>
+                  {s.session && <span className="truncate text-xs text-muted-foreground">{s.session}</span>}
                   {s.current && <Badge variant="secondary">loaded</Badge>}
                   <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">
                     {formatBytes(s.size)} · {modifiedText(s.modified)}

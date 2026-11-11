@@ -113,11 +113,12 @@ def compute(
         if instance.resume_after_boot and instance.desired_state == "running" and state == "exited":
             # stopped by `manage.py host_shutdown`; scheduling.resume_flagged_servers starts it again
             # (only while it is still meant to run, and it drops a mark it will not act on)
-            unclean = "" if exit_code in (0, None) else f" (exit code {exit_code}: not a clean stop)"
+            clean = (0, None) if exit_code in (0, None) else _clean_exit_codes(instance)
+            unclean = "" if exit_code in clean else f" (exit code {exit_code}: not a clean stop)"
             return Status.STOPPED, f"Stopped because the host was shutting down{unclean}; it is started again automatically"
-        if instance.desired_state == "running" and exit_code not in (0, None):
+        if instance.desired_state == "running" and exit_code not in (0, None) and exit_code not in _clean_exit_codes(instance):
             return Status.FAILED, f"Server exited unexpectedly (exit code {exit_code}). Check the console log."
-        if instance.desired_state == "running" and exit_code == 0 and state == "exited":
+        if instance.desired_state == "running" and exit_code is not None and state == "exited":
             return Status.STOPPED, STOPPED_ITSELF_DETAIL
         if instance.installed_at is None and state == "created":
             return Status.CREATED, "Installed container; not started yet"
@@ -125,3 +126,12 @@ def compute(
     if state == "paused":
         return Status.STOPPED, "Container paused"
     return Status.UNKNOWN, f"Unexpected container state '{state}'"
+
+
+def _clean_exit_codes(instance: Instance) -> frozenset[int]:
+    """Exit codes of a clean stop of the server's game (0; Terraria's image also 143 after its saving
+    SIGTERM handler). Only asked for an exit code other than 0."""
+    from apps import games
+
+    definition = games.get_or_none(getattr(instance, "game", None))
+    return definition.clean_exit_codes if definition is not None else frozenset({0})

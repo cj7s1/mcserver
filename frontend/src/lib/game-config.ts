@@ -99,5 +99,6 @@ export function displayValue(field: ConfigField, value: ConfigValue | undefined)
   if (value === undefined || value === null || value === "") return field.nullable ? "Random / not set" : "Not set";
   if (field.type === "bool") return value === true ? "On" : "Off";
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
+  if (field.option_labels?.[String(value)]) return field.option_labels[String(value)];
   return String(value);
 }

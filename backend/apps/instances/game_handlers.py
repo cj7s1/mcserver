@@ -107,6 +107,11 @@ def setup(job: Job, ctx: JobContext) -> dict[str, Any]:
         record_setup(instance, step.id, "running")
         try:
             message = definition.run_setup_step(instance, step, ctx) or ""
+        except games.SetupWaiting as exc:
+            # cannot run yet (the server is stopped): pending with the reason, the job ends quietly
+            record_setup(instance, step.id, "pending", str(exc))
+            ctx.log(f"Setup step '{step.label}' waits: {exc}")
+            return {"done": done, "waiting": step.id}
         except Exception as exc:
             detail = str(getattr(exc, "detail", exc))
             record_setup(instance, step.id, "failed", detail)
@@ -265,15 +270,25 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any) -> dict[s
 def saves_reset(job: Job, ctx: JobContext) -> dict[str, Any]:
     """A new map: the server creates it from the map-gen settings (with the chosen seed) at its next start."""
     p = job.params or {}
+    own = getattr(_saves(_instance(job)), "run_reset", None)
+    if own is not None:
+        return own(job, ctx)  # a game that makes its new world through its API (Satisfactory)
+    chosen: dict[str, Any] = {"seed": p.get("seed")}
 
     def place(client: AgentClient, instance: Instance) -> None:
         values = dict(p.get("settings") or {})
+        saves = _saves(instance)
+        if hasattr(saves, "prepare_reset"):
+            # a game whose new world is described by its own settings (Terraria: size, difficulty, seed)
+            chosen["seed"] = saves.prepare_reset(client, instance, values, p.get("seed"))
+            ctx.log(f"The seed of the new world: {chosen['seed']}")
+            return
         values["seed"] = p.get("seed")  # None: random
-        _saves(instance).write_map_gen(client, instance, values)
+        saves.write_map_gen(client, instance, values)
         ctx.log("The seed of the new map: " + ("random" if p.get("seed") is None else str(p.get("seed"))))
 
     result = _replace_save(job, ctx, what="resetting the world", place=place)
-    result["seed"] = p.get("seed")
+    result["seed"] = chosen["seed"]
     return result
 
 
@@ -283,6 +298,9 @@ def saves_import(job: Job, ctx: JobContext) -> dict[str, Any]:
     from .handlers import drop_import_archive
 
     p = job.params or {}
+    own = getattr(_saves(_instance(job)), "run_import", None)
+    if own is not None:
+        return own(job, ctx)  # a game that loads an uploaded save through its API (Satisfactory)
 
     def place(client: AgentClient, instance: Instance) -> None:
         target = _saves(instance).current_path(instance)

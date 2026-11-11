@@ -1,6 +1,7 @@
 """The runtime profiles this agent has, and how a spec or a container selects one.
 
-Registered: Minecraft (``minecraft.py``) and Factorio (``factorio.py``). A spec without ``game`` (every panel
+Registered: Minecraft (``minecraft.py``), Factorio (``factorio.py``) and Satisfactory
+(``satisfactory.py``). A spec without ``game`` (every panel
 before multi-game support, and every Minecraft spec of a current one) is Minecraft; a container
 without the ``io.mcpanel.game`` label is Minecraft as well, so existing containers keep their
 labels and their spec-hash label unchanged.
@@ -14,7 +15,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..errors import AgentError
-from . import factorio, minecraft
+from . import factorio, minecraft, satisfactory, terraria
 from .base import AGENT_SIDE_HEALTH, IMPLEMENTED_HEALTH, Health, Mount, RuntimeProfile, UserModel
 
 if TYPE_CHECKING:
@@ -65,7 +66,29 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
         raise ValueError(f"Profile {profile.game}: a cmd health check needs an argv")
     if profile.health.kind == "tcp" and not (profile.health.port and 1 <= profile.health.port <= 65535):
         raise ValueError(f"Profile {profile.game}: a tcp health check needs a port")
+    if profile.health.kind == "udp-query" and not (
+        profile.health.port
+        and 1 <= profile.health.port <= 65535
+        and profile.health.payload
+        and profile.health.pattern
+    ):
+        raise ValueError(
+            f"Profile {profile.game}: a udp-query health check needs a port, a payload and a pattern"
+        )
+    if profile.health.kind == "driver":
+        from ..drivers import ControlDriver
+        from ..drivers import get as get_driver
+
+        if type(get_driver(profile.control, dict(profile.control_options))).ready is ControlDriver.ready:
+            raise ValueError(f"Profile {profile.game}: the {profile.control} driver has no readiness check")
+    for key in profile.env_ports:
+        if key not in profile.env_values:
+            raise ValueError(
+                f"Profile {profile.game}: port variable {key} needs a value pattern (env_values)"
+            )
     patterns = list(profile.env_values.values()) + list(profile.log_redact_patterns)
+    if profile.health.kind == "udp-query":
+        patterns.append(str(profile.health.pattern))
     if profile.health.kind == "log":
         if not profile.health.pattern:
             raise ValueError(f"Profile {profile.game}: a log health check needs a pattern")
@@ -89,6 +112,17 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
         parts = mount.subdir.split("/")
         if mount.subdir.startswith("/") or ".." in parts or not mount.container_path.startswith("/"):
             raise ValueError(f"Profile {profile.game}: invalid mount {mount}")
+    for argv in (profile.entrypoint, profile.command):
+        if argv is not None and (
+            not isinstance(argv, tuple) or any(not isinstance(a, str) or "\x00" in a for a in argv)
+        ):
+            raise ValueError(f"Profile {profile.game}: entrypoint and command must be tuples of strings")
+    if profile.entrypoint is not None and not (profile.entrypoint and profile.entrypoint[0].startswith("/")):
+        raise ValueError(f"Profile {profile.game}: the entrypoint must start with an absolute program path")
+    if profile.working_dir is not None and (
+        not profile.working_dir.startswith("/") or ".." in profile.working_dir.split("/")
+    ):
+        raise ValueError(f"Profile {profile.game}: invalid working folder {profile.working_dir!r}")
     if profile.user.kind == "drop_privileges_env" and not (profile.user.uid_env and profile.user.gid_env):
         raise ValueError(f"Profile {profile.game}: drop_privileges_env needs uid_env and gid_env")
     keys = [(profile.game, v) for v in profile.variants] or [(profile.game, None)]
@@ -99,6 +133,9 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
 
 register(minecraft.PROFILE)
 register(factorio.PROFILE)
+register(satisfactory.PROFILE)
+for _profile in terraria.PROFILES:
+    register(_profile)
 
 
 def get(game: str | None, variant: str | None = None) -> RuntimeProfile | None:
@@ -152,6 +189,12 @@ def allowed_images(settings: Settings, profile: RuntimeProfile) -> list[str]:
     """
     if profile.game == DEFAULT_GAME:
         return list(settings.allowed_images)
+    # a game whose variants run different images (Terraria: PassiveLemon's, TShock's) can name
+    # them per variant: AGENT_GAME_<ID>_<VARIANT>_IMAGES before AGENT_GAME_<ID>_IMAGES
+    for variant in profile.variants:
+        raw = os.environ.get(_env_name(f"{profile.game}_{variant}"))
+        if raw is not None:
+            return _parse_list(raw)
     raw = os.environ.get(_env_name(profile.game))
     return list(profile.images) if raw is None else _parse_list(raw)
 
@@ -193,4 +236,24 @@ def info(settings: Settings) -> dict[str, Any]:
         for variant in profile.variants:
             if variant not in entry["variants"]:
                 entry["variants"].append(variant)
+        if profile.variants and sum(1 for p in all_profiles() if p.game == profile.game and p.variants) > 1:
+            # several profiles of one game (Terraria): the game's images are all of theirs, and
+            # each variant's own data is under "variant_profiles" (only for such games)
+            for image in allowed_images(settings, profile):
+                if image not in entry["images"]:
+                    entry["images"].append(image)
+            for key, pairs in (("ports", profile.container_ports), ("never_publish", profile.never_publish)):
+                for port, proto in pairs:
+                    if [port, proto] not in entry[key]:
+                        entry[key].append([port, proto])
+            details = entry.setdefault("variant_profiles", {})
+            for variant in profile.variants:
+                details[variant] = {
+                    "images": allowed_images(settings, profile),
+                    "control": profile.control,
+                    "ports": [[port, proto] for port, proto in profile.container_ports],
+                    "never_publish": [[port, proto] for port, proto in profile.never_publish],
+                    "health": profile.health.kind,
+                    "clean_exit_codes": list(profile.clean_exit_codes),
+                }
     return games

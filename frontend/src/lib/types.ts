@@ -58,10 +58,26 @@ export type GameCapability =
 export type MemoryModel = "jvm" | "plain";
 
 /** One entry of GET /api/catalog/games. */
+/**
+ * A variant of a game in the catalog (Minecraft: server types; Terraria: vanilla / tModLoader / TShock).
+ * Games whose variants differ in more than their name add the optional fields.
+ */
+export interface GameVariantInfo {
+  id: string;
+  label: string;
+  default_memory_mb?: number;
+  notes?: string[];
+  capabilities?: GameCapability[];
+  stop_words?: string[];
+  player_list_labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
+  /** The game version the variant is built on, when it is not the variant's own (tModLoader: Terraria 1.4.4.9). */
+  game_version?: string | null;
+}
+
 export interface GameInfo {
   id: string;
   label: string;
-  variants: { id: string; label: string }[];
+  variants: GameVariantInfo[];
   capabilities: GameCapability[];
   memory_model: MemoryModel;
   default_memory_mb: number;
@@ -82,6 +98,8 @@ export interface GameInfo {
   command_hint?: string;
   /** The game has a version catalog (GET /catalog/games/<id>/versions). */
   has_versions?: boolean;
+  /** No version to choose: what the server runs (Satisfactory: Steam's stable branch, updated at every start). */
+  fixed_version?: { id: string; label: string; help?: string };
   min_memory_mb?: number;
   /** Regex source of a valid player name. */
   player_name_pattern?: string;
@@ -116,6 +134,10 @@ export interface ConfigField {
   initial?: boolean;
   /** Options: the choice is fixed after creation. */
   pinned?: boolean;
+  /** Options: the game variants that have it (absent: every variant). */
+  variants?: string[];
+  /** Enum: what the form shows for each value. */
+  option_labels?: Record<string, string>;
 }
 
 export interface GamePortSpec {
@@ -125,6 +147,8 @@ export interface GamePortSpec {
   container_port: number;
   default_host_port: number;
   help?: string;
+  /** Always the host port number of this other named port (Satisfactory's API on TCP = the game's UDP port). */
+  same_port_as?: string;
 }
 
 export interface GameConfigFileSpec {
@@ -134,6 +158,8 @@ export interface GameConfigFileSpec {
   label: string;
   help?: string;
   fields: ConfigField[];
+  /** The game variants that have this file (absent: every variant). */
+  variants?: string[];
 }
 
 export interface GameSecretSpec {
@@ -142,6 +168,10 @@ export interface GameSecretSpec {
   help?: string;
   required?: boolean;
   link?: string;
+  /** The game variants that have this secret (absent: every variant). */
+  variants?: string[];
+  /** Required only when this option has this value (Satisfactory: the join password with access "password"). */
+  required_when?: { option: string; value: string };
 }
 
 export interface GameSetupStepSpec {
@@ -150,12 +180,16 @@ export interface GameSetupStepSpec {
   help?: string;
   /** "auto": the panel does it (a setup job); "secret": needs a secret from the owner. */
   kind: string;
+  /** kind "secret": the key of the secret it waits for. */
+  secret?: string | null;
 }
 
 export interface GameWorldSpec {
   kind: "saves" | string;
   extension?: string;
   reset_fields?: ConfigField[];
+  /** New game, import and export go through the running server's API (Satisfactory). */
+  via_api?: boolean;
 }
 
 /** GET /catalog/games/<id>/versions */
@@ -196,6 +230,8 @@ export interface InstanceSetup {
   needed: boolean;
   next: string | null;
   steps: SetupStepState[];
+  /** Satisfactory: whether the setup published the ports yet (nothing is reachable before). */
+  ports_open?: boolean;
 }
 
 /** One file of GET /instances/{id}/config. */
@@ -246,6 +282,8 @@ export interface SaveFile {
   /** epoch seconds or ISO string */
   modified: number | string | null;
   current: boolean;
+  /** Games whose saves belong to sessions (Satisfactory): the session of this save, when the server said. */
+  session?: string | null;
 }
 
 export interface SavesInfo {
@@ -706,6 +744,8 @@ export interface PlayersResponse {
   online?: { online: number | null; max: number | null; players: string[]; error?: string };
   /** Non-Minecraft games: what the lists are called ({ops: "Admins"}). */
   labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
+  /** The game reports a player count only (Satisfactory): no names, no lists. */
+  count_only?: boolean;
 }
 
 export interface Role {

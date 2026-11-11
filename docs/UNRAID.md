@@ -192,6 +192,20 @@ stops them before Docker stops, and starts them again after boot:
   outside the Minecraft range. Forward that UDP port, not TCP. It runs as `MC_UID`/`MC_GID` (99:100 on
   Unraid) without any capability, so its files in the server folder belong to `nobody:users` like the
   Minecraft servers' files. Each Factorio version is an image of about 1 GB on the cache drive.
+* A Satisfactory server uses the same number on **UDP and TCP** (7777 by default: the game and the
+  server's API) plus a **TCP** messaging port (8888 by default); forward all three. Its image runs
+  as root with four capabilities and drops to `MC_UID`/`MC_GID` (99:100), so its files belong to
+  `nobody:users` too. The game itself (2.8 GB) is downloaded into the server folder on the first
+  start and left out of backups; give it at least 8 GB of RAM (12 GB by default). The panel claims
+  the server before its ports are published, so nothing on your network can take it over first.
+* A Terraria server uses **TCP** 7777 by default (the next free TCP port when that one is taken, for
+  example by a Satisfactory server); forward that TCP port. Vanilla and tModLoader run as root with
+  five capabilities and drop to `MC_UID`; because the image cannot reuse the existing group 100
+  (`users`), their files belong to `nobody` with group 99 instead of `nobody:users` (the panel and
+  backups do not mind; set the group with Unraid's tools if you browse them over SMB as another
+  user). TShock runs as `MC_UID`/`MC_GID` (99:100) with no capability. tModLoader downloads .NET from
+  Microsoft whenever its container is recreated, so it needs internet access then; give it 3 GB of
+  RAM. Each Terraria image is 0.3-0.9 GB on the cache drive.
 
 ## 6. Snapshots on Unraid
 

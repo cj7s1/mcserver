@@ -28,6 +28,11 @@ export function SetupCard({ instance, canConfigure }: { instance: Instance; canC
         <p className="font-medium">Setup needed{step ? `: ${step.label}` : ""}</p>
         {step?.help && <p className="mt-1 text-muted-foreground">{step.help}</p>}
         {step?.message && <p className={failed ? "mt-1 text-destructive" : "mt-1 text-muted-foreground"}>{step.message}</p>}
+        {setup.ports_open === false && (
+          <p className="mt-1 text-xs text-muted-foreground">
+            No port is published until these steps are done, so nobody outside the panel can reach the server yet.
+          </p>
+        )}
         <ol className="mt-2 grid gap-0.5 text-xs text-muted-foreground">
           {setup.steps.map((s, i) => (
             <li key={s.id}>

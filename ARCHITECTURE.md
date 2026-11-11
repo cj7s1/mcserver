@@ -352,8 +352,8 @@ After anything unclear the server is left stopped.
 
 ## Games: definitions, runtime profiles, control drivers
 
-The design is docs/design/GAME-DEFINITIONS.md. Built: Minecraft (phase 1, unchanged behaviour) and
-Factorio (phases 2 and 3). A game has two halves that must agree:
+The design is docs/design/GAME-DEFINITIONS.md. Built: Minecraft (phase 1, unchanged behaviour),
+Factorio (phases 2 and 3), Satisfactory and Terraria (their own sections below). A game has two halves that must agree:
 
 * **Panel: the game definition** (`backend/apps/games/<game>.py`, a `GameDefinition` subclass,
   registered in `apps/games/__init__.py` `_load`). Everything game-specific on the panel side is
@@ -397,7 +397,8 @@ What the generic pieces do:
   non-exclusive until it takes the lock); a `secret` step runs once its secret is set; the
   Overview shows "Setup needed". Factorio has none; the mechanism is tested with a test game.
 * **Readiness**: besides Docker health checks (`cmd`, the image's own), the agent runs `tcp`
-  (connect to the container) and `log:<regex>` (a line since the container started) probes itself
+  (connect to the container), `udp-query` (a datagram, a reply matching a pattern), `driver` (the
+  control driver's `ready()`) and `log:<regex>` (a line since the container started) probes itself
   and reports them as the container's `health` (`starting` / `healthy` / `unhealthy` after the
   profile's `start_period_s`), so `state.compute` reads them like Docker's. Factorio uses the log
   probe (`Starting RCON interface at`): an RCON health check would print a line every interval.
@@ -413,6 +414,30 @@ What the generic pieces do:
 * **Exits from inside the game**: Factorio's `/quit` exits 0, which Docker's restart policy would
   restart. The console turns stop words into the panel's Stop; `POST /command` and schedule commands
   refuse them for games with `refuse_stop_commands` (400 `stop_via_power`).
+* **Variants with their own data** (Terraria): one agent profile per variant (`(game, variant)`), a
+  spec names `variant`; `/v1/info` lists each variant's images and control under
+  `variant_profiles`, and the panel checks the variant too (`require_agent_support(..., variant)`).
+  On the panel the definition narrows per server: `config_files_for`, `secret_specs_for`,
+  `setup_status`, `capabilities(instance)`; the catalog's variants carry their memory, notes,
+  capabilities and stop words, and options, config files and secrets name their `variants`, which
+  the wizard uses to show only the chosen variant's fields. Versions per variant:
+  `GET /api/catalog/games/<id>/versions?variant=`.
+* **Console input** (`agent/mcagent/drivers/console_io.py`, `console.py`): for games that take
+  commands on their console only. The profile chooses the transport: `exec`, a fixed argv template
+  with one `{line}` element run through Docker's exec API as the server's uid:gid (the only exec the
+  agent runs), or `stdin`, the line written through Docker's attach API to a container created with
+  `stdin_open`. Every line is sanitised (printable, length-capped; with the `tmux` guard no key names,
+  no leading `-`, no trailing `;`) and written under a per-server console lock; the reply is the log
+  read after the write (bounded), so a command answers with what the server printed meanwhile.
+* **The container's process** can be fixed by a profile (`entrypoint`, `command`, `working_dir`;
+  fixed environment through `injected_env`), never by a spec: TShock runs its server binary directly
+  as the runtime uid:gid instead of the image's root bootstrap script.
+* **Panel-owned keys inside game files**: `definition.before_apply(instance, client)` runs before every
+  apply (after the control secret file) and puts back what the panel owns (Terraria's
+  `serverconfig.txt` world/port/paths, TShock's REST token); `masked_text` hides a secret the game keeps
+  inside a file in the text editor.
+* **Clean stops that do not exit 0**: `definition.clean_exit_codes` (Terraria's image: 143 after its
+  saving SIGTERM handler) are neither a crash in `state.compute` nor a warning in the stop log.
 * **Runtime images per game**: system setting `runtime_images` (`{game: {"repository"}}`); the tag
   follows the game's rule (Factorio: `<exact version>-rootless`). Minecraft keeps
   `runtime_image_repository` / `runtime_image_channel`. The agent must allow the repository
@@ -435,6 +460,98 @@ loads `saves/world.zip` (`SAVE_NAME`, `LOAD_LATEST_SAVE=false`) and creates it f
 (`DLC_SPACE_AGE`) is chosen at creation and pinned in `game_options`. Versions come from Docker Hub's
 `*-rootless` tags and factorio.com's latest stable release; a software update changes the exact tag
 (pre-update backup, downgrade only when confirmed).
+
+### Satisfactory
+
+`wolveix/satisfactory-server` at the tag the panel release pins (`v1.9.11`), in root mode with exactly
+CHOWN DAC_OVERRIDE SETUID SETGID (`PUID`/`PGID` = the runtime uid/gid; the image runs unprivileged as
+uid 1000 only), the server folder at `/config`. SteamCMD downloads the game (2.9 GB) into `gamefiles/`
+on the first start and validates it at every start; the server follows Steam's stable branch
+(`fixed_version` in the catalog: no version to pick, no software update, "Update now" = restart).
+`gamefiles/` is the profile's default backup exclude, and a restore moves it from the old server folder
+into the restored one (`main._carry_over_excluded`) instead of throwing it away. The first start is
+retried on SteamCMD's exit 5/8; later starts rely on the container's `on-failure` policy, which the
+definition forces because a clean `Shutdown` exits 0.
+
+Ports: the game (UDP) and the HTTPS API (TCP) share one host port number (`PortSpec.same_port_as`:
+`assign_named_ports` picks a number free for both protocols, the API port is never asked for); the
+container port stays 7777 because the claim is stored per game port (`ServerSettings.<port>.sav`). The
+reliable-messaging port is advertised to players as the server knows it, so the definition sets
+`SERVERMESSAGINGPORT` to the host port and publishes it 1:1; the profile allows a container port that
+such a variable names (`RuntimeProfile.env_ports`).
+
+Control is the `satisfactory-api` driver (`agent/mcagent/drivers/satisfactory.py`) on the generic
+`http-api` base (`drivers/http_api.py`): HTTPS to the container's address on the instance network, a TLS
+context of its own that accepts the self-signed certificate for that hop only (pinned per container run),
+bounded timeouts and answer sizes, the API token read from `.mcpanel/api-token` in the server folder.
+Errors usually come back as HTTP 200 with an `errorCode`, so every answer is checked. Saves are
+`SaveGame` as `<session>_mcpanel` (204 once written; the newest save of the session is what the server
+loads at its next start); stop = SaveGame, `Shutdown`, wait for the exit, then `docker stop` (a no-op for
+an exited container); signals end the game without saving. Readiness is the agent's `udp-query` probe
+(the Lightweight Query answers while a map loads, when the HTTPS API is briefly down). `/ping` answers
+through the driver (`drivers.QueryTarget`): the player count from `QueryServerState` (no names), the
+limit, the build, the server name. The panel reaches the other functions through the agent's
+`POST /v1/instances/{id}/game/{action}` (feature `game_actions`): `claim`, `client_password`,
+`new_game`, `sessions`, `save`, `upload_save`, `load_game`, `options`, `apply_options`, `status`.
+
+Claiming (setup steps `claim`, `access`, `new_game`, `publish`): the spec has no ports until
+`setup_state.ports_open`; the claim waits for readiness, logs in passwordless as InitialAdmin, claims with
+the control secret as admin password (or, when this panel claimed it before, logs in with it), generates
+an API token (returned once; stored in `Instance.secrets["api_token"]`, written to the token file before
+every apply through `control_secret_value`), then the join password (or the explicit "open" choice) is
+applied and checked, a game is created unless one exists, and the `publish` step recreates the container
+with its ports. A step that needs a running server raises `SetupWaiting` (pending, the job ends quietly);
+the Start job enqueues the pending steps. The agent's `publish_guard` refuses an apply with ports while
+the running container still accepts an InitialAdmin login or the folder has no token. Changing the join
+password in Settings re-runs the `access` step (`secrets_changed`).
+
+Settings are two virtual config "files" (`is_virtual_config`): launch settings kept in
+`game_options["launch"]` and passed as the image's variables (restart), and the server options read
+from and written to the API while it runs. Saves (`SatisfactorySaves`) run their own jobs
+(`run_reset`, `run_import`, `export`): a stopped server is started for them and stopped again, a safety
+backup comes first, and the earlier sessions stay in `saved/server/`.
+
+### Terraria
+
+Three variants (`server_type`), one agent profile each (game `terraria`):
+
+* **vanilla / tModLoader**: `passivelemon/terraria-docker:terraria-<version>` /
+  `:tmodloader-<version>`, root with CHOWN DAC_OVERRIDE FOWNER SETUID SETGID (the entrypoint creates a
+  user from `PUID`/`PGID`, chowns `/opt/terraria` and drops to it; `--user` fails). A runtime gid that
+  already exists in the image (100) becomes the uid as `PGID` (`profiles.terraria.terraria_ids`), or
+  `groupadd` fails. `SERVERCONFIG=1`: the server reads the panel's `serverconfig.txt` from the server
+  folder (`/opt/terraria/config`); the image's other variables are refused (they are written into that
+  file unescaped). tModLoader needs `MODPACK` (the definition sets `mcpanel`) and
+  `ModPacks/mcpanel/Mods/enabled.json`, else it exits 0. The server runs in tmux: commands only
+  through the image's `inject` script (console driver, `exec` transport, `tmux` guard, as `PUID:PGID`).
+  Readiness: the log line `Server started`. SIGTERM saves after a 5 s warning and exits 143 (a clean
+  stop). Consistent backups: `save`, then vanilla's `Backing up world file` line; tModLoader prints
+  no end of a save, so the driver waits until `Worlds/*.twld` gets a newer mtime and keeps it 0.5 s
+  (bounded; the job log says so).
+* **TShock**: `ryshe/terraria:tshock-<terraria>-<tshock>` (TShock 6+), run without the image's
+  bootstrap: entrypoint `/tshock/TShock.Server`, user = runtime uid:gid, no capability, workdir `/tmp`,
+  `HOME`/`DOTNET_BUNDLE_EXTRACT_BASE_DIR` = `/tmp`, arguments `-configpath /config -logpath /config/logs
+  -additionalplugins /plugins -config /config/serverconfig.txt` (the TShock plugin comes from the image's
+  `/plugins`, so it follows the image version); the server folder is `/config`, the image's three other
+  VOLUMEs are tmpfs. Control: the `tshock-rest` driver (`drivers/tshock.py`): REST on 7878 over the
+  instance network (never published) with the application token the panel writes into `config.json`
+  (`Settings.ApplicationRestTokens`, user `mcpanel`, group superadmin; the token is the control secret
+  `Instance.rcon_password`); `rawcmd` for commands, `/v2/world/save` (synchronous) for saves,
+  `/v2/server/status` for `/ping` (players, limit), `/v2/users/*` for the owner account
+  (`game_action owner_account`); stdin when the API cannot be used. Stop signal SIGINT (saves, exit 0).
+  The one-time `/setup <code>` is masked in every console text the agent hands out; the setup step
+  `owner_account` (secret `owner_password`) creates the owner account, so TShock disables the code at
+  its next start.
+
+The panel owns `world`, `worldpath`, `worldname`, `port`, `upnp`, `banlist` (and `modpack`/`modpath`)
+in `serverconfig.txt` and writes them, plus `autocreate` when missing, before every apply. The world is
+`Worlds/<game_options.world_name>.wld`; `TerrariaSaves` moves every world file aside on reset/import,
+and a reset writes size, difficulty and seed (`prepare_reset`; the size is always written, never left
+to an older value meeting a bigger world). Versions come from Docker Hub's tags per variant (tModLoader:
+`x.y.3.z` stable, `x.y.2.z` previews; `*-latest` digests mark the latest). Players: vanilla/tModLoader
+from the console's `playing` (cached 55 s; so the player history sends one `playing` a minute while
+the server runs), kick and ban by command, unban by editing `banlist.txt`; TShock from its status,
+kick and `ban add` by command.
 
 ### Adding a game
 

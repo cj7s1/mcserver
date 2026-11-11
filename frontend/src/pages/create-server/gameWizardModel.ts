@@ -5,7 +5,7 @@
  * fields marked `initial`, and the secrets. Minecraft keeps its own wizard (wizardModel.ts).
  */
 import { fromText, initialTexts, valuesForCreate } from "@/lib/game-config";
-import type { ConfigField, ConfigValue, GameInfo, GameVersionsResponse } from "@/lib/types";
+import type { ConfigField, ConfigValue, GameInfo, GameVariantInfo, GameVersionsResponse } from "@/lib/types";
 import type { FieldErrors, StepId } from "./wizardModel";
 
 export const GAME_WIZARD_STEPS: { id: StepId; label: string; short: string }[] = [
@@ -17,6 +17,8 @@ export const GAME_WIZARD_STEPS: { id: StepId; label: string; short: string }[] =
 ];
 
 export interface GameWizardState {
+  /** The game variant (Terraria: vanilla, tmodloader, tshock); null for a game without variants. */
+  variant: string | null;
   /** null = the catalog's latest stable version */
   version: string | null;
   /** option key -> form text (defaults from the catalog) */
@@ -45,15 +47,51 @@ export function initialFields(game: GameInfo): { file: string; label: string; fi
     .filter((f) => f.fields.length > 0);
 }
 
-export function initialGameState(game: GameInfo): GameWizardState {
+/** The variants the wizard offers: those of a game whose catalog describes them (Minecraft's server types are not). */
+export function wizardVariants(game: GameInfo): GameVariantInfo[] {
+  return (game.variants ?? []).filter((v) => v.default_memory_mb !== undefined || v.notes !== undefined);
+}
+
+function forVariant<T extends { variants?: string[] }>(items: T[] | undefined, variant: string | null): T[] | undefined {
+  if (!items) return items;
+  return items.filter((x) => !x.variants?.length || (variant !== null && x.variants.includes(variant)));
+}
+
+/**
+ * The catalog entry as one variant sees it: its memory, notes, capabilities and stop words, and only the
+ * options, config files, secrets and setup steps it has. A game without variant data is returned as it is.
+ */
+export function variantView(game: GameInfo, variant: string | null): GameInfo {
+  const info = wizardVariants(game).find((v) => v.id === variant);
+  if (!info) return game;
+  const secrets = forVariant(game.secrets, variant);
+  const secretKeys = new Set((secrets ?? []).map((s) => s.key));
   return {
+    ...game,
+    default_memory_mb: info.default_memory_mb ?? game.default_memory_mb,
+    notes: info.notes ?? game.notes,
+    capabilities: info.capabilities ?? game.capabilities,
+    stop_words: info.stop_words ?? game.stop_words,
+    player_list_labels: info.player_list_labels ?? game.player_list_labels,
+    options: forVariant(game.options, variant),
+    config_files: forVariant(game.config_files, variant),
+    secrets,
+    setup_steps: game.setup_steps?.filter((s) => !s.secret || secretKeys.has(s.secret)),
+  };
+}
+
+/** The wizard's first state; for a game with variants, of ``variant`` (default: the first). */
+export function initialGameState(game: GameInfo, variant: string | null = wizardVariants(game)[0]?.id ?? null): GameWizardState {
+  const view = variantView(game, variant);
+  return {
+    variant,
     version: null,
-    options: initialTexts(game.options ?? []),
+    options: initialTexts(view.options ?? []),
     name: "",
     memory: null,
-    ports: Object.fromEntries((game.ports ?? []).map((p) => [p.name, ""])),
+    ports: Object.fromEntries((view.ports ?? []).map((p) => [p.name, ""])),
     hostIp: "",
-    settings: Object.fromEntries(initialFields(game).map((f) => [f.file, initialTexts(f.fields)])),
+    settings: Object.fromEntries(initialFields(view).map((f) => [f.file, initialTexts(f.fields)])),
     secrets: {},
     description: "",
     group: "",
@@ -87,6 +125,8 @@ export function validateGameStep(step: StepId, game: GameInfo, state: GameWizard
   if (step === "software") {
     if (!version.trim()) errors.version = "Choose a version";
     else if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version.trim())) errors.version = "Not a valid version";
+    const variants = wizardVariants(game);
+    if (variants.length && !variants.some((v) => v.id === state.variant)) errors.variant = "Choose a variant";
     for (const o of game.options ?? []) {
       const parsed = fromText(o, state.options[o.key] ?? "");
       if ("error" in parsed) errors[`options.${o.key}`] = parsed.error;
@@ -122,10 +162,15 @@ export function validateGameStep(step: StepId, game: GameInfo, state: GameWizard
     if (state.group.length > 60) errors.group = "Group must be at most 60 characters";
   } else if (step === "review") {
     for (const s of game.secrets ?? []) {
-      if (s.required && !(state.secrets[s.key] ?? "").trim()) errors[`secrets.${s.key}`] = `${s.label} is required`;
+      if ((s.required || secretRequiredNow(s, state)) && !(state.secrets[s.key] ?? "").trim()) errors[`secrets.${s.key}`] = `${s.label} is required`;
     }
   }
   return errors;
+}
+
+/** A secret that is required only with one choice of an option (Satisfactory's join password with access "password"). */
+export function secretRequiredNow(s: { required_when?: { option: string; value: string } }, state: Pick<GameWizardState, "options">): boolean {
+  return !!s.required_when && (state.options[s.required_when.option] ?? "") === s.required_when.value;
 }
 
 /** Which step a (client or server) error key belongs to. */
@@ -140,6 +185,7 @@ export function gameStepForField(key: string): StepId {
 
 export interface GameCreatePayload {
   game: string;
+  variant?: string;
   name: string;
   version: string;
   memory_mb: number;
@@ -165,6 +211,7 @@ export function buildGamePayload(game: GameInfo, state: GameWizardState, version
     start: state.start,
     nightly_backup: state.nightlyBackup && nightlyBackupAllowed,
   };
+  if (state.variant) payload.variant = state.variant;
   // every option is sent: they are pinned on the server, so the choice is explicit
   const options: Record<string, ConfigValue> = {};
   for (const o of game.options ?? []) {

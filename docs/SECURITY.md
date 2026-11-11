@@ -158,7 +158,7 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
 * The panel never configures router port forwarding, UPnP or DNS. Minecraft game ports are published
   on the Docker host only; making them reachable from the internet is a deliberate step you take on
   your router.
-* RCON (Minecraft 25575, Factorio 27015) is never published; only the agent reaches it on the
+* RCON (Minecraft 25575, Factorio 27015) and TShock's REST API (7878) are never published; only the agent reaches them on the
   container network. Game ports are published per protocol (Factorio: UDP).
 * Redis (job queue, live events, cache) has no password and its cache holds pickled objects, so
   whoever can write to it can run code in the panel. It therefore has no network listener at all:
@@ -340,7 +340,7 @@ would stop that server itself at array stop and count it as stopped by hand.
 * World saving that a backup switched off (`save-off`) is switched on again even if the agent
   process ends during the pause (a marker file; `save-on` at shutdown, at start and every 30 s).
 
-## Games other than Minecraft (Factorio)
+## Games other than Minecraft (Factorio, Satisfactory, Terraria)
 
 Each game is reviewed code: a definition in the panel and a runtime profile in the agent
 (ARCHITECTURE.md, "Games"). The panel and users still cannot choose images, mounts, capabilities,
@@ -380,6 +380,104 @@ has no profile for.
   and the API and schedules refuse them (400 `stop_via_power`).
 * **Image VOLUMEs** are mounted into the server folder (or a tmpfs the profile names), so no data of
   a game server lives in an anonymous Docker volume outside it.
+
+### Console input: the only exec, and stdin
+
+Games that take commands on their console only (Terraria) get one line at a time
+(`agent/mcagent/drivers/console_io.py`):
+
+* **Exec is allowed in exactly one form:** a profile names a fixed argv template with exactly one
+  element `{line}` (PassiveLemon's Terraria image: `["inject", "{line}"]`, a script that types the line
+  into the server's tmux pane). The template is checked when the profile is loaded (a program first,
+  one `{line}` element, no other templated element). The agent runs it through Docker's exec API with
+  the line as that one argument, never through a shell, without a TTY or stdin, not privileged
+  (`no-new-privileges` applies), as the uid:gid the server runs as (the container's `PUID`/`PGID`).
+  Nothing of a request chooses the program, the user or any other argument; there is no other exec in
+  the agent.
+* **stdin:** for images whose server reads its stdin (TShock run directly) the line and a newline are
+  written through Docker's attach API to a container the profile created with `stdin_open` (no TTY).
+  Nothing is read back through the attachment.
+* **Every line is sanitised** before either: surrounding blanks removed, not empty, at most 256
+  characters, no control, format (zero-width, bidi), surrogate, private-use or line/paragraph separator
+  characters, so a line can never become two commands. Consoles typed through `tmux send-keys` also
+  refuse what tmux would not type as text: a single word that is a key name (`C-c`, `Escape`, `0x03`,
+  `F1`, ...), a line starting with `-` (an option of `send-keys`) or ending with `;` (tmux's command
+  separator). A refused line is 400 `console_line_refused` and never reaches Docker.
+* **One writer per server** (a per-server console lock; 409 `console_busy` after 30 s). A command's
+  answer is the container log read after the write (bounded), passed through the same redaction as
+  every other log text.
+* Exits from inside the game (`exit`, TShock's `off`) are turned into the panel's Stop like Factorio's
+  `/quit`.
+
+### Terraria: privileges, the TShock REST token, the setup code
+
+* **Vanilla and tModLoader** need root with CHOWN, DAC_OVERRIDE, FOWNER, SETUID and SETGID (the image
+  creates its user and chowns the server folder at every start; `--user` fails), with
+  `no-new-privileges`; the server runs as `MC_UID`. The image writes its variables unescaped into its
+  config file, so the profile refuses all of them except `TZ` (and tModLoader's `MODPACK`, a bare name):
+  the panel writes `serverconfig.txt` itself and the server reads that (`SERVERCONFIG=1`).
+  tModLoader's launcher downloads the .NET runtime from Microsoft at every container creation (code
+  from the internet, into the container layer); that is the image's design and cannot be switched off.
+* **TShock** runs with **no capability** as `MC_UID:MC_GID`: the profile replaces the image's root
+  bootstrap script (which reads `config.json` with `jq`, can run a `mysql` client with a password on its
+  command line, and ignores stop signals) with the server binary, a fixed argument list, `/tmp` as
+  working folder and fixed `HOME`/`DOTNET_BUNDLE_EXTRACT_BASE_DIR`. None of this is expressible in a
+  spec (`RuntimeProfile.entrypoint`/`command`/`working_dir`).
+* **The REST token.** TShock's REST API (port 7878) is never published; the agent reaches it over the
+  instance network. The panel generates the token (the server's control secret, `Instance.rcon_password`,
+  encrypted in the database) and writes it before every start into `config.json` as the only application
+  token (`ApplicationRestTokens`, user `mcpanel`, group superadmin), together with `RestApiEnabled`,
+  the port and `LogRest=false`; these keys are managed (refused in Game settings) and put back at every
+  apply. The agent's driver reads the token from that file (no symbolic link followed, size-capped);
+  it travels only in the query string of requests to the container (TShock's design) and never appears
+  in an error message or log line of the agent; the agent also masks it in console text. The text
+  editor shows `config.json` with the token masked; a user with `instance.files.read` can still
+  download the file, and it is in backups (restic, encrypted). It grants superadmin over that TShock
+  server only.
+* **The one-time `/setup` code** TShock prints at its first start (it makes whoever types it in game an
+  admin) is masked in every console text the agent hands out. The panel creates the owner account itself
+  (setup step `owner_account`: password from the secret `owner_password`, sent to the agent in the
+  request only, never logged or stored in a file by the panel), and TShock switches the code off at its
+  next start. `docker logs` on the host still shows it, and `setup-code.txt` stays in the server folder
+  until that restart.
+
+### Satisfactory: claiming, the API token, internal-only TLS
+
+* **Claiming.** An unclaimed Satisfactory server belongs to whoever reaches its API first (a
+  passwordless `InitialAdmin` login works until it is claimed). The panel never publishes such a
+  server: its spec has no ports until the setup's claim, join-password and new-game steps are done
+  (`setup_state.ports_open`), and the agent refuses an apply that would publish the ports of a
+  Satisfactory server whose running container still accepts an `InitialAdmin` login, or whose server
+  folder holds no API token (409 `server_unclaimed`). The claim runs through the agent over the
+  instance network; the admin password is the server's control secret (encrypted in the database,
+  sent to the agent only in the claim request, never written to disk by the panel).
+* **Client logins.** After the claim anyone who reaches the server can still log in as a client
+  (and read its state) until a client password is set. The create wizard requires an explicit
+  choice: a join password, or "open to anyone who knows the address"; the setup applies it and
+  checks that it took effect. Clearing the password later in Settings means "open".
+* **API token.** The claim makes a non-expiring API token (`server.GenerateAPIToken`). The agent
+  returns it once, in the claim's answer; the panel stores it encrypted (`Instance.secrets`, not
+  listed or settable through the secrets API) and writes it to `.mcpanel/api-token` in the server
+  folder before every apply, where the agent's driver reads it (no symbolic link followed). Like
+  Factorio's RCON password file, the file editor masks it and refuses to change it, but a user with
+  `instance.files.read` can download it, and it is in backups (restic, encrypted). It grants
+  admin over that game server only, which listens on the instance network and its own published
+  ports. The game server itself can read it (it stores its tokens in `saved/ServerSettings.7777.sav`
+  anyway). It is never logged; job logs and audit details name steps and keys only.
+* **Internal-only TLS.** The game's API uses a self-signed certificate. The agent connects only to
+  the server's own container address (from Docker, right before each request; the published port on
+  127.0.0.1 with `AGENT_RCON_MODE=published`), with a TLS context of its own that skips certificate
+  verification for that hop only: every other HTTPS connection (panel to agent, catalog downloads)
+  keeps full verification. The certificate seen first in a container's run is pinned for that run;
+  a different one is refused (`api_tls_changed`). Requests are bounded (3 s to connect, at most
+  600 s in all, answers at most 8 MB); the agent's `POST /game/{action}` accepts only the driver's
+  named operations, with parameters it validates (names, save names, option keys, sizes).
+* **Privileges.** The image needs root mode on Unraid (it runs unprivileged as uid 1000 only): the
+  profile adds exactly CHOWN, DAC_OVERRIDE, SETUID and SETGID (fewer fail at start), with
+  `no-new-privileges`; the image drops to `MC_UID`/`MC_GID`. The game port stays 7777 in the
+  container (a different port would be a new, unclaimed server). Its variables that download other
+  branches, skip updates or print every variable (`STEAMAPPID`, `STEAMBETA*`, `SKIPUPDATE`,
+  `DEBUG`, ...) are refused by the panel and the agent.
 
 ## Reporting
 

@@ -291,6 +291,19 @@ class AgentClient:
             "POST", f"/v1/instances/{instance_id}/command", json={"command": command, "timeout": timeout}, timeout=timeout + 10
         )["output"]
 
+    def game_action(
+        self, instance_id: UUID, action: str, params: dict[str, Any] | None = None, timeout: float = 60
+    ) -> dict[str, Any]:
+        """An operation of the running server's own control API (agents with ``game_actions``;
+        Satisfactory: claim, client_password, new_game, sessions, save, upload_save, options, ...).
+        The answer's ``result``. Never log ``params`` or the result: they can hold secrets."""
+        return self._json(
+            "POST",
+            f"/v1/instances/{instance_id}/game/{action}",
+            json={"params": params or {}, "timeout": timeout},
+            timeout=timeout + 15,
+        )["result"]
+
     def delete_data(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("DELETE", f"/v1/instances/{instance_id}/data", json={"confirm": str(instance_id)})["operation"]
 

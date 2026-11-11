@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import re
 from typing import Any, Literal
 from uuid import UUID
@@ -120,6 +121,20 @@ class StopRequest(BaseModel):
 class CommandRequest(BaseModel):
     command: str = Field(min_length=1, max_length=1446)
     timeout: float = Field(default=30.0, gt=0, le=300)
+
+
+class GameActionRequest(BaseModel):
+    """``POST /instances/{id}/game/{action}``: an operation of the game's control API (the driver
+    validates ``params`` itself)."""
+
+    params: dict[str, Any] = Field(default_factory=dict)
+    timeout: float = Field(default=60.0, gt=0, le=600)
+
+    @model_validator(mode="after")
+    def _small(self) -> GameActionRequest:
+        if len(json.dumps(self.params)) > 16384:
+            raise ValueError("params are too large")
+        return self
 
 
 class MkdirRequest(BaseModel):

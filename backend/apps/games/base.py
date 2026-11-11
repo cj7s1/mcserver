@@ -84,6 +84,8 @@ class ConfigFile:
     id: str = ""  # the file's id in the API; default: the file name without its extension
     fields: tuple[dict[str, Any], ...] = ()
     help: str = ""
+    # the game variants that have this file (empty: every variant); the wizard shows only those
+    variants: tuple[str, ...] = ()
 
     @property
     def file_id(self) -> str:
@@ -96,7 +98,7 @@ class ConfigFile:
         return next((f for f in self.fields if f["key"] == key), None)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "id": self.file_id,
             "path": self.path,
             "codec": self.codec,
@@ -106,6 +108,9 @@ class ConfigFile:
             "managed_keys": sorted(self.managed_keys),
             "secret_keys": list(self.secret_keys),
         }
+        if self.variants:
+            data["variants"] = list(self.variants)
+        return data
 
 
 @dataclass(frozen=True)
@@ -119,9 +124,12 @@ class PortSpec:
     protocol: str  # tcp | udp
     default_host_port: int
     help: str = ""
+    # the name of another port of the game that this one always shares its host port number with
+    # (Satisfactory: the HTTPS API on 7777/tcp and the game on 7777/udp); the panel never asks for it
+    same_port_as: str = ""
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "name": self.name,
             "label": self.label,
             "container_port": self.container_port,
@@ -129,6 +137,9 @@ class PortSpec:
             "default_host_port": self.default_host_port,
             "help": self.help,
         }
+        if self.same_port_as:
+            data["same_port_as"] = self.same_port_as
+        return data
 
 
 @dataclass(frozen=True)
@@ -140,9 +151,18 @@ class SecretSpec:
     help: str = ""
     required: bool = False
     link: str = ""
+    variants: tuple[str, ...] = ()  # the variants that have it (empty: every variant)
+    # required only when the option (key, value) is chosen (Satisfactory: the client password when
+    # access is "password")
+    required_when: tuple[str, str] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "label": self.label, "help": self.help, "required": self.required, "link": self.link}
+        data = {"key": self.key, "label": self.label, "help": self.help, "required": self.required, "link": self.link}
+        if self.variants:
+            data["variants"] = list(self.variants)
+        if self.required_when:
+            data["required_when"] = {"option": self.required_when[0], "value": self.required_when[1]}
+        return data
 
 
 @dataclass(frozen=True)
@@ -173,6 +193,9 @@ class GameOption:
     help: str = ""
     pinned: bool = True
     options: tuple[str, ...] = ()
+    variants: tuple[str, ...] = ()  # the variants that have it (empty: every variant)
+    # what the form shows for each value of an enum ((value, label), ...)
+    option_labels: tuple[tuple[str, str], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         data = {
@@ -185,7 +208,15 @@ class GameOption:
         }
         if self.options:
             data["options"] = list(self.options)
+        if self.variants:
+            data["variants"] = list(self.variants)
+        if self.option_labels:
+            data["option_labels"] = dict(self.option_labels)
         return data
+
+
+class SetupWaiting(Exception):
+    """A setup step cannot run yet (``GameDefinition.run_setup_step``); the message says why."""
 
 
 class CapabilityUnavailable(ConflictError):
@@ -233,15 +264,24 @@ class GameDefinition:
     # server was never ready; the first start retries up to install_attempts times.
     retryable_install_exits: frozenset[int] = frozenset()
     install_attempts: int = 3
+    # Exit codes of a correct, saving stop (Terraria's image exits 143 after its SIGTERM save)
+    clean_exit_codes: frozenset[int] = frozenset({0})
     # the save files of the game (non-Minecraft games; Minecraft has instances/world.py)
     saves: Any = None
     # environment variables an owner may add (Settings -> Environment) for this game; all others are
     # refused (images of other games have variables that download code or run scripts)
     allowed_user_env: frozenset[str] = frozenset({"TZ"})
+    # a game without versions to choose: {"id", "label", "help"} of what it runs (the catalog says so
+    # and the wizard asks for no version; Satisfactory follows Steam's stable branch)
+    fixed_version: dict[str, str] | None = None
 
     # -- data -------------------------------------------------------------------------------
     def default_memory_mb(self) -> int:
         return 2048
+
+    def default_memory_mb_for(self, variant: str | None) -> int:
+        """The default memory of a new server of ``variant`` (tModLoader needs more than vanilla)."""
+        return self.default_memory_mb()
 
     def config_files(self) -> tuple[ConfigFile, ...]:
         """The files the config editor shows (the first one is the main file)."""
@@ -296,6 +336,9 @@ class GameDefinition:
             entry["command_hint"] = self.command_hint
         if self.has_versions:
             entry["has_versions"] = True
+        if self.fixed_version:
+            # no version to pick: the server follows a branch (Satisfactory: stable, updated at every start)
+            entry["fixed_version"] = dict(self.fixed_version)
         if self.id != DEFAULT_GAME and self.ports:
             entry["min_memory_mb"] = self.min_memory_mb
             entry["default_stop_timeout"] = self.default_stop_timeout
@@ -372,6 +415,17 @@ class GameDefinition:
     def config_file(self, file_id: str) -> ConfigFile | None:
         return next((f for f in self.config_files() if f.file_id == file_id), None)
 
+    def config_files_for(self, instance: Instance) -> tuple[ConfigFile, ...]:
+        """The config files of this server (a game whose variants have different files narrows them)."""
+        return self.config_files()
+
+    def config_file_for(self, instance: Instance, file_id: str) -> ConfigFile | None:
+        return next((f for f in self.config_files_for(instance) if f.file_id == file_id), None)
+
+    def secret_specs_for(self, instance: Instance) -> tuple[SecretSpec, ...]:
+        """The secrets of this server (per variant)."""
+        return self.secret_specs
+
     # -- setup steps -----------------------------------------------------------------------------
     def setup_status(self, instance: Instance) -> dict[str, Any] | None:
         """``Instance.setup`` in the API: null without setup steps."""
@@ -389,8 +443,39 @@ class GameDefinition:
         return {"needed": next_step is not None, "next": next_step, "steps": steps}
 
     def run_setup_step(self, instance: Instance, step: SetupStep, ctx: Any) -> str:
-        """Run one automatic setup step (the ``setup`` job); returns what to record as its message."""
+        """Run one automatic setup step (the ``setup`` job); returns what to record as its message.
+        Raise :class:`SetupWaiting` when the step cannot run yet (the server is stopped): the step stays
+        pending with that message and the job ends without failing."""
         raise NotImplementedError(f"{self.id} has no setup step {step.id}")
+
+    def secrets_changed(self, instance: Instance, keys: list[str]) -> None:
+        """The owner changed these secrets (Settings); a game whose setup step applies one marks that
+        step pending again (Satisfactory: the client password)."""
+        return None
+
+    # -- the control secret file -------------------------------------------------------------------
+    def control_secret_value(self, instance: Instance) -> str | None:
+        """What the panel writes into ``control_secret_file`` before every apply: the control secret
+        (Factorio's RCON password); None writes nothing (Satisfactory before its claim)."""
+        from apps.instances.spec import rcon_password
+
+        return rcon_password(instance)
+
+    # -- config "files" the panel keeps itself or reads from the game's API ----------------------------
+    def is_virtual_config(self, cfg: ConfigFile) -> bool:
+        """Whether ``cfg`` is not a file of the server folder but values the definition reads and
+        writes itself (``virtual_config_values`` / ``write_virtual_config``)."""
+        return False
+
+    def virtual_config_values(self, client: AgentClient, instance: Instance, cfg: ConfigFile) -> dict[str, Any] | None:
+        """The values of a virtual config; None leaves it out of the Game settings page for now."""
+        return None
+
+    def write_virtual_config(
+        self, client: AgentClient, instance: Instance, cfg: ConfigFile, values: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Apply validated changes of a virtual config; returns its values afterwards."""
+        raise NotImplementedError
 
     # -- creating a server -------------------------------------------------------------------------
     def create_fields(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -516,6 +601,24 @@ class GameDefinition:
     def initial_files(self, instance: Instance, params: dict[str, Any]) -> dict[str, str]:
         """Files written into a new server's folder before its first start (the install job)."""
         return {}
+
+    def before_apply(self, instance: Instance, client: AgentClient) -> None:
+        """Write what the panel owns in the server's files before every apply (after the control
+        secret file): Terraria's managed serverconfig.txt keys and TShock's REST token."""
+        return None
+
+    def masked_text(self, instance: Instance, path: str, content: str) -> str:
+        """A server file as the text editor shows it (secrets the game keeps inside a file hidden)."""
+        return content
+
+    def version_key(self, version: str) -> tuple[int, ...]:
+        """Sort key of an exact version (newer is larger); ValueError when it has no numbers."""
+        import re
+
+        parts = tuple(int(n) for n in re.findall(r"\d+", str(version)))
+        if not parts:
+            raise ValueError(f"not a version: {version!r}")
+        return parts
 
     # -- console -------------------------------------------------------------------------------
     def normalise_command(self, text: str) -> str:

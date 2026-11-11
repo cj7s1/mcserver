@@ -93,13 +93,24 @@ Minecraft server).
 |---|---|---|
 | `backend/tests/test_games_phase1.py` | The registry, capabilities in the API, the catalog, the agent gate (`agent_lacks_game`), routing of spec, console, power warnings, players and backups through the definition | Fake agent, a test game |
 | `backend/tests/test_games_phase2.py` | Config codecs (JSON, INI, key=value, properties) and schema validation; the Factorio definition (capabilities, spec, console rules, catalog entry, version list from Docker Hub and factorio.com); named ports per protocol; create, PATCH (ports, refused fields, env allow-list), Game settings API with masked secrets, the masked control-secret file, secrets and setup steps (a test game), the first-start retry, `/quit` refused, broadcast as chat, players from files and RCON, software update with pre-update backup, `runtime_images`, saves reset / import / export, backup excludes, clone | Fake agent (in-memory files, containers, restic), a cached version catalog, the catalog's HTTP calls monkeypatched |
+| `backend/tests/test_games_satisfactory.py` | The Satisfactory definition (catalog entry, `fixed_version`, ports that share a number, the messaging port 1:1, restart policy), create (explicit join choice, conditional join password, 8 GB minimum, ports free on both protocols), the claim flow as setup steps (no ports before `ports_open`, token stored encrypted and written for the agent, every failure point keeps the ports closed, a stopped server waits and the Start job resumes it, publish retried), join password changes, the token file masked in the editor, launch settings and server options, saves (list, export after SaveGame, new game and import through the API, a stopped server started and stopped again), the player count | Fake agent, `AgentClient.game_action` replaced by an in-memory Satisfactory |
+| `agent/tests/test_games_satisfactory.py` (+ `tests/sf_fake.py`) | The Satisfactory profile (root mode with four capabilities, PUID/PGID, `/config`, env allow-list, the messaging port the variable names, no ports before the claim), the `http-api` base (TLS for the internal hop only, certificate pinned per run, bounded time and size, token file without symlinks, published mode), the driver against a fake HTTPS + UDP server built from the spike's recorded answers (errors as HTTP 200 + `errorCode`, the claim and each of its failure points, client password, new game with `GameModeSettings`, save names, multipart upload, sessions, options), the `udp-query` and `driver` readiness probes, stop (SaveGame, Shutdown, wait, fallbacks), `/ping` through the driver, the backup save over the driver's channel, `POST /game/{action}`, the publish guard and the apply that refuses, `/v1/info`, the restore that keeps `gamefiles/` | Fake containers, an in-process HTTPS server with a self-signed certificate and a UDP responder |
 | `agent/tests/test_games.py` | Profiles and drivers of phase 1: registration rules, image allow-lists per game, labels, the driver per container, `/v1/info` `games` | Fake containers |
 | `agent/tests/test_games_phase2.py` | The Factorio profile (create arguments: user, no capabilities, `/factorio` mount, no Docker health check, labels), tag pattern and environment allow-list with value patterns, never-published ports, image VOLUME mounts (bind into `.volumes/`, tmpfs), the `tcp` and `log` readiness probes as `health`, the RCON driver with a password file against the RCON fake, saves that wait for `Saving finished`, redaction of the secret in logs, the stream and the last-run record, profile backup excludes, `/v1/info` extras | Fake containers and logs, the in-process RCON fake |
+| `backend/tests/test_terraria.py` | The Terraria definition (variants, capabilities per variant, catalog entry with per-variant data, versions per variant from Docker Hub tags, spec and `MODPACK`, console rules, `playing` and `banlist.txt` parsing), create per variant (`serverconfig.txt` with the panel-owned keys, tModLoader's `enabled.json`, TShock's REST settings and the owner-account setup step), validation and the per-variant agent gate, `before_apply`, config/secrets APIs per variant, the file editor masking the REST token, players, metrics player count, worlds (reset with a text seed, import with the header check, export), software update, exit 143 as a clean stop, clone | `FakeAgent`, Docker Hub answers |
+| `agent/tests/test_terraria.py` | The three Terraria profiles (exact tags per variant, per-variant image variables, PUID/PGID around a group the image has, env allow-lists, create arguments incl. TShock's entrypoint/command/workdir/tmpfs and no capabilities, the process passed to Docker), console sanitising (control and invisible characters, length, tmux key names, `-`/`;`), the exec template rules, the exec and attach primitives, the console lock, command output from the log, saves (log line; tModLoader's `.twld` mtime with the job-log messages; the backup's save through the console channel), the TShock driver against a local HTTP server (token from `config.json`, no symlink, rawcmd, save, broadcast, status for `/ping`, owner account, errors without the token, stdin fallback, `/setup` code and token redaction), `/v1/info` `variant_profiles`, a refused line through `/command` | Fake Docker API, local HTTP server |
 
-Frontend: `lib/game-config.test.ts` (field values, masking, console rules),
+Frontend: `pages/satisfactory.test.tsx` (the Satisfactory wizard: no version, explicit join choice,
+conditional join password, no API port; the count-only players page; the network editor without the
+API port; the setup card's ports note; "Update now"; the saves section of a game with saves through
+its API), `lib/game-config.test.ts` (field values, masking, console rules),
 `create-server/{gameWizardModel,GameWizard}.test.*` (the request body of the Factorio wizard),
 `pages/instance/factorio-pages.test.tsx` (tabs and Settings tabs of a Factorio server, Game settings
-form, named ports, setup card, players labels, saves dialogs, console hint), `GameStep.test.tsx`.
+form, named ports, setup card, players labels, saves dialogs, console hint), `GameStep.test.tsx`,
+`create-server/TerrariaWizard.test.tsx` (variant view of the catalog, the variant in the request, the
+tModLoader version warning and variant notes, versions asked per variant) and
+`pages/instance/terraria-pages.test.tsx` (only the player lists a variant has, the Software tab's
+versions of the server's variant, labels and stop words).
 
 ## Tests with real containers
 
@@ -154,6 +165,32 @@ a Factorio server, ready, RCON players / chat / commands, `/server-save`, a cons
 of the backup (stopped and running), software update to another exact tag, the create wizard, the
 console's `/quit`, the Game settings form, delete. Results: DEVELOPMENT_STATUS.md, "Multi-game
 phases 2 and 3".
+
+**Satisfactory on real containers** (run by hand, 2026-11-11; no script in the repository yet). A copy
+of the working tree built into a stack under its own Compose project name and instances network
+(BuildKit from a private `DOCKER_CONFIG`), runtime uid:gid 99:100 as on Unraid, host ports from a
+range of its own, the server bound to 127.0.0.1. Through the API: create (join password chosen),
+install (SteamCMD download of 2.9 GB), the setup job (claim, join password, new game, publish) with a
+watcher that records the container's published ports every 2 s, checks from the host on the published
+port (InitialAdmin and passwordless client logins refused, the join password accepted, UDP query
+"Playing"), player count, a server option through the API, a consistent backup (browse: no
+`gamefiles/`), stop (SaveGame, Shutdown, exit 0, not restarted), start (the stop's save loaded), new
+game with a safety backup, export (byte-identical to the file), import (loaded), restore of the backup
+(game files kept, the backed-up session loaded), restart as "Update now", delete. Results:
+DEVELOPMENT_STATUS.md, "Satisfactory".
+
+**Terraria on real containers** (run by hand, 2026-11-11; no script in the repository yet). The same
+setup (a snapshot of the working tree built with a private BuildKit into a stack of its own, runtime
+uid:gid 99:100, host ports from a range of its own on 127.0.0.1). Through the API, for each variant
+(vanilla, tModLoader, TShock): create, install, ready; console commands (and refused lines: a tmux key
+name, a trailing `;`, the stop words); players; a broadcast through the definition; export (saved
+first, `relogic` header); a consistent backup; stop (exit 143 / 143 / 0, no warning); start (the same
+world: the seed); world reset with a text seed; import of the exported `.wld` (and a refused non-world
+file); restore of the backup after another reset; delete (container, folder and backups gone). Also:
+vanilla software update 1.4.5.7 -> 1.4.5.8 with a pre-update backup and a refused downgrade; the TShock
+owner account created by the setup job, the `/setup` code masked in the panel's console and switched off
+by TShock at the next start, the stdin fallback (no panel token in `config.json`), the REST token masked
+in the file editor, no anonymous volume. Results: DEVELOPMENT_STATUS.md, "Terraria".
 
 ## Agent tests on a real btrfs filesystem
 

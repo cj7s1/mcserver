@@ -1,6 +1,6 @@
 # Development status
 
-_Last updated: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
+_Last updated: 2026-11-11 (Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
 pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
 all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
@@ -10,6 +10,158 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Terraria (branch `feature/multi-game`, 2026-11-11)
+
+What it is: ARCHITECTURE.md, "Terraria" and the generic pieces in "Games" (variants with their own data,
+console input, the profile's own process, panel-owned keys in game files, clean exit codes); operating
+it: DEPLOYMENT.md, "Terraria servers", docs/UNRAID.md; security: docs/SECURITY.md, "Console input: the
+only exec, and stdin" and "Terraria: privileges, the TShock REST token, the setup code".
+
+**Built:** the definition (`backend/apps/games/terraria.py`: variants vanilla / tModLoader / TShock,
+versions per variant from Docker Hub tags, `serverconfig.txt` and TShock's `config.json` with
+panel-owned keys written before every apply, worlds, players, the TShock owner-account setup step),
+three agent profiles (`agent/mcagent/profiles/terraria.py`), the console primitives
+(`drivers/console_io.py`: the fixed-argv exec, stdin through the attach API, sanitising, a per-server
+console lock), the `console` and `tshock-rest` drivers, profile fields `entrypoint`/`command`/
+`working_dir`/`clean_exit_codes`, shared hooks (`config_files_for`, `secret_specs_for`,
+`default_memory_mb_for`, `before_apply`, `masked_text`, `version_key`, `clean_exit_codes`, variant check in
+`require_agent_support`, per-variant `AGENT_GAME_<ID>_<VARIANT>_IMAGES`, `variant_profiles` in
+`/v1/info`) and the UI (a variant choice with its notes and the tModLoader 1.4.4.9 warning in the
+wizard, versions per variant, only the player lists a variant has).
+
+**Verification levels**
+
+* **Unit / API tests:** `backend/tests/test_terraria.py` (29), `agent/tests/test_terraria.py` (85, fake
+  Docker API and a local HTTP server for TShock's REST answers), `frontend/src/pages/create-server/
+  TerrariaWizard.test.tsx` and `pages/instance/terraria-pages.test.tsx` (9). Suites on the final tree:
+  backend 1845 passed (2 skipped), agent 1391 passed (45 skipped: restic, btrfs, ZFS binaries), frontend
+  515 tests in 56 files; ruff, `makemigrations --check` (no migration), `tsc -b`, lint (warnings only, none
+  new) and the build pass. The Minecraft pin tests and the Factorio tests pass unchanged. Registry tests
+  of phase 1 that listed exactly the games of that time now check that Minecraft and Factorio come first
+  (also done for Satisfactory), and one agent test that used "terraria/tshock" as an example of an unknown
+  game now uses an unknown variant.
+* **Real containers on a Linux desktop (2026-11-11), Docker 29.9.2,** runtime uid:gid **99:100** as on
+  Unraid, a stack built from a snapshot of the tree, servers on 127.0.0.1 only, everything through the
+  panel's API (TESTING.md, "Terraria on real containers"; logs outside the repository):
+  * **vanilla** (`terraria-1.4.5.7`, then 1.4.5.8): ready 12 s after the install; root + CHOWN
+    DAC_OVERRIDE FOWNER SETUID SETGID, `PUID=99 PGID=99 SERVERCONFIG=1`, no Docker health check, files
+    99:99. Commands through `inject` (`say` -> `<Server> hello from the panel`, `version`, `playing`,
+    `seed`); `C-c`, `say a;` refused (400 `console_line_refused`), `exit` 400 `stop_via_power`. Players
+    (none online); broadcast `<Server> Restart in 5 minutes - panel broadcast test`; export (saved
+    first, `relogic` header, `application/octet-stream`); consistent backup (`save`, `Backing up world
+    file`); stop: exit 143, status `stopped`, no warning; start: same container, one `Creating world` in
+    two runs, same numeric seed; reset with seed `panelreset`, difficulty 1 (`Creating world - Seed:
+    panelreset ... Difficulty: 1`, old files in `Worlds-replaced/`); a random file refused as import; import
+    of the export (seed back); another reset, then restore of the first backup (seed back); software
+    update to 1.4.5.8 with a pre-update backup (`Terraria Server v1.4.5.8`, same seed), a downgrade
+    refused (409 `downgrade_unconfirmed`); delete (container, folder, backups gone).
+  * **tModLoader** (`tmodloader-2026.09.3.1`, 3 GB): the first try **exited 0 in a loop** ("Modpack name
+    was not provided"): the definition did not set `MODPACK`; fixed (`game_env`) and covered by a test,
+    then: .NET downloaded at the container's creation, ready after 18-24 s, `Terraria Server v1.4.4.9 -
+    tModLoader v2026.9.3.1`; commands (echoed by tModLoader), players, consistent backup (the `.twld`
+    written 1 s after `save`; the job log says it waits for `Worlds/*.twld` and that it was written),
+    export, stop exit 143, start (same seed, one world creation), reset (`modreset`), import, reset,
+    restore (seed back), delete.
+  * **TShock** (`tshock-1.4.5.8-6.2.1`): user 99:100, **no capability**, entrypoint `/tshock/TShock.Server`
+    with the profile's arguments, workdir `/tmp`, tmpfs for the three other VOLUMEs (no anonymous volume),
+    7878 not published. The setup job created the owner account `boss` over REST 30 s after the start;
+    the panel's console shows `/setup ********`; at the next start TShock logged "An account has been
+    detected ... disable the initial setup system". Commands over REST (`mcpanel executed: /say ...`),
+    players from REST status (`max 6` = the wizard's MaxSlots), broadcast, backup with the synchronous REST
+    save, stop on SIGINT exit 0, start (same world), reset to a medium expert world (`tsreset`, 6400x1800,
+    102 s), import of the export, reset, restore (`worldinfo` seed back), the stdin fallback (no panel
+    token in `config.json`: `Server executed: /say via stdin fallback`), the REST token masked in the file
+    editor, delete.
+  * Afterwards the desktop's containers, networks, volumes and image tags matched the snapshot taken
+    before (itzg `stable-java21` unchanged; four anonymous volumes an early `docker create` of the TShock
+    image had left were removed).
+* **Not exercised:** a real game client (players above 0, kick/ban of a real player, `playing`'s player
+  lines; the parser is unit-tested on Terraria's documented format), the agent-side ban/unban as the game
+  applies it, tModLoader with mods, a tModLoader software update (its latest stable was the version
+  created), TShock versions other than 6.2.1, Unraid itself.
+
+**Deviations from the brief / design:**
+
+* On Unraid's 99:100 PassiveLemon's entrypoint fails (`groupadd: GID '100' already exists`); the
+  profile uses the uid as `PGID` when the image already has the gid (files 99:99, not 99:100).
+* TShock loads its plugin from the image's `/plugins` (`-additionalplugins`) and reads world settings
+  from `serverconfig.txt` (`-config`), so its command line is fully fixed (no spec-derived arguments)
+  and `ServerPlugins` is a tmpfs; user plugins are not supported yet.
+* The console lock is a per-server console lock of its own, not the lifecycle lock (a restart holds the
+  lifecycle lock while it stops the server).
+* Fixed environment uses the existing `injected_env`; no separate profile field.
+* TShock players: online list, kick and `ban add` only (TShock's bans live in its own database: no ban list
+  or unban in the panel); vanilla/tModLoader: kick, ban (online players, by IP) and unban (edits
+  `banlist.txt`); no whitelist/op lists.
+* The world export is the `.wld` only (tModLoader's `.twld` mod data is in backups, not in the download).
+* The TShock image repository is not configurable in `runtime_images` (PassiveLemon's is).
+* `agent/mcagent/drivers/tshock.py` first imported `httpx` (a dev dependency only; the first agent image did
+  not start); it now uses the standard library.
+
+**Open points:** vanilla/tModLoader player counts for the player history send `playing` about once a
+minute while the server runs (a console line each time); the REST token file is downloadable by users with
+`instance.files.read` (like Factorio's RCON password file); a mod manager for tModLoader and TShock plugins.
+
+## Satisfactory (branch `feature/multi-game`, 2026-11-11)
+
+What it is: ARCHITECTURE.md, "Satisfactory"; operating it: DEPLOYMENT.md, "Satisfactory servers";
+security: docs/SECURITY.md, "Satisfactory: claiming, the API token, internal-only TLS".
+
+**Built:** the definition (`backend/apps/games/satisfactory.py`), the runtime profile and the
+`satisfactory-api` driver on a new generic `http-api` driver base (agent), the readiness kinds
+`udp-query` and `driver`, the agent's `POST /game/{action}` (feature `game_actions`) and publish guard,
+shared hooks (named ports that share a number, a variable that names a container port, setup steps that
+wait for a running server and are resumed by Start, virtual config files, a conditional secret, a fixed
+version in the catalog, a restore that keeps the excluded game files) and the UI for them (wizard,
+count-only players page, "Update now", saves through the API).
+
+**Verification levels**
+
+* **Unit / API tests:** all three layers (TESTING.md: `backend/tests/test_games_satisfactory.py`,
+  `agent/tests/test_games_satisfactory.py` against a fake HTTPS + UDP server built from the spike's
+  recorded answers, `frontend/src/pages/satisfactory.test.tsx`). Suites on the final tree (with the Terraria work in progress next to it): backend 1845 passed (2 skipped), agent 1391 passed (45 skipped: restic, btrfs, ZFS binaries), frontend 515 tests in 56 files; ruff, `makemigrations --check`, `tsc -b`, lint (warnings only) and the build pass. The Minecraft pin tests and the Factorio tests pass unchanged; three registry tests of phase 1 that listed exactly the games of that time (`agent/tests/test_games.py`, `backend/tests/test_games_phase1.py`) now check that Minecraft and Factorio are among them.
+* **Real containers on a Linux desktop (2026-11-11), Docker 29.9.2,** image
+  `wolveix/satisfactory-server:v1.9.11` (game build CL 517554), runtime uid:gid 99:100 as on Unraid,
+  through the panel's API on a stack built from this tree (TESTING.md, "Satisfactory on real
+  containers"):
+  * create (join password chosen, host ports 29010 udp+tcp and 29011 tcp on 127.0.0.1) → install:
+    image pulled, SteamCMD downloaded the game, "ready" after 52 s; root mode with exactly CHOWN
+    DAC_OVERRIDE SETUID SETGID, the game running as `uid=99(steam)`, `PUID=99 PGID=100
+    SERVERGAMEPORT=7777 SERVERMESSAGINGPORT=29011 MAXPLAYERS=6`, restart policy `on-failure`.
+  * **No port before the claim:** the watcher saw `PortBindings {}` from the first container until
+    the `publish` step; the three bindings appeared only after claim, join password and new game
+    were done. From the host afterwards: `PasswordlessLogin` InitialAdmin and Client both
+    `passwordless_login_not_possible`, `PasswordLogin` with the join password accepted, UDP query
+    `state 3 (Playing), CL 517554, name "SF E2E"`.
+  * The first claim **failed on the real server**: `VerifyAuthenticationToken` answers
+    `missing_params` even with a bearer token (the spike had not checked that call with a token).
+    The driver now checks the new token with `QueryServerState`; the second setup run took the
+    "claimed by this panel before" path (admin login with the control secret, a new token) and
+    finished all four steps in 5 s.
+  * SteamCMD's `Missing configuration` (exit 8) happened once, on the container the `publish` step
+    created; Docker's `on-failure` restart recovered it (RestartCount 1).
+  * Player count `{"online": 0, "max": 6}` (no client joined: no game client on the desktop), a server
+    option (autosave 600 s) through the API, kept after a restart; a consistent backup (`SaveGame`
+    first; browse: `.mcpanel`, `backups`, `logs`, `saved`, no `gamefiles/`); stop: `SaveGame`,
+    `Shutdown`, `LogExit: Exiting.`, exit 0, not restarted, container retired; start: the stop's save
+    loaded (`loadgame=SF_E2E_..._mcpanel`); new game "Reset World" after a safety backup (older
+    session kept); export (`.sav`, byte-identical to the file on disk); import of that file
+    (`loadgame=e2e_import`, upload removed afterwards); restore of the first backup with a safety
+    backup (the 2.7 GB `gamefiles/` kept, no download; the backed-up session loaded, still claimed);
+    restart as "Update now" (validate, ready in 12 s, same save); delete (container, folder, backups).
+  * Not exercised: a real game client joining (player names/counts above 0, the remapped messaging
+    port as clients see it), the agent's publish guard refusing on a real unclaimed server (unit
+    tests only), Unraid itself.
+* **Real-container run used a snapshot of the working tree** with one change outside this work:
+  the Terraria engineer's in-progress `agent/mcagent/drivers/tshock.py` imports `httpx` at module
+  level, which is not a dependency of the agent image, so the agent did not start; the snapshot
+  imported it lazily. That file is theirs and is not changed in the tree.
+
+**Open points:** the `game_options.session_name` the panel remembers can be stale after a restore (the
+saves list asks the running server instead); the API shows the messaging port's container port as 8888
+while the container uses the host port number (cosmetic); `api_token` file is downloadable by users
+with `instance.files.read`, like Factorio's RCON password file.
 
 ## Multi-game phases 2 and 3: the generic pieces and Factorio (branch `feature/multi-game`)
 

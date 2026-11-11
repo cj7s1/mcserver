@@ -26,11 +26,13 @@ export function useGameInfo(instance: Pick<Instance, "game"> | string | null | u
   return id ? games.data?.find((g) => g.id === id) : undefined;
 }
 
-/** GET /catalog/games/<id>/versions (only for games with has_versions). */
-export function useGameVersionCatalog(game: string | null | undefined, enabled = true) {
+/** GET /catalog/games/<id>/versions (only for games with has_versions); ``variant`` for games whose
+ * variants have versions of their own (Terraria: ?variant=tshock). */
+export function useGameVersionCatalog(game: string | null | undefined, enabled = true, variant?: string | null) {
   return useQuery({
-    queryKey: qk.gameVersions(game ?? ""),
-    queryFn: ({ signal }) => api.get<GameVersionsResponse>(`/catalog/games/${encodeURIComponent(game!)}/versions`, undefined, signal),
+    queryKey: qk.gameVersions(variant ? `${game ?? ""}/${variant}` : (game ?? "")),
+    queryFn: ({ signal }) =>
+      api.get<GameVersionsResponse>(`/catalog/games/${encodeURIComponent(game!)}/versions`, variant ? { variant } : undefined, signal),
     enabled: !!game && enabled,
     staleTime: 10 * 60_000,
     retry: 1,

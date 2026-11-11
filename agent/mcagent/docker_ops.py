@@ -505,7 +505,7 @@ def build_create_kwargs(
                     "port_not_allowed",
                     403,
                 )
-            if (reason := profile.port_error(p.container_port, p.protocol)) is not None:
+            if (reason := profile.port_error(p.container_port, p.protocol, spec.env)) is not None:
                 raise AgentError(reason, "port_not_allowed", 403)
             key = f"{p.container_port}/{p.protocol}"
             ports.setdefault(key, []).append((p.host_ip, p.host_port))
@@ -560,6 +560,13 @@ def build_create_kwargs(
         uid = settings.runtime_uid if profile.user.uid is None else profile.user.uid
         gid = settings.runtime_gid if profile.user.gid is None else profile.user.gid
         kwargs["user"] = f"{uid}:{gid}"
+    # the process the profile fixes (only when it names one: Minecraft's arguments stay as they were)
+    if profile.entrypoint is not None:
+        kwargs["entrypoint"] = list(profile.entrypoint)
+    if profile.command is not None:
+        kwargs["command"] = list(profile.command)
+    if profile.working_dir is not None:
+        kwargs["working_dir"] = profile.working_dir
     hc = spec.healthcheck
     if profile.health.kind == "cmd":
         kwargs["healthcheck"] = {
@@ -638,7 +645,7 @@ def create_container(
     docker_client = client()
     try:
         low_level = _create_container_args(
-            {**kwargs, "command": None, "version": docker_client.api.api_version}
+            {**kwargs, "command": kwargs.get("command"), "version": docker_client.api.api_version}
         )
         created = docker_client.api.create_container(**low_level, stop_timeout=stop_timeout)
         return docker_client.containers.get(created["Id"])
@@ -1239,6 +1246,48 @@ def _probe_tcp(c: Container, port: int, settings: Settings) -> bool:
         return False
 
 
+HEALTH_UDP_TIMEOUT = 1.0
+HEALTH_UDP_MAX_REPLY = 4096
+
+
+def container_address(c: Container, port: int, protocol: str, settings: Settings) -> tuple[str, int] | None:
+    """(host, port) at which the agent reaches ``port``/``protocol`` of the running container ``c``:
+    its address on its network (127.0.0.1 with host networking), or with AGENT_RCON_MODE=published
+    the published host port on 127.0.0.1. None when there is none."""
+    attrs = c.attrs or {}
+    if settings.rcon_mode == "published":
+        for b in ((attrs.get("NetworkSettings") or {}).get("Ports") or {}).get(f"{port}/{protocol}") or []:
+            if b.get("HostPort"):
+                return "127.0.0.1", int(b["HostPort"])
+        return None
+    if (attrs.get("HostConfig") or {}).get("NetworkMode") == "host":
+        return "127.0.0.1", port
+    for net in ((attrs.get("NetworkSettings") or {}).get("Networks") or {}).values():
+        if net.get("IPAddress"):
+            return net["IPAddress"], port
+    return None
+
+
+def _probe_udp(c: Container, health: Any, settings: Settings) -> bool:
+    """One datagram (the profile's payload) to the container's UDP port; ready when a reply comes
+    back within HEALTH_UDP_TIMEOUT whose bytes (latin-1) match the profile's pattern."""
+    import socket
+
+    target = container_address(c, int(health.port or 0), "udp", settings)
+    if target is None:
+        return False
+    family = socket.AF_INET6 if ":" in target[0] else socket.AF_INET
+    with socket.socket(family, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(HEALTH_UDP_TIMEOUT)
+        try:
+            sock.connect(target)
+            sock.send(bytes(health.payload))
+            reply = sock.recv(HEALTH_UDP_MAX_REPLY)
+        except OSError:
+            return False
+    return re.search(str(health.pattern or ""), reply.decode("latin-1"), re.DOTALL) is not None
+
+
 def _log_matches(c: Container, pattern: re.Pattern[str], since: float | None) -> bool:
     kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "timestamps": False, "tail": HEALTH_LOG_TAIL}
     if since is not None:
@@ -1280,19 +1329,27 @@ def agent_health(
                 ok = _log_matches(c, re.compile(str(health.pattern)), since)
                 entry["checked"] = now
                 entry["ok"] = ok
-        elif health.kind == "tcp":
+        elif health.kind in ("tcp", "udp-query", "driver"):
             at = entry.get("at")
             if at is not None and 0 <= now - at < HEALTH_TCP_CACHE_SECONDS:
                 ok = bool(entry.get("ok"))
             else:
-                ok = _probe_tcp(c, int(health.port or 0), get_settings())
+                if health.kind == "tcp":
+                    ok = _probe_tcp(c, int(health.port or 0), get_settings())
+                elif health.kind == "udp-query":
+                    ok = _probe_udp(c, health, get_settings())
+                else:
+                    ok = bool(drivers.for_profile(profile).ready(get_settings(), c))
                 entry["ok"], entry["at"] = ok, now
     except Exception as exc:  # Docker or socket trouble: not ready (yet)
         log.debug("readiness probe of %s failed: %s", c.name, exc)
         ok = False
-    what = f"agent probe {health.kind}: " + (
-        f"log line /{health.pattern}/" if health.kind == "log" else f"TCP port {health.port}"
-    )
+    what = f"agent probe {health.kind}: " + {
+        "log": f"log line /{health.pattern}/",
+        "tcp": f"TCP port {health.port}",
+        "udp-query": f"UDP query on port {health.port}",
+        "driver": f"{profile.control} readiness",
+    }.get(health.kind, health.kind)
     if ok:
         return "healthy", f"{what} ok"
     running_for = None if started is None else now - started.timestamp()

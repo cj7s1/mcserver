@@ -113,7 +113,8 @@ def tg_spec(**over) -> InstanceSpec:
 
 # --- profile selection, unknown_game --------------------------------------------------------------
 def test_minecraft_and_factorio_are_registered():
-    assert {p.game for p in profiles.all_profiles()} == {"minecraft", "factorio"}
+    # (later games add their own profiles: Satisfactory's tests are test_games_satisfactory.py)
+    assert {"minecraft", "factorio"} <= {p.game for p in profiles.all_profiles()}
     assert profiles.get(None) is profiles.get("minecraft") is mc_profile.PROFILE
     assert mc_profile.PROFILE.control == "minecraft-rcon"
 
@@ -126,7 +127,7 @@ def test_a_spec_without_game_is_minecraft():
 
 
 @pytest.mark.parametrize(
-    ("game", "variant"), [("nogame", None), ("minecraft", "paper"), ("terraria", "tshock")]
+    ("game", "variant"), [("nogame", None), ("minecraft", "paper"), ("terraria", "calamity")]
 )
 def test_a_game_without_a_profile_is_unknown_game(settings, game, variant):
     spec = mc_spec(game=game, variant=variant)
@@ -214,12 +215,14 @@ def test_agent_allowed_images_keeps_meaning_minecraft(tmp_path, testgame, monkey
     assert validate_image(custom, "ghcr.io/me/testgame:3", testgame) == "ghcr.io/me/testgame:3"
     with pytest.raises(AgentError):
         validate_image(custom, TG_IMAGE, testgame)
-    assert profiles.all_allowed_images(custom) == {
+    # (every other registered game adds its own repositories)
+    assert profiles.all_allowed_images(custom) >= {
         "ghcr.io/me/mc",
         "ghcr.io/me/testgame",
         "factoriotools/factorio",
         "docker.io/factoriotools/factorio",
     }
+    assert not {"itzg/minecraft-server", "example/testgame"} & profiles.all_allowed_images(custom)
 
 
 def test_superseded_image_cleanup_covers_every_game(settings, testgame, monkeypatch):
@@ -666,7 +669,8 @@ def info(api, auth, monkeypatch):
 def test_info_lists_the_games(info):
     body = info()
     assert "games" in body["features"]
-    assert body["games"] == {
+    # (later games are listed too; Satisfactory: test_games_satisfactory.py)
+    assert {k: body["games"][k] for k in ("minecraft", "factorio")} == {
         "minecraft": {
             "variants": [],
             "images": ["itzg/minecraft-server", "docker.io/itzg/minecraft-server"],
