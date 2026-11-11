@@ -50,6 +50,13 @@ for the new catalog shapes is not done yet; nothing of it has run on Unraid.**
   patterns and `fixed_version.updates_on_restart`, players `changes_while_stopped`, connection info without
   conditional ports that are off and with the real container port of 1:1 ports, schedules without
   "Command" for games without a console, and `upgrade.sh` dumps that one second could overwrite.
+* Fix round 2 after the end-to-end run on real containers (`audit-2026-11-09/mg6-e2e/BUGS.md`): a world reset
+  or import that changes the container's configuration (Valheim world name, Rust seed) recreates the
+  container; a restore keeps the excluded game files and glob matches (Palworld no longer re-validates);
+  PZ Build 41 deop uses `none`, and refusals of PZ/HKMP/CS2/Rust player actions fail as `game_refused`;
+  PZ's logs and ini (RCON password) are masked in every download and never zipped, its own backup zips are
+  never handed out and switched off; Stop ends a job that only waits for the first start; HKMP's screen
+  guard refuses `$` and its replies drop screen's "Remove dead screens"; Rust's empty description is sent.
 
 ## Real-container gate of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
 
