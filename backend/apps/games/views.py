@@ -30,3 +30,21 @@ class GameCatalogView(APIView):
     @extend_schema(operation_id="catalog_games", responses={200: GameCatalogEntrySerializer(many=True)})
     def get(self, request: Request) -> Response:
         return Response(catalog())
+
+
+class GameVersionsView(APIView):
+    """``GET /api/catalog/games/<id>/versions``: the exact versions of a game with a version catalog,
+    newest first (``stable``/``latest`` flags); 404 for a game without one. Any signed-in user."""
+
+    @extend_schema(operation_id="catalog_game_versions", responses={200: dict})
+    def get(self, request: Request, game: str) -> Response:
+        from apps.core.errors import ApiError
+
+        from . import get_or_none
+
+        definition = get_or_none(game)
+        if definition is None or not definition.has_versions:
+            raise ApiError("This game has no version catalog", code="not_found", status_code=404)
+        versions = definition.versions(request.query_params.get("variant") or None)
+        latest = next((v["id"] for v in versions if v.get("latest")), versions[0]["id"] if versions else None)
+        return Response({"versions": versions, "latest": latest})

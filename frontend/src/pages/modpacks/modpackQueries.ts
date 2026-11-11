@@ -194,9 +194,10 @@ export function useResolveRelease(provider: Provider, projectId: string | null |
  * The games this panel can run (GET /catalog/games). An older panel has no such endpoint: the
  * answer is then an empty list, and the wizard is the Minecraft wizard as before.
  */
-export function useGames() {
+export function useGames(enabled = true) {
   return useQuery({
     queryKey: mpk.games,
+    enabled,
     queryFn: async () => {
       try {
         const res = await api.get<GameInfo[] | { games: GameInfo[] }>("/catalog/games");

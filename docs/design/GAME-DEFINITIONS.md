@@ -1,6 +1,10 @@
 # Design: game definitions (multi-game support)
 
-Status: **proposal for review**, 2026-11-10. Nothing in this document is built yet. It is based on a
+Status: phases 1 to 3 (section 10) are **built**: Minecraft as the first definition, the generic
+pieces, and Factorio (ARCHITECTURE.md, "Games"; DEVELOPMENT_STATUS.md, "Multi-game phases 2 and 3").
+Where the real images differed from this proposal, the code follows the spike of 2026-11-10 (for
+Factorio: the `-rootless` tag, readiness from a log line, the RCON password from a file). The rest
+of this document is the proposal as it was reviewed, 2026-11-10. It is based on a
 read-only map of the code at commit `082b949` and on research of each game's server software as it
 is in November 2026. Facts about games come from their official docs, the image repositories and
 SteamCMD documentation; points that could not be confirmed are marked *to confirm*. The research

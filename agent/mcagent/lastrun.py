@@ -202,8 +202,9 @@ def has_run(described: dict[str, Any]) -> bool:
 
 
 def build(instance_id: UUID, described: dict[str, Any], lines: list[str], truncated: bool) -> dict[str, Any]:
-    """The record for a container, from ``docker_ops.describe`` and its console tail."""
-    return {
+    """The record for a container, from ``docker_ops.describe`` and its console tail. The game
+    (and variant) of a container that is not Minecraft is kept too (a Minecraft record has none)."""
+    record = {
         "version": RECORD_VERSION,
         "instance_id": str(instance_id),
         "retired_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -224,6 +225,10 @@ def build(instance_id: UUID, described: dict[str, Any], lines: list[str], trunca
         "spec_hash": _field(described.get("spec_hash")),
         "log": {"lines": list(lines), "truncated": bool(truncated)},
     }
+    for key in ("game", "variant"):
+        if described.get(key):
+            record[key] = _field(described.get(key))
+    return record
 
 
 def summarize(record: dict[str, Any]) -> dict[str, Any]:

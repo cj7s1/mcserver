@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .base import ControlDriver, NoControlDriver, Report, Send
+from .base import ControlDriver, NoControlDriver, Report, Send, WaitLog
 from .minecraft import MinecraftDriver
 from .rcon import RconCommands, RconDriver, RconStep
 
@@ -29,6 +29,7 @@ __all__ = [
     "RconStep",
     "Report",
     "Send",
+    "WaitLog",
     "for_container",
     "for_labels",
     "for_profile",

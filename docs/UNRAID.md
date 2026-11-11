@@ -188,6 +188,10 @@ stops them before Docker stops, and starts them again after boot:
   your router or DNS.
 * Voice-chat and map mods need extra ports (for example Simple Voice Chat on UDP 24454). Add them in the
   server's Network tab.
+* A Factorio server uses **UDP** 34197 by default (the next free UDP port when that one is taken),
+  outside the Minecraft range. Forward that UDP port, not TCP. It runs as `MC_UID`/`MC_GID` (99:100 on
+  Unraid) without any capability, so its files in the server folder belong to `nobody:users` like the
+  Minecraft servers' files. Each Factorio version is an image of about 1 GB on the cache drive.
 
 ## 6. Snapshots on Unraid
 

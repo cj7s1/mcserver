@@ -156,6 +156,7 @@ export function useTrackedJob(instance: Instance) {
     qc.invalidateQueries({ queryKey: qk.backups(instance.id) });
     qc.invalidateQueries({ queryKey: snapshotsKey(instance.id) });
     qc.invalidateQueries({ queryKey: qk.world(instance.id) });
+    qc.invalidateQueries({ queryKey: qk.saves(instance.id) });
     invalidate(instance.id);
     if (job.status === "succeeded") toast.success(`${job.title}: done`);
     else if (job.status === "failed") toast.error(`${job.title} failed${job.error ? `: ${job.error}` : ""}`);

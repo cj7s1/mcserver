@@ -5,7 +5,8 @@ import { qk } from "@/lib/queries";
 import type { WorldFolder, WorldInfo } from "@/lib/types";
 
 /** Job kinds of the world section (backend apps/instances/handlers.py); a reset is started from Settings → Danger zone. */
-export const WORLD_JOB_KINDS = ["world_replace", "world_reset"];
+// saves_reset / saves_import: the same for games other than Minecraft (backups/SavesSection.tsx)
+export const WORLD_JOB_KINDS = ["world_replace", "world_reset", "saves_reset", "saves_import"];
 
 export const isWorldJob = (kind: string | null | undefined) => !!kind && WORLD_JOB_KINDS.includes(kind);
 

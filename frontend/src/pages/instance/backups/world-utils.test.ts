@@ -33,7 +33,7 @@ describe("world helpers", () => {
   });
 
   it("lets the Backups page adopt a running world reset and report it in the World section", () => {
-    expect(WORLD_JOB_KINDS).toEqual(["world_replace", "world_reset"]);
+    expect(WORLD_JOB_KINDS).toEqual(["world_replace", "world_reset", "saves_reset", "saves_import"]);
     expect(BACKUP_JOB_KINDS).toEqual(expect.arrayContaining(["world_replace", "world_reset"]));
   });
 

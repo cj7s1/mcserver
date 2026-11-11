@@ -10,9 +10,11 @@ import { formatBytes } from "@/lib/format";
 import { qk, useSystemInfo } from "@/lib/queries";
 import type { SystemInfo, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { useGames } from "../modpacks/modpackQueries";
 import { AdminCallout, AdminNoPermission } from "./admin-shared";
 import { NodesSection } from "./system/NodesSection";
 import { NotificationsSection } from "./system/NotificationsSection";
+import { GameImagesSection } from "./system/GameImagesSection";
 import { SettingsForm } from "./system/SettingsForm";
 import {
   HostSection,
@@ -44,6 +46,8 @@ export default function SystemPage() {
     queryFn: () => api.get<SystemSettings>("/system/settings"),
     enabled: canSettings,
   });
+  // per-game runtime images: only when the panel runs more than one game
+  const games = useGames(canSettings);
 
   if (!allowed) return <AdminNoPermission permission="system.settings" what="System settings" />;
 
@@ -101,6 +105,9 @@ export default function SystemPage() {
                 policy={agentPolicy(info.data?.agent)}
               />
             ) : null)}
+          {canSettings && settings.data && (games.data ?? []).length > 1 && (
+            <GameImagesSection key={JSON.stringify(settings.data.values.runtime_images ?? {})} settings={settings.data} games={games.data ?? []} />
+          )}
           {canSettings && <NotificationsSection />}
           <SecurityNotesSection />
         </div>

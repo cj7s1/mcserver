@@ -1,5 +1,5 @@
 /** Shared test fixtures (not used by product code). */
-import type { GameCapability, Instance, WorldResetFolder, WorldResetPlan } from "@/lib/types";
+import type { GameCapability, GameInfo, Instance, WorldResetFolder, WorldResetPlan } from "@/lib/types";
 
 export function makeInstance(over: Partial<Instance> = {}): Instance {
   return {
@@ -141,4 +141,106 @@ export function withGameFields(i: Instance): Instance {
   if (i.content_kind !== "none") caps.push("content");
   if (i.is_modpack) caps.push("modpacks");
   return { ...i, game: "minecraft", game_label: "Minecraft", capabilities: caps.sort(), memory_model: "jvm" };
+}
+
+/** The Factorio entry of GET /catalog/games as the backend describes it (contract B3). */
+export function factorioGame(over: Partial<GameInfo> = {}): GameInfo {
+  return {
+    id: "factorio",
+    label: "Factorio",
+    variants: [],
+    capabilities: [
+      "broadcast",
+      "config_files",
+      "consistent_backups",
+      "console_commands",
+      "player_actions",
+      "players",
+      "software_update",
+      "world_import_export",
+      "world_reset",
+    ],
+    memory_model: "plain",
+    default_memory_mb: 2048,
+    notes: ["Headless server; no account needed."],
+    ports: [{ name: "game", label: "Game", protocol: "udp", container_port: 34197, default_host_port: 34197 }],
+    options: [
+      { key: "space_age", type: "bool", label: "Space Age", default: false, pinned: true, help: "Players need the expansion to join." },
+    ],
+    config_files: [
+      {
+        id: "server-settings",
+        path: "config/server-settings.json",
+        codec: "json",
+        label: "Server settings",
+        fields: [
+          { key: "name", type: "string", label: "Server name", initial: true },
+          { key: "visibility.public", type: "bool", label: "Public listing", default: false, initial: true },
+          { key: "game_password", type: "string", label: "Game password", secret: true, initial: true },
+          { key: "max_players", type: "int", label: "Max players", default: 0, min: 0, max: 65535, initial: true },
+          { key: "allow_commands", type: "enum", label: "Commands", options: ["true", "false", "admins-only"], default: "admins-only" },
+        ],
+      },
+      {
+        id: "map-gen-settings",
+        path: "config/map-gen-settings.json",
+        codec: "json",
+        label: "Map generation",
+        fields: [{ key: "seed", type: "int", label: "Seed", nullable: true, default: null, initial: true, restart: false }],
+      },
+    ],
+    secrets: [],
+    setup_steps: [],
+    stop_words: ["/quit"],
+    keeps_command_slash: true,
+    command_hint: "/players online",
+    has_versions: true,
+    min_memory_mb: 512,
+    player_name_pattern: "[A-Za-z0-9_.-]{1,60}",
+    player_list_labels: { whitelist: "Whitelist", ops: "Admins", bans: "Bans" },
+    world: { kind: "saves", extension: ".zip", reset_fields: [{ key: "seed", type: "int", label: "Map seed", nullable: true }] },
+    ...over,
+  };
+}
+
+/** A running Factorio server as the backend sends it (game fields, named ports, pinned options). */
+export function makeFactorioInstance(over: Partial<Instance> = {}): Instance {
+  return makeInstance({
+    id: "22222222-2222-2222-2222-222222222222",
+    name: "Factory",
+    server_type: "" as Instance["server_type"],
+    minecraft_version: "2.1.24",
+    java_version: 0,
+    image: "factoriotools/factorio:2.1.24-rootless",
+    memory_mb: 2048,
+    memory_overhead_mb: 0,
+    container_memory_mb: 2048,
+    game_port: 34197,
+    stop_timeout: 120,
+    game: "factorio",
+    game_label: "Factorio",
+    capabilities: factorioGame().capabilities,
+    memory_model: "plain",
+    ports: [{ name: "game", label: "Game", protocol: "udp", container_port: 34197, host_port: 34197, host_ip: "0.0.0.0" }],
+    game_options: { space_age: false, save_name: "world" },
+    setup: null,
+    connection: {
+      host_port: 34197,
+      container_port: 34197,
+      bind_address: "0.0.0.0",
+      addresses: [],
+      notes: ["Forward UDP 34197 on your router for players outside your network."],
+      ports: [
+        {
+          name: "game",
+          label: "Game",
+          protocol: "udp",
+          container_port: 34197,
+          host_port: 34197,
+          addresses: [{ kind: "lan", label: "LAN", address: "192.0.2.10:34197" }],
+        },
+      ],
+    },
+    ...over,
+  });
 }

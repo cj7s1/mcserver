@@ -157,7 +157,10 @@ def run_backup(
             str(backup.id),
             tags=[f"kind:{kind}"],
             consistency=consistency,
-            excludes=DEFAULT_EXCLUDES + (list(policy.excludes or []) if policy_excludes else []) + list(excludes or []),
+            excludes=DEFAULT_EXCLUDES
+            + _game_excludes(instance)
+            + (list(policy.excludes or []) if policy_excludes else [])
+            + list(excludes or []),
         )
         done = client.wait_operation(
             op["id"], timeout=6 * 3600, interval=1.5, on_progress=ctx.agent_progress(span[0], span[1] - span[0])
@@ -370,6 +373,12 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _game_excludes(instance: Instance) -> list[str]:
+    """The game's own default exclusions (large re-creatable folders; Minecraft has none)."""
+    definition = games.get_or_none(instance.game)
+    return list(definition.default_backup_excludes) if definition is not None else []
+
+
 @register("backup")
 def backup_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
@@ -572,12 +581,17 @@ def restore_new_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     if target.node_id != client.node.pk:
         # the snapshot is in another node's repository (the source server was migrated since):
         # restic restores on the node that holds it, so the new server is created there
-        from apps.instances.services import allocate_port, ports_in_use
+        from apps.instances.services import allocate_port, assign_named_ports, ports_in_use
 
-        if target.game_port in ports_in_use(client.node, exclude=target):
+        fields = ["node", "game_port"]
+        if target.ports and (target.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            target.ports = assign_named_ports(games.for_instance(target), client.node, exclude=target, current=target.ports)
+            target.game_port = int(target.ports[0]["host_port"])
+            fields.append("ports")
+        elif target.game_port in ports_in_use(client.node, exclude=target):
             target.game_port = allocate_port(client.node, exclude=target)
         target.node = client.node
-        target.save(update_fields=["node", "game_port"])
+        target.save(update_fields=fields)
         ctx.log(f"The backup is stored on {client.node.name}; the restored server is created there")
     ctx.progress(0.05, f"Restoring '{backup.name}' into {target.name}", force=True)
     op = client.restore_backup(source.id, backup.snapshot_id, target_instance_id=target.id)

@@ -65,6 +65,7 @@ def apply_container(
     if start and admit:
         admit_memory(instance, ctx, client)
     spec = build_spec(instance)
+    write_control_secret(instance, client)
     pull = "newer" if start and client.supports(PULL_NEWER_FEATURE) else "missing"
     ctx.progress(span[0], "Preparing container (pulling the runtime image if needed)", force=True)
     op = client.apply(instance.id, spec, start=start, pull=pull)
@@ -93,6 +94,22 @@ def apply_container(
     if start or container.get("running"):  # (the agent also starts the replacement of a container that was running)
         _started(instance)
     return done
+
+
+def write_control_secret(instance: Instance, client: AgentClient) -> None:
+    """Games whose image reads the control secret from a file (Factorio: config/rconpw) get it
+    written before every apply, so the server, the spec and the agent's driver agree on it. The
+    secret is never logged."""
+    definition = games.get_or_none(instance.game)
+    path = definition.control_secret_file if definition is not None else None
+    if not path:
+        return
+    from .spec import rcon_password
+
+    parent = path.rsplit("/", 1)[0] if "/" in path else ""
+    if parent:
+        client.mkdir(instance.id, parent, parents=True)
+    client.write_text(instance.id, path, rcon_password(instance) + "\n")
 
 
 CLONE_LEVEL_NAME_FEATURE = "clone_level_name"  # clone leaves out exactly the world named by level_name / layout
@@ -173,8 +190,10 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Create the data directory, write initial config, create the container and optionally start it."""
     instance = _instance(job)
     client = AgentClient(instance.node)
-    # initial config files of the game (Minecraft: server.properties from job.params["server_properties"])
-    files = games.for_instance(instance).initial_files(instance, job.params or {})
+    definition = games.for_instance(instance)
+    # initial config files of the game (Minecraft: server.properties from job.params["server_properties"];
+    # other games: their config files from job.params["settings"])
+    files = definition.initial_files(instance, job.params or {})
     ctx.progress(0.02, "Creating instance directory", force=True)
     client.prepare(instance.id, files)
     start = bool(job.params.get("start", True))
@@ -183,6 +202,15 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     apply_container(instance, ctx, start=start, span=(0.05, 0.9))
     if start:
         ctx.progress(0.95, "Server container started; the first start downloads and installs the server software")
+        if definition.retryable_install_exits:
+            from .game_handlers import wait_first_start
+
+            wait_first_start(instance, ctx, client, span=(0.95, 0.04))
+    if definition.setup_steps:
+        from .game_handlers import enqueue_setup
+
+        if enqueue_setup(instance, user=job.user) is not None:
+            ctx.log("Setup steps follow in their own job")
     return {"started": start}
 
 
@@ -304,7 +332,7 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
     if not isinstance(info, dict):
         return
     if info.get("flushed"):
-        ctx.log("The world was saved (save-all flush) before the server was stopped")
+        ctx.log(f"The world was saved ({_save_command(ctx)}) before the server was stopped")
     if info.get("stop_sent_via_rcon"):
         ctx.log("The server was still starting; the stop was delivered as soon as it accepted commands")
     for warning in info.get("warnings") or []:
@@ -318,6 +346,18 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
             f"warning: the server did not shut down cleanly (exit code {exit_code}): it was ended when its time to stop "
             "ran out, or it failed while stopping. Its last changes may not be saved; see the end of the console log"
         )
+
+
+def _save_command(ctx: JobContext) -> str:
+    """The command the agent's driver saves with before a stop (Minecraft: save-all flush)."""
+    try:
+        game = Instance.objects.filter(pk=ctx.job.instance_id).values_list("game", flat=True).first()
+    except Exception:  # the log line is a note only
+        game = None
+    definition = games.get_or_none(game)
+    if definition is None or definition.id == games.DEFAULT_GAME or not definition.flush_command:
+        return "save-all flush"
+    return definition.flush_command
 
 
 @register("stop")
@@ -745,6 +785,8 @@ def set_software(instance: Instance, state: dict[str, Any]) -> dict[str, tuple[A
     from .services import bump_revision
     from .spec import image_for
 
+    if (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+        return games.for_instance(instance).set_software(instance, state)
     wanted = {f: state[f] for f in SOFTWARE_FIELDS if f in state and f != "image"}
     if "java_version" in wanted:
         wanted["java_version"] = int(wanted["java_version"])
@@ -790,6 +832,8 @@ def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
 
     instance = _instance(job)
     p = job.params
+    if (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+        return _game_software_update(job, ctx, instance)
     before = {
         "minecraft_version": instance.minecraft_version,
         "loader_version": instance.loader_version,
@@ -841,6 +885,57 @@ def software_update(job: Job, ctx: JobContext) -> dict[str, Any]:
         put_back(job, instance, ctx, exc, was_running=was_running, untouched=untouched)
         raise
     return {"before": before, "after": {k: getattr(instance, k) for k in before}, "backup_id": backup_id}
+
+
+def _game_software_update(job: Job, ctx: JobContext, instance: Instance) -> dict[str, Any]:
+    """Software update of a game other than Minecraft: the exact version (and so the image tag)
+    changes, protected by a pre-update backup; after a failure that changed nothing the version
+    is put back and a server that was running is started again."""
+    from apps.backups.handlers import run_backup
+    from apps.backups.models import BackupKind
+
+    definition = games.for_instance(instance)
+    p = job.params
+    before = definition.software_state(instance)
+    target = str(p["version"])
+    was_running = False
+    backup_id = None
+    try:
+        was_running = ensure_stopped(instance, ctx)
+        if p.get("backup", True):
+            ctx.progress(0.05, "Creating a pre-update backup")
+            backup = run_backup(
+                instance,
+                ctx,
+                name=f"Before update to {definition.label} {target}",
+                kind=BackupKind.PRE_UPDATE,
+                user=job.user,
+                span=(0.05, 0.55),
+                job=job,
+            )
+            backup.meta = {**(backup.meta or {}), "software_before": before}
+            backup.save(update_fields=["meta"])
+            backup_id = str(backup.id)
+        ctx.check_cancelled()
+        definition.set_software(instance, {"version": target})
+        instance.refresh_from_db()
+        ctx.progress(
+            0.6, f"Recreating container for {definition.describe_software(definition.software_state(instance))}", force=True
+        )
+        if was_running:
+            starting_again(ctx, lambda: apply_container(instance, ctx, start=True, span=(0.6, 0.97), admit=False))
+        else:
+            apply_container(instance, ctx, start=bool(p.get("start")), span=(0.6, 0.97))
+    except Exception as exc:
+        untouched = instance.minecraft_version == before.get("version")
+        if not untouched:
+            untouched = _apply_refused(exc, instance)
+            if untouched:
+                definition.set_software(instance, before)
+                ctx.log("The update was not applied: the previous version was put back")
+        put_back(job, instance, ctx, exc, was_running=was_running, untouched=untouched)
+        raise
+    return {"before": before, "after": definition.software_state(instance), "backup_id": backup_id}
 
 
 # Failures of an apply that prove the old container was not touched: the agent refused the
@@ -966,13 +1061,24 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
         old_node = instance.node
         _tag_backups_on_node(instance, old_node)  # they stay in the old node's restic repository
         port_changed = None
-        if instance.game_port in ports_in_use(target_node, exclude=instance):
+        fields = ["node", "game_port", "container_spec_hash"]
+        if instance.ports and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            # named ports: each keeps its number when it is free there for its protocol
+            from .services import assign_named_ports
+
+            ports = assign_named_ports(games.for_instance(instance), target_node, exclude=instance, current=instance.ports)
+            if ports != instance.ports:
+                port_changed = (instance.game_port, int(ports[0]["host_port"]))
+                instance.ports = ports
+                instance.game_port = int(ports[0]["host_port"])
+                fields.append("ports")
+        elif instance.game_port in ports_in_use(target_node, exclude=instance):
             new_port = allocate_port(target_node, exclude=instance)
             port_changed = (instance.game_port, new_port)
             instance.game_port = new_port
         instance.node = target_node
         instance.container_spec_hash = ""
-        instance.save(update_fields=["node", "game_port", "container_spec_hash"])
+        instance.save(update_fields=fields)
         moved = True
         ctx.progress(0.88, f"Creating the container on {target_node.name}")
         # (memory is checked: the server did not count on the target node before)

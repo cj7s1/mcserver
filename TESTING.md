@@ -80,6 +80,27 @@ Frontend tests of the same round: `components/RouteError.test.tsx`, `MemoryOverc
 `library/ServerActions.test.tsx` (run with `npx vitest run`). `lib/batches.test.tsx` also covers
 the per-file `failed` list of uploads and a bulk update the server stopped part-way.
 
+### Tests of multi-game support (phases 1 to 3)
+
+The rule of the multi-game work is that nothing changes for Minecraft. The **pin tests** hold the
+exact output of before game definitions and must pass unchanged: `backend/tests/test_games_phase1_pins.py`
+(with `games_pin_fixtures.py` / `games_pin_expected.py`: the spec dict and spec hash of fixture
+servers), `agent/tests/test_games_pins.py` (with `pins/create_kwargs.json`: the Docker create
+arguments) and `frontend/src/pages/instance/sections-pin.test.tsx` (the tabs and sections of a
+Minecraft server).
+
+| File | What it runs | Stand-ins |
+|---|---|---|
+| `backend/tests/test_games_phase1.py` | The registry, capabilities in the API, the catalog, the agent gate (`agent_lacks_game`), routing of spec, console, power warnings, players and backups through the definition | Fake agent, a test game |
+| `backend/tests/test_games_phase2.py` | Config codecs (JSON, INI, key=value, properties) and schema validation; the Factorio definition (capabilities, spec, console rules, catalog entry, version list from Docker Hub and factorio.com); named ports per protocol; create, PATCH (ports, refused fields, env allow-list), Game settings API with masked secrets, the masked control-secret file, secrets and setup steps (a test game), the first-start retry, `/quit` refused, broadcast as chat, players from files and RCON, software update with pre-update backup, `runtime_images`, saves reset / import / export, backup excludes, clone | Fake agent (in-memory files, containers, restic), a cached version catalog, the catalog's HTTP calls monkeypatched |
+| `agent/tests/test_games.py` | Profiles and drivers of phase 1: registration rules, image allow-lists per game, labels, the driver per container, `/v1/info` `games` | Fake containers |
+| `agent/tests/test_games_phase2.py` | The Factorio profile (create arguments: user, no capabilities, `/factorio` mount, no Docker health check, labels), tag pattern and environment allow-list with value patterns, never-published ports, image VOLUME mounts (bind into `.volumes/`, tmpfs), the `tcp` and `log` readiness probes as `health`, the RCON driver with a password file against the RCON fake, saves that wait for `Saving finished`, redaction of the secret in logs, the stream and the last-run record, profile backup excludes, `/v1/info` extras | Fake containers and logs, the in-process RCON fake |
+
+Frontend: `lib/game-config.test.ts` (field values, masking, console rules),
+`create-server/{gameWizardModel,GameWizard}.test.*` (the request body of the Factorio wizard),
+`pages/instance/factorio-pages.test.tsx` (tabs and Settings tabs of a Factorio server, Game settings
+form, named ports, setup card, players labels, saves dialogs, console hint), `GameStep.test.tsx`.
+
 ## Tests with real containers
 
 Both scripts are called by CI (`.github/workflows/ci.yml`, jobs "docker" and "upgrade") and can be
@@ -118,6 +139,21 @@ the old images; a run whose `docker compose up` fails is finished by `run --resu
 layout has the account and the setting and no old container; `rollback` brings back the old
 layout, the old images and the old schema with the data; `run` again; `restore-db` with the dump
 of that run, then `rollback`.
+
+**Factorio and the upgrade from the release before multi-game support** (run by hand, 2026-11-10;
+no script in the repository yet). A scratch git checkout with two commits (commit `082b949` from
+`git archive`, then the multi-game tree) and a stack under its own Compose project name, its own
+instances network and the agent API on loopback (a `docker-compose.override.yml`); BuildKit from a
+private `DOCKER_CONFIG`. The old stack was built, one vanilla server created and started (on a
+local tag of the itzg image and the `pinned:` channel, so that the owner's `stable-java21` tag is
+never pulled), then `deploy/scripts/upgrade.sh run --with-migrations` switched to the new tree. The
+vanilla container must be the same afterwards (id, start time, spec-hash label) and the server must
+not read restart-required. On the upgraded stack, through the API and in a headless browser: create
+a Factorio server, ready, RCON players / chat / commands, `/server-save`, a consistent backup, stop
+(exit 0, container retired), start (same seed), world reset with a seed, import of a save, restore
+of the backup (stopped and running), software update to another exact tag, the create wizard, the
+console's `/quit`, the Game settings form, delete. Results: DEVELOPMENT_STATUS.md, "Multi-game
+phases 2 and 3".
 
 ## Agent tests on a real btrfs filesystem
 

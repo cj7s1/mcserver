@@ -943,9 +943,21 @@ def test_full_restore_plain_directory(plain_settings, monkeypatch):
     iid = uuid.uuid4()
     inst, snap = _make_server(plain_settings, iid)
     client, auth = _client_for(plain_settings, monkeypatch)
+    chowned: list[tuple[Path, int, int]] = []
+    real_chown = os.chown
+
+    def spy(path, uid, gid, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if not isinstance(path, int):
+            chowned.append((Path(path), uid, gid))
+        return real_chown(path, uid, gid, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chown", spy)
     op = _full_restore(client, auth, iid, snap)
     assert op["status"] == "succeeded", op
     _assert_restored(inst)
+    # the server folder belongs to the runtime uid/gid again (restic made the staging folder as root):
+    # a rootless image (Factorio) must be able to create files at its top level
+    assert (inst, plain_settings.runtime_uid, plain_settings.runtime_gid) in chowned
     assert list(plain_settings.staging_dir.iterdir()) == []
     assert list(plain_settings.trash_dir.iterdir()) == []
 

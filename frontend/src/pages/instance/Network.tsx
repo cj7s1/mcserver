@@ -11,7 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
 import { api, ApiError, errorMessage } from "@/lib/api";
-import { gameLabel } from "@/lib/games";
+import { gameLabel, isMinecraft } from "@/lib/games";
 import { qk, useInvalidateInstance, useSystemInfo } from "@/lib/queries";
 import type { Instance, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,7 @@ import { useInstanceContext } from "./InstanceLayout";
 import { usePorts } from "./backups/backup-utils";
 import { AddressList, ConnectionFlow } from "./network/ConnectionPanel";
 import { ExtraPortsEditor } from "./network/ExtraPortsEditor";
+import { GameNetwork } from "./network/GameNetwork";
 import { MAX_EXTRA_PORTS, type PortPreset, type PortRow } from "./network/port-presets";
 
 type BindMode = "all" | "localhost" | "custom";
@@ -143,6 +144,13 @@ function Advanced({ title, hint, children }: { title: string; hint?: string; chi
 }
 
 export default function Network() {
+  const { instance, can } = useInstanceContext();
+  // other games: named ports with their protocols (network/GameNetwork.tsx); Minecraft: as before
+  if (!isMinecraft(instance)) return <GameNetwork instance={instance} canEdit={can("instance.configure") && !instance.archived_at} />;
+  return <MinecraftNetwork />;
+}
+
+function MinecraftNetwork() {
   const { instance, can } = useInstanceContext();
   const auth = useAuth();
   const qc = useQueryClient();

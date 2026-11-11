@@ -19,6 +19,11 @@ export const qk = {
   players: (id: string) => ["instances", id, "players"] as const,
   content: (id: string) => ["instances", id, "content"] as const,
   access: (id: string) => ["instances", id, "access"] as const,
+  // non-Minecraft games (backend contract B6-B8)
+  gameConfig: (id: string) => ["instances", id, "config"] as const,
+  secrets: (id: string) => ["instances", id, "secrets"] as const,
+  saves: (id: string) => ["instances", id, "saves"] as const,
+  gameVersions: (game: string) => ["catalog", "games", game, "versions"] as const,
   jobs: ["jobs"] as const,
   job: (id: string) => ["jobs", id] as const,
   system: ["system"] as const,

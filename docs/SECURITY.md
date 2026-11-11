@@ -158,7 +158,8 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
 * The panel never configures router port forwarding, UPnP or DNS. Minecraft game ports are published
   on the Docker host only; making them reachable from the internet is a deliberate step you take on
   your router.
-* RCON (25575) is never published; only the agent reaches it on the container network.
+* RCON (Minecraft 25575, Factorio 27015) is never published; only the agent reaches it on the
+  container network. Game ports are published per protocol (Factorio: UDP).
 * Redis (job queue, live events, cache) has no password and its cache holds pickled objects, so
   whoever can write to it can run code in the panel. It therefore has no network listener at all:
   it runs inside the panel container on a Unix socket (`--port 0`, mode 700) in `/run/mcpanel`, a
@@ -338,6 +339,47 @@ would stop that server itself at array stop and count it as stopped by hand.
   or cut-off HTTP 200. Single-file restores escape `[ ] * ?` before passing a name to restic.
 * World saving that a backup switched off (`save-off`) is switched on again even if the agent
   process ends during the pause (a marker file; `save-on` at shutdown, at start and every 30 s).
+
+## Games other than Minecraft (Factorio)
+
+Each game is reviewed code: a definition in the panel and a runtime profile in the agent
+(ARCHITECTURE.md, "Games"). The panel and users still cannot choose images, mounts, capabilities,
+users or devices; the agent looks them up in the profile of the spec's `game` and refuses a game it
+has no profile for.
+
+* **Images:** a profile allows only its own repositories (`AGENT_GAME_<ID>_IMAGES` replaces the list;
+  Factorio: `factoriotools/factorio`) and its tag pattern (Factorio: an exact `<version>-rootless`
+  tag; the regular tags start as root and need four capabilities, so they are refused).
+* **Privileges:** Factorio's rootless image runs as the runtime uid:gid set by the agent
+  (`MC_UID`/`MC_GID`), with no capabilities at all, `no-new-privileges` and the server folder as its
+  only mount: stricter than the Minecraft containers.
+* **Environment:** an allow-list per game, enforced by the panel and again by the agent. Factorio
+  accepts only `TZ` and the variables the panel sets (`DLC_SPACE_AGE`, `GENERATE_NEW_SAVE`,
+  `LOAD_LATEST_SAVE`, `SAVE_NAME`), each with a value pattern; the image's variables that download
+  mods with credentials (`UPDATE_MODS_ON_START`, `USERNAME`, `TOKEN`) or move its files (`CONFIG`,
+  `SAVES`, `*_FILE`, ...) are refused.
+* **RCON is never published.** The profile's `never_publish` (Factorio: 27015) is enforced by the
+  agent whatever the spec says; the agent reaches RCON over the instance network.
+* **The RCON password is visible on the host.** The Factorio image passes it to the server on its
+  command line (`--rcon-password`), so anyone who can list the host's processes (`ps`) can read it,
+  and its entrypoint runs with `set -x`, which prints that command line into the container's log.
+  The agent replaces the password with `********` in every log text it hands out (the console, the
+  log download, the last-run record), so console viewers in the panel do not see it; `docker logs`
+  on the host still shows it. It only grants RCON, which is reachable from the instance network
+  only. The panel writes it to `config/rconpw` before every start (from the server's encrypted
+  control secret); the file editor shows that file masked and refuses to change it, but a user with
+  `instance.files.read` can still download it, and it is in backups.
+* **Secrets per server** (`Instance.secrets`, for tokens a game needs) are encrypted like the RCON
+  password, never returned by the API (only whether each is set), and audited by name only.
+* **Game settings** with secrets (Factorio's game password and factorio.com token in
+  `config/server-settings.json`) are masked in the Game settings form; they are plain text in the
+  server folder, where the game reads them.
+* **Public listing** is off by default for Factorio (`visibility.public=false`); the image's example
+  file would list the server publicly.
+* **Exits from inside the game** (`/quit`) are not sent: the console runs the panel's Stop instead,
+  and the API and schedules refuse them (400 `stop_via_power`).
+* **Image VOLUMEs** are mounted into the server folder (or a tmpfs the profile names), so no data of
+  a game server lives in an anonymous Docker volume outside it.
 
 ## Reporting
 

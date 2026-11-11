@@ -50,7 +50,9 @@ export type GameCapability =
   | "jvm"
   | "eula"
   | "properties"
-  | "diagnostics";
+  | "diagnostics"
+  /** Game settings editor for a game's own config files (non-Minecraft games; never Minecraft). */
+  | "config_files";
 
 /** "jvm": memory_mb is the Java heap and the container gets off-heap headroom; "plain": memory_mb is the container limit. */
 export type MemoryModel = "jvm" | "plain";
@@ -65,6 +67,193 @@ export interface GameInfo {
   default_memory_mb: number;
   /** What the owner should know (memory needed, what they have to provide): a list of sentences. */
   notes: string[] | string;
+  // --- present only for games that have them (contract B3); Minecraft's entry has none of them ---
+  ports?: GamePortSpec[];
+  config_files?: GameConfigFileSpec[];
+  /** Per-server choices pinned at creation (Factorio: Space Age). */
+  options?: ConfigField[];
+  secrets?: GameSecretSpec[];
+  setup_steps?: GameSetupStepSpec[];
+  /** Console words that make the server exit; the panel runs its Stop instead (Factorio: "/quit"). */
+  stop_words?: string[];
+  /** Commands keep their leading "/" (Factorio); Minecraft strips it. */
+  keeps_command_slash?: boolean;
+  /** Example/hint for the console input. */
+  command_hint?: string;
+  /** The game has a version catalog (GET /catalog/games/<id>/versions). */
+  has_versions?: boolean;
+  min_memory_mb?: number;
+  /** Regex source of a valid player name. */
+  player_name_pattern?: string;
+  player_list_labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
+  world?: GameWorldSpec | null;
+}
+
+/**
+ * One field of a game's config file, option or reset form (contract "Field schema"). Values are JSON
+ * typed: bool, int, number, string, null or a list of strings.
+ */
+export type ConfigFieldType = "string" | "int" | "number" | "bool" | "enum" | "list";
+export type ConfigValue = string | number | boolean | null | string[];
+
+export interface ConfigField {
+  key: string;
+  type: ConfigFieldType;
+  label: string;
+  help?: string;
+  group?: string;
+  default?: ConfigValue;
+  min?: number;
+  max?: number;
+  options?: string[];
+  /** Empty input means null (e.g. a random seed). */
+  nullable?: boolean;
+  /** The API masks the value ("********"); sending the mask back means unchanged. */
+  secret?: boolean;
+  /** A change applies at the next start (default true). */
+  restart?: boolean;
+  /** Shown in the create wizard. */
+  initial?: boolean;
+  /** Options: the choice is fixed after creation. */
+  pinned?: boolean;
+}
+
+export interface GamePortSpec {
+  name: string;
+  label: string;
+  protocol: "tcp" | "udp";
+  container_port: number;
+  default_host_port: number;
+  help?: string;
+}
+
+export interface GameConfigFileSpec {
+  id: string;
+  path: string;
+  codec: string;
+  label: string;
+  help?: string;
+  fields: ConfigField[];
+}
+
+export interface GameSecretSpec {
+  key: string;
+  label: string;
+  help?: string;
+  required?: boolean;
+  link?: string;
+}
+
+export interface GameSetupStepSpec {
+  id: string;
+  label: string;
+  help?: string;
+  /** "auto": the panel does it (a setup job); "secret": needs a secret from the owner. */
+  kind: string;
+}
+
+export interface GameWorldSpec {
+  kind: "saves" | string;
+  extension?: string;
+  reset_fields?: ConfigField[];
+}
+
+/** GET /catalog/games/<id>/versions */
+export interface GameVersion {
+  id: string;
+  label: string;
+  stable: boolean;
+  latest: boolean;
+}
+
+export interface GameVersionsResponse {
+  versions: GameVersion[];
+  latest: string | null;
+}
+
+/** A named port of a non-Minecraft server (Instance.ports). */
+export interface NamedPort {
+  name: string;
+  label?: string;
+  protocol: "tcp" | "udp";
+  container_port: number;
+  host_port: number;
+  host_ip?: string;
+}
+
+export interface SetupStepState {
+  id: string;
+  label: string;
+  help?: string;
+  kind: string;
+  /** pending | running | done | failed */
+  status: string;
+  message?: string;
+}
+
+/** Instance.setup: null for games without first-start setup steps. */
+export interface InstanceSetup {
+  needed: boolean;
+  next: string | null;
+  steps: SetupStepState[];
+}
+
+/** One file of GET /instances/{id}/config. */
+export interface ConfigFileState {
+  id: string;
+  path: string;
+  label: string;
+  codec: string;
+  help?: string;
+  exists: boolean;
+  values: Record<string, ConfigValue>;
+  fields: ConfigField[];
+  managed_keys: string[];
+  redacted_keys: string[];
+}
+
+export interface ConfigFilesResponse {
+  files: ConfigFileState[];
+}
+
+/** PATCH /instances/{id}/config/{file} */
+export interface ConfigPatchResult {
+  values: Record<string, ConfigValue>;
+  changed: string[];
+  restart_required: boolean;
+  redacted_keys?: string[];
+}
+
+/** GET/PUT /instances/{id}/secrets */
+export interface InstanceSecret {
+  key: string;
+  label: string;
+  help?: string;
+  required?: boolean;
+  link?: string;
+  set: boolean;
+}
+
+export interface SecretsResponse {
+  secrets: InstanceSecret[];
+}
+
+/** GET /instances/{id}/saves (non-Minecraft games). */
+export interface SaveFile {
+  name: string;
+  path: string;
+  size: number;
+  /** epoch seconds or ISO string */
+  modified: number | string | null;
+  current: boolean;
+}
+
+export interface SavesInfo {
+  current: string;
+  saves: SaveFile[];
+  set_aside: { folder: string; files: string[] }[];
+  options: Record<string, ConfigValue>;
+  reset_fields: ConfigField[];
 }
 
 export type PermissionCode =
@@ -117,12 +306,29 @@ export interface PortMapping {
   label?: string;
 }
 
+export interface ConnectionAddress {
+  kind: "bind" | "lan" | "public";
+  label: string;
+  address: string;
+}
+
+export interface ConnectionPort {
+  name: string;
+  label: string;
+  protocol: "tcp" | "udp";
+  container_port: number;
+  host_port: number;
+  addresses: ConnectionAddress[];
+}
+
 export interface ConnectionInfo {
   host_port: number;
   container_port: number;
   bind_address: string;
-  addresses: { kind: "bind" | "lan" | "public"; label: string; address: string }[];
+  addresses: ConnectionAddress[];
   notes: string[];
+  /** Non-Minecraft servers: every named port with its addresses. */
+  ports?: ConnectionPort[];
 }
 
 export interface ActiveJob {
@@ -237,6 +443,12 @@ export interface Instance {
   capabilities?: GameCapability[];
   /** Absent from older panels: "jvm" (Minecraft). */
   memory_model?: MemoryModel;
+  /** Named ports of a non-Minecraft server ([] for Minecraft, absent from older panels). */
+  ports?: NamedPort[];
+  /** Pinned per-game choices (Factorio: {space_age}); {} for Minecraft. */
+  game_options?: Record<string, ConfigValue>;
+  /** First-start setup; null for games without setup steps. */
+  setup?: InstanceSetup | null;
 }
 
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -492,6 +704,8 @@ export interface PlayersResponse {
   ip_bans: PlayerEntry[];
   known_players: { name: string; uuid: string; expiresOn?: string }[];
   online?: { online: number | null; max: number | null; players: string[]; error?: string };
+  /** Non-Minecraft games: what the lists are called ({ops: "Admins"}). */
+  labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
 }
 
 export interface Role {
@@ -593,6 +807,8 @@ export interface SystemSettings {
     timezone: string;
     /** RAM in MB kept free for the host when servers are started (memory admission); 0-65536 */
     memory_reserve_mb: number;
+    /** Per-game runtime image repository (non-Minecraft games): {game: {repository}}. */
+    runtime_images?: Record<string, { repository?: string }> | null;
   };
   secrets_configured: Record<string, boolean>;
   /** PATCH only: notes about what was saved (e.g. the CurseForge key could not be verified) */

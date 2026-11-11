@@ -7,7 +7,10 @@ import { useAuth } from "@/hooks/use-auth";
 import { formatDateTime, formatMemoryMb, relativeTime } from "@/lib/format";
 import type { ConnectionInfo, Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { gameLabel, knownVariantLabel } from "@/lib/games";
+import { displayValue } from "@/lib/game-config";
+import { gameLabel, isMinecraft, knownVariantLabel } from "@/lib/games";
+import { useGameInfo } from "../game-api";
+import { ConnectionPorts } from "../network/GameNetwork";
 import { CopyButton, capitalize } from "./overview-utils";
 
 const KIND_STYLE: Record<ConnectionInfo["addresses"][number]["kind"], { label: string; className: string; icon: ReactNode }> = {
@@ -25,6 +28,22 @@ function SectionLink({ to, children }: { to: string; children: ReactNode }) {
 }
 
 export function ConnectionCard({ instance }: { instance: Instance }) {
+  // other games: one block per named port with its protocol (network/GameNetwork.tsx)
+  if (!isMinecraft(instance)) {
+    return (
+      <Section
+        title="Connection"
+        description="Addresses players use to join"
+        actions={<SectionLink to={`/servers/${instance.id}/network`}>Network settings</SectionLink>}
+      >
+        <ConnectionPorts instance={instance} />
+      </Section>
+    );
+  }
+  return <MinecraftConnectionCard instance={instance} />;
+}
+
+function MinecraftConnectionCard({ instance }: { instance: Instance }) {
   const { can } = useAuth();
   const c = instance.connection;
   const port = c.host_port;
@@ -164,7 +183,50 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-export function SoftwareCard({ instance: i, canConfigure }: { instance: Instance; canConfigure: boolean }) {
+export function SoftwareCard({ instance, canConfigure }: { instance: Instance; canConfigure: boolean }) {
+  return isMinecraft(instance) ? (
+    <MinecraftSoftwareCard instance={instance} canConfigure={canConfigure} />
+  ) : (
+    <GameSoftwareCard instance={instance} canConfigure={canConfigure} />
+  );
+}
+
+/** Software of a server of another game: game, version, pinned options, image, memory limit. */
+function GameSoftwareCard({ instance: i, canConfigure }: { instance: Instance; canConfigure: boolean }) {
+  const game = useGameInfo(i);
+  const pinned = (game?.options ?? []).filter((o) => o.pinned || (i.game_options && o.key in i.game_options));
+  return (
+    <Section
+      title="Software"
+      description="What this server runs"
+      actions={canConfigure ? <SectionLink to={`/servers/${i.id}/settings`}>Settings</SectionLink> : undefined}
+    >
+      {i.description && <p className="mb-3 text-sm text-muted-foreground">{i.description}</p>}
+      <dl className="grid grid-cols-[minmax(6.5rem,auto)_1fr] gap-x-4 gap-y-2 text-sm">
+        <Row label="Game">{gameLabel(i)}</Row>
+        <Row label="Version">{i.minecraft_version || "—"}</Row>
+        {pinned.map((o) => (
+          <Row key={o.key} label={o.label}>
+            {displayValue(o, i.game_options?.[o.key])}
+          </Row>
+        ))}
+        <Row label="Image">
+          <span className="flex min-w-0 items-center gap-1">
+            <span className="truncate font-mono text-xs">{i.image}</span>
+            <CopyButton value={i.image} label="Copy image name" />
+          </span>
+        </Row>
+        <Row label="Memory">{formatMemoryMb(i.container_memory_mb)} container limit</Row>
+        <Row label="Installed">
+          {i.installed_at ? <span title={formatDateTime(i.installed_at)}>{relativeTime(i.installed_at)}</span> : <span className="text-muted-foreground">Not yet</span>}
+        </Row>
+        <Row label="Created">{formatDateTime(i.created_at)}</Row>
+      </dl>
+    </Section>
+  );
+}
+
+function MinecraftSoftwareCard({ instance: i, canConfigure }: { instance: Instance; canConfigure: boolean }) {
   const url = i.is_modpack ? modpackUrl(i) : null;
   const hasLoader = i.loader && i.loader !== "vanilla" && i.loader !== "none";
   return (

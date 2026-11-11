@@ -111,7 +111,24 @@ class Instance(models.Model):
     game_port = models.PositiveIntegerField()
     extra_ports = models.JSONField(default=list, blank=True)
     network = models.CharField(max_length=100, blank=True, help_text="Blank = agent default instance network")
+    # The control secret: Minecraft's RCON password; for other games the secret of their control
+    # channel (Factorio: the RCON password the panel writes to config/rconpw).
     rcon_password = EncryptedTextField(default=_rcon_password)
+    # Named ports of games other than Minecraft (apps/games: PortSpec), each
+    # {"name", "container_port", "protocol", "host_port", "host_ip"}. Minecraft keeps game_port and
+    # extra_ports exactly as before; for other games game_port holds the host port of the first
+    # named port (so the code paths that move or copy servers keep working).
+    ports = models.JSONField(default=list, blank=True, db_default=[])
+
+    # --- per-game state ----------------------------------------------------------------
+    # Choices of the game definition that are pinned when the server is created (Factorio:
+    # {"space_age": bool, "save_name": "world"}); empty for Minecraft.
+    game_options = models.JSONField(default=dict, blank=True, db_default={})
+    # Values only the owner can provide (tokens), as encrypted JSON {key: value}. Never logged,
+    # never returned by the API (only whether each one is set).
+    secrets = EncryptedTextField(blank=True, default="", db_default="")
+    # First-start steps of the game (apps/games: SetupStep): {"steps": {id: {"status", "at", "message"}}}
+    setup_state = models.JSONField(default=dict, blank=True, db_default={})
 
     # --- lifecycle / observed state ------------------------------------------------------
     desired_state = models.CharField(max_length=10, choices=DesiredState.choices, default=DesiredState.STOPPED)
@@ -151,7 +168,12 @@ class Instance(models.Model):
     class Meta:
         ordering = ["name"]
         constraints = [
-            models.UniqueConstraint(fields=["node", "game_port"], name="unique_game_port_per_node"),
+            # Minecraft's game port (TCP). Other games' ports are checked per protocol in code
+            # (services.check_named_ports): their game_port is a copy of their first named port, and
+            # UDP 34197 of one server and TCP 34197 of another do not conflict.
+            models.UniqueConstraint(
+                fields=["node", "game_port"], condition=models.Q(game="minecraft"), name="unique_game_port_per_node"
+            ),
         ]
 
     def __str__(self) -> str:
@@ -186,6 +208,25 @@ class Instance(models.Model):
             if definition is not None:
                 return definition.container_memory_mb(self)
         return self.jvm_container_memory_mb
+
+    @property
+    def secret_values(self) -> dict[str, str]:
+        """The decrypted per-instance secrets ({} when none or unreadable)."""
+        import json
+
+        raw = self.secrets or ""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return {}
+        return {str(k): str(v) for k, v in data.items() if isinstance(v, str)} if isinstance(data, dict) else {}
+
+    def set_secret_values(self, values: dict[str, str]) -> None:
+        import json
+
+        self.secrets = json.dumps({k: v for k, v in sorted(values.items()) if v}) if values else ""
 
     @property
     def jvm_container_memory_mb(self) -> int:

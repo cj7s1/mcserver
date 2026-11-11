@@ -1,6 +1,6 @@
 """Runtime profiles and control drivers (multi-game phase 1).
 
-Only Minecraft is registered in the agent; the tests add a made-up game ("testgame", an RCON
+Minecraft and Factorio are registered in the agent (Factorio's own tests: test_games_phase2.py); the tests add a made-up game ("testgame", an RCON
 game shaped like Factorio) to exercise what a second profile changes: profile selection,
 unknown_game, the per-profile image allow-list, the environment policy, the game label, the
 driver dispatch of stop / command / ping / the saving pause, and GET /v1/info.
@@ -112,8 +112,8 @@ def tg_spec(**over) -> InstanceSpec:
 
 
 # --- profile selection, unknown_game --------------------------------------------------------------
-def test_only_minecraft_is_registered():
-    assert {p.game for p in profiles.all_profiles()} == {"minecraft"}
+def test_minecraft_and_factorio_are_registered():
+    assert {p.game for p in profiles.all_profiles()} == {"minecraft", "factorio"}
     assert profiles.get(None) is profiles.get("minecraft") is mc_profile.PROFILE
     assert mc_profile.PROFILE.control == "minecraft-rcon"
 
@@ -126,7 +126,7 @@ def test_a_spec_without_game_is_minecraft():
 
 
 @pytest.mark.parametrize(
-    ("game", "variant"), [("factorio", None), ("minecraft", "paper"), ("terraria", "tshock")]
+    ("game", "variant"), [("nogame", None), ("minecraft", "paper"), ("terraria", "tshock")]
 )
 def test_a_game_without_a_profile_is_unknown_game(settings, game, variant):
     spec = mc_spec(game=game, variant=variant)
@@ -147,7 +147,7 @@ def test_game_and_variant_ids_are_validated(value):
 
 
 def test_apply_refuses_an_unknown_game_before_anything_is_queued(api, auth, no_docker):
-    body = {"spec": mc_spec(game="factorio", image="factoriotools/factorio:2.0").model_dump(mode="json")}
+    body = {"spec": mc_spec(game="nogame", image="example/nogame:2.0").model_dump(mode="json")}
     r = api.put(f"/v1/instances/{uuid.uuid4()}/container", json=body, headers=auth)
     assert r.status_code == 400 and r.json()["error"]["code"] == "unknown_game"
 
@@ -172,7 +172,11 @@ def test_register_refuses_incomplete_profiles(testgame):
     for bad in (
         _testgame(game="Bad"),
         _testgame(control="telnet"),
-        _testgame(health=Health("tcp", port=7777)),
+        _testgame(health=Health("udp-query", port=7777)),
+        _testgame(health=Health("tcp")),
+        _testgame(health=Health("log")),
+        _testgame(health=Health("log", pattern="(")),
+        _testgame(tag_pattern="["),
         _testgame(health=Health("cmd")),
         _testgame(mounts=(Mount("../other", "/data"),)),
         _testgame(mounts=(Mount(".", "data"),)),
@@ -210,7 +214,12 @@ def test_agent_allowed_images_keeps_meaning_minecraft(tmp_path, testgame, monkey
     assert validate_image(custom, "ghcr.io/me/testgame:3", testgame) == "ghcr.io/me/testgame:3"
     with pytest.raises(AgentError):
         validate_image(custom, TG_IMAGE, testgame)
-    assert profiles.all_allowed_images(custom) == {"ghcr.io/me/mc", "ghcr.io/me/testgame"}
+    assert profiles.all_allowed_images(custom) == {
+        "ghcr.io/me/mc",
+        "ghcr.io/me/testgame",
+        "factoriotools/factorio",
+        "docker.io/factoriotools/factorio",
+    }
 
 
 def test_superseded_image_cleanup_covers_every_game(settings, testgame, monkeypatch):
@@ -394,7 +403,7 @@ def test_the_game_label_is_only_on_containers_that_are_not_minecraft(settings, t
     assert (labels["io.mcpanel.game"], labels["io.mcpanel.variant"]) == ("testgame", "modded")
     assert profiles.for_labels(labels) is monkey
     assert profiles.for_labels({}) is mc_profile.PROFILE
-    assert profiles.for_labels({"io.mcpanel.game": "factorio"}) is None
+    assert profiles.for_labels({"io.mcpanel.game": "nogame"}) is None
 
 
 def test_the_profile_decides_the_rest_of_the_container(settings, testgame):
@@ -439,7 +448,7 @@ def test_driver_selection_from_labels(testgame):
         4000,
     )
     assert isinstance(drivers.for_status({"game": "testgame"}), RconDriver)
-    assert type(drivers.for_labels({"io.mcpanel.game": "factorio"})) is NoControlDriver
+    assert type(drivers.for_labels({"io.mcpanel.game": "nogame"})) is NoControlDriver
     with pytest.raises(ValueError):
         drivers.get("telnet")
 
@@ -509,7 +518,7 @@ def test_an_rcon_game_without_a_stop_command_gets_no_courier(game_server, settin
 
 
 def test_a_container_without_a_driver_gets_a_plain_docker_stop(game_server, settings):
-    game_server.container.labels["io.mcpanel.game"] = "factorio"  # no such profile here
+    game_server.container.labels["io.mcpanel.game"] = "nogame"  # no such profile here
     result = docker_ops.stop(IID, 30, settings)
     assert game_server.log == [("docker stop", 30)] and game_server.sent == []
     assert result.as_dict() == {"flushed": False, "stop_sent_via_rcon": False, "warnings": [], "exit_code": 0}
@@ -526,7 +535,7 @@ def test_command_goes_through_the_containers_driver(api, auth, game_server, monk
     r = api.post(f"/v1/instances/{IID}/command", json={"command": "/server-save", "timeout": 7}, headers=auth)
     assert r.status_code == 200 and r.json() == {"output": "Saved"}
     assert calls == [(IP, 27015, PASSWORD, "/server-save", 7.0, 4000)]
-    game_server.container.labels["io.mcpanel.game"] = "factorio"
+    game_server.container.labels["io.mcpanel.game"] = "nogame"
     r = api.post(f"/v1/instances/{IID}/command", json={"command": "x"}, headers=auth)
     assert r.status_code == 409 and r.json()["error"]["code"] == "command_unsupported"
 
@@ -563,7 +572,7 @@ def test_rcon_endpoint_follows_the_driver(game_server, settings):
     with pytest.raises(AgentError) as exc:
         docker_ops.rcon_endpoint(settings, IID)
     assert str(exc.value) == "RCON port is not published"
-    game_server.container.labels["io.mcpanel.game"] = "factorio"
+    game_server.container.labels["io.mcpanel.game"] = "nogame"
     with pytest.raises(AgentError) as exc:
         docker_ops.rcon_endpoint(settings, IID)
     assert exc.value.code == "rcon_unavailable"
@@ -614,7 +623,7 @@ def test_a_game_that_cannot_pause_saves_before_the_copy(saving):
 
 @pytest.mark.parametrize("consistency", ["auto", "require"])
 def test_a_game_without_saving_makes_the_copy_inconsistent(saving, consistency):
-    saving.status["game"] = "factorio"  # no profile: the none driver
+    saving.status["game"] = "nogame"  # no profile: the none driver
     if consistency == "require":
         with pytest.raises(AgentError) as exc:
             with main._world_saving_paused(saving.settings, IID, consistency, _Op(), "backup", 0.02):
@@ -662,7 +671,20 @@ def test_info_lists_the_games(info):
             "variants": [],
             "images": ["itzg/minecraft-server", "docker.io/itzg/minecraft-server"],
             "control": "minecraft-rcon",
-        }
+            "ports": [[25565, "tcp"]],
+            "never_publish": [[25575, None]],
+            "health": "cmd",
+            "install_retry_exits": [],
+        },
+        "factorio": {
+            "variants": [],
+            "images": ["factoriotools/factorio", "docker.io/factoriotools/factorio"],
+            "control": "rcon",
+            "ports": [[34197, "udp"]],
+            "never_publish": [[27015, None]],
+            "health": "log",
+            "install_retry_exits": [],
+        },
     }
 
 
@@ -673,4 +695,8 @@ def test_info_lists_a_registered_profile(info, testgame, monkeypatch):
         "variants": ["modded", "vanilla"],
         "images": ["ghcr.io/me/testgame"],
         "control": "rcon",
+        "ports": [[7777, "udp"]],
+        "never_publish": [[27015, "tcp"]],
+        "health": "image",
+        "install_retry_exits": [],
     }

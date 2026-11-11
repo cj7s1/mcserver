@@ -25,7 +25,8 @@ class PlayerSeen(models.Model):
     """Players observed online (via RCON `list`), aggregated per server."""
 
     instance = models.ForeignKey("instances.Instance", on_delete=models.CASCADE, related_name="players_seen")
-    name = models.CharField(max_length=16)
+    # Minecraft names have up to 16 characters, Factorio names up to 60
+    name = models.CharField(max_length=64)
     first_seen = models.DateTimeField()
     last_seen = models.DateTimeField()
     minutes_online = models.PositiveIntegerField(default=0, help_text="Approximate, from 1-minute sampling")

@@ -46,6 +46,24 @@ def validate_env(value: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def validate_game_env(definition: Any, value: Any) -> dict[str, str]:
+    """Extra variables of a server of another game: only what its definition allows (``allowed_user_env``)."""
+    if not isinstance(value, dict):
+        raise serializers.ValidationError("Must be an object of NAME: value pairs")
+    if len(value) > 100:
+        raise serializers.ValidationError("Too many variables")
+    out = {}
+    for k, v in value.items():
+        if not ENV_KEY.match(str(k)):
+            raise serializers.ValidationError(f"Invalid variable name {k!r}")
+        if (reason := definition.env_override_error(str(k))) is not None:
+            raise serializers.ValidationError(reason)
+        if not isinstance(v, (str, int, float, bool)) or len(str(v)) > 8192 or "\x00" in str(v) or "\n" in str(v):
+            raise serializers.ValidationError(f"Invalid value for {k}")
+        out[str(k)] = str(v).lower() if isinstance(v, bool) else str(v)
+    return out
+
+
 def validate_extra_ports(value: list[Any]) -> list[dict[str, Any]]:
     if not isinstance(value, list) or len(value) > 10:
         raise serializers.ValidationError("Provide at most 10 extra port mappings")
@@ -107,6 +125,15 @@ class InstanceSerializer(serializers.ModelSerializer):
     memory_model = serializers.SerializerMethodField(
         help_text="jvm: memory_mb is the Java heap (the container gets more); plain: memory_mb is the container limit"
     )
+    ports = serializers.JSONField(
+        required=False,
+        help_text="Named ports of games other than Minecraft: [{name, container_port, protocol, host_port, host_ip}] "
+        "([] for Minecraft, which has game_port and extra_ports). PATCH: [{name, host_port, host_ip?}]",
+    )
+    game_options = serializers.JSONField(read_only=True, help_text="Choices pinned when the server was created")
+    setup = serializers.SerializerMethodField(
+        help_text="First-start steps of the game: {needed, next, steps}; null when the game has none"
+    )
 
     class Meta:
         model = Instance
@@ -120,6 +147,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "node_name",
             "game",
             "game_label",
+            "game_options",
+            "setup",
             "edition",
             "server_type",
             "minecraft_version",
@@ -152,6 +181,7 @@ class InstanceSerializer(serializers.ModelSerializer):
             "host_ip",
             "game_port",
             "extra_ports",
+            "ports",
             "network",
             "desired_state",
             "status",
@@ -196,6 +226,7 @@ class InstanceSerializer(serializers.ModelSerializer):
                 "host_ip",
                 "game_port",
                 "extra_ports",
+                "ports",
                 "network",
                 "minecraft_version",
                 "loader_version",
@@ -215,6 +246,11 @@ class InstanceSerializer(serializers.ModelSerializer):
     def get_memory_model(self, obj: Instance) -> str:
         definition = games.get_or_none(obj.game)
         return definition.memory_model if definition is not None else "plain"
+
+    @extend_schema_field(serializers.DictField(allow_null=True))
+    def get_setup(self, obj: Instance) -> dict[str, Any] | None:
+        definition = games.get_or_none(obj.game)
+        return definition.setup_status(obj) if definition is not None else None
 
     def get_restart_required(self, obj: Instance) -> bool:
         try:
@@ -248,6 +284,13 @@ class InstanceSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance: Instance) -> dict[str, Any]:
         data = super().to_representation(instance)
+        if data.get("ports"):
+            definition = games.get_or_none(instance.game)
+            labels = {p.name: p.label for p in (definition.ports if definition is not None else ())}
+            data["ports"] = [
+                {**p, "label": labels.get(str(p.get("name")), str(p.get("name")))} if isinstance(p, dict) else p
+                for p in data["ports"]
+            ]
         if data.get("env") and not self._may_configure(instance):
             data["env"] = dict.fromkeys(data["env"], ENV_VALUE_HIDDEN)
         return data
@@ -296,8 +339,31 @@ class InstanceSerializer(serializers.ModelSerializer):
         return obj.backup_schedules if hasattr(obj, "backup_schedules") else backup_schedule_count(obj)
 
     # --- validation of editable fields --------------------------------------------------
+    def _definition(self) -> Any:
+        game = getattr(self.instance, "game", None) or games.DEFAULT_GAME
+        return games.get(game)
+
+    def _not_minecraft(self) -> bool:
+        return self.instance is not None and (self.instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME
+
     def validate_env(self, value: Any) -> dict[str, str]:
+        if self._not_minecraft():
+            return validate_game_env(self._definition(), value)
         return validate_env(value)
+
+    def validate_ports(self, value: Any) -> list[dict[str, Any]]:
+        if not self._not_minecraft():
+            if value in ([], None):
+                return []  # what the API shows for Minecraft: no change
+            raise serializers.ValidationError("Minecraft servers set game_port and extra_ports instead")
+        if not isinstance(value, list) or len(value) > 16:
+            raise serializers.ValidationError("Provide a list of {name, host_port} objects")
+        out = []
+        for item in value:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise serializers.ValidationError("Each port needs its name and host_port")
+            out.append(item)
+        return out
 
     def validate_extra_ports(self, value: Any) -> list[dict[str, Any]]:
         return validate_extra_ports(value)
@@ -316,8 +382,21 @@ class InstanceSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         attrs = super().validate(attrs)
+        if self._not_minecraft():
+            # settings of Minecraft's container that other games do not have
+            refused = sorted(attrs.keys() & {"game_port", "extra_ports", "jvm_flags_preset", "jvm_args", "java_version"})
+            if refused:
+                label = self._definition().label
+                raise serializers.ValidationError(
+                    {k: [f"{label} servers do not have this setting" + (" (use ports)" if "port" in k else "")] for k in refused}
+                )
+            if "memory_mb" in attrs and attrs["memory_mb"] < self._definition().min_memory_mb:
+                raise serializers.ValidationError(
+                    {"memory_mb": [f"{self._definition().label} needs at least {self._definition().min_memory_mb} MB"]}
+                )
         if self.instance is not None and attrs.keys() & {"memory_mb", "memory_overhead_mb"}:
             probe = Instance(
+                game=self.instance.game,
                 server_type=self.instance.server_type,
                 memory_mb=attrs.get("memory_mb", self.instance.memory_mb),
                 memory_overhead_mb=attrs.get("memory_overhead_mb", self.instance.memory_overhead_mb),
@@ -394,6 +473,8 @@ def connection_info(instance: Instance, *, public: Any = _UNSET, lan: Any = _UNS
         addresses.append({"kind": "lan", "label": "LAN", "address": f"{lan}{suffix}"})
     if public:
         addresses.append({"kind": "public", "label": "Public (requires router port forwarding)", "address": f"{public}{suffix}"})
+    if (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+        return _named_connection_info(instance, public=public, lan=lan)
     return {
         "host_port": port,
         "container_port": 25565,
@@ -406,6 +487,53 @@ def connection_info(instance: Instance, *, public: Any = _UNSET, lan: Any = _UNS
     }
 
 
+def _named_connection_info(instance: Instance, *, public: str, lan: str) -> dict[str, Any]:
+    """Connection info of a game with named ports: one entry per port, with its protocol."""
+    definition = games.get_or_none(instance.game)
+    specs = {p.name: p for p in (definition.ports if definition is not None else ())}
+    entries = []
+    for port in instance.ports or []:
+        if not isinstance(port, dict):
+            continue
+        spec = specs.get(str(port.get("name")))
+        host_port = port.get("host_port")
+        bind = port.get("host_ip") or instance.host_ip
+        addresses = []
+        if bind not in ("0.0.0.0", "::"):  # noqa: S104
+            addresses.append({"kind": "bind", "label": "Bound address", "address": f"{bind}:{host_port}"})
+        if lan:
+            addresses.append({"kind": "lan", "label": "LAN", "address": f"{lan}:{host_port}"})
+        if public:
+            addresses.append(
+                {"kind": "public", "label": "Public (requires router port forwarding)", "address": f"{public}:{host_port}"}
+            )
+        entries.append(
+            {
+                "name": port.get("name"),
+                "label": spec.label if spec else str(port.get("name")),
+                "protocol": port.get("protocol") or (spec.protocol if spec else "tcp"),
+                "container_port": port.get("container_port") or (spec.container_port if spec else None),
+                "host_port": host_port,
+                "bind_address": bind,
+                "help": spec.help if spec else "",
+                "addresses": addresses,
+            }
+        )
+    first = entries[0] if entries else {}
+    forward = ", ".join(f"{e['protocol'].upper()} {e['host_port']}" for e in entries) or "the server's ports"
+    return {
+        "host_port": first.get("host_port"),
+        "container_port": first.get("container_port"),
+        "bind_address": first.get("bind_address") or instance.host_ip,
+        "addresses": first.get("addresses") or [],
+        "ports": entries,
+        "notes": [
+            "The panel maps the host ports to the container; it does not configure router port forwarding or DNS.",
+            f"Players outside your network can only connect if you forward {forward} on your router.",
+        ],
+    }
+
+
 class CreateInstanceSerializer(serializers.Serializer):
     MODES = ("standard", "modpack")
 
@@ -414,7 +542,8 @@ class CreateInstanceSerializer(serializers.Serializer):
     description = serializers.CharField(max_length=2000, required=False, allow_blank=True)
     group = serializers.CharField(max_length=60, required=False, allow_blank=True)
     icon_url = serializers.URLField(required=False, allow_blank=True, max_length=500)
-    accept_eula = serializers.BooleanField()
+    # required for Minecraft (the EULA); other games have none
+    accept_eula = serializers.BooleanField(required=False)
     # standard
     server_type = serializers.ChoiceField(
         choices=[c for c in ServerType.values if c not in ("MODRINTH", "AUTO_CURSEFORGE", "FTBA", "CUSTOM")], required=False
@@ -451,6 +580,25 @@ class CreateInstanceSerializer(serializers.Serializer):
     game = serializers.CharField(
         max_length=32, required=False, default="minecraft", help_text="Game id from GET /api/catalog/games (default minecraft)"
     )
+    # games other than Minecraft (contract B5)
+    version = serializers.CharField(
+        max_length=40, required=False, help_text="Other games: the exact version (GET /api/catalog/games/<id>/versions)"
+    )
+    variant = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    ports = serializers.DictField(
+        child=serializers.IntegerField(min_value=1024, max_value=65535),
+        required=False,
+        help_text="Other games: host port per named port; a port left out gets the game's default when free",
+    )
+    options = serializers.DictField(child=serializers.JSONField(), required=False, help_text="Other games: pinned options")
+    settings = serializers.DictField(
+        child=serializers.DictField(child=serializers.JSONField(allow_null=True)),
+        required=False,
+        help_text="Other games: initial config values {file id: {key: value}}",
+    )
+    secrets = serializers.DictField(
+        child=serializers.CharField(max_length=4096, allow_blank=True), required=False, help_text="Other games: secrets"
+    )
 
     def validate_game(self, value: str) -> str:
         if games.get_or_none(value) is None:
@@ -458,11 +606,14 @@ class CreateInstanceSerializer(serializers.Serializer):
         return value
 
     def validate_accept_eula(self, value: bool) -> bool:
-        if not value:
+        if not value and self.initial_data.get("game", games.DEFAULT_GAME) in (games.DEFAULT_GAME, None, ""):
             raise serializers.ValidationError("You must accept the Minecraft EULA (https://aka.ms/MinecraftEULA)")
         return value
 
     def validate_env(self, value: Any) -> dict[str, str]:
+        game = self.initial_data.get("game") if isinstance(self.initial_data, dict) else None
+        if game and game != games.DEFAULT_GAME and games.get_or_none(game) is not None:
+            return validate_game_env(games.get(game), value or {})
         return validate_env(value or {})
 
     def validate_jvm_args(self, value: str) -> str:
@@ -480,7 +631,9 @@ class CreateInstanceSerializer(serializers.Serializer):
 
     def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         if attrs.get("game", games.DEFAULT_GAME) != games.DEFAULT_GAME:
-            return attrs  # the create view refuses other games (phase 1): no Minecraft checks for them
+            return self._validate_other_game(attrs)
+        if "accept_eula" not in attrs:
+            raise serializers.ValidationError({"accept_eula": ["This field is required."]})
         if attrs["mode"] == "standard":
             if not attrs.get("server_type"):
                 raise serializers.ValidationError({"server_type": ["Choose a server type"]})
@@ -521,6 +674,36 @@ class CreateInstanceSerializer(serializers.Serializer):
             )
             if node is not None and (error := container_limit_error(node, probe.container_memory_mb)):
                 raise serializers.ValidationError({"memory_mb": [error]})
+        return attrs
+
+    def _validate_other_game(self, attrs: dict[str, Any]) -> dict[str, Any]:
+        """A server of a game other than Minecraft (contract B5): its version, memory, options and settings."""
+        definition = games.get(attrs["game"])
+        if definition.has_versions and not attrs.get("version"):
+            raise serializers.ValidationError({"version": [f"Choose a {definition.label} version"]})
+        memory = attrs.get("memory_mb") or definition.default_memory_mb()
+        if memory < definition.min_memory_mb:
+            raise serializers.ValidationError({"memory_mb": [f"{definition.label} needs at least {definition.min_memory_mb} MB"]})
+        attrs["memory_mb"] = memory
+        from apps.core.errors import ApiError
+        from apps.nodes.models import Node
+
+        try:
+            attrs["options"] = definition.validate_options(attrs.get("options"))
+            attrs["settings"] = definition.validate_initial_settings(attrs.get("settings"))
+        except ApiError as exc:
+            raise serializers.ValidationError(
+                {"settings" if exc.error_code == "invalid_setting" else "options": [str(exc.detail)]}
+            ) from exc
+        unknown = sorted(set(attrs.get("secrets") or {}) - {s.key for s in definition.secret_specs})
+        if unknown:
+            raise serializers.ValidationError({"secrets": [f"Unknown secret(s): {', '.join(unknown)}"]})
+        missing = [s.label for s in definition.secret_specs if s.required and not (attrs.get("secrets") or {}).get(s.key)]
+        if missing:
+            raise serializers.ValidationError({"secrets": [f"Required: {', '.join(missing)}"]})
+        node = Node.objects.filter(pk=attrs["node"]).first() if attrs.get("node") else Node.default()
+        if node is not None and (error := container_limit_error(node, int(memory))):
+            raise serializers.ValidationError({"memory_mb": [error]})
         return attrs
 
 
@@ -584,6 +767,14 @@ class ScheduleSerializer(serializers.ModelSerializer):
             if not cmd or len(cmd) > 1400 or "\n" in cmd:
                 raise serializers.ValidationError({"payload": ["A single-line command is required"]})
             payload["command"] = definition.normalise_command(cmd)
+            if definition.refuse_stop_commands and definition.is_stop_command(payload["command"]):
+                raise serializers.ValidationError(
+                    {
+                        "payload": [
+                            f"'{payload['command']}' would make the server exit and Docker would start it again; use a stop schedule"
+                        ]
+                    }
+                )
             attrs["payload"] = payload
         if action in ("restart", "stop") and isinstance(payload, dict):
             from .power_warnings import validate_message, validate_warn_minutes

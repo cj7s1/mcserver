@@ -1,6 +1,7 @@
 # Development status
 
-_Last updated: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
+_Last updated: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
+pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
 all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
 stopped servers without a container, stop safety, Unraid shutdown hook, btrfs snapshots without
@@ -9,6 +10,84 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Multi-game phases 2 and 3: the generic pieces and Factorio (branch `feature/multi-game`)
+
+Design: docs/design/GAME-DEFINITIONS.md; how it works: ARCHITECTURE.md, "Games"; security notes:
+docs/SECURITY.md, "Games other than Minecraft". Phase 1 (Minecraft as the first game definition,
+no behaviour change) is the commit before.
+
+**Verification levels**
+
+* **Unit / API tests:** every generic piece and Factorio, in all three layers (TESTING.md, "Tests of
+  multi-game support"). Suites on the final tree: backend 1787 passed (2 skipped), agent 1237 passed
+  (45 skipped: restic, btrfs, ZFS binaries), frontend 499 tests in 53 files; ruff, `makemigrations
+  --check`, `tsc -b`, lint (warnings only, none new) and the build pass. The Minecraft pin tests pass
+  unchanged.
+* **Real containers on a Linux desktop (2026-11-10), Docker 29.9.2:** a stack of commit `082b949`
+  (what runs on the Unraid server) with one running vanilla server, upgraded with
+  `deploy/scripts/upgrade.sh run --with-migrations` to this tree: the vanilla container was not
+  touched (same id, start time and spec-hash label) and does **not** read restart-required. Then
+  Factorio `2.1.23-rootless` on the upgraded stack through the API and a headless browser: create
+  (Space Age off, password, seed), ready in about 2 s (agent log probe), RCON players / chat /
+  `/seed` / `/version`, whitelist through RCON, `/quit` refused by the API and turned into the Stop
+  job by the console, `/server-save` with `Saving finished`, a consistent backup (the driver's save,
+  `temp/` left out), stop (SIGTERM, exit 0, container retired after about 5 s), start (same seed and
+  whitelist), world reset with a new seed (safety backup, saves moved aside, new map), import of the
+  earlier save (seed back), export download, restore of the backup while stopped and while running,
+  software update to `2.1.24-rootless` (pre-update backup, `/version` 2.1.24, same map), the create
+  wizard (second server on UDP 34198, seed and max players from the form), the Game settings form
+  (saved, masked password kept), delete of both. The RCON password does not appear in the panel's
+  log API (it is in `docker logs` on the host: docs/SECURITY.md). The container runs as 1000:1000
+  with no capabilities, only 34197/udp published, no anonymous volume created.
+* **Not run:** anything on Unraid (uid 99:100 was tested with the image in the spike, not with the
+  panel), a real Factorio client joining, Space Age on, a public listing, a game with setup steps
+  or secrets other than the test game, the first-start retry against a real SteamCMD image, the
+  `tcp` readiness probe and image VOLUME mounts on a real image (unit tests only), the integration
+  test suite, `panel-acceptance.sh` and `upgrade-rehearsal.sh` on this tree, a rollback of this
+  upgrade.
+
+**Found and fixed during the real-container run:** a full restore left the server folder owned by
+root (restic creates the staging folder): itzg's root entrypoint had hidden this for Minecraft, but
+the rootless Factorio image could not write its log and crash-looped. The agent now gives the folder
+back to the runtime uid/gid after the swap (`main.restore_backup`). Also: the stop log named
+Minecraft's `save-all flush` for every game.
+
+**Deviations from the design**
+
+* Factorio uses the `-rootless` tags (no capabilities, `user` set by the agent) instead of the
+  regular tags with `PUID`/`PGID` (the spike's finding).
+* Readiness is the agent's log probe (`Starting RCON interface at`), not RCON: every RCON connection
+  is a line in Factorio's log, so a health check every 10 s would flood the console. The rootless
+  image has no HEALTHCHECK of its own.
+* The RCON password goes through `config/rconpw` (written by the panel before every apply), not an
+  environment variable: the image has none. The entrypoint's `set -x` prints it into the container
+  log, so the agent redacts it from every log text it serves (not in the design).
+* The server always loads `saves/world.zip` (explicit `SAVE_NAME`, `LOAD_LATEST_SAVE=false`): with the
+  image's default "newest file" a copied save was not always picked (spike). A reset or an import
+  moves all saves into `saves-replaced/<stamp>/` instead of deleting them.
+* `Instance.game_options` (pinned choices such as Space Age and the save name) is a column the design
+  did not name. `game_port` stays for other games as a copy of their first named port; its unique
+  constraint now covers Minecraft rows only.
+* Secrets and setup steps are built and tested with a test game; Factorio has neither (the
+  factorio.com token for a public listing is a field of server-settings.json, masked in the form).
+* The install retry for image-side download failures is in the panel (`wait_first_start`); the agent
+  only reports the profile's retryable exit codes in `/v1/info`.
+* Backup excludes come from both halves: the agent adds the profile's (Factorio: `<server
+  folder>/temp`, as an absolute path), the panel the definition's (`*.tmp.zip`).
+* Not built in these phases: the console-write primitive for Terraria/TShock (design 5.2), the
+  `udp-query` and `driver` readiness kinds, a players query without a command for Factorio
+  (`/players online` over RCON, cached 30 s, so each check is a log line), Factorio mods.
+
+**Open points**
+
+* Run `upgrade-rehearsal.sh` and the integration tests on this tree; try a rollback of the upgrade
+  (migration 0006 is reversible; a Factorio server would be unknown to the old panel).
+* Unraid: a Factorio server as 99:100 on the cache pool, UDP forwarding, a real client.
+* The job log of a software update says "The runtime image is a newer build now" for a change of
+  version (another tag); the wording is meant for a moved tag.
+* The panel polls Factorio's players over RCON (every page poll after 30 s, and once a minute for the
+  history), which adds "New RCON connection" lines to its log.
 
 ## Where things stand (2026-11-10)
 

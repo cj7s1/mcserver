@@ -1,0 +1,43 @@
+/** Named ports of a non-Minecraft server: rows of the editor, validation and the PATCH body (GameNetwork.tsx). */
+import type { NamedPort } from "@/lib/types";
+
+export interface NamedPortRow {
+  name: string;
+  label: string;
+  protocol: "tcp" | "udp";
+  container_port: number;
+  host_port: string;
+}
+
+export function rowsFromPorts(ports: readonly NamedPort[]): NamedPortRow[] {
+  return ports.map((p) => ({
+    name: p.name,
+    label: p.label || p.name,
+    protocol: p.protocol,
+    container_port: p.container_port,
+    host_port: String(p.host_port),
+  }));
+}
+
+/** Errors per port name: range, and two named ports of this server on the same host port and protocol. */
+export function validateNamedPorts(rows: readonly NamedPortRow[]): Record<string, string> {
+  const errors: Record<string, string> = {};
+  const seen = new Map<string, string>();
+  for (const r of rows) {
+    const t = r.host_port.trim();
+    if (!/^\d+$/.test(t) || Number(t) < 1024 || Number(t) > 65535) {
+      errors[r.name] = "A port between 1024 and 65535";
+      continue;
+    }
+    const key = `${Number(t)}/${r.protocol}`;
+    const other = seen.get(key);
+    if (other) errors[r.name] = `Same port and protocol as ${other}`;
+    else seen.set(key, r.label);
+  }
+  return errors;
+}
+
+/** The PATCH body's `ports`: every named port of the server with its host port. */
+export function portsPatch(rows: readonly NamedPortRow[]): { name: string; host_port: number }[] {
+  return rows.map((r) => ({ name: r.name, host_port: Number(r.host_port.trim()) }));
+}

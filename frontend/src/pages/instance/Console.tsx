@@ -30,7 +30,9 @@ import { useTheme } from "@/hooks/use-theme";
 import { api, errorMessage } from "@/lib/api";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { consoleRules, gameId, isMinecraft } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
+import { useGameInfo } from "./game-api";
 import { CommandInput } from "./console/CommandInput";
 import { ConnectionIndicator } from "./console/ConnectionIndicator";
 import {
@@ -83,6 +85,9 @@ function slug(s: string): string {
 }
 
 function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instance; canCommandPerm: boolean; canFiles: boolean }) {
+  // the game's console rules (stop words, leading slash); Minecraft keeps the built-in ones
+  const minecraft = isMinecraft(instance);
+  const gameInfo = useGameInfo(minecraft ? null : instance);
   const { resolved } = useTheme();
   const themeRef = useRef(resolved);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -605,7 +610,13 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
 
         {/* command line */}
         <div className="border-t p-3">
-          <CommandInput instanceId={instance.id} disabledReason={disabledReason} pending={pending} onSubmit={sendCommand} />
+          <CommandInput
+            instanceId={instance.id}
+            disabledReason={disabledReason}
+            pending={pending}
+            onSubmit={sendCommand}
+            rules={minecraft ? undefined : consoleRules(gameInfo ?? { id: gameId(instance) })}
+          />
         </div>
       </div>
       <p className="px-1 text-xs text-muted-foreground">

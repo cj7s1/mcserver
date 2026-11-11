@@ -150,6 +150,36 @@ removes the replaced image when it has no tag left and no container uses it. The
 channel in System settings (stable, latest, ...) applies to existing servers too: a running
 server shows **restart required** after a change and gets the new image at its next start.
 
+### Factorio servers
+
+The create wizard asks for the game first (Minecraft or Factorio). A Factorio server:
+
+* runs `factoriotools/factorio:<exact version>-rootless` (about 1 GB per version on disk), as
+  `MC_UID`/`MC_GID` with no capabilities. Clients must run the same version: the version is pinned
+  and changed in Settings -> Software (with a pre-update backup; going back needs a confirmation).
+  The version list comes from Docker Hub's tags and factorio.com, so creating a server needs
+  internet access from the panel.
+* gets one **UDP** port, 34197 when it is free (else the next free one above it). Forward that UDP
+  port on your router for players outside your network; the Network page lists it with its
+  protocol. RCON (27015/tcp) is never published.
+* has a memory limit of its own (no Java heap; default 2 GB, at least 1 GB). Large maps and Space
+  Age games need more.
+* asks once whether **Space Age** is on (off by default: players need to own the expansion to
+  join). The choice cannot be changed later, because switching it under an existing save converts
+  the save.
+* is not listed publicly unless you turn it on in Settings -> Game settings (which also needs a
+  factorio.com username and token). A game password can be set there and in the wizard.
+* keeps its map in `saves/world.zip`. Backups -> Saves downloads it, imports a save (`.zip`) or
+  creates a new map with a chosen seed; both move the previous saves into `saves-replaced/` in
+  the server folder after a safety backup.
+* needs an agent of this release: an older agent does not have the Factorio profile, and the panel
+  refuses to create or start a Factorio server on it (`agent_lacks_game`). `./scripts/upgrade.sh run`
+  updates both.
+
+A registry mirror for the Factorio image is set in System settings (`runtime_images`, for example
+`{"factorio": {"repository": "registry.example/factorio"}}`); the agent must allow it too
+(`AGENT_GAME_FACTORIO_IMAGES` in the agent's environment, comma-separated).
+
 ### Memory
 
 Before a server is started, the panel checks that it fits into the host's RAM: the memory limits

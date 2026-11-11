@@ -5,7 +5,7 @@
 
 
 A self-hosted Minecraft **Java Edition** server manager for a Docker host (more hosts can be added as
-nodes). It's designed for Unraid first and also runs on any Linux Docker host. It combines
+nodes), which also runs **Factorio** servers. It's designed for Unraid first and also runs on any Linux Docker host. It combines
 Prism-Launcher-style instance management with game-panel administration, and it is built around
 **easy modpack servers**: search for *Better MC*, pick a release, choose RAM and a port, and deploy.
 
@@ -14,6 +14,10 @@ Prism-Launcher-style instance management with game-panel administration, and it 
 
 ## Features
 
+- **Games:** Minecraft (Java edition) and Factorio (headless, pinned exact versions, Space Age
+  chosen once, UDP port, game settings form, saves: download, import, new map with a seed). Each
+  game is a reviewed definition in the panel plus a runtime profile in the agent; the UI shows only
+  what a game supports.
 - **Servers:** Vanilla, Paper, Purpur, Folia, Fabric, Quilt, Forge, NeoForge. Versions come from the
   official metadata services, and Java is picked automatically from Mojang's requirements.
 - **Modpacks:** Modrinth, CurseForge (with or without an API key) and Feed The Beast. Releases are

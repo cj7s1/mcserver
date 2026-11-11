@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -22,6 +23,7 @@ from .models import SystemSetting
 
 EDITABLE = {
     "runtime_image_channel": str,
+    "runtime_images": dict,
     "default_memory_mb": int,
     "port_range_start": int,
     "port_range_end": int,
@@ -189,6 +191,8 @@ class SystemSettingsView(APIView):
                 raise ApiError(f"{key} must be a {typ.__name__}", code="invalid_setting")
             if key == "runtime_image_channel" and value not in ("stable", "latest") and not str(value).startswith("pinned:"):
                 raise ApiError("runtime_image_channel must be stable, latest or pinned:<version>", code="invalid_setting")
+            if key == "runtime_images" and value is not None:
+                _check_runtime_images(value)
             if key in ("port_range_start", "port_range_end") and value is not None and not 1024 <= value <= 65535:
                 raise ApiError("Port range must be within 1024-65535", code="invalid_setting")
             if key == "default_bind_ip" and value is not None and not _is_ip(value):
@@ -214,6 +218,26 @@ class SystemSettingsView(APIView):
         response = self.get(request)
         response.data["warnings"] = warnings
         return response
+
+
+_REPOSITORY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,199}$")
+
+
+def _check_runtime_images(value: dict[str, Any]) -> None:
+    """``runtime_images``: {game: {"repository": "..."}} for games other than Minecraft (Minecraft has
+    runtime_image_repository / runtime_image_channel). The agent still has to allow the repository
+    (AGENT_GAME_<ID>_IMAGES)."""
+    from apps import games
+
+    for game, entry in value.items():
+        definition = games.get_or_none(game)
+        if definition is None or game == games.DEFAULT_GAME:
+            raise ApiError(f"runtime_images: unknown game {game!r} (Minecraft has its own settings)", code="invalid_setting")
+        if not isinstance(entry, dict) or set(entry) - {"repository"}:
+            raise ApiError(f'runtime_images.{game} must be {{"repository": "..."}}', code="invalid_setting")
+        repo = entry.get("repository")
+        if repo is not None and (not isinstance(repo, str) or not _REPOSITORY.match(repo) or ".." in repo or "//" in repo):
+            raise ApiError(f"runtime_images.{game}.repository is not a valid image repository", code="invalid_setting")
 
 
 class PortsView(APIView):

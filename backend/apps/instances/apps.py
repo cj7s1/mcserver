@@ -7,4 +7,4 @@ class InstancesConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self) -> None:
-        from . import handlers  # noqa: F401  (registers job handlers)
+        from . import game_handlers, handlers  # noqa: F401  (registers job handlers)

@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 
 Send = Callable[[str, float], Any]
 Report = Callable[[int, str], None]
+# wait_log(pattern, since, timeout): whether the running container printed a line matching the
+# regular expression ``pattern`` after ``since`` (epoch seconds), waiting up to ``timeout`` s.
+WaitLog = Callable[[str, float, float], bool]
 
 
 class ControlDriver:
@@ -53,8 +56,9 @@ class ControlDriver:
     def can_save(self) -> bool:
         return False
 
-    def save(self, send: Send, report: Report) -> None:
-        """Make the server write its world to disk now (before a copy without a pause)."""
+    def save(self, send: Send, report: Report, wait_log: WaitLog | None = None) -> None:
+        """Make the server write its world to disk now (before a copy without a pause); with
+        ``wait_log`` a driver whose game reports the end of a save in its log waits for it."""
         raise AgentError("This server's game cannot save on request", "save_unsupported", 409)
 
     @property
@@ -81,6 +85,11 @@ class ControlDriver:
 
     def ready(self, settings: Settings, c: Container) -> bool | None:
         """Readiness beyond Docker's health check; None: Docker's health check decides."""
+        return None
+
+    # --- the control secret ---------------------------------------------------------------------
+    def secret(self, settings: Settings, c: Container) -> str | None:
+        """The secret the agent uses to reach the server (RCON password); None without one."""
         return None
 
 

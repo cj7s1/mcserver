@@ -19,21 +19,35 @@ class PlayerActionSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=200, required=False, allow_blank=True)
 
 
+class GamePlayerActionSerializer(PlayerActionSerializer):
+    """Games other than Minecraft: names are checked by the game's definition (Factorio: up to 60 characters)."""
+
+    name = serializers.CharField(max_length=64)
+
+
 class PlayersView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
-        games.for_instance(instance).require(instance, "players")
+        definition = games.for_instance(instance)
+        definition.require(instance, "players")
+        if definition.id != games.DEFAULT_GAME:
+            return Response(definition.player_lists(instance))
         return Response(service.lists(instance))
 
     @extend_schema(request=PlayerActionSerializer, responses={200: dict})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.players")
-        games.for_instance(instance).require(instance, "player_actions")
-        ser = PlayerActionSerializer(data=request.data)
+        definition = games.for_instance(instance)
+        definition.require(instance, "player_actions")
+        other = definition.id != games.DEFAULT_GAME
+        ser = (GamePlayerActionSerializer if other else PlayerActionSerializer)(data=request.data)
         ser.is_valid(raise_exception=True)
         d = ser.validated_data
-        result = service.mutate(instance, d["action"], d["name"], d.get("reason", ""))
+        if other:
+            result = definition.player_action(instance, d["action"], d["name"], d.get("reason", ""))
+        else:
+            result = service.mutate(instance, d["action"], d["name"], d.get("reason", ""))
         audit.record(
             f"players.{d['action']}",
             request=request,

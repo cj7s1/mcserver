@@ -75,19 +75,20 @@ def run(kind, inst, capture, **params):
 
 
 # --- registry -------------------------------------------------------------------------------------
-def test_registry_has_minecraft_only():
-    assert games.ids() == ["minecraft"]
-    assert [d.id for d in games.all()] == ["minecraft"]
+def test_registry_has_the_built_in_games():
+    # phase 1 had Minecraft only; phase 3 adds Factorio (tests/test_games_phase2.py)
+    assert games.ids() == ["minecraft", "factorio"]
+    assert [d.id for d in games.all()] == ["minecraft", "factorio"]
     mc = games.get("minecraft")
     assert isinstance(mc, MinecraftDefinition) and games.get(None) is mc and games.get("") is mc
-    assert games.get_or_none("factorio") is None
+    assert games.get_or_none("nogame") is None
     with pytest.raises(games.UnknownGame) as exc:
-        games.get("factorio")
+        games.get("nogame")
     assert exc.value.status_code == 409 and exc.value.error_code == "unknown_game"
 
 
 def test_register_and_unregister(testgame):
-    assert games.ids() == ["minecraft", "testgame"] and games.get("testgame") is testgame
+    assert games.ids() == ["minecraft", "factorio", "testgame"] and games.get("testgame") is testgame
     with pytest.raises(ValueError, match="already registered"):
         games.register(FakeGame())
     with pytest.raises(ValueError, match="already registered"):
@@ -252,7 +253,9 @@ def test_other_game_api_fields(clients, other):
 def test_game_catalog(clients):
     resp = clients["viewer"].get("/api/catalog/games")
     assert resp.status_code == 200
-    assert resp.json() == [
+    # Minecraft's entry is exactly what phase 1 answered; Factorio's is tested in tests/test_games_phase2.py
+    assert [g["id"] for g in resp.json()] == ["minecraft", "factorio"]
+    assert resp.json()[:1] == [
         {
             "id": "minecraft",
             "label": "Minecraft",
@@ -271,9 +274,9 @@ def test_game_catalog_default_memory_follows_the_setting(clients, testgame):
 
     SystemSetting.set("default_memory_mb", 6144)
     body = clients["owner"].get("/api/catalog/games").json()
-    assert [g["id"] for g in body] == ["minecraft", "testgame"]
+    assert [g["id"] for g in body] == ["minecraft", "factorio", "testgame"]
     assert body[0]["default_memory_mb"] == 6144
-    assert body[1] == {
+    assert body[2] == {
         "id": "testgame",
         "label": "Test Game",
         "variants": [{"id": "vanilla", "label": "Vanilla"}],
@@ -317,7 +320,8 @@ def test_agent_games_are_read_from_its_info(node, fake_agent):
     from apps.nodes.client import AgentClient
 
     assert AgentClient(node).games() == {
-        "minecraft": {"variants": [], "images": ["itzg/minecraft-server"], "control": "minecraft-rcon"}
+        "minecraft": {"variants": [], "images": ["itzg/minecraft-server"], "control": "minecraft-rcon"},
+        "factorio": {"variants": [], "images": ["factoriotools/factorio"], "control": "rcon"},
     }
     fake_agent.without_games()
     assert AgentClient(node).games(refresh=True) == {}

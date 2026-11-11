@@ -372,9 +372,13 @@ class ConsoleConsumer(_GuardedConsumer):
         The answer is a ``notice`` (``level`` info/error, ``message``, the command's ``id``, and
         ``job_id`` of the stop job) followed by the ``command_result`` with the same ``id`` and the
         same text; a client that showed the notice can skip the result's text."""
+        from apps import games
+
+        definition = games.get_or_none(getattr(self.instance, "game", None))
+        word = definition.stop_word if definition is not None else "stop"  # Minecraft: stop
         if "instance.control" not in self.perms:
             message = (
-                "Not sent: 'stop' over the console makes the server exit, and Docker starts it again at once. "
+                f"Not sent: '{word}' over the console makes the server exit, and Docker starts it again at once. "
                 "Stopping the server needs the permission to start and stop it, which you do not have."
             )
             await self._send({"type": "notice", "level": "error", "message": message, "id": req_id})
@@ -406,7 +410,7 @@ class ConsoleConsumer(_GuardedConsumer):
             )
             return
         message = (
-            "'stop' was not sent to the server: the panel is stopping it instead (the same as the Stop button), "
+            f"'{word}' was not sent to the server: the panel is stopping it instead (the same as the Stop button), "
             "so Docker does not start it again."
         )
         await self._send({"type": "notice", "level": "info", "message": message, "id": req_id, "job_id": str(job.id)})

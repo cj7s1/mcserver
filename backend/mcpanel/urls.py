@@ -10,6 +10,7 @@ from apps.catalog import views as catalog
 from apps.content import views as content
 from apps.core import views as core
 from apps.games import views as games
+from apps.instances import game_views
 from apps.instances import views as instances
 from apps.jobs import views as jobs
 from apps.metrics import views as metrics
@@ -54,6 +55,14 @@ instance_patterns = [
     path("<uuid:pk>/world/replace", instances.WorldReplaceView.as_view()),
     path("<uuid:pk>/world/reset", instances.WorldResetView.as_view()),
     path("<uuid:pk>/diagnostics", instances.DiagnosticsView.as_view()),
+    path("<uuid:pk>/config", game_views.ConfigFilesView.as_view()),
+    path("<uuid:pk>/config/<str:file_id>", game_views.ConfigFileView.as_view()),
+    path("<uuid:pk>/secrets", game_views.SecretsView.as_view()),
+    path("<uuid:pk>/setup", game_views.SetupView.as_view()),
+    path("<uuid:pk>/saves", game_views.SavesView.as_view()),
+    path("<uuid:pk>/saves/reset", game_views.SavesResetView.as_view()),
+    path("<uuid:pk>/saves/import", game_views.SavesImportView.as_view()),
+    path("<uuid:pk>/saves/export", game_views.SavesExportView.as_view()),
     path("<uuid:pk>/software", instances.SoftwareUpdateView.as_view()),
     path("<uuid:pk>/migrate", instances.MigrateView.as_view()),
     path("<uuid:pk>/manual-downloads", instances.ManualDownloadsView.as_view()),
@@ -103,6 +112,7 @@ api_patterns = [
     path("catalog/loaders", catalog.LoaderVersionsView.as_view()),
     path("catalog/java", catalog.JavaView.as_view()),
     path("catalog/games", games.GameCatalogView.as_view()),
+    path("catalog/games/<str:game>/versions", games.GameVersionsView.as_view()),
     path("modpacks/providers", modpacks.ProvidersView.as_view()),
     path("modpacks/<str:provider>/search", modpacks.SearchView.as_view()),
     path("modpacks/<str:provider>/projects/<str:project_id>", modpacks.ProjectView.as_view()),

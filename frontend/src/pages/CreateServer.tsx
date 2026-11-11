@@ -14,6 +14,7 @@ import { MINECRAFT, variantLabel } from "@/lib/games";
 import { qk } from "@/lib/queries";
 import type { MemoryModel, Provider, ServerType, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { GameWizard } from "./create-server/GameWizard";
 import { StepGame } from "./create-server/StepGame";
 import { StepGameplay } from "./create-server/StepGameplay";
 import { StepResources } from "./create-server/StepResources";
@@ -502,6 +503,20 @@ export default function CreateServer() {
           }
         />
       </div>
+    );
+  }
+
+  // another game than Minecraft, past the Game step: the generic wizard of its catalog entry
+  const otherGame =
+    hasGameStep && state.game && state.game !== MINECRAFT ? games.data?.find((g) => g.id === state.game) : undefined;
+  if (otherGame && step !== "game") {
+    return (
+      <GameWizard
+        key={otherGame.id}
+        game={otherGame}
+        nightlyBackupAllowed={nightlyBackupAllowed(user)}
+        onBackToGame={() => setStep("game")}
+      />
     );
   }
 

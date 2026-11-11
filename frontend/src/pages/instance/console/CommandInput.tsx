@@ -2,6 +2,7 @@ import { CornerDownLeft, Loader2 } from "lucide-react";
 import { useId, useRef, useState, type KeyboardEvent } from "react";
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput, InputGroupText } from "@/components/ui/input-group";
 import { useAuth } from "@/hooks/use-auth";
+import { MINECRAFT_CONSOLE, normaliseConsoleCommand, type ConsoleRules } from "@/lib/games";
 import { userScopedKey } from "@/lib/user-storage";
 
 const MAX_HISTORY = 100;
@@ -40,11 +41,14 @@ export function CommandInput({
   disabledReason,
   pending,
   onSubmit,
+  rules = MINECRAFT_CONSOLE,
 }: {
   instanceId: string;
   disabledReason: string | null;
   pending: number;
   onSubmit: (command: string) => boolean;
+  /** How the server's game takes commands (default: Minecraft's: no leading slash, `stop`). */
+  rules?: ConsoleRules;
 }) {
   const userId = useAuth().user?.id;
   const [value, setValue] = useState("");
@@ -55,7 +59,7 @@ export function CommandInput({
   const disabled = !!disabledReason;
 
   const submit = () => {
-    const cmd = value.trim().replace(/^\/+/, "");
+    const cmd = normaliseConsoleCommand(value, rules);
     if (!cmd || disabled) return;
     if (!onSubmit(cmd)) return;
     const next = history[history.length - 1] === cmd ? history : [...history, cmd].slice(-MAX_HISTORY);
@@ -116,7 +120,7 @@ export function CommandInput({
           autoCapitalize="off"
           autoCorrect="off"
           spellCheck={false}
-          placeholder={disabled ? "Commands unavailable" : "Type a command, e.g. list or say Hello"}
+          placeholder={disabled ? "Commands unavailable" : `Type a command, e.g. ${rules.example}`}
           aria-describedby={`${id}-help`}
           className="font-mono text-sm"
         />
@@ -128,13 +132,26 @@ export function CommandInput({
         </InputGroupAddon>
       </InputGroup>
       <p id={`${id}-help`} className="text-xs text-muted-foreground">
-        {disabledReason ?? (
-          <>
-            Enter to send · <kbd className="font-mono">↑</kbd>/<kbd className="font-mono">↓</kbd> history · no leading slash needed ·
-            commands run over RCON and are recorded in the audit log ·{" "}
-            <span className="font-mono">stop</span> stops the server through the panel
-          </>
-        )}
+        {disabledReason ??
+          (rules === MINECRAFT_CONSOLE ? (
+            <>
+              Enter to send · <kbd className="font-mono">↑</kbd>/<kbd className="font-mono">↓</kbd> history · no leading slash needed ·
+              commands run over RCON and are recorded in the audit log ·{" "}
+              <span className="font-mono">stop</span> stops the server through the panel
+            </>
+          ) : (
+            <>
+              Enter to send · <kbd className="font-mono">↑</kbd>/<kbd className="font-mono">↓</kbd> history ·{" "}
+              {rules.keepsSlash ? "commands keep their leading slash (a line without one is a chat message)" : "no leading slash needed"}{" "}
+              · commands are recorded in the audit log
+              {rules.stopWords.length > 0 && (
+                <>
+                  {" "}
+                  · <span className="font-mono">{rules.stopWords.join(", ")}</span> stops the server through the panel
+                </>
+              )}
+            </>
+          ))}
       </p>
     </form>
   );

@@ -1288,17 +1288,23 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                 continue
             current_stream["s"] = stream
             splitter = _LineSplitter()
+            # a game whose image prints its control secret: hidden in every line (None: Minecraft)
+            redact = (
+                docker_ops.log_redactor(settings, c)
+                if (getattr(c, "labels", None) or {}).get(profiles.LABEL_GAME)
+                else None
+            )
             try:
                 for chunk in stream:
                     if stop_event.is_set():
                         break
                     for line in splitter.feed(chunk):
-                        emit({"type": "log", "line": line})
+                        emit({"type": "log", "line": redact(line) if redact is not None else line})
             except Exception as exc:  # stream broke (container stopped / daemon restarted)
                 log.debug("log stream for %s ended: %s", instance_id, exc)
             finally:
                 for line in splitter.flush():
-                    emit({"type": "log", "line": line})
+                    emit({"type": "log", "line": redact(line) if redact is not None else line})
                 with contextlib.suppress(Exception):
                     stream.close()
                 current_stream.pop("s", None)
@@ -1859,6 +1865,23 @@ async def list_backups(instance_id: UUID, settings: Settings = Depends(get_setti
     return {"snapshots": await run_in_threadpool(r.snapshots)}
 
 
+def _profile_backup_excludes(settings: Settings, instance_id: UUID) -> list[str]:
+    """The default backup excludes of the server's game (its container's labels, or the game its
+    last-run record names), as absolute paths below the server folder; none for Minecraft, for an
+    unknown game and when Docker cannot be asked."""
+    try:
+        status = docker_ops.status(instance_id, settings)
+    except Exception as exc:
+        log.debug("backup of %s: the game could not be determined: %s", instance_id, exc)
+        return []
+    info = status if status.get("exists") else (status.get("last_run") or {})
+    profile = profiles.get(info.get("game") or profiles.DEFAULT_GAME, info.get("variant") or None)
+    if profile is None:
+        return []
+    source = docker_ops.instance_dir(settings, instance_id)
+    return [str(source / rel) for rel in profile.default_backup_excludes]
+
+
 @app.post("/v1/instances/{instance_id}/backups", dependencies=[Depends(require_token)])
 async def create_backup(
     instance_id: UUID, body: BackupRequest, settings: Settings = Depends(get_settings)
@@ -1869,12 +1892,13 @@ async def create_backup(
     restic = Restic(settings, instance_id)
 
     def _backup(op: Operation) -> dict[str, Any]:
+        excludes = list(body.excludes) + _profile_backup_excludes(settings, instance_id)
         with _world_saving_paused(settings, instance_id, body.consistency, op, "backup", 0.02) as saving:
             op.update(0.06, "Running restic backup")
             summary = restic.backup(
                 source,
                 [f"instance:{instance_id}", f"backup:{body.backup_id}", *body.tags],
-                body.excludes,
+                excludes,
                 lambda p, m: op.update(0.06 + p * 0.9, m),
             )
         summary["warnings"] = saving.warnings + summary.get("warnings", [])
@@ -1955,6 +1979,11 @@ async def restore_backup(
             raise
         if moved:
             remove_tree(old)
+        # restic creates the staging folder itself (as root): the server folder must belong to the
+        # runtime uid/gid again, as prepare and apply leave it, or an image that runs without
+        # root (Factorio's rootless image) cannot create or rename files at its top level
+        with contextlib.suppress(PermissionError, FileNotFoundError):
+            os.chown(target_dir, settings.runtime_uid, settings.runtime_gid)
         if warnings:
             result["warnings"] = warnings
         return result
@@ -2259,6 +2288,15 @@ def _clear_saving_marker(settings: Settings, instance_id: UUID) -> None:
         _saving_marker(settings, instance_id).unlink()
 
 
+def _log_waiter(instance_id: UUID) -> drivers.WaitLog:
+    """``wait_log`` for a driver's save: waits for a line in the running container's log."""
+
+    def wait(pattern: str, since: float, timeout: float) -> bool:
+        return docker_ops.wait_for_log(docker_ops.running_container(instance_id), pattern, since, timeout)
+
+    return wait
+
+
 def _sender_with_timeout(settings: Settings, instance_id: UUID, timeout: float) -> drivers.Send:
     """Like :func:`_sender`, every command bounded by ``timeout`` instead of the driver's own
     (the recovery loop and the shutdown hook)."""
@@ -2310,7 +2348,7 @@ def _world_saving_paused(
                 if driver.can_pause_saving:
                     driver.pause_saving(send_pausing, report)
                 elif driver.can_save:
-                    driver.save(send, report)
+                    driver.save(send, report, _log_waiter(instance_id))
                 else:
                     raise AgentError("this server's game cannot save on request", "save_unsupported", 409)
                 time.sleep(SAVE_SETTLE_SECONDS)

@@ -5,7 +5,7 @@ All containers are created from an :class:`InstanceSpec`, which deliberately
 cannot express privileged mode, extra capabilities, devices or extra mounts: what the
 container gets beyond the spec comes from the runtime profile of its game
 (:mod:`mcagent.profiles`), and how the agent talks to the server from its control driver
-(:mod:`mcagent.drivers`). Minecraft is the only game in phase 1 of multi-game support.
+(:mod:`mcagent.drivers`). Games: Minecraft and Factorio (profiles/).
 """
 
 from __future__ import annotations
@@ -156,6 +156,8 @@ def validate_image(settings: Settings, image: str, profile: RuntimeProfile | Non
 
     if not IMAGE_TAG_RE.match(tag):
         raise AgentError("Invalid image tag", "invalid_image")
+    if (reason := profile.tag_error(tag)) is not None:
+        raise AgentError(reason, "invalid_image")
     return f"{repo}:{tag}"
 
 
@@ -393,10 +395,12 @@ def label_safe_name(name: str) -> str:
 def _validate_env(profile: RuntimeProfile, spec: InstanceSpec, injected: dict[str, str]) -> None:
     """The profile's environment policy, re-validated here (never rely on the panel). A key the
     agent injects itself is not refused: the injected value replaces it."""
-    for key in spec.env:
+    for key, value in spec.env.items():
         if key in injected:
             continue
         reason = profile.env_error(key)
+        if reason is None:
+            reason = profile.env_value_error(key, value)
         if reason is not None:
             raise AgentError(reason, "env_not_allowed", 400)
 
@@ -406,12 +410,64 @@ def _mount_source(settings: Settings, instance_id: UUID, subdir: str) -> str:
     return str(base if subdir in ("", ".") else base / subdir)
 
 
+# Folder of the server folder that holds the image VOLUMEs outside the profile's mounts.
+IMAGE_VOLUMES_DIR = ".volumes"
+IMAGE_VOLUME_TMPFS_OPTIONS = "rw,nosuid,nodev"
+
+
+def _norm_container_path(path: str) -> str:
+    parts = [p for p in str(path).split("/") if p not in ("", ".")]
+    if ".." in parts:
+        raise AgentError(f"The image declares an invalid volume path {path!r}", "invalid_image", 400)
+    return "/" + "/".join(parts)
+
+
+def image_volume_plan(
+    profile: RuntimeProfile, image_volumes: list[str] | None
+) -> tuple[dict[str, str], list[str]]:
+    """Where each VOLUME the image declares goes: ({container path: path relative to the server
+    folder}, [container paths that get a tmpfs]). A path that is exactly a profile mount needs
+    nothing; one below a mount is that subfolder of the mount; one in ``volume_tmpfs`` a tmpfs;
+    any other one ``.volumes/<path with "/" as "_">``. Docker creates an anonymous volume for
+    every declared path that has no mount of its own, so every one gets one."""
+    binds: dict[str, str] = {}
+    tmpfs: list[str] = []
+    if not profile.mount_image_volumes or not image_volumes:
+        return binds, tmpfs
+    mounts = {_norm_container_path(m.container_path): m.subdir for m in profile.mounts}
+    tmpfs_paths = {_norm_container_path(t) for t in profile.volume_tmpfs}
+    for raw in sorted(image_volumes):
+        path = _norm_container_path(raw)
+        if path in mounts or path == "/":
+            continue
+        if path in tmpfs_paths:
+            tmpfs.append(path)
+            continue
+        rel = None
+        for target, subdir in sorted(mounts.items(), key=lambda kv: -len(kv[0])):
+            if path.startswith(target.rstrip("/") + "/"):
+                below = path[len(target.rstrip("/")) + 1 :]
+                rel = below if subdir in ("", ".") else f"{subdir.rstrip('/')}/{below}"
+                break
+        if rel is None:
+            rel = f"{IMAGE_VOLUMES_DIR}/{path.strip('/').replace('/', '_')}"
+        binds[path] = rel
+    return binds, tmpfs
+
+
 def build_create_kwargs(
-    settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str
+    settings: Settings,
+    instance_id: UUID,
+    spec: InstanceSpec,
+    spec_hash: str,
+    image_volumes: list[str] | None = None,
 ) -> dict[str, Any]:
     """The arguments of ``containers.create()``: what the spec asks for (validated) plus what the
     runtime profile of its game fixes. For Minecraft exactly what the agent created before
-    multi-game support (tests/test_games_pins.py)."""
+    multi-game support (tests/test_games_pins.py).
+
+    ``image_volumes``: the VOLUMEs the image declares (``create_container`` inspects the image
+    for profiles with ``mount_image_volumes``); each gets a mount (``image_volume_plan``)."""
     profile = profiles.for_spec(spec)
     image = validate_image(settings, spec.image, profile)
     network = spec.network or settings.instance_network
@@ -436,6 +492,9 @@ def build_create_kwargs(
         volumes[str(settings.runtime_ca_bundle)] = {"bind": "/mcpanel/certs/ca-bundle.crt", "mode": "ro"}
     if settings.runtime_java_truststore and profile.java_truststore:
         volumes[str(settings.runtime_java_truststore)] = {"bind": "/mcpanel/certs/cacerts", "mode": "ro"}
+    volume_binds, volume_tmpfs = image_volume_plan(profile, image_volumes)
+    for target, rel in volume_binds.items():
+        volumes[_mount_source(settings, instance_id, rel)] = {"bind": target, "mode": "rw"}
 
     ports: dict[str, Any] = {}
     if network != "host":
@@ -510,18 +569,60 @@ def build_create_kwargs(
             "start_period": hc.start_period_s * 1_000_000_000,
             "retries": hc.retries,
         }
+    elif profile.health.kind in profiles.AGENT_SIDE_HEALTH:
+        # the agent probes readiness itself (agent_health); no image HEALTHCHECK may interfere
+        kwargs["healthcheck"] = {"test": ["NONE"]}
     # kind "image": the image's own HEALTHCHECK applies (profiles.register refuses other kinds)
+    if volume_tmpfs:
+        kwargs["tmpfs"] = dict.fromkeys(volume_tmpfs, IMAGE_VOLUME_TMPFS_OPTIONS)
     if spec.cpu_limit:
         kwargs["nano_cpus"] = int(spec.cpu_limit * 1e9)
     return kwargs
+
+
+def declared_volumes(image: str) -> list[str]:
+    """The VOLUMEs of a local image (its Config.Volumes)."""
+    try:
+        attrs = client().images.get(image).attrs or {}
+    except ImageNotFound as exc:
+        raise AgentError(f"Image {image} is not present", "image_missing", 409) from exc
+    return sorted(((attrs.get("Config") or {}).get("Volumes") or {}).keys())
+
+
+def prepare_image_volumes(settings: Settings, instance_id: UUID, binds: dict[str, str]) -> None:
+    """Create the server-folder subfolders the image volumes are bound to (owned by the runtime
+    uid/gid; no symbolic link is followed), so Docker does not create them as root."""
+    from .safefs import PathError, SafeRoot
+
+    root = SafeRoot(instance_dir(settings, instance_id), settings.runtime_uid, settings.runtime_gid)
+    for rel in binds.values():
+        try:
+            if not root.exists(rel):
+                root.mkdir(rel, parents=True)
+            elif root.stat(rel).type != "directory":
+                raise AgentError(
+                    f"{rel} in the server folder is not a folder; the image needs it for a volume",
+                    "invalid_path",
+                    409,
+                )
+        except PathError as exc:
+            raise AgentError(
+                f"Cannot prepare {rel} for the image's volume: {exc}", exc.code, exc.status
+            ) from exc
 
 
 def create_container(
     settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str, *, name: str | None = None
 ) -> Container:
     """Create the container (stopped). ``name`` replaces the usual name (used while the old
-    container of the server still exists; see :func:`replacement_name`)."""
-    kwargs = build_create_kwargs(settings, instance_id, spec, spec_hash)
+    container of the server still exists; see :func:`replacement_name`). For a profile with
+    ``mount_image_volumes`` the image is inspected for its VOLUMEs first (never for Minecraft)."""
+    profile = profiles.for_spec(spec)
+    image_volumes = None
+    if profile.mount_image_volumes:
+        image_volumes = declared_volumes(validate_image(settings, spec.image, profile))
+        prepare_image_volumes(settings, instance_id, image_volume_plan(profile, image_volumes)[0])
+    kwargs = build_create_kwargs(settings, instance_id, spec, spec_hash, image_volumes)
     if name is not None:
         if name not in (container_name(instance_id), replacement_name(instance_id)):
             raise AgentError("Invalid container name", "internal", 500)
@@ -655,6 +756,9 @@ def save_last_run_record(settings: Settings, instance_id: UUID, c: Container) ->
     if not lastrun.has_run(described):
         return False
     lines, truncated = read_console_tail(c)
+    redact = log_redactor(settings, c) if (getattr(c, "labels", None) or {}).get(LABEL_GAME) else None
+    if redact is not None:
+        lines = [redact(line) for line in lines]
     lastrun.write(settings, instance_id, lastrun.build(instance_id, described, lines, truncated))
     return True
 
@@ -1079,7 +1183,170 @@ def describe(c: Container) -> dict[str, Any]:
         described["game"] = labels[LABEL_GAME]
         if labels.get(LABEL_VARIANT):
             described["variant"] = labels[LABEL_VARIANT]
+        profile = profiles.for_labels(labels)
+        if profile is not None and profile.health.kind in profiles.AGENT_SIDE_HEALTH:
+            described["health"], described["health_output"] = agent_health(c, profile, described)
     return described
+
+
+# --- agent-side readiness probes (profiles' health kinds "tcp" and "log") ----------------------------
+HEALTH_TCP_CACHE_SECONDS = 5.0
+HEALTH_TCP_TIMEOUT = 1.0
+HEALTH_LOG_TAIL = 5000  # lines read per look at the log (only what is new since the last look)
+HEALTH_LOG_OVERLAP = 2.0  # seconds read again at every look (Docker's `since` is a timestamp)
+_health_lock = threading.Lock()
+# (container id, StartedAt) -> state of the probe for that run
+_health_state: dict[tuple[str, str], dict[str, Any]] = {}
+_HEALTH_STATE_MAX = 512
+
+
+def _health_entry(key: tuple[str, str]) -> dict[str, Any]:
+    with _health_lock:
+        entry = _health_state.get(key)
+        if entry is None:
+            if len(_health_state) >= _HEALTH_STATE_MAX:
+                _health_state.clear()  # old runs; a probe just looks again
+            entry = _health_state[key] = {}
+        return entry
+
+
+def _probe_tcp(c: Container, port: int, settings: Settings) -> bool:
+    import socket
+
+    host: str | None
+    target_port = port
+    info_ports = (c.attrs.get("NetworkSettings") or {}).get("Ports") or {}
+    if settings.rcon_mode == "published":
+        host = None
+        for b in info_ports.get(f"{port}/tcp") or []:
+            if b.get("HostPort"):
+                host, target_port = "127.0.0.1", int(b["HostPort"])
+                break
+    elif (c.attrs.get("HostConfig") or {}).get("NetworkMode") == "host":
+        host = "127.0.0.1"
+    else:
+        host = None
+        for net in ((c.attrs.get("NetworkSettings") or {}).get("Networks") or {}).values():
+            if net.get("IPAddress"):
+                host = net["IPAddress"]
+                break
+    if host is None:
+        return False
+    try:
+        with socket.create_connection((host, target_port), timeout=HEALTH_TCP_TIMEOUT):
+            return True
+    except OSError:
+        return False
+
+
+def _log_matches(c: Container, pattern: re.Pattern[str], since: float | None) -> bool:
+    kwargs: dict[str, Any] = {"stdout": True, "stderr": True, "timestamps": False, "tail": HEALTH_LOG_TAIL}
+    if since is not None:
+        kwargs["since"] = since
+    text = c.logs(**kwargs)
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    return any(pattern.search(line) for line in re.split(r"[\r\n]+", text))
+
+
+def agent_health(
+    c: Container, profile: RuntimeProfile, described: dict[str, Any], now: float | None = None
+) -> tuple[str | None, str | None]:
+    """(health, health_output) of a container whose profile's readiness probe the agent runs.
+
+    None while the container is not running. "healthy" once the probe succeeded: ``log`` stays
+    healthy for the rest of the run (the line was printed), ``tcp`` is checked again after
+    HEALTH_TCP_CACHE_SECONDS. Before that "starting" until ``start_period_s`` after the start,
+    then "unhealthy" (what Docker reports for its own checks, so state.py reads it alike).
+    Never raises: a probe that cannot be run counts as not succeeded."""
+    if not described.get("running"):
+        return None, None
+    health = profile.health
+    started_raw = str(described.get("started_at") or "")
+    started = _timestamp(started_raw)
+    now = time.time() if now is None else now
+    key = (str(c.id), started_raw)
+    entry = _health_entry(key)
+    ok = False
+    try:
+        if health.kind == "log":
+            if entry.get("ok"):
+                ok = True
+            else:
+                look_from = entry.get("checked")
+                if look_from is None and started is not None:
+                    look_from = started.timestamp()
+                since = None if look_from is None else max(0.0, look_from - HEALTH_LOG_OVERLAP)
+                ok = _log_matches(c, re.compile(str(health.pattern)), since)
+                entry["checked"] = now
+                entry["ok"] = ok
+        elif health.kind == "tcp":
+            at = entry.get("at")
+            if at is not None and 0 <= now - at < HEALTH_TCP_CACHE_SECONDS:
+                ok = bool(entry.get("ok"))
+            else:
+                ok = _probe_tcp(c, int(health.port or 0), get_settings())
+                entry["ok"], entry["at"] = ok, now
+    except Exception as exc:  # Docker or socket trouble: not ready (yet)
+        log.debug("readiness probe of %s failed: %s", c.name, exc)
+        ok = False
+    what = f"agent probe {health.kind}: " + (
+        f"log line /{health.pattern}/" if health.kind == "log" else f"TCP port {health.port}"
+    )
+    if ok:
+        return "healthy", f"{what} ok"
+    running_for = None if started is None else now - started.timestamp()
+    if running_for is not None and running_for > health.start_period_s:
+        return "unhealthy", f"{what} not seen within {health.start_period_s} s"
+    return "starting", f"{what} not seen yet"
+
+
+# --- waiting for a log line (saves that report their end in the log) -----------------------------------
+LOG_WAIT_POLL = 0.25
+
+
+def wait_for_log(c: Container, pattern: str, since: float, timeout: float) -> bool:
+    """Whether the container prints a line matching ``pattern`` after ``since`` (epoch seconds)
+    within ``timeout`` seconds. Polls the log; bounded."""
+    compiled = re.compile(pattern)
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            if _log_matches(c, compiled, since):
+                return True
+        except NotFound:
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(LOG_WAIT_POLL)
+
+
+# --- secrets in console output -------------------------------------------------------------------------
+REDACTED = "********"
+
+
+def log_redactor(settings: Settings, c: Container) -> Any:
+    """A function that hides the control secret in console text of container ``c``, or None when
+    its profile prints none (Minecraft). The secret (and whatever the profile's
+    log_redact_patterns match) becomes ``********``."""
+    profile = profiles.for_labels(c.labels)
+    if profile is None or not profile.redact_secret_in_logs:
+        return None
+    try:
+        secret = drivers.for_profile(profile).secret(settings, c)
+    except Exception as exc:
+        log.debug("control secret of %s not readable for redaction: %s", c.name, exc)
+        secret = None
+    patterns = [re.compile(p) for p in profile.log_redact_patterns]
+
+    def redact(text: str) -> str:
+        if secret and len(secret) >= 4:
+            text = text.replace(secret, REDACTED)
+        for pattern in patterns:
+            text = pattern.sub(lambda m: (m.group(1) if m.groups() else "") + REDACTED, text)
+        return text
+
+    return redact
 
 
 def status(instance_id: UUID, settings: Settings | None = None) -> dict[str, Any]:
@@ -1184,16 +1451,26 @@ def stats(instance_id: UUID) -> dict[str, Any]:
     }
 
 
-def logs(instance_id: UUID, tail: int = 500, since: int | None = None) -> str:
+def logs(
+    instance_id: UUID, tail: int = 500, since: int | None = None, settings: Settings | None = None
+) -> str:
     c = require_container(instance_id)
-    return _container_log(c, tail, since)
+    return _container_log(c, tail, since, settings)
 
 
-def _container_log(c: Container, tail: int, since: int | None = None) -> str:
+def _container_log(
+    c: Container, tail: int, since: int | None = None, settings: Settings | None = None
+) -> str:
     kwargs: dict[str, Any] = {"tail": tail, "timestamps": False, "stdout": True, "stderr": True}
     if since:
         kwargs["since"] = since
-    return c.logs(**kwargs).decode("utf-8", errors="replace")
+    text = c.logs(**kwargs).decode("utf-8", errors="replace")
+    redact = (
+        log_redactor(settings or get_settings(), c)
+        if (getattr(c, "labels", None) or {}).get(LABEL_GAME)
+        else None
+    )
+    return redact(text) if redact is not None else text
 
 
 def previous_run_lines(settings: Settings, instance_id: UUID, c: Container | None) -> list[str]:
@@ -1241,7 +1518,7 @@ def console_history(
     lines: list[str] = []
     if c is not None:
         try:
-            lines = _container_log(c, tail, since).splitlines()
+            lines = _container_log(c, tail, since, settings).splitlines()
         except APIError as exc:
             if not _is_gone(exc):
                 raise

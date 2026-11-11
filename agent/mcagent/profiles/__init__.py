@@ -1,6 +1,6 @@
 """The runtime profiles this agent has, and how a spec or a container selects one.
 
-Phase 1 of multi-game support registers Minecraft only. A spec without ``game`` (every panel
+Registered: Minecraft (``minecraft.py``) and Factorio (``factorio.py``). A spec without ``game`` (every panel
 before multi-game support, and every Minecraft spec of a current one) is Minecraft; a container
 without the ``io.mcpanel.game`` label is Minecraft as well, so existing containers keep their
 labels and their spec-hash label unchanged.
@@ -14,14 +14,15 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..errors import AgentError
-from . import minecraft
-from .base import IMPLEMENTED_HEALTH, Health, Mount, RuntimeProfile, UserModel
+from . import factorio, minecraft
+from .base import AGENT_SIDE_HEALTH, IMPLEMENTED_HEALTH, Health, Mount, RuntimeProfile, UserModel
 
 if TYPE_CHECKING:
     from ..config import Settings
     from ..schemas import InstanceSpec
 
 __all__ = [
+    "AGENT_SIDE_HEALTH",
     "DEFAULT_GAME",
     "LABEL_GAME",
     "LABEL_VARIANT",
@@ -62,6 +63,28 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
         )
     if profile.health.kind == "cmd" and not profile.health.argv:
         raise ValueError(f"Profile {profile.game}: a cmd health check needs an argv")
+    if profile.health.kind == "tcp" and not (profile.health.port and 1 <= profile.health.port <= 65535):
+        raise ValueError(f"Profile {profile.game}: a tcp health check needs a port")
+    patterns = list(profile.env_values.values()) + list(profile.log_redact_patterns)
+    if profile.health.kind == "log":
+        if not profile.health.pattern:
+            raise ValueError(f"Profile {profile.game}: a log health check needs a pattern")
+        patterns.append(profile.health.pattern)
+    if profile.tag_pattern is not None:
+        patterns.append(profile.tag_pattern)
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ValueError(
+                f"Profile {profile.game}: invalid regular expression {pattern!r}: {exc}"
+            ) from exc
+    for path in (*profile.volume_tmpfs, *(m.container_path for m in profile.mounts)):
+        if not path.startswith("/") or ".." in path.split("/"):
+            raise ValueError(f"Profile {profile.game}: invalid container path {path!r}")
+    for rel in profile.default_backup_excludes:
+        if rel.startswith("/") or ".." in rel.split("/") or not rel:
+            raise ValueError(f"Profile {profile.game}: invalid backup exclude {rel!r}")
     for mount in profile.mounts:
         parts = mount.subdir.split("/")
         if mount.subdir.startswith("/") or ".." in parts or not mount.container_path.startswith("/"):
@@ -75,6 +98,7 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
 
 
 register(minecraft.PROFILE)
+register(factorio.PROFILE)
 
 
 def get(game: str | None, variant: str | None = None) -> RuntimeProfile | None:
@@ -149,12 +173,22 @@ def all_allowed_images(settings: Settings) -> set[str]:
 
 
 def info(settings: Settings) -> dict[str, Any]:
-    """``GET /v1/info`` → ``games``: {game: {variants, images, control}}."""
+    """``GET /v1/info`` → ``games``: {game: {variants, images, control, ports, never_publish,
+    health, install_retry_exits}} (``ports``: the [container port, protocol] pairs a spec may
+    publish; ``never_publish``: [port, protocol or null]; ``health``: the readiness probe kind)."""
     games: dict[str, Any] = {}
     for profile in all_profiles():
         entry = games.setdefault(
             profile.game,
-            {"variants": [], "images": allowed_images(settings, profile), "control": profile.control},
+            {
+                "variants": [],
+                "images": allowed_images(settings, profile),
+                "control": profile.control,
+                "ports": [[port, proto] for port, proto in profile.container_ports],
+                "never_publish": [[port, proto] for port, proto in profile.never_publish],
+                "health": profile.health.kind,
+                "install_retry_exits": list(profile.install_retry_exits),
+            },
         )
         for variant in profile.variants:
             if variant not in entry["variants"]:

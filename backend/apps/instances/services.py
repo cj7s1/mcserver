@@ -39,11 +39,17 @@ def ports_in_use(node: Node, *, exclude: Instance | None = None, include_agent: 
     qs = Instance.objects.filter(node=node)
     if exclude is not None:
         qs = qs.exclude(pk=exclude.pk)
-    for inst in qs.only("id", "name", "game_port", "extra_ports"):
+    for inst in qs.only("id", "name", "game_port", "extra_ports", "ports"):
         used[inst.game_port] = f"server '{inst.name}'"
         for extra in inst.extra_ports or []:
             try:
                 used[int(extra["host_port"])] = f"server '{inst.name}' ({extra.get('label') or 'extra port'})"
+            except (KeyError, TypeError, ValueError):
+                continue
+        # named ports of other games: a Minecraft server never takes their numbers, whatever the protocol
+        for named in inst.ports or []:
+            try:
+                used.setdefault(int(named["host_port"]), f"server '{inst.name}' ({named.get('name') or 'port'})")
             except (KeyError, TypeError, ValueError):
                 continue
     if include_agent:
@@ -72,6 +78,129 @@ def allocate_port(node: Node, *, exclude: Instance | None = None) -> int:
         if port not in used:
             return port
     raise ConflictError(f"No free ports left in the range {start}-{end}", code="no_free_ports")
+
+
+# --- named ports of games other than Minecraft (protocol-aware) -----------------------------------------
+NAMED_PORT_SEARCH = 100  # how far above a game's well-known port a free one is looked for
+
+
+def ports_in_use_by_protocol(
+    node: Node, *, exclude: Instance | None = None, include_agent: bool = True
+) -> dict[tuple[int, str], str]:
+    """Map of (host port, protocol) -> what uses it: panel servers (Minecraft's game port is TCP, its
+    extra ports have their own protocol; other games list named ports) and the Docker host. TCP 7777
+    and UDP 7777 are different ports."""
+    used: dict[tuple[int, str], str] = {}
+    qs = Instance.objects.filter(node=node)
+    if exclude is not None:
+        qs = qs.exclude(pk=exclude.pk)
+    for inst in qs.only("id", "name", "game", "game_port", "extra_ports", "ports"):
+        named = [p for p in inst.ports or [] if isinstance(p, dict)]
+        if not named:
+            used[(int(inst.game_port), "tcp")] = f"server '{inst.name}'"
+        for extra in inst.extra_ports or []:
+            try:
+                key = (int(extra["host_port"]), str(extra.get("protocol") or "tcp"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            used[key] = f"server '{inst.name}' ({extra.get('label') or 'extra port'})"
+        for port in named:
+            try:
+                key = (int(port["host_port"]), str(port.get("protocol") or "tcp"))
+            except (KeyError, TypeError, ValueError):
+                continue
+            used[key] = f"server '{inst.name}' ({port.get('name') or 'port'})"
+    if include_agent:
+        try:
+            for p in AgentClient(node).published_ports():
+                if exclude is not None and p.get("instance_id") == str(exclude.pk):
+                    continue
+                key = (int(p["host_port"]), str(p.get("protocol") or "tcp"))
+                used.setdefault(key, f"Docker container '{p.get('container')}'")
+        except ApiError as exc:
+            log.warning("Could not query agent for published ports: %s", exc)
+    return used
+
+
+def assign_named_ports(
+    definition: Any,
+    node: Node,
+    requested: dict[str, Any] | None = None,
+    *,
+    host_ip: str = "",
+    exclude: Instance | None = None,
+    current: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """The named ports of a server of ``definition``: ``[{name, container_port, protocol, host_port,
+    host_ip}]`` in the definition's order.
+
+    A requested host port (``requested[name]``, or an int under ``host_port`` of a dict) must be free
+    for its protocol (409 ``port_conflict``). A port not requested keeps its ``current`` host port, or
+    gets the game's well-known port when that is free, else the next free one above it, else the
+    first free one of the panel's range (409 ``no_free_ports``)."""
+    requested = dict(requested or {})
+    known = {p.name for p in definition.ports}
+    if unknown := sorted(set(requested) - known):
+        raise ApiError(f"Unknown port(s) for {definition.label}: {', '.join(unknown)}", code="invalid_port")
+    previous = {str(p.get("name")): p for p in current or [] if isinstance(p, dict)}
+    used = ports_in_use_by_protocol(node, exclude=exclude)
+    taken: set[tuple[int, str]] = set()
+    start, end = port_range()
+    out: list[dict[str, Any]] = []
+    for spec in definition.ports:
+        want = requested.get(spec.name)
+        ip = host_ip
+        if isinstance(want, dict):
+            ip = str(want.get("host_ip") or host_ip or "")
+            want = want.get("host_port")
+        if want in (None, "", 0):
+            if spec.name in previous:
+                want = int(previous[spec.name]["host_port"])
+                ip = ip or str(previous[spec.name].get("host_ip") or "")
+                if (want, spec.protocol) in taken:
+                    want = None
+        if want not in (None, "", 0):
+            try:
+                port = int(want)
+            except (TypeError, ValueError):
+                raise ApiError(f"{spec.label}: the host port must be a number", code="invalid_port") from None
+            if not 1024 <= port <= 65535:
+                raise ApiError("Ports must be between 1024 and 65535", code="invalid_port")
+            key = (port, spec.protocol)
+            if key in used or key in taken:
+                what = used.get(key) or f"its own {spec.protocol.upper()} port"
+                raise ConflictError(
+                    f"{spec.protocol.upper()} port {port} is already used by {what}",
+                    code="port_conflict",
+                    details={"port": port, "protocol": spec.protocol, "name": spec.name, "port_name": spec.name},
+                )
+        else:
+            candidates = [*range(spec.default_host_port, min(65535, spec.default_host_port + NAMED_PORT_SEARCH) + 1)]
+            candidates += [p for p in range(start, end + 1) if p not in candidates]
+            port = next((p for p in candidates if (p, spec.protocol) not in used and (p, spec.protocol) not in taken), 0)
+            if not port:
+                raise ConflictError(
+                    f"No free {spec.protocol.upper()} port for {spec.label}",
+                    code="no_free_ports",
+                    details={"port_name": spec.name},
+                )
+        taken.add((port, spec.protocol))
+        entry = {"name": spec.name, "container_port": spec.container_port, "protocol": spec.protocol, "host_port": port}
+        if ip:
+            ipaddress_ok(ip)
+            entry["host_ip"] = ip
+        out.append(entry)
+    return out
+
+
+def ipaddress_ok(value: str) -> str:
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        raise ApiError(f"{value!r} is not an IP address", code="invalid_port") from None
+    return value
 
 
 def bump_revision(instance: Instance) -> None:

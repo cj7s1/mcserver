@@ -21,6 +21,7 @@ import {
   Settings,
   Settings2,
   ShieldCheck,
+  SlidersHorizontal,
   SquareTerminal,
   Terminal,
   TriangleAlert,
@@ -162,7 +163,7 @@ export function overviewShortcuts(i: Instance): OverviewShortcut[] {
 
 // --- Settings tabs ------------------------------------------------------------------------------
 
-export type SettingsTabId = "properties" | "resources" | "software" | "environment" | "general" | "danger";
+export type SettingsTabId = "game-settings" | "properties" | "resources" | "software" | "environment" | "general" | "danger";
 
 export interface SettingsTab {
   id: SettingsTabId;
@@ -173,6 +174,8 @@ export interface SettingsTab {
 }
 
 export const SETTINGS_TABS: readonly SettingsTab[] = [
+  // a non-Minecraft game's own config files (Minecraft has no config_files capability: not shown there)
+  { id: "game-settings", label: () => "Game settings", icon: SlidersHorizontal, requires: ["config_files"] },
   { id: "properties", label: () => "Properties", icon: FileCog, requires: ["properties"] },
   { id: "resources", label: (i) => (hasCapability(i, "jvm") ? "Resources & JVM" : "Resources"), icon: Cpu },
   { id: "software", label: () => "Software", icon: Boxes, requires: ["software_update"] },
@@ -186,7 +189,7 @@ export function settingsTabs(i: Instance): SettingsTab[] {
   return SETTINGS_TABS.filter((t) => visible(i, t));
 }
 
-/** The tab Settings opens with (Properties for Minecraft). */
+/** The tab Settings opens with (Properties for Minecraft, Game settings for games with config files). */
 export function defaultSettingsTab(i: Instance): SettingsTabId {
   return settingsTabs(i)[0]?.id ?? "general";
 }

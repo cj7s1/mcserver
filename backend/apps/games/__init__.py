@@ -1,8 +1,10 @@
 """Game definitions and their registry (docs/design/GAME-DEFINITIONS.md).
 
 ``get(id)``, ``all()`` and ``for_instance(instance)`` return the definition objects
-(``base.GameDefinition``); Minecraft (``minecraft.MinecraftDefinition``) is the only built-in game.
-The built-in games are registered on first use, so importing this package loads no models.
+(``base.GameDefinition``). Built-in games: Minecraft (``minecraft.MinecraftDefinition``) and Factorio
+(``factorio.FactorioDefinition``). They are registered on first use, so importing this package
+loads no models. To add a game: a module with a ``GameDefinition`` subclass, registered in
+``_load`` below, and the matching runtime profile in the agent (agent/mcagent/profiles/).
 """
 
 from __future__ import annotations
@@ -11,20 +13,40 @@ from typing import TYPE_CHECKING, Any
 
 from apps.core.errors import ConflictError
 
-from .base import CAPABILITIES, DEFAULT_GAME, MEMORY_MODELS, CapabilityUnavailable, ConfigFile, GameDefinition, Variant
+from .base import (
+    ALL_CAPABILITIES,
+    CAPABILITIES,
+    DEFAULT_GAME,
+    EXTRA_CAPABILITIES,
+    MEMORY_MODELS,
+    CapabilityUnavailable,
+    ConfigFile,
+    GameDefinition,
+    GameOption,
+    PortSpec,
+    SecretSpec,
+    SetupStep,
+    Variant,
+)
 
 if TYPE_CHECKING:
     from apps.instances.models import Instance
     from apps.nodes.client import AgentClient
 
 __all__ = [
+    "ALL_CAPABILITIES",
     "CAPABILITIES",
     "DEFAULT_GAME",
+    "EXTRA_CAPABILITIES",
     "GAMES_FEATURE",
     "MEMORY_MODELS",
     "CapabilityUnavailable",
     "ConfigFile",
     "GameDefinition",
+    "GameOption",
+    "PortSpec",
+    "SecretSpec",
+    "SetupStep",
     "UnknownGame",
     "Variant",
     "all",
@@ -56,9 +78,11 @@ def _load() -> None:
     if _loaded:
         return
     _loaded = True
+    from .factorio import FactorioDefinition
     from .minecraft import MinecraftDefinition
 
     _registry.setdefault(DEFAULT_GAME, MinecraftDefinition())
+    _registry.setdefault(FactorioDefinition.id, FactorioDefinition())
 
 
 def register(definition: GameDefinition) -> GameDefinition:
@@ -70,9 +94,12 @@ def register(definition: GameDefinition) -> GameDefinition:
     return definition
 
 
+BUILT_IN = (DEFAULT_GAME, "factorio")
+
+
 def unregister(game_id: str) -> None:
-    if game_id == DEFAULT_GAME:
-        raise ValueError("the built-in Minecraft definition cannot be removed")
+    if game_id in BUILT_IN:
+        raise ValueError(f"the built-in {game_id} definition cannot be removed")
     _registry.pop(game_id, None)
 
 

@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage } from "@/lib/api";
 import { formatBytes, formatDateTime, relativeTime } from "@/lib/format";
+import { hasAnyCapability, isMinecraft } from "@/lib/games";
 import { qk } from "@/lib/queries";
 import type { Backup } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,7 @@ import { SnapshotsSection } from "./backups/SnapshotsSection";
 import { TrackedJobBanner } from "./backups/TrackedJobBanner";
 import { emptyBackupsHint, onOtherNode, useBackups, useTrackedJob, type BackupsResponse } from "./backups/backup-utils";
 import { isSnapshotJob } from "./backups/snapshot-utils";
+import { SavesSection } from "./backups/SavesSection";
 import { WorldSection } from "./backups/WorldSection";
 import { isWorldJob } from "./backups/world-utils";
 
@@ -208,10 +210,19 @@ export default function Backups() {
         showTracked={snapshotJob}
       />
 
-      {perms.files && (
+      {perms.files && isMinecraft(instance) && (
         <WorldSection
           instance={instance}
           canReplacePerm={perms.restore && perms.filesWrite}
+          tracked={tracked}
+          showTracked={worldJob}
+        />
+      )}
+      {!isMinecraft(instance) && hasAnyCapability(instance, ["world_reset", "world_import_export"]) && (
+        <SavesSection
+          instance={instance}
+          canChange={perms.restore && perms.filesWrite}
+          canDownload={perms.files}
           tracked={tracked}
           showTracked={worldJob}
         />

@@ -12,7 +12,7 @@ import { ConnectionLostBanner, ErrorState, LoadingState } from "@/components/Sta
 import { StatusBadge } from "@/components/StatusBadge";
 import { Button } from "@/components/ui/button";
 import { ApiError, errorMessage } from "@/lib/api";
-import { hasCapability, variantLabel } from "@/lib/games";
+import { gameLabel, hasCapability, isMinecraft, variantLabel } from "@/lib/games";
 import { sendPower } from "@/lib/power";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
 import { restartRequiredText } from "@/lib/restart-required";
@@ -32,8 +32,15 @@ export function useInstanceContext(): InstanceContext {
 }
 
 export function softwareLabel(i: Instance): string {
+  if (!isMinecraft(i)) return `${gameLabel(i)} ${i.minecraft_version}`.trim();
   if (i.is_modpack) return `${i.modpack_name || "Modpack"} ${i.modpack_version_name}`.trim();
   return `${variantLabel(i.server_type)} ${i.minecraft_version}${i.loader_version ? ` · ${i.loader_version}` : ""}`;
+}
+
+/** The game port in the header: Minecraft's number as before; other games' first named port with its protocol. */
+function portLabel(i: Instance): string {
+  const first = !isMinecraft(i) ? i.ports?.[0] : undefined;
+  return first ? `${first.host_port}/${first.protocol}` : String(i.game_port);
 }
 
 function PowerControls({ instance, can }: InstanceContext) {
@@ -143,7 +150,7 @@ export function InstanceLayout() {
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
                 {softwareLabel(instance)}
-                {hasCapability(instance, "jvm") && ` · Java ${instance.java_version}`} · port {instance.game_port}
+                {hasCapability(instance, "jvm") && ` · Java ${instance.java_version}`} · port {portLabel(instance)}
               </p>
             </div>
           </div>

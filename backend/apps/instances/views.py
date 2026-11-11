@@ -38,6 +38,13 @@ from .serializers import CreateInstanceSerializer, InstanceSerializer, ScheduleS
 from .spec import image_for
 from .world import RESET_KEEP, SEED_MODES
 
+
+def create_other_game(request: Request, data: dict[str, Any], node: Node, definition: Any) -> Response:
+    from .game_views import create_other_game as create
+
+    return create(request, data, node, definition)
+
+
 TEXT_EDIT_LIMIT = 5 * 1024 * 1024
 
 log = logging.getLogger(__name__)
@@ -81,12 +88,9 @@ class InstanceListView(APIView):
             raise ValidationError({"node": ["Unknown node"]})
         game = data.get("game") or games.DEFAULT_GAME
         if game != games.DEFAULT_GAME:
-            # the node's agent must have the game's runtime profile (409 agent_lacks_game) ...
+            # the node's agent must have the game's runtime profile (409 agent_lacks_game)
             games.require_agent_support(game, AgentClient(node))
-            # ... and only Minecraft servers can be created so far (multi-game phase 1)
-            raise ConflictError(
-                f"{games.get(game).label} servers cannot be created yet", code="unsupported_by_game", details={"game": game}
-            )
+            return create_other_game(request, data, node, games.get(game))
         fields: dict[str, Any] = {
             "name": data["name"],
             "description": data.get("description", ""),
@@ -230,6 +234,7 @@ class InstanceDetailView(APIView):
         "minecraft_version",
         "loader_version",
         "java_version",
+        "ports",
     }
 
     @extend_schema(responses={200: InstanceSerializer})
@@ -243,6 +248,10 @@ class InstanceDetailView(APIView):
         ser.is_valid(raise_exception=True)
         changed = {k: v for k, v in ser.validated_data.items() if getattr(instance, k) != v}
         version_fields = sorted({"minecraft_version", "loader_version"} & changed.keys())
+        if version_fields and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            raise ValidationError(
+                {field: ["Change the version through the software update (POST .../software)"] for field in version_fields}
+            )
         if version_fields:
             if instance.is_modpack:
                 message = "Modpack servers take their versions from the pinned modpack release"
@@ -251,7 +260,20 @@ class InstanceDetailView(APIView):
                 # downgrade and takes a pre-update backup; a plain field edit would skip all that.
                 message = "Change the Minecraft or loader version through the software update (POST .../software)"
             raise ValidationError({field: [message] for field in version_fields})
-        if "game_port" in changed:
+        if "ports" in ser.validated_data and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            definition = games.for_instance(instance)
+            requested = {
+                str(p["name"]): {"host_port": p.get("host_port"), "host_ip": p.get("host_ip") or ""}
+                for p in ser.validated_data["ports"]
+            }
+            ports = services.assign_named_ports(definition, instance.node, requested, exclude=instance, current=instance.ports)
+            changed.pop("ports", None)
+            if ports != instance.ports:
+                changed["ports"] = ports
+                changed["game_port"] = int(ports[0]["host_port"]) if ports else instance.game_port
+                if changed["game_port"] == instance.game_port:
+                    changed.pop("game_port")
+        elif "game_port" in changed:
             services.check_port_available(instance.node, changed["game_port"], exclude=instance)
         for extra in changed.get("extra_ports", []):
             services.check_port_available(instance.node, extra["host_port"], exclude=instance)
@@ -445,10 +467,17 @@ class InstanceCloneView(APIView):
         fields = {f: getattr(source, f) for f in copy_fields}
         games.require_agent_support(source.game, AgentClient(source.node))  # 409 agent_lacks_game
         port = ser.validated_data.get("game_port")
+        if (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            fields["game_options"] = dict(source.game_options or {})
+            requested = {source.ports[0]["name"]: port} if port and source.ports else None
+            fields["ports"] = services.assign_named_ports(games.for_instance(source), source.node, requested, host_ip="")
+            port = int(fields["ports"][0]["host_port"]) if fields["ports"] else 0
         # One transaction: if the source is busy (409 instance_busy) the new record is rolled
         # back instead of being left behind as an empty orphan server.
         with transaction.atomic():
-            if port:
+            if port and "ports" in fields:
+                pass  # named ports: checked per protocol above
+            elif port:
                 services.check_port_available(source.node, port)
             else:
                 port = services.allocate_port(source.node)
@@ -538,6 +567,11 @@ class InstanceCommandView(APIView):
         command = definition.normalise_command(ser.validated_data["command"])
         if "\n" in command or "\r" in command:
             raise ValidationError({"command": ["Commands must be a single line"]})
+        if definition.refuse_stop_commands and definition.is_stop_command(command):
+            raise ApiError(
+                f"'{command}' would make the server exit, and Docker would start it again at once; use Stop instead",
+                code="stop_via_power",
+            )
         output = AgentClient(instance.node).command(instance.id, command)
         audit.record("instance.command", request=request, instance=instance, target=instance, details={"command": command[:300]})
         return Response({"command": command, "output": output})
@@ -726,6 +760,15 @@ def _properties_text(path: str, content: str, current: dict[str, Any] | None) ->
     return None, content
 
 
+def _is_control_secret_file(instance: Instance, path: str) -> bool:
+    """Whether ``path`` is the file the game reads its control secret from (Factorio: config/rconpw)."""
+    definition = games.get_or_none(instance.game)
+    secret_file = definition.control_secret_file if definition is not None else None
+    if not secret_file:
+        return False
+    return "/".join(p for p in str(path).replace("\\", "/").split("/") if p and p != ".") == secret_file
+
+
 class FilesTextView(APIView):
     """Read and write a text file. ``GET`` answers ``binary_or_non_utf8: true`` for a file that is
     not valid UTF-8 (its ``content`` is then a read-only preview with replacement characters);
@@ -738,6 +781,9 @@ class FilesTextView(APIView):
         instance = get_instance_for(request.user, pk, "instance.files.read")
         client = AgentClient(instance.node)
         path = request.query_params.get("path", "")
+        if _is_control_secret_file(instance, path):
+            # the control secret (Factorio: config/rconpw) is not shown in the editor
+            return Response({"path": path, "content": REDACTED_VALUE + "\n", "redacted": True, "binary_or_non_utf8": False})
         try:
             answer = _exact_properties(client, instance, path, client.read_text(instance.id, path))
         except ApiError as exc:
@@ -756,6 +802,12 @@ class FilesTextView(APIView):
         content = data.get("content")
         if not isinstance(content, str) or len(content.encode()) > TEXT_EDIT_LIMIT:
             raise ValidationError({"content": ["Text content is required (max 5 MB)"]})
+        if _is_control_secret_file(instance, path):
+            raise ApiError(
+                "This file holds the server's control password; the panel writes it before every start",
+                code="managed_file",
+                status_code=403,
+            )
         client = AgentClient(instance.node)
         create_only = bool(data.get("create_only"))
         current: dict[str, Any] | None = None
@@ -1536,6 +1588,10 @@ class SoftwareUpdateView(APIView):
 
         instance = get_instance_for(request.user, pk, "instance.configure")
         games.for_instance(instance).require(instance, "software_update")
+        if (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            from .game_views import game_software_update
+
+            return game_software_update(request, instance)
         if instance.is_modpack:
             raise ApiError("Modpack servers are updated through the modpack release picker", code="use_modpack_update")
         if instance.archived_at:

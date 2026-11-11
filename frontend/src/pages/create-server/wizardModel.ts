@@ -28,7 +28,7 @@ import { validateImportArchive } from "./import/importModel";
 
 export type Category = "vanilla" | "plugins" | "mods" | "modpack" | "import";
 export type StandardCategory = "vanilla" | "plugins" | "mods";
-export type StepId = "game" | "type" | "software" | "resources" | "gameplay" | "review";
+export type StepId = "game" | "type" | "software" | "resources" | "gameplay" | "settings" | "review";
 export type JvmPreset = "aikar" | "meowice" | "none";
 
 export const CATEGORY_TYPES: Record<StandardCategory, ServerType[]> = {
@@ -60,9 +60,12 @@ export function wizardSteps(games: readonly Pick<GameInfo, "id">[] | undefined):
   return games && games.length > 1 ? [GAME_STEP, ...STEPS] : STEPS;
 }
 
-/** Games the wizard can create servers of (per-game steps come later). */
+/**
+ * Games the wizard can create servers of: Minecraft (its own steps) and every other game of the
+ * catalog (the generic steps of GameWizard.tsx, driven by the catalog entry).
+ */
 export function creatableGame(id: string): boolean {
-  return id === MINECRAFT;
+  return id === MINECRAFT || !!id;
 }
 
 export const JAVA_VERSIONS = [8, 11, 16, 17, 21, 25] as const;

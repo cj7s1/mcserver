@@ -13,10 +13,13 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage } from "@/lib/api";
+import { hasCapability, isMinecraft } from "@/lib/games";
 import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { qk, useInvalidateInstance, useJob } from "@/lib/queries";
 import type { Instance, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { SavesResetDialog } from "../backups/SavesDialogs";
+import { useGameInfo } from "../game-api";
 import { useMigrationOutcome, useNodes } from "./migrate-api";
 import { MigrateDialog } from "./migrate-dialog";
 import { useWorldResetOutcome } from "./reset-world-api";
@@ -189,14 +192,17 @@ export function DangerTab({ instance, can }: TabProps) {
   const canClone = auth.can("instance.create") && can("instance.files.read");
   const canMigrate = canConfigure && auth.can("system.nodes");
   // the same two permissions as "Replace world" on the Backups page; instance.delete is not needed
-  const canResetWorld = can("instance.restore") && can("instance.files.write");
+  const minecraft = isMinecraft(instance);
+  // other games: their saves reset ("new map"), only when the game has one
+  const canResetWorld = can("instance.restore") && can("instance.files.write") && (minecraft || hasCapability(instance, "world_reset"));
+  const game = useGameInfo(minecraft ? null : instance);
   const nodes = useNodes(canMigrate);
   const otherNodes = (nodes.data ?? []).filter((n) => n.id !== instance.node);
   const job = useJob(jobId);
   useMigrationOutcome(job.data, instance.id);
   useWorldResetOutcome(job.data, instance.id);
   // a reset that failed or was cancelled can leave the server stopped for a manual check: its log says what was done
-  const showJobLog = job.data?.kind === "world_reset" && (job.data.status === "failed" || job.data.status === "cancelled");
+  const showJobLog = (job.data?.kind === "world_reset" || job.data?.kind === "saves_reset") && (job.data.status === "failed" || job.data.status === "cancelled");
 
   const action = useMutation({
     // recreating a running server starts it again: the same memory check as a start ("Start anyway?")
@@ -356,7 +362,9 @@ export function DangerTab({ instance, can }: TabProps) {
                 description={
                   archived
                     ? "Not available while the server is archived. Unarchive it first."
-                    : "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. The next step lets you take a safety backup first."
+                    : minecraft
+                      ? "Deletes the world so the server generates a new one the next time it starts. Settings, mods, plugins, the whitelist, operators and backups are kept. The next step lets you take a safety backup first."
+                      : "Moves the current save aside (it stays in the server folder) and generates a new map, with a new seed if you want. Settings, admins, the whitelist and backups are kept. The next step lets you take a safety backup first."
                 }
                 action={
                   <Button ref={resetButton} variant="destructive" size="sm" onClick={() => setResetOpen(true)} disabled={busy || archived}>
@@ -425,7 +433,22 @@ export function DangerTab({ instance, can }: TabProps) {
           }}
         />
       )}
-      {resetOpen && (
+      {resetOpen && !minecraft && (
+        <SavesResetDialog
+          instance={instance}
+          fields={game?.world?.reset_fields}
+          onClose={() => {
+            setResetOpen(false);
+            resetButton.current?.focus();
+          }}
+          onStarted={(j) => {
+            qc.setQueryData(qk.job(j.id), j);
+            setJobId(j.id);
+            invalidate(instance.id);
+          }}
+        />
+      )}
+      {resetOpen && minecraft && (
         <ResetWorldDialog
           instance={instance}
           returnFocusRef={resetButton}

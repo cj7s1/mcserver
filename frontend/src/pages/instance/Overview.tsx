@@ -16,6 +16,7 @@ import { ConnectionCard, SoftwareCard } from "./overview/info-cards";
 import { useNow } from "./overview/overview-utils";
 import { useStatSamples } from "./overview/live-samples";
 import { ResourceCharts } from "./overview/resource-charts";
+import { SetupCard } from "./overview/SetupCard";
 import { StatTiles } from "./overview/stat-tiles";
 
 /** Disk usage is expensive to measure (directory walk on the node), so it is polled separately and rarely. */
@@ -148,6 +149,8 @@ function OverviewContent() {
           </Button>
         </div>
       )}
+
+      <SetupCard instance={instance} canConfigure={can("instance.configure")} />
 
       <BackupNotice instance={instance} />
 

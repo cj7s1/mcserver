@@ -350,10 +350,113 @@ code says whether the world was touched (`world.WORLD_RESET_UNTOUCHED`). After a
 left the world as it was, the seed is put back and a server that was running is started again.
 After anything unclear the server is left stopped.
 
+## Games: definitions, runtime profiles, control drivers
+
+The design is docs/design/GAME-DEFINITIONS.md. Built: Minecraft (phase 1, unchanged behaviour) and
+Factorio (phases 2 and 3). A game has two halves that must agree:
+
+* **Panel: the game definition** (`backend/apps/games/<game>.py`, a `GameDefinition` subclass,
+  registered in `apps/games/__init__.py` `_load`). Everything game-specific on the panel side is
+  asked from `games.for_instance(instance)`: capabilities (which features and UI sections exist),
+  the memory model, the agent spec (`build_spec`; the base class builds the generic spec of a game
+  with named ports from `image()`, `game_env()` and `ports`), the config files and their form
+  schema (`config_files()`), pinned options (`options`, stored in `Instance.game_options`), secrets
+  (`secret_specs`, `Instance.secrets`), first-start steps (`setup_steps`, `run_setup_step`,
+  `Instance.setup_state`), the version catalog (`versions`, `validate_version`), the console rules
+  (`normalise_command`, `stop_words`, `refuse_stop_commands`, `keeps_command_slash`), players
+  (`online_players`, `player_lists`, `player_action`), broadcast, the saves model (`saves`) and the
+  software record of backups (`software_state`, `set_software`, `describe_software`). Minecraft's
+  definition wraps the code that existed before and never adds keys to its spec.
+* **Agent: the runtime profile** (`agent/mcagent/profiles/<game>.py`, registered in
+  `profiles/__init__.py`). Data the panel cannot choose: allowed image repositories and tag pattern,
+  the container user, capabilities, mounts, injected and reserved environment and the environment
+  allow-list (with value patterns for the variables the panel sets), publishable container ports and
+  the never-published ones, the readiness probe, stop signal, TTY/stdin, log redaction, default
+  backup excludes and the **control driver** (`agent/mcagent/drivers/`: `minecraft-rcon`, the
+  generic `rcon`, `none`) with its options. A spec names only `game`/`variant`; an agent without the
+  profile answers 400 `unknown_game`, and the panel refuses to create or start such a server on it
+  (409 `agent_lacks_game`, from `GET /v1/info` `games`).
+
+What the generic pieces do:
+
+* **Named ports** (`Instance.ports`, `services.assign_named_ports`, `ports_in_use_by_protocol`):
+  conflicts are per protocol (TCP 7777 and UDP 7777 are different ports); a new server gets the
+  game's well-known port when it is free, else the next free one above it, else one of the panel's
+  range. `game_port` of such a server is a copy of its first named port (the unique constraint on
+  `game_port` holds for Minecraft rows only). The agent publishes only the profile's container ports
+  and never its `never_publish` ones. The connection info lists every named port with its protocol.
+* **Memory model `plain`**: `memory_mb` is the container limit (no JVM overhead); the memory check
+  and the API use `Instance.container_memory_mb`, which asks the definition.
+* **Config files** (`apps/games/codecs.py`: `json` with dotted keys, `ini` with `section.key`, `kv`,
+  `java-properties`): `GET /api/instances/<id>/config` and `PATCH .../config/<file id>` read and
+  change only the keys of the schema; comments, order and unknown keys stay; secret fields are
+  masked (`********` sent back means unchanged); managed keys are refused. The frontend renders the
+  schema (`components/ConfigFieldsForm.tsx`, Settings -> Game settings, capability `config_files`).
+* **Secrets and setup steps**: `Instance.secrets` is encrypted JSON (never returned, never in audit
+  details: keys only). Steps of kind `auto` run in the `setup` job (enqueued by the install job,
+  non-exclusive until it takes the lock); a `secret` step runs once its secret is set; the
+  Overview shows "Setup needed". Factorio has none; the mechanism is tested with a test game.
+* **Readiness**: besides Docker health checks (`cmd`, the image's own), the agent runs `tcp`
+  (connect to the container) and `log:<regex>` (a line since the container started) probes itself
+  and reports them as the container's `health` (`starting` / `healthy` / `unhealthy` after the
+  profile's `start_period_s`), so `state.compute` reads them like Docker's. Factorio uses the log
+  probe (`Starting RCON interface at`): an RCON health check would print a line every interval.
+* **Consistent backups**: the agent's driver saves (`/server-save`) and waits for the completion line
+  (`Saving finished`) before restic copies; the same save precedes a stop. Default excludes come from
+  the profile (agent, absolute: Factorio's `temp/`) and the definition (panel: `*.tmp.zip`).
+* **Image VOLUMEs**: for profiles with `mount_image_volumes` the agent inspects the image and mounts
+  every declared VOLUME that is not a profile mount into `<server folder>/.volumes/...` (or a tmpfs
+  the profile names), so Docker never creates an anonymous volume outside the server folder.
+* **First start of images that download the game**: a definition can name `retryable_install_exits`
+  (SteamCMD's exit 5/8); the install job then waits for the first start and starts the container
+  again up to `install_attempts` times (`game_handlers.wait_first_start`).
+* **Exits from inside the game**: Factorio's `/quit` exits 0, which Docker's restart policy would
+  restart. The console turns stop words into the panel's Stop; `POST /command` and schedule commands
+  refuse them for games with `refuse_stop_commands` (400 `stop_via_power`).
+* **Runtime images per game**: system setting `runtime_images` (`{game: {"repository"}}`); the tag
+  follows the game's rule (Factorio: `<exact version>-rootless`). Minecraft keeps
+  `runtime_image_repository` / `runtime_image_channel`. The agent must allow the repository
+  (`AGENT_GAME_<ID>_IMAGES`, default: the profile's list).
+* **Saves** of games other than Minecraft (`definition.saves`; Factorio `FactorioSaves`):
+  `GET /saves`, `POST /saves/reset` (job `saves_reset`), `POST /saves/import` (job `saves_import`),
+  `GET /saves/export`. Reset and import stop the server, take a safety backup, move every save into
+  `saves-replaced/<UTC stamp>/` in the server folder, then write the map settings (the server creates
+  the new map at its start) or put the uploaded zip in place, and start it again if it was running.
+
+### Factorio
+
+`factoriotools/factorio:<version>-rootless`, run as the runtime uid:gid with no capabilities, the
+server folder at `/factorio`, 34197/udp published, RCON 27015/tcp internal only. The panel writes the
+control secret (`Instance.rcon_password`) to `config/rconpw` before every apply
+(`handlers.write_control_secret`); the image passes it to the server, the agent's `rcon` driver reads
+it from the file. The file editor shows that file masked and refuses to write it. The server always
+loads `saves/world.zip` (`SAVE_NAME`, `LOAD_LATEST_SAVE=false`) and creates it from
+`config/map-gen-settings.json` when it is missing (`GENERATE_NEW_SAVE=true`). Space Age
+(`DLC_SPACE_AGE`) is chosen at creation and pinned in `game_options`. Versions come from Docker Hub's
+`*-rootless` tags and factorio.com's latest stable release; a software update changes the exact tag
+(pre-update backup, downgrade only when confirmed).
+
+### Adding a game
+
+1. Agent: a profile module in `agent/mcagent/profiles/` (copy `factorio.py`), registered in
+   `profiles/__init__.py`; a driver in `agent/mcagent/drivers/` only if no existing one fits
+   (register it in `drivers/__init__.py` `FACTORIES`); new error codes in `agent/mcagent/errors.py`.
+   `profiles.register` refuses a profile whose health probe is not implemented.
+2. Panel: a definition module in `backend/apps/games/` (copy `factorio.py`), registered in
+   `apps/games/__init__.py`: ports (`PortSpec`), options, config files with their schema, secrets,
+   setup steps (and `run_setup_step`), versions and image rule, `game_env`, capabilities, players,
+   saves model.
+3. Frontend: nothing game-specific is needed for the generic pages (they read the catalog entry and
+   the capabilities); a game with its own concepts adds a page or a capability.
+4. Tests: a definition test (spec, catalog, codecs), a profile test (create kwargs), a driver test
+   against a fake of its protocol, and a run on real containers.
+
 ## Data layout on the host (`AGENT_DATA_ROOT`)
 
 ```
-<data root>/instances/<instance-uuid>/   -> mounted at /data in the Minecraft container
+<data root>/instances/<instance-uuid>/   -> mounted at /data in the Minecraft container (Factorio: /factorio)
+<instance dir>/.volumes/<path>           -> other games: an image VOLUME that is not the profile's mount
+<instance dir>/saves-replaced/<stamp>/   -> Factorio: the saves a world reset or an import moved aside
 <backup root>/restic/<instance-uuid>/    -> restic repository (AGENT_BACKUP_ROOT, default <data root>/backups)
 <data root>/staging/                     -> restore/clone staging (same filesystem for atomic rename)
 <data root>/instances/<id>.mcpanel-{restore,clone,old}-* -> btrfs: new subvolume built next to the server, renamed in
@@ -387,7 +490,7 @@ server's files (a restore or previous copy whose server folder is missing or emp
 ## Backend apps
 
 `accounts` (users, roles, per-instance grants, permission matrix) · `audit` · `nodes` (Node + agent
-client) · `catalog` (Mojang/Fabric/Quilt/Forge/NeoForge/Paper/Purpur metadata, Java resolution) ·
+client) · `games` (game definitions: Minecraft, Factorio; config codecs; `GET /api/catalog/games`) · `catalog` (Mojang/Fabric/Quilt/Forge/NeoForge/Paper/Purpur metadata, Java resolution) ·
 `instances` (model, spec builder, state, reconcile, handlers, schedules, files/properties/console
 proxies) · `jobs` (runner, watchdog) · `modpacks` (Modrinth, CurseForge, FTB adapters) · `content`
 (mods/plugins manager) · `backups` · `players` · `console` (WebSocket consumers, event fan-out) · `core`
@@ -406,8 +509,8 @@ off the cache drive).
 
 * `/ws/instances/<id>/console/` — the panel relays the agent's log stream
   (`/v1/instances/<id>/logs/stream`, follows across restarts) and executes commands via RCON with a
-  per-command permission check and audit entry. `stop` typed there (any case, with or without `/`)
-  is not sent: over RCON it makes the server exit and Docker's restart policy starts it again at
+  per-command permission check and audit entry. The game's stop word typed there (Minecraft:
+  `stop`, any case, with or without `/`; Factorio: `/quit`) is not sent: over RCON it makes the server exit and Docker's restart policy starts it again at
   once. With `instance.control` the console enqueues the Stop button's job instead and sends a
   `notice` saying so; without it the command is refused (`stop_refused`). The notice carries the
   command's `id` (and `job_id`); the `command_result` with the same id and text follows, and the SPA

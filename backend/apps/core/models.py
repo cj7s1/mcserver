@@ -22,6 +22,9 @@ class SystemSetting(models.Model):
     DEFAULTS: dict[str, Any] = {
         "runtime_image_repository": "itzg/minecraft-server",
         "runtime_image_channel": "stable",  # stable | latest | pinned:<version>
+        # other games: {game: {"repository": "..."}}; the tag follows the game's own rule (Factorio:
+        # "<exact version>-rootless"). Minecraft keeps the two settings above.
+        "runtime_images": {},
         "default_memory_mb": 4096,
         "port_range_start": None,  # falls back to settings.MCPANEL_PORT_RANGE_START
         "port_range_end": None,

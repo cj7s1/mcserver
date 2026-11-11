@@ -4,7 +4,7 @@
  * `game_label`, `capabilities` and `memory_model` with every instance; an older panel sends none of
  * them, and the instance is then a Minecraft server gated exactly as before (content_kind, is_modpack).
  */
-import type { GameCapability, Instance, MemoryModel } from "./types";
+import type { GameCapability, GameInfo, Instance, MemoryModel } from "./types";
 
 export const MINECRAFT = "minecraft";
 
@@ -27,7 +27,7 @@ const MINECRAFT_BASE: readonly GameCapability[] = [
   "world_reset",
 ];
 
-const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft" };
+const GAME_LABELS: Record<string, string> = { [MINECRAFT]: "Minecraft", factorio: "Factorio" };
 
 export function gameId(i: Pick<Instance, "game">): string {
   return i.game || MINECRAFT;
@@ -187,4 +187,44 @@ export function memoryWording(model: MemoryModel): MemoryWording {
     autoOverheadHint: () => "no extra memory",
     autoOverheadRule: () => "none",
   };
+}
+
+// --- console ----------------------------------------------------------------------------------------
+
+/** How a game's console takes commands (GET /catalog/games: stop_words, keeps_command_slash, command_hint). */
+export interface ConsoleRules {
+  /** Commands keep their leading "/" (Factorio); Minecraft strips it. */
+  keepsSlash: boolean;
+  /** Words the panel turns into its own Stop (lower case, as typed after normalisation). */
+  stopWords: string[];
+  /** Example commands for the input placeholder. */
+  example: string;
+}
+
+export const MINECRAFT_CONSOLE: ConsoleRules = { keepsSlash: false, stopWords: ["stop"], example: "list or say Hello" };
+
+/** The console rules of a game: Minecraft's without catalog data (Minecraft, older panels). */
+export function consoleRules(game: Pick<GameInfo, "id" | "stop_words" | "keeps_command_slash" | "command_hint"> | undefined | null): ConsoleRules {
+  if (!game || game.id === MINECRAFT) return MINECRAFT_CONSOLE;
+  return {
+    keepsSlash: !!game.keeps_command_slash,
+    stopWords: (game.stop_words ?? []).map((w) => w.toLowerCase()),
+    example: game.command_hint || (game.keeps_command_slash ? "/players online" : "help"),
+  };
+}
+
+/** A typed console line as it is sent: trimmed, and without leading slashes unless the game keeps them. */
+export function normaliseConsoleCommand(text: string, rules: ConsoleRules = MINECRAFT_CONSOLE): string {
+  const t = text.trim();
+  return rules.keepsSlash ? t : t.replace(/^\/+/, "");
+}
+
+/** Whether a (normalised) command is one of the game's stop words, which the panel turns into a Stop. */
+export function isStopWord(command: string, rules: ConsoleRules = MINECRAFT_CONSOLE): boolean {
+  return rules.stopWords.includes(command.trim().toLowerCase());
+}
+
+export function hasAnyCapability(i: GameFields, caps: readonly GameCapability[]): boolean {
+  const have = instanceCapabilities(i);
+  return caps.some((c) => have.has(c));
 }

@@ -1,6 +1,7 @@
 # CLAUDE.md — guide for future sessions
 
-Self-hosted Minecraft server management platform (Unraid-first). Read `DEVELOPMENT_STATUS.md` first:
+Self-hosted game server management platform (Unraid-first): Minecraft, and Factorio since multi-game
+phases 2 + 3 (docs/design/GAME-DEFINITIONS.md; ARCHITECTURE.md "Games"). Read `DEVELOPMENT_STATUS.md` first:
 it records what works, what was verified and the next task. `ARCHITECTURE.md` explains why things are
 the way they are; `docs/reference/*.md` holds **verified** upstream API notes (itzg, Modrinth,
 CurseForge, FTB, version metadata, restic) — use them instead of guessing endpoints.
@@ -8,7 +9,8 @@ CurseForge, FTB, version metadata, restic) — use them instead of guessing endp
 ## Layout
 
 ```
-agent/      FastAPI node agent (only component with Docker socket). mcagent/{main,docker_ops,lastrun,safefs,backups,snapshots,zfs,world,archive,fetch,hashcache,storage,rcon,tls,schemas,operations,maintenance,netguard,slp}.py
+agent/      FastAPI node agent (only component with Docker socket). mcagent/{main,docker_ops,lastrun,safefs,backups,snapshots,zfs,world,archive,fetch,hashcache,storage,rcon,tls,schemas,operations,maintenance,netguard,slp,errors}.py,
+            mcagent/profiles/ (runtime profile per game: minecraft, factorio), mcagent/drivers/ (control drivers: minecraft-rcon, rcon, none)
 backend/    Django 5.2 + DRF + Channels + Celery. mcpanel/ (settings, urls, asgi, celery), apps/<app>/,
             container/ (entrypoint.sh, supervise.py, healthcheck.py: the single panel container)
 frontend/   React 19 + TS 7 + Vite 8 + Tailwind 4 + shadcn/ui (radix-nova) + TanStack Query + react-router 8 + xterm.js
@@ -65,6 +67,8 @@ docs/QUICKSTART-UNRAID.md must not name the old periodic-worker service. Run bot
 
 | Area | Backend | Agent |
 |---|---|---|
+| Games: definitions, capabilities, catalog (`GET /api/catalog/games`, `.../<id>/versions`) | `apps/games/{__init__,base,minecraft,factorio,codecs,views}.py`; `games.for_instance(i)` is the one way to ask game-specific questions; Minecraft's spec never gets new keys (pin tests `tests/test_games_phase1_pins.py`) | `profiles/{__init__,base,minecraft,factorio}.py` (images, tag pattern, user, caps, mounts, env allow-list, ports, never_publish, health, redaction, backup excludes), `drivers/{base,rcon,minecraft}.py`, `errors.py` (error codes); pins `tests/test_games_pins.py` + `pins/create_kwargs.json` |
+| Other games: named ports, config files, secrets, setup steps, saves, software update | `apps/instances/{game_views,game_handlers}.py` (create, `/config`, `/secrets`, `/setup`, `/saves*`; jobs `setup`, `saves_reset`, `saves_import`, `wait_first_start`), `services.assign_named_ports` / `ports_in_use_by_protocol`, `handlers.write_control_secret` / `_game_software_update`; frontend `create-server/GameWizard.tsx`, `settings/game-settings-tab.tsx`, `backups/SavesSection.tsx`, `network/GameNetwork.tsx`, `overview/SetupCard.tsx`, `players/GamePlayers.tsx` | `docker_ops.{agent_health,wait_for_log,log_redactor,image_volume_plan}`, `main._log_waiter`, `main._profile_backup_excludes` |
 | Lifecycle, spec, status, crash loops | `apps/instances/{handlers,spec,state,reconcile}.py`. A job starts a server only through `handlers.start_server` (creates the container when there is none). A job that stopped a running server and then fails starts it again when nothing was changed, else records it stopped (`put_back`, `Progress`) | `docker_ops.py`; apply creates the new container before it removes the old one |
 | Memory admission | `apps/instances/capacity.py` (node RAM minus system setting `memory_reserve_mb` vs. limits of running containers; 409 `insufficient_memory`, override `allow_overcommit`); frontend `lib/power.ts` (`sendPower`, the one power path), `components/{MemoryOvercommitDialog,MemoryCommitBar}.tsx` | `GET /v1/info` (`docker.memory_bytes`) |
 | Runtime images | `spec.current_image` (channel reaches existing servers), `handlers.apply_container` (`pull="newer"` on every start that creates a container) | `main.apply_spec`, `docker_ops` (bounded pull, superseded images removed); feature `pull_newer` |
@@ -109,6 +113,10 @@ docs/QUICKSTART-UNRAID.md must not name the old periodic-worker service. Run bot
 * Audit every mutation with `apps.audit.service.record(...)` — never put secrets in `details`.
 * The agent re-validates everything; never rely on the panel for agent-side safety.
 * itzg env is built only in `apps/instances/spec.py`; keys in `MANAGED_ENV` cannot be overridden by users.
+  Other games: the environment comes from the definition (`game_env`, `allowed_user_env`) and the agent's
+  profile re-checks it (allow-list with value patterns).
+* A new game is a definition (panel) plus a runtime profile (agent) plus tests; ARCHITECTURE.md "Adding a
+  game" lists the steps. Never add keys to a Minecraft spec (it would make every server read restart-required).
 * Frontend: API calls via `src/lib/api.ts`, query keys in `src/lib/queries.ts`, types in `src/lib/types.ts`,
   shared UI in `src/components/`, instance pages get `{instance, can}` from `useInstanceContext()`.
 * Keep `DEVELOPMENT_STATUS.md` and `ROADMAP.md` updated when a feature lands; commit often.

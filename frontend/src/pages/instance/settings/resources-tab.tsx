@@ -304,8 +304,12 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
         </div>
       </Section>
 
-      <Section title="Java runtime" description="Garbage collector tuning and process behaviour.">
+      <Section
+        title={jvm ? "Java runtime" : "Process"}
+        description={jvm ? "Garbage collector tuning and process behaviour." : "How the server is stopped and restarted."}
+      >
         <div className="grid grid-cols-1 gap-5">
+          {jvm && (
           <Field id="jvm-preset" label="JVM flag preset" error={err("jvm_flags_preset")} hint={preset?.hint}>
             <Select value={current.jvm_flags_preset} onValueChange={(v) => set("jvm_flags_preset", v as Fields["jvm_flags_preset"])} disabled={disabled}>
               <SelectTrigger id="jvm-preset" className="w-full sm:w-72">
@@ -320,12 +324,14 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
               </SelectContent>
             </Select>
           </Field>
-          {current.jvm_flags_preset === "meowice" && instance.java_version < 17 && (
+          )}
+          {jvm && current.jvm_flags_preset === "meowice" && instance.java_version < 17 && (
             <Notice tone="warning">
               MeowIce flags need Java 17 or newer; this server uses Java {instance.java_version}, so no preset flags are applied.
             </Notice>
           )}
-          <Advanced title="Advanced runtime" description="JVM arguments, shutdown and restart policy">
+          <Advanced title="Advanced runtime" description={jvm ? "JVM arguments, shutdown and restart policy" : "Shutdown and restart policy"}>
+            {jvm && (
             <Field
               id="jvm-args"
               label="Extra JVM arguments"
@@ -343,6 +349,7 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
                 aria-invalid={!!err("jvm_args") || undefined}
               />
             </Field>
+            )}
             <Field
               id="stop-timeout"
               label="Stop timeout (seconds)"

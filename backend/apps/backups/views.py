@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
@@ -274,8 +276,17 @@ class BackupRestoreNewView(APIView):
             raise ApiError("game_port must be a port number", code="invalid_port") from None
         # One transaction: when the source is busy (409 instance_busy) the new server record is
         # rolled back with the failed enqueue instead of being left behind as an orphan.
+        extra: dict[str, Any] = {}
+        if (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+            # named ports, per protocol; the pinned choices of the source (its save was made with them)
+            requested = {source.ports[0]["name"]: port} if port and source.ports else None
+            extra["ports"] = services.assign_named_ports(games.for_instance(source), repo_node, requested)
+            extra["game_options"] = dict(source.game_options or {})
+            port = int(extra["ports"][0]["host_port"]) if extra["ports"] else port
         with transaction.atomic():
-            if port:
+            if extra:
+                pass  # named ports: checked per protocol above
+            elif port:
                 services.check_port_available(repo_node, port)
             else:
                 port = services.allocate_port(repo_node)
@@ -286,6 +297,7 @@ class BackupRestoreNewView(APIView):
                 source=Source.RESTORED,
                 created_by=request.user,
                 **{f: getattr(source, f) for f in copy_fields},
+                **extra,
             )
             job = enqueue(
                 "restore_new",

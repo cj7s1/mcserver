@@ -51,10 +51,11 @@ ALLOWED_FETCH_HOSTS = {
 # agent/mcagent/main.py FEATURES of the agent released with this panel (tests/test_contracts_2026_11_10.py
 # checks that the two agree).
 CURRENT_AGENT_FEATURES = ("retire", "pull_newer", "ping", "clone_level_name", "games")
-# GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; multi-game phase 1
-# has Minecraft only, without variants)
+# GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; phase 1 had
+# Minecraft only, phase 3 adds Factorio)
 CURRENT_AGENT_GAMES: dict[str, dict[str, Any]] = {
     "minecraft": {"variants": [], "images": ["itzg/minecraft-server"], "control": "minecraft-rcon"},
+    "factorio": {"variants": [], "images": ["factoriotools/factorio"], "control": "rcon"},
 }
 
 

@@ -6,8 +6,9 @@ import { ErrorState, LoadingState } from "@/components/States";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/hooks/use-auth";
-import { gameLabel } from "@/lib/games";
+import { gameLabel, isMinecraft } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
+import { GamePlayers } from "./players/GamePlayers";
 import { OnlinePlayers } from "./players/OnlinePlayers";
 import { PlayerLists } from "./players/PlayerLists";
 import { useAvatarPreference, usePlayers } from "./players/player-utils";
@@ -37,6 +38,13 @@ function ModeNote({ running }: { running: boolean }) {
 }
 
 export default function Players() {
+  const { instance, can } = useInstanceContext();
+  // other games: their own lists and labels (players/GamePlayers.tsx); Minecraft: as before
+  if (!isMinecraft(instance)) return <GamePlayers instance={instance} canManage={can("instance.players") && !instance.archived_at} />;
+  return <MinecraftPlayers />;
+}
+
+function MinecraftPlayers() {
   const { instance, can } = useInstanceContext();
   const { user } = useAuth();
   const running = RUNNING_LIKE.includes(instance.status);

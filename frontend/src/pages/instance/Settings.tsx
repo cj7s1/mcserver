@@ -3,10 +3,13 @@ import { useCallback, useEffect, useRef, useState, type ComponentType } from "re
 import { useSearchParams } from "react-router";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { defaultSettingsTab, SETTINGS_TABS, settingsTabs, type SettingsTabId } from "@/lib/sections";
+import { isMinecraft } from "@/lib/games";
 import { useInstanceContext } from "./InstanceLayout";
 import { UnsavedChangesDialog, useUnsavedChangesGuard } from "./files/use-unsaved-guard";
 import { DangerTab } from "./settings/danger-tab";
 import { EnvTab } from "./settings/env-tab";
+import { GameSettingsTab } from "./settings/game-settings-tab";
+import { GameSoftwareTab } from "./settings/game-software-tab";
 import { GeneralTab } from "./settings/general-tab";
 import { PropertiesTab } from "./settings/properties-tab";
 import { ResourcesTab } from "./settings/resources-tab";
@@ -16,10 +19,16 @@ import { SoftwareTab } from "./settings/software-tab";
 type TabId = SettingsTabId;
 
 /** The page of each Settings tab; which tabs a server shows comes from the section registry. */
+/** Minecraft's Software tab, or the version catalog of another game. */
+function AnySoftwareTab(props: TabProps) {
+  return isMinecraft(props.instance) ? <SoftwareTab {...props} /> : <GameSoftwareTab {...props} />;
+}
+
 const COMPONENTS: Record<TabId, ComponentType<TabProps>> = {
+  "game-settings": GameSettingsTab,
   properties: PropertiesTab,
   resources: ResourcesTab,
-  software: SoftwareTab,
+  software: AnySoftwareTab,
   environment: EnvTab,
   general: GeneralTab,
   danger: DangerTab,

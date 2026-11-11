@@ -85,13 +85,11 @@ describe("create wizard: Game step", () => {
     expect(screen.queryByText("Which game?")).toBeNull();
   });
 
-  it("comes first with several games; only Minecraft can be created yet", async () => {
+  it("comes first with several games; Minecraft goes on to today's steps", async () => {
     const user = setup(() => Promise.resolve([MINECRAFT, FACTORIO]));
     expect(await screen.findByText("Which game?")).toBeInTheDocument();
     expect(stepNames()).toEqual(["Game", ...TODAY_STEPS]);
-    const factorio = screen.getByRole("radio", { name: /Factorio/ });
-    expect(factorio).toBeDisabled();
-    expect(screen.getByText(/Factorio servers cannot be created with this panel version yet/)).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /Factorio/ })).toBeEnabled();
     expect(screen.getByText("Java edition. 4 GB suits a small server.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Next/ }));
@@ -103,6 +101,16 @@ describe("create wizard: Game step", () => {
     await user.click(screen.getByRole("button", { name: /Back/ }));
     expect(await screen.findByText("Which game?")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Minecraft/ })).toBeChecked();
+  });
+
+  it("another game continues with the steps of its catalog entry", async () => {
+    const user = setup(() => Promise.resolve([MINECRAFT, FACTORIO]));
+    await user.click(await screen.findByRole("radio", { name: /Factorio/ }));
+    await user.click(screen.getByRole("button", { name: /Next/ }));
+    expect(stepNames()).toEqual(["Game", "Version", "Resources", "Settings", "Review"]);
+    expect(await screen.findByRole("heading", { name: /Step 2 of 5: Version & options/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Back/ }));
+    expect(await screen.findByText("Which game?")).toBeInTheDocument();
   });
 
   it("keeps Minecraft deep links on their step", async () => {

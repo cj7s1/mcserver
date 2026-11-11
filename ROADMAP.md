@@ -136,6 +136,20 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [~] Audit round of 2026-11-09 (open findings of four work lists): fixed and unit-tested on branch
       `fix/audit-remaining`; remaining points in DEVELOPMENT_STATUS.md "Audit of 2026-11-09"
 
+## Multi-game (docs/design/GAME-DEFINITIONS.md, section 10)
+- [x] Phase 1: game definitions and runtime profiles, Minecraft as the first game, no behaviour change (pin tests)
+- [x] Phase 2: named ports per protocol, memory model "plain", config files with codecs and the Game settings
+      form, secrets and setup steps, agent-side readiness probes (tcp, log), driver saves with a completion
+      line before backups and stops, image VOLUMEs in the server folder, first-start retry for image-side
+      downloads, stop words per game, runtime images per game, the Game step in the wizard
+- [x] Phase 3: Factorio (rootless image, UDP port, RCON driver with a password file, Space Age pinned, saves:
+      export / import / new map, players, software update to another exact tag). Real containers on a desktop
+      (2026-11-10); not run on Unraid
+- [ ] Console-write primitive (Terraria via the image's `inject`, TShock via stdin): not built yet
+- [ ] Phase 4: Terraria (vanilla, tModLoader), then TShock
+- [ ] Phase 5: Satisfactory (HTTPS API driver, claiming before ports are published)
+- [ ] Later: DST, a decision on Stardew Valley, per-game mods (Factorio mod portal first)
+
 ## Dependencies
 - Modpack update/rollback depends on backups (done) and provider adapters (done).
 - Content manager depends on agent `/files/hashes` + `/files/fetch` (done).
