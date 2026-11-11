@@ -353,7 +353,9 @@ After anything unclear the server is left stopped.
 ## Games: definitions, runtime profiles, control drivers
 
 The design is docs/design/GAME-DEFINITIONS.md. Built: Minecraft (phase 1, unchanged behaviour),
-Factorio (phases 2 and 3), Satisfactory and Terraria (their own sections below). A game has two halves that must agree:
+Factorio (phases 2 and 3), Satisfactory and Terraria (their own sections below), and six games on a
+shared base: Palworld, Valheim, Project Zomboid, Hollow Knight (HKMP), Counter-Strike 2 and Rust
+("Six Steam-era games" below). A game has two halves that must agree:
 
 * **Panel: the game definition** (`backend/apps/games/<game>.py`, a `GameDefinition` subclass,
   registered in `apps/games/__init__.py` `_load`). Everything game-specific on the panel side is
@@ -373,7 +375,8 @@ Factorio (phases 2 and 3), Satisfactory and Terraria (their own sections below).
   allow-list (with value patterns for the variables the panel sets), publishable container ports and
   the never-published ones, the readiness probe, stop signal, TTY/stdin, log redaction, default
   backup excludes and the **control driver** (`agent/mcagent/drivers/`: `minecraft-rcon`, the
-  generic `rcon`, `none`) with its options. A spec names only `game`/`variant`; an agent without the
+  generic `rcon`, `http-api` with `satisfactory-api` and `palworld-api`, `console`, `tshock-rest`,
+  `webrcon`, `none`) with its options. A spec names only `game`/`variant`; an agent without the
   profile answers 400 `unknown_game`, and the panel refuses to create or start such a server on it
   (409 `agent_lacks_game`, from `GET /v1/info` `games`).
 
@@ -385,6 +388,13 @@ What the generic pieces do:
   range. `game_port` of such a server is a copy of its first named port (the unique constraint on
   `game_port` holds for Minecraft rows only). The agent publishes only the profile's container ports
   and never its `never_publish` ones. The connection info lists every named port with its protocol.
+  A port can share another one's number (`same_port_as`, Satisfactory) or derive from it
+  (`offset_of` + `offset`, Valheim's query port = game + 1): such a port is never asked for, the game
+  port is chosen so that the derived numbers are free as well and they move with it (409
+  `port_conflict` names the game port). A port can be published 1:1 (`one_to_one`: container port =
+  host port, for images that take the port from a variable and advertise it) and only while a setting
+  is on (`when` = (config id, key, value): Valheim's crossplay port, CS2's CSTV port, Rust+); its number
+  stays reserved either way. The catalog shows these as `same_port_as`, `derived_from`, `one_to_one`, `when`.
 * **Memory model `plain`**: `memory_mb` is the container limit (no JVM overhead); the memory check
   and the API use `Instance.container_memory_mb`, which asks the definition.
 * **Config files** (`apps/games/codecs.py`: `json` with dotted keys, `ini` with `section.key`, `kv`,
@@ -393,7 +403,14 @@ What the generic pieces do:
   masked (`********` sent back means unchanged); managed keys are refused. The frontend renders the
   schema (`components/ConfigFieldsForm.tsx`, Settings -> Game settings, capability `config_files`).
 * **Secrets and setup steps**: `Instance.secrets` is encrypted JSON (never returned, never in audit
-  details: keys only). Steps of kind `auto` run in the `setup` job (enqueued by the install job,
+  details: keys only). A secret may carry the value `pattern` of the agent's profile (checked at create
+  and in Settings; `pattern_help` says it in words), be `generate`d when the create request has none
+  (it can then not be cleared; nor can a `required` one) and be `reveal`able: `POST
+  /api/instances/<id>/secrets/<key>/reveal` (`instance.configure`, `Cache-Control: no-store`, audited as
+  `instance.secret_revealed` with the key only) for passwords players type in game (Palworld's and
+  Project Zomboid's admin passwords). `definition.secret_error` adds rules across settings (Valheim: the
+  join password must not contain the server name). String config fields may carry a `pattern` too
+  (values that reach an environment; Counter-Strike 2's image `eval`s its start line). Steps of kind `auto` run in the `setup` job (enqueued by the install job,
   non-exclusive until it takes the lock); a `secret` step runs once its secret is set; the
   Overview shows "Setup needed". Factorio has none; the mechanism is tested with a test game.
 * **Readiness**: besides Docker health checks (`cmd`, the image's own), the agent runs `tcp`
@@ -415,7 +432,8 @@ What the generic pieces do:
 * **First start of images that download the game**: a definition can name `retryable_install_exits`
   (SteamCMD's exit 5/8); the install job then waits for the first start and starts the container
   again up to `install_attempts` times (`game_handlers.wait_first_start`). A first start that is not
-  ready after 30 minutes fails the install job (`first_start_timeout`; the server goes on starting and
+  ready after 30 minutes (the definition's `first_start_timeout`: CS2 4 h, Rust 2 h) fails the install
+  job (error code `first_start_timeout`; the server goes on starting and
   the setup job is queued to go on once it answers). Satisfactory's restart policy is "no", so every
   start a job makes (`handlers.start_server`, the restart job, the publish step) waits the same way
   (`handlers.watch_start`, at most 10 minutes, then the job ends with a note) and also handles the
@@ -504,6 +522,16 @@ What the generic pieces do:
   `GET /saves/export`. Reset and import stop the server, take a safety backup, move every save into
   `saves-replaced/<UTC stamp>/` in the server folder, then write the map settings (the server creates
   the new map at its start) or put the uploaded zip in place, and start it again if it was running.
+  Worlds that are folders use one generic model (`apps/games/foldersaves.py` `FolderSaves`, catalog
+  `world.kind = "folder"`), configured per definition with the folder, the file names that make a world
+  (`markers`) and hooks (`world_paths` per purpose reset/import/export, `world_target`, `place_world`,
+  `after_import`, `prepare_world_reset`, `save_now`): the list shows the current world (size from a
+  bounded walk, `size_complete`) and the set-aside copies; an import is a zip of the world folder that
+  the panel checks before uploading it (the markers at the top or one folder below, no links, no
+  absolute or `..` paths, bounded size and entry count; `root` goes to the job), which the job extracts
+  into a staging folder `.mcpanel-import-<hex>.d` and moves into place; an export is a zip of the world
+  folder built by the agent (`files/archive`, minus the game's own rolling copies), after a save when
+  the server runs and the user may send commands.
 
 ### Factorio
 
@@ -676,16 +704,52 @@ from the console's `playing` (cached 55 s; so the player history sends one `play
 the server runs), kick and ban by command, unban by editing `banlist.txt`; TShock from its status,
 kick and `ban add` by command.
 
+### Six Steam-era games (Palworld, Valheim, Project Zomboid, HKMP, Counter-Strike 2, Rust)
+
+Contract `audit-2026-11-09/briefs/games-6-contract.md`, ground truth `audit-2026-11-09/design/probe-6games.md`
+(outside the repository). The definitions share `apps/games/steamgame.py` (`SteamGameDefinition`): no
+version to pick (`fixed_version`: the image runs SteamCMD or DepotDownloader at every start and follows
+Steam's public branch; HKMP's server comes with the image, its tag is the version), memory model
+`plain`, restart policy "no" (panel and agent), the runtime image pinned by the panel release
+(`image_tag`, Rust `image_digest`; `runtime_images` may name another repository), virtual configs kept in
+`game_options[<config id>]` and passed as variables (`config_values`, `write_virtual_config`,
+`check_config` for rules across fields; a change makes the spec "restart required"), every published
+port 1:1, `TZ` as the only owner variable, and diagnostics for a failed download, a full disk and running
+out of memory (`steam_issues`). The agent's profiles (`agent/mcagent/profiles/{palworld,valheim,zomboid,
+hkmp,cs2,rust}.py`, shared patterns in `steam.py`) allow exactly the variables the definitions set, with
+the same value patterns; `backend/tests/test_games_six.py` runs the agent's own `build_create_kwargs`
+on the specs the panel builds.
+
+| | image (pinned) | ports (published 1:1) | control | settings | players | world |
+|---|---|---|---|---|---|---|
+| Palworld | `thijsvanloef/palworld-server-docker:v2.8.1` | game 8211/udp (`PORT`, `PUBLIC_PORT`) | `palworld-api` (REST 8212 internal, Basic `admin:<ADMIN_PASSWORD>`) | virtual `server`, `gameplay` (the image writes `PalWorldSettings.ini` from them) | REST list; kick/ban/unban by user id (`steam_<id>`, an online name is resolved); bans from `banlist.txt` | folder `Pal/Saved/SaveGames/0/<id>/`, named by `GameUserSettings.ini` `DedicatedServerName` |
+| Valheim | `ghcr.io/community-valheim-tools/valheim-server:1.4.1` | game 2456/udp (`SERVER_PORT`), query = +1, crossplay = +2 (`when` crossplay) | none | virtual `server` (name, public, crossplay, save interval, preset/modifiers/keys as whitelisted `SERVER_ARGS`) | the three list files (`config/adminlist.txt`, `bannedlist.txt`, `permittedlist.txt`, SteamID64), no online list | folder `config/worlds_local/<world>/` (+ older `.db`/`.fwl`) |
+| Project Zomboid | `indifferentbroccoli/projectzomboid-server-docker:v1.2.0` | game 16261/udp (`DEFAULT_PORT`), RakNet 16262/udp (`UDP_PORT`) | `rcon` (27015 internal, password injected by the agent), status through A2S | virtual `launch` (max players); `data/Server/<name>.ini` (`kv`; the image's keys managed; `UPnP=false`, `BackupsOnStart=false` by `before_apply`) | RCON `players`; kick/ban/unban/admin/whitelist by RCON (lists live in the game's database: not listed) | folder `data/Saves/Multiplayer/<name>/` (+ `_player`; reset may move `data/db/<name>.db`) |
+| HKMP | `maximalmax90/hkmpserver:v2.4.3-2` | game 2222/udp (`PORT`) | `console` exec `hkmp <line>` (guard `screen`: no `^`, `\`, control characters) | virtual `launch` (full sync); `serversettings.json`, `whitelist.json` (`json`) | `list`; kick/ban(ip)/unban(ip)/auth/whitelist through the console; lists from the JSON files | none |
+| Counter-Strike 2 | `joedwards32/cs2:5.0.1` (uid 1000:1000, `init`) | game 27015/udp (`CS2_PORT`), CSTV 27020/udp (`when` cstv) | `rcon` on the game port's number over TCP (`port_env`), status through A2S | virtual `server` (name, players, mode, map, LAN, bots, CSTV); `server.cfg` is the image's (masked, write-protected) | A2S names; kick | none (backups keep `game/csgo/cfg/`) |
+| Rust | `didstopia/rust-server@sha256:c60a3ab0...` | game 28015/udp, query 28017/udp, Rust+ 28082/tcp (`when` rust_plus; never 28016/8080) | `webrcon` (WebSocket 28016 internal), status through A2S | virtual `server` (name, description, players, map size, seed fixed at creation, save interval, Rust+) | `playerlist`; kick/ban/unban/owners through WebRCON operations; owners and bans from `cfg/users.cfg`, `cfg/bans.cfg` | folder `server/<identity>/`: a reset moves map, saves and the world's databases (blueprints when asked) and picks the seed; import/export the whole folder |
+
+Secrets: Palworld `admin_password` (generated, revealable; `ADMIN_PASSWORD`, the REST API's password)
+and `server_password`; Valheim `server_password` (required, 5+ characters, not containing the server
+name); Project Zomboid `admin_password` (generated, revealable: the in-game account `admin`); CS2 `gslt`
+(link to Steam's token page), `server_password`, `tv_password`. The RCON passwords of PZ, CS2 and Rust are
+the control secret (`Instance.rcon_password`, 32 letters and digits), injected by the agent
+(`RCON_PASSWORD`, `CS2_RCONPW`, `RUST_RCON_PASSWORD`) and masked in the files that hold them. SteamCMD
+failures are retried on the first start and every start (`retryable_install_exits`: PZ 1, CS2 5/8,
+Rust 1) like Satisfactory's. Players' online counts for the metrics come from A2S (`/ping`, capability
+`query`) for Project Zomboid, CS2 and Rust, from the game's own list for Palworld and HKMP (Valheim: none).
+
 ### Adding a game
 
 1. Agent: a profile module in `agent/mcagent/profiles/` (copy `factorio.py`), registered in
    `profiles/__init__.py`; a driver in `agent/mcagent/drivers/` only if no existing one fits
    (register it in `drivers/__init__.py` `FACTORIES`); new error codes in `agent/mcagent/errors.py`.
    `profiles.register` refuses a profile whose health probe is not implemented.
-2. Panel: a definition module in `backend/apps/games/` (copy `factorio.py`), registered in
+2. Panel: a definition module in `backend/apps/games/` (copy `factorio.py`; an image that downloads
+   its game and follows one branch: copy one of the six on `steamgame.py`), registered in
    `apps/games/__init__.py`: ports (`PortSpec`), options, config files with their schema, secrets,
    setup steps (and `run_setup_step`), versions and image rule, `game_env`, capabilities, players,
-   saves model.
+   saves model (a world that is a folder: `foldersaves.FolderSaves`).
 3. Frontend: nothing game-specific is needed for the generic pages (they read the catalog entry and
    the capabilities); a game with its own concepts adds a page or a capability.
 4. Tests: a definition test (spec, catalog, codecs), a profile test (create kwargs), a driver test

@@ -1,6 +1,7 @@
 # Development status
 
-_Last updated: 2026-11-11 (fixes from the real-container gate of the multi-game branch, first section below; before that the fixes from the review of the multi-game branch, second section; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
+_Last updated: 2026-11-11 (six more games on branch `feature/more-games`, panel side: first section below; then the
+fixes from the real-container gate of the multi-game branch, second section; before that the fixes from the review of the multi-game branch, second section; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
 pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
 all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
@@ -10,6 +11,38 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Six more games, panel side (branch `feature/more-games`, 2026-11-11)
+
+Palworld, Valheim, Project Zomboid, Hollow Knight (HKMP), Counter-Strike 2 and Rust (contract
+`audit-2026-11-09/briefs/games-6-contract.md`, probe `design/probe-6games.md`, agent interface notes
+`more-games/agent-notes.md`; all outside the repository). **Implemented and unit-tested on the panel; the
+agent side is the agent engineer's (its real-container smoke: `more-games/agent-smoke.md`); the frontend
+for the new catalog shapes is not done yet; nothing of it has run on Unraid.**
+
+* Definitions on a shared base (`apps/games/steamgame.py`): pinned images (Rust by digest), no version to
+  pick (`fixed_version`; PZ's branch `public`/`legacy41` chosen once), restart policy "no", virtual configs
+  passed as variables, 1:1 ports, `TZ` only, diagnostics for a failed download, a full disk and out of
+  memory. Ports per game and their env, settings, secrets, players and worlds: ARCHITECTURE.md "Six
+  Steam-era games".
+* Generic pieces (no change for the older games: `tests/test_games_other_pins.py` pins the catalog entries
+  and specs of Minecraft, Factorio, the three Terraria variants and Satisfactory as they were): derived
+  ports (`PortSpec.offset_of`, Valheim's query/crossplay port; chosen so that they are free, moved with the
+  game port), 1:1 ports (`one_to_one`), ports published only while a setting is on (`when`), secret
+  patterns, generated and revealable secrets (`POST /secrets/<key>/reveal`, audited), `secret_error`
+  (Valheim's password must not contain the server name), string config fields with a `pattern` (CS2's
+  start line is eval'd), `first_start_timeout` per game (CS2 4 h, Rust 2 h), the folder saves model
+  (`apps/games/foldersaves.py`: list with sizes, reset, import of a checked zip through a staging folder,
+  export as a zip without the game's rolling copies).
+* Tests: `backend/tests/test_games_six.py` (every game created through the API, specs and environments
+  exactly, the agent's own `build_create_kwargs` run on the panel's specs with the agent's virtualenv,
+  refusals of shell metacharacters and bad patterns, secrets never in the audit log, players per game,
+  folder saves with the fake agent's extract, diagnostics, the agent gate).
+* Not verified (no real server behind the panel's code yet): Palworld's world import (`DedicatedServerName`
+  in `GameUserSettings.ini`, community practice), whether Valheim reloads its list files while running
+  (the panel says "at the latest at the next start"), PZ reading a partial `Server/<name>.ini` written before
+  its first start, the JSON shape of HKMP's `approved` entries, CS2's `status` parsing (only a fallback:
+  the player list comes from A2S), Rust's map wipe file list (community practice) and its RCON replies.
 
 ## Real-container gate of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
 

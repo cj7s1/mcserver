@@ -5,7 +5,8 @@
 
 
 A self-hosted Minecraft **Java Edition** server manager for a Docker host (more hosts can be added as
-nodes), which also runs **Factorio**, **Satisfactory** and **Terraria** servers. It's designed for Unraid first and also runs on any Linux Docker host. It combines
+nodes), which also runs **Factorio**, **Satisfactory**, **Terraria**, **Palworld**, **Valheim**, **Project Zomboid**,
+**Hollow Knight (HKMP)**, **Counter-Strike 2** and **Rust** servers. It's designed for Unraid first and also runs on any Linux Docker host. It combines
 Prism-Launcher-style instance management with game-panel administration, and it is built around
 **easy modpack servers**: search for *Better MC*, pick a release, choose RAM and a port, and deploy.
 
@@ -30,6 +31,12 @@ Prism-Launcher-style instance management with game-panel administration, and it 
   console commands, online players (kick; ban and unban by IP for vanilla/tModLoader), consistent
   backups, `serverconfig.txt` (and TShock's `config.json`) as a form, worlds: download, import of a
   `.wld`, new world with size, difficulty and seed.
+- **Palworld, Valheim, Project Zomboid, Hollow Knight (HKMP), Counter-Strike 2, Rust:** dedicated servers
+  on pinned community images that download the game from Steam and follow its public branch (no version
+  to pick; "update" means restart), settings as forms, ports published with the number the game
+  advertises, online players and the actions each game has, worlds as folders (download, import of a
+  zip, reset; Rust: a map wipe with a new seed). See [docs/GAMES.md](docs/GAMES.md) for ports, disk,
+  memory and the rules of each game (Valheim's password, CS2's Game Server Login Token, PZ's admin login).
 - **Servers:** Vanilla, Paper, Purpur, Folia, Fabric, Quilt, Forge, NeoForge. Versions come from the
   official metadata services, and Java is picked automatically from Mojang's requirements.
 - **Modpacks:** Modrinth, CurseForge (with or without an API key) and Feed The Beast. Releases are

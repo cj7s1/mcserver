@@ -206,6 +206,15 @@ stops them before Docker stops, and starts them again after boot:
   user). TShock runs as `MC_UID`/`MC_GID` (99:100) with no capability. tModLoader downloads .NET from
   Microsoft whenever its container is recreated, so it needs internet access then; give it 3 GB of
   RAM. Each Terraria image is 0.3-0.9 GB on the cache drive.
+* **Palworld, Valheim, Project Zomboid, HKMP, Counter-Strike 2 and Rust** use UDP ports, published with
+  the same number inside the container (the game advertises it): Palworld 8211, Valheim 2456 + 2457 (and
+  2458 with crossplay), Project Zomboid 16261 + 16262, HKMP 2222, Counter-Strike 2 27015 (+ 27020 for
+  CSTV; never forward its TCP port: that is RCON), Rust 28015 + 28017 (+ TCP 28082 for Rust+). Except
+  HKMP, their images download the game into the server folder on the first start (Palworld 4.6 GB,
+  Valheim 4 GB, Project Zomboid 7 GB, Rust 10 GB, Counter-Strike 2 about **60 GB**) and leave it out of
+  backups; check the free space of the share first. Counter-Strike 2's image runs as uid 1000:1000
+  (its files belong to 1000:1000, not `nobody:users`); the others run as root with a few capabilities
+  and drop to `MC_UID`/`MC_GID`. Per-game notes (memory, passwords, tokens): [GAMES.md](GAMES.md).
 
 ## 6. Snapshots on Unraid
 

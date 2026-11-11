@@ -148,6 +148,9 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [x] Console-write primitive (Terraria via the image's `inject` through a fixed exec argv, TShock via stdin)
 - [x] Phase 4: Terraria (vanilla, tModLoader, TShock): verified on real containers, not yet on Unraid
 - [ ] Phase 5: Satisfactory (HTTPS API driver, claiming before ports are published)
+- [~] Six more games: Palworld, Valheim, Project Zomboid, Hollow Knight (HKMP), Counter-Strike 2, Rust (panel
+      definitions and agent profiles unit-tested, agent smoke on real containers; frontend shapes pending; not on
+      Unraid)
 - [ ] Later: DST, a decision on Stardew Valley, per-game mods (Factorio mod portal first)
 
 ## Dependencies
