@@ -187,8 +187,21 @@ def run_backup(
         ctx.log(f"warning: {w}")
     note = games.for_instance(instance).consistency_note(instance)
     if backup.consistent and note:
-        # what "consistent" means for this game (Minecraft's own wording is in the agent's log)
-        ctx.log(f"Consistent backup: {note}")
+        # what "consistent" means for this game (Minecraft's own wording is in the agent's log), as it
+        # actually happened (agents report "saving"; older ones do not: the game's note then)
+        saving = result.get("saving")
+        if saving == "stopped":
+            ctx.log(
+                "Consistent backup: the server was not running, so its files did not change during the copy "
+                "(nothing was saved first)"
+            )
+        elif saving == "no_game":
+            ctx.log(
+                "Consistent backup: the server runs but has no game loaded, so there was nothing to save first "
+                "(the save files did not change during the copy)"
+            )
+        elif saving in (None, "saved", "paused"):
+            ctx.log(f"Consistent backup: {note}")
     return backup
 
 

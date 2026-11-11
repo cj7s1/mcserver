@@ -9,7 +9,12 @@ member goes through the same confined :class:`SafeRoot` writer as uploads, so:
   (zip-bomb protection) -- and the archive's own index is bounded too: the zip central
   directory is measured before :mod:`zipfile` loads it, tar headers are counted while they
   are read (never all listed first) and oversized extended headers are refused,
-* existing files are only replaced when ``overwrite`` is set.
+* existing files are only replaced when ``overwrite`` is set,
+* ``protected`` files and folders (the panel names the game's secret files: Factorio's
+  ``config/rconpw``, Satisfactory's ``.mcpanel/`` and its claim) are never written: an entry whose
+  target (after the normalisation and the strip of a common folder) is one of them or lies inside
+  one is skipped and reported, compared ignoring case; so is a file entry that would take the place
+  of a folder above one, and the destination itself may lie inside one (then everything is skipped).
 """
 
 from __future__ import annotations
@@ -54,6 +59,15 @@ class ExtractStats:
     existing: list[str] = field(default_factory=list)
     skipped_count: int = 0
     existing_count: int = 0
+    protected: list[str] = field(default_factory=list)
+    protected_count: int = 0
+
+    def keep(self, target: str) -> None:
+        """An entry not extracted because it would write a protected path (``target``: where it
+        would have gone; a path, never the content)."""
+        self.protected_count += 1
+        if len(self.protected) < REPORT_LIMIT:
+            self.protected.append(target[:600])
 
     def skip(self, note: str) -> None:
         self.skipped_count += 1
@@ -74,6 +88,8 @@ class ExtractStats:
             "skipped_count": self.skipped_count,
             "existing_count": self.existing_count,
             "existing": self.existing,
+            "protected_count": self.protected_count,
+            "protected": self.protected,
         }
 
 
@@ -242,6 +258,43 @@ def _open_archive(fh: IO[bytes]) -> tuple[str, object]:
         ) from exc
 
 
+MAX_PROTECTED = 32
+
+
+def protected_paths(items: list[str] | None) -> list[tuple[str, ...]]:
+    """The ``protected`` paths of an extract request as case-folded parts (AgentError 400 for an
+    absolute or unsafe path, or the server folder itself)."""
+    items = list(items or [])
+    if len(items) > MAX_PROTECTED:
+        raise AgentError(f"At most {MAX_PROTECTED} paths can be protected", "invalid_path", 400)
+    out = []
+    for item in items:
+        if not isinstance(item, str) or item.startswith(("/", "\\")):
+            raise AgentError(
+                f"Invalid protected path {item!r}: a path relative to the server folder", "invalid_path", 400
+            )
+        try:
+            parts = split_path(item)
+        except PathError as exc:
+            raise AgentError(f"Invalid protected path {item!r}: {exc}", "invalid_path", 400) from exc
+        if not parts:
+            raise AgentError("The server folder itself cannot be protected", "invalid_path", 400)
+        out.append(tuple(p.casefold() for p in parts))
+    return out
+
+
+def _protects(parts: list[str], kind: str, protected: list[tuple[str, ...]]) -> bool:
+    """Whether an entry with this target must not be written: the target is a protected path or
+    lies inside one, or (a file) it would take the place of a folder that holds one."""
+    folded = tuple(p.casefold() for p in parts)
+    for prot in protected:
+        if folded[: len(prot)] == prot:
+            return True
+        if kind != "dir" and len(folded) < len(prot) and prot[: len(folded)] == folded:
+            return True
+    return False
+
+
 def extract(
     root: SafeRoot,
     archive: str,
@@ -251,13 +304,16 @@ def extract(
     overwrite: bool = False,
     progress: Callable[[float, str], None] | None = None,
     check: Callable[[int, int], None] | None = None,
+    protected: list[str] | None = None,
 ) -> dict:
     """Extract ``archive`` into ``destination`` (both relative to ``root``).
 
     ``check(file_count, total_bytes)`` runs after the member list is read and before
     anything is written (e.g. to refuse an archive that does not fit on the disk).
+    ``protected``: paths relative to ``root`` that no entry may write (see the module docstring).
     """
     dest_parts = split_path(destination)
+    guarded = protected_paths(protected)
     with root.open_read(archive) as (fh, _size):
         try:
             kind, arc = _open_archive(fh)
@@ -274,6 +330,7 @@ def extract(
                 overwrite=overwrite,
                 progress=progress,
                 check=check,
+                protected=guarded,
             )
         finally:
             arc.close()  # type: ignore[attr-defined]
@@ -290,6 +347,7 @@ def _extract_members(
     overwrite: bool,
     progress: Callable[[float, str], None] | None,
     check: Callable[[int, int], None] | None = None,
+    protected: list[tuple[str, ...]] | None = None,
 ) -> dict:
     stats = ExtractStats()
     if strip not in ("auto", "0", "none"):
@@ -334,6 +392,9 @@ def _extract_members(
                 continue
             if m.kind == "other":
                 stats.skip(f"{m.name} (links and special files are not extracted)")
+                continue
+            if protected and _protects([*dest_parts, *parts], m.kind, protected):
+                stats.keep(target)  # (before any folder of it is created)
                 continue
             if m.kind == "dir":
                 root.mkdir(target, parents=True)

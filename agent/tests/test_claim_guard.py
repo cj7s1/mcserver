@@ -79,9 +79,9 @@ def use_fake_driver(fake, monkeypatch):
 
 
 def claimed_folder(settings, fake, drv) -> None:
-    """The panel claimed the server: the game wrote the claim file, the panel the token file."""
+    """The panel claimed the server: the game wrote the claim file, the agent the claim marker, the
+    panel the token file."""
     claimed(settings, fake, drv, Container(fake.port))
-    write_claim_file(settings)
 
 
 # --- the publish guard ------------------------------------------------------------------------------
@@ -102,8 +102,18 @@ def test_stale_token_file_does_not_let_an_unclaimed_server_through(settings, fak
                 fresh_drv.publish_guard(settings, IID, existing)
             assert exc.value.code == "server_unclaimed" and exc.value.status == 409
             assert "ServerSettings.7777.sav" in str(exc.value)
-        # a game that answers unclaimed although a settings file is there: the live probe refuses
+        # a settings file is there again, but nobody verified it: refused before any probe
         write_claim_file(settings)
+        with pytest.raises(AgentError) as exc:
+            fresh_drv.publish_guard(settings, IID, None)
+        assert exc.value.code == "server_unclaimed" and "claim-verified" in str(exc.value)
+        # even a marker that matches the files: a running game that answers unclaimed is refused
+        from mcagent import claimmarker
+
+        fp = claimmarker.fingerprint(settings, IID, satisfactory.CLAIM_FILE)
+        claimmarker.write(
+            settings, IID, satisfactory.CLAIM_FILE, fp, since_generation=claimmarker.generation(IID)
+        )
         with pytest.raises(AgentError) as exc:
             fresh_drv.publish_guard(settings, IID, Container(fresh.port))
         assert exc.value.code == "server_unclaimed"
@@ -175,11 +185,13 @@ def test_the_claim_file_is_derived_from_the_game_port():
 
 def test_the_token_file_is_still_required(settings, fake):
     drv = driver_for(fake)
-    write_claim_file(settings)
+    claimed_folder(settings, fake, drv)
+    token = (settings.instances_dir / str(IID) / satisfactory.TOKEN_FILE).read_text()
+    (settings.instances_dir / str(IID) / satisfactory.TOKEN_FILE).unlink()
     with pytest.raises(AgentError) as exc:
         drv.publish_guard(settings, IID, None)
     assert exc.value.code == "server_unclaimed"
-    write_token(settings, "bm9wZQ.00")
+    write_token(settings, token.strip())
     drv.publish_guard(settings, IID, None)
 
 
@@ -200,7 +212,17 @@ def test_start_of_a_published_unclaimed_server_is_refused(
     r = api.post(f"/v1/instances/{IID}/start", headers=auth)
     assert r.status_code == 409 and r.json()["error"]["code"] == "server_unclaimed"
     assert c.started_calls == 0 and c.state == "exited"
+    # the settings file alone proves nothing (the game writes it before anybody claimed it)
     write_claim_file(settings)
+    r = api.post(f"/v1/instances/{IID}/start", headers=auth)
+    assert r.status_code == 409 and r.json()["error"]["code"] == "server_unclaimed" and c.started_calls == 0
+    # the agent's verification recorded in the claim marker does
+    from mcagent import claimmarker
+
+    fp = claimmarker.fingerprint(settings, IID, satisfactory.CLAIM_FILE)
+    assert claimmarker.write(
+        settings, IID, satisfactory.CLAIM_FILE, fp, since_generation=claimmarker.generation(IID)
+    )
     r = api.post(f"/v1/instances/{IID}/start", headers=auth)
     assert r.status_code == 200 and c.started_calls == 1
 

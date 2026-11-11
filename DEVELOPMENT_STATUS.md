@@ -1,6 +1,6 @@
 # Development status
 
-_Last updated: 2026-11-11 (fixes from the review of the multi-game branch, first section below; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
+_Last updated: 2026-11-11 (fixes from the real-container gate of the multi-game branch, first section below; before that the fixes from the review of the multi-game branch, second section; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
 pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
 all unit-tested only; see "Audit of 2026-11-09" and "Review of the audit fixes" below. Before that, the release on branch `feature/reset-world`: three containers, upgrade script,
@@ -10,6 +10,109 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Real-container gate of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
+
+The gate ran 7222291 on real containers (logs in `audit-2026-11-09/mh-e2e/logs/`, outside the
+repository). Its findings are fixed in the working tree on top of 7222291. Each fix has a regression test
+that was checked to fail without it (mutation runs on scratch copies: 20 agent mutations, 16 panel
+mutations, plus the extract/execute-stop and rollback mutations below; all caught). Minecraft's pin tests
+pass unchanged; Minecraft's behaviour changes only in item 4.
+
+1. **(high) An unclaimed Satisfactory server answered on its published port for ~1.6 s** after a hand
+   `docker start` (gate logs 45/46). Fixed with the **claim marker** `.mcpanel/claim-verified` (size,
+   mtime_ns, SHA-256 of `saved/ServerSettings.7777.sav`, written only by the agent after it verified the
+   claim through the API on an unpublished container, or after the panel's own settings change on a
+   published container whose marker matched; removed by `mark_unclaimed`, every agent file operation under
+   `saved/`, restores, snapshot rollbacks, clones, a claim re-run, a change of the file outside the panel)
+   and the **start wrapper** `.mcpanel/start-guard.sh` as the container's entrypoint (exit 78 for a
+   published container without a matching marker, before `/init.sh`), restart policy **"no"** (panel and
+   agent), the panel's jobs retry SteamCMD's exits 5/8 at every start they make (`handlers.watch_start`)
+   and treat exit 78 as "claim not verified" (reconciler `observed`, Start job: recreate unpublished,
+   setup: claim, join password, game, `verify_claim`, publish), and the agent's check loop reacts to
+   Docker's `start`/`die` events at once (a fresh published run without a matching marker is stopped
+   before its API is up; the wrapper's refusal is recorded as `guard_stop`). Measured on build 517554
+   (raw container, `audit-2026-11-09/fx-e2e/logs/02-03`): the game writes the settings file at the claim,
+   `SetClientPassword`, `CreateNewGame` and a load of another session; not for `GenerateAPIToken`,
+   `ApplyServerOptions`, `SaveGame`, `LoadGame` of the same session, `Shutdown` or a start (API tokens are
+   signed, not stored). Tests: agent `tests/test_claim_marker.py` (33, the wrapper run for real with
+   `/bin/sh`), panel `tests/test_review_fx_claim.py` (16).
+2. **(high/medium) After a lost claim the server came back with no game loaded (state 1) and `SaveGame`
+   hung** (gate logs 41-52). `mark_unclaimed` resets `new_game` too; that step keeps a loaded game
+   (`QueryServerState.isGameRunning`), else loads the newest save of the remembered session (else the
+   newest save), else creates a game. `SaveGame` is never called without a loaded game (stop, backup,
+   reset, import); the saves page shows "current" from the API (none while no game is loaded).
+3. **(medium) Extract/import overwrote secret files** (gate logs 71/72: Factorio started with the
+   attacker's RCON password). The panel sends the protected paths (`secret_files.extract_protected`), the
+   agent skips such entries (feature `extract_protected`; case-insensitive, after normalisation and strip;
+   a file replacing a folder above one too), destinations inside them are refused (403 `managed_file`),
+   an older agent is refused for games with secret files (409 `agent_outdated`); Import of a server
+   archive now also tells the definition (`files_touched`). Tests: `backend/tests/
+   test_review_mg_extract_secrets.py` (16), `agent/tests/test_extract_protected.py` (26).
+4. **(low, deliberate Minecraft change) `execute ... run stop`** stopped the server (gate log 82). A line
+   whose final `run` target is stop (`execute`/`return`, also `minecraft:` names, nested, any case,
+   slashes) and `minecraft:stop` are refused by `POST /command` and schedules (400 `stop_via_power`) and
+   become the Stop job in the console. `say stop`, `execute run say stop`, `tellraw @a "run stop"` pass;
+   `execute run say run stop` is refused (harmless false positive). Tests:
+   `backend/tests/test_review_mg_execute_stop.py` (27).
+5. **(low) The backup log claimed a save that did not happen.** The agent reports `saving` (`stopped`,
+   `no_game`, `saved`, `paused`, `failed`, `skipped`); the log says "the server was not running ... nothing
+   was saved first" or "no game loaded" accordingly.
+6. **(low) `upgrade-rehearsal.sh` failed at step 6 with 082b949 as the old revision:** the layout check
+   reads the old revision's compose file. Run with 082b949 on real containers: `REHEARSAL PASSED`
+   (`OK same layout as the old revision's compose file: agent panel postgres`; parking checks below).
+7. **(cosmetic)** `ports_open` is true only once the publish step is done; `rollback --archive-other-games`
+   no longer prints Django's `CommandError` line; the refusal lists the dump as a third choice with its
+   commands, or says it is no choice. Tests in `tests/test_upgrade_script.py`, `test_review_fx_claim.py`.
+8. **(risk in the old version) Unarchive + Start of a Terraria server in the old panel ran itzg** (gate
+   logs 93/95). The undo of migration 0007 parks the recorded servers on a node "parked by upgrade.sh
+   rollback (other games)" (`http://127.0.0.1:1/...`, no token); 0007 moves them back to their own node
+   and deletes the parked node. Verified against the real 082b949 code (its Start, Recreate, Move, Clone
+   and Delete fail with "Cannot reach the node agent ...", no container) and in the rehearsal. Tests:
+   `tests/test_rollback_other_games.py` (3 new).
+
+Also found and fixed on the real stack (2026-11-11, `audit-2026-11-09/fx-e2e/logs/`): SteamCMD's exit 8
+on the container the publish step created (20 s after its start, log 20) left the server stopped once the
+restart policy was "no" (now `watch_start` after every start, also in the publish step and the restart
+job); a restart the agent refused (`server_unclaimed`) recreated the server unpublished but queued no
+setup, so it stayed unpublished (log 58; now queued).
+
+**Verified on real containers** (desktop, Docker 29.9.2, `wolveix/satisfactory-server:v1.9.11`, CL
+517554, runtime 99:100, a stack built from this tree, ports on 127.0.0.1; a host probe sent
+`PasswordlessLogin` InitialAdmin to the published API port every 100 ms throughout: **9,534 probes, 0
+unclaimed answers**):
+* setup on a fresh server: marker written after claim, rewritten after join password and new game,
+  `verify_claim`, published; the wrapper logged "claim verified by the panel; starting";
+* claim lost (marker and settings file removed) on the running published server: `docker restart` ->
+  exit 78 at once (probe: connection refused/reset only), `docker start` -> exit 78 again; the agent
+  recorded the refusal and the panel closed the ports; panel Start -> recreated unpublished, new claim,
+  "No game was loaded: loaded the newest save 'SF_FX_..._mcpanel'", verified, published, claimed answer
+  (`passwordless_login_not_possible`);
+* join password changed in Settings while published -> marker rewritten (agent log), panel restart and a
+  hand `docker restart` with the valid marker start normally; a server option change leaves the file alone;
+* restore of a pre-claim backup (no `saved/`) while running -> SteamCMD exit 8 retried by the job, new
+  claim, "New game", published; restore of the backup with the session -> "Already claimed by this
+  panel", "The server plays '<session>'", published; Saves "current" = that session from the API;
+* backup while running: "saved through its API"; stopped: "the server was not running ... nothing was
+  saved first";
+* a folder created under `saved/` through the panel's file API removed the marker; the next restart was
+  refused by the agent, recreated unpublished and set up again;
+* extract of a zip with `.mcpanel/claim-verified`, `.mcpanel/api-token`, `.mcpanel/start-guard.sh` and
+  `saved/ServerSettings.7777.sav`: "4 entries were not extracted", the files unchanged.
+
+**Open points:** a Docker daemon restart was not exercised (no root on the desktop; policy "no" means
+Docker does not start the server, and the wrapper covers any start); `SaveGame` skipped on a real idle
+server was not caught in a job (the recovery loads a game within seconds; the idle answer
+`isGameRunning: false` with a `SERVER-SESSION...` name was recorded on the raw container); the wrapper
+and the marker are owned by the runtime uid inside the container (the image's `chown -R /config`), so a
+compromised game process could change them for a later hand start (the agent rewrites the wrapper
+before each of its own starts and still checks every published run); a mkdir under `saved/` also
+removes the marker (fail closed, costs one setup run); the panel shows a server whose start the wrapper
+refused as "failed" (exit 78) until it is started from the panel; after a rollback, parked servers can
+be listed and unarchived but not deleted in the old version (delete them after the next upgrade), and a
+Clone there leaves a row on the parked node; TShock's `sudo` may need the same treatment as
+`execute ... run stop` (not verified); Spigot/Paper `restart` without a restart script exits and Docker
+restarts it (not changed: a further Minecraft behaviour change needs a decision).
 
 ## Review of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
 

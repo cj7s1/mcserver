@@ -548,6 +548,8 @@ def build_create_kwargs(
         LABEL_STOP_TIMEOUT: str(spec.stop_timeout),
     }
     labels.update(profiles.labels_for(spec))  # none for Minecraft
+    # a profile may fix the policy (Satisfactory: "no", only the agent starts it); Minecraft's is the spec's
+    restart_policy = profile.restart_policy or spec.restart_policy
     kwargs: dict[str, Any] = {
         "image": image,
         "name": container_name(instance_id),
@@ -561,8 +563,8 @@ def build_create_kwargs(
         "memswap_limit": f"{spec.memory_limit_mb}m",
         "pids_limit": settings.pids_limit,
         "restart_policy": {
-            "Name": spec.restart_policy,
-            **({"MaximumRetryCount": 3} if spec.restart_policy == "on-failure" else {}),
+            "Name": restart_policy,
+            **({"MaximumRetryCount": 3} if restart_policy == "on-failure" else {}),
         },
         "stop_signal": profile.stop_signal,
         # Docker's own stop timeout (Config.StopTimeout): what the server gets when Docker stops
@@ -684,6 +686,8 @@ def create_container(
         if name not in (container_name(instance_id), replacement_name(instance_id)):
             raise AgentError("Invalid container name", "internal", 500)
         kwargs["name"] = name
+    if profile.prepare_start is not None:
+        prepare_start(settings, instance_id, profile)
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
     # docker-py's high-level containers.create() cannot set Config.StopTimeout: it rejects a
@@ -1004,11 +1008,29 @@ def start_guard(settings: Settings, instance_id: UUID, c: Container, *, live: bo
         driver.publish_guard(settings, instance_id, c if live else None)
 
 
+def prepare_start(settings: Settings, instance_id: UUID, profile: RuntimeProfile | None) -> None:
+    """The profile's ``prepare_start`` (Satisfactory: its start wrapper); a failure refuses the start."""
+    from .safefs import PathError
+
+    if profile is None or profile.prepare_start is None:
+        return
+    try:
+        profile.prepare_start(settings, instance_id)
+    except (OSError, PathError) as exc:
+        raise AgentError(
+            f"Could not prepare the server folder for the start ({exc}); the server is not started",
+            "start_failed",
+            500,
+        ) from exc
+
+
 def start(instance_id: UUID, settings: Settings | None = None) -> None:
     """Start the existing container, after :func:`start_guard` (every start of the agent goes
     through here: apply, /start, /restart)."""
     c = require_container(instance_id)
-    start_guard(settings or get_settings(), instance_id, c)
+    settings = settings or get_settings()
+    start_guard(settings, instance_id, c)
+    prepare_start(settings, instance_id, profiles.for_labels(c.labels))
     try:
         reattach_recreated_networks(c)
         c.start()

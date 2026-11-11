@@ -256,6 +256,7 @@ def start_server(
     span: tuple[float, float] = (0.1, 0.8),
     apply_changes: bool = False,
     admit: bool = True,
+    watch: bool = True,
 ) -> bool:
     """Start the server, creating its container when there is none. Returns True when it was (re)created.
 
@@ -274,6 +275,10 @@ def start_server(
 
     ``admit``: check that the server fits into the node's memory (see ``apply_container``). The
     jobs that start a server again after they stopped it for their work pass False.
+
+    ``watch``: for games whose image downloads the game at every start (Satisfactory: restart
+    policy "no"), wait until it is ready, start it again after SteamCMD's failures and handle the
+    start wrapper's refusal (``watch_start``).
     """
     client = AgentClient(instance.node)
     status = client.status(instance.id)
@@ -290,6 +295,8 @@ def start_server(
         try:
             client.start(instance.id)
             _started(instance)
+            if watch:
+                watch_start(instance, ctx, client)
             return False
         except AgentError as exc:
             if exc.error_code == "server_unclaimed" and unclaimed_refusal(instance, ctx, exc):
@@ -310,7 +317,21 @@ def start_server(
         _note_runtime_image(instance, ctx, previous, done)
     except Exception:  # a note only: the server is started
         log.exception("could not compare the runtime image of %s with its last run", instance.pk)
+    if watch:
+        watch_start(instance, ctx, client)
     return True
+
+
+def watch_start(instance: Instance, ctx: JobContext, client: AgentClient) -> None:
+    """After a start of a game whose image downloads the game at every start (``retryable_install_exits``;
+    Satisfactory, restart policy "no"): wait until it is ready, start it again after SteamCMD's failures,
+    and handle the start wrapper's refusal (``game_handlers.wait_first_start``). Nothing for other games."""
+    if not games.for_instance(instance).retryable_install_exits:
+        return
+    from .game_handlers import wait_first_start
+
+    instance.refresh_from_db()
+    wait_first_start(instance, ctx, client, span=(0.85, 0.1), first=False)
 
 
 def _note_runtime_image(instance: Instance, ctx: JobContext, previous: dict[str, Any], applied: dict[str, Any]) -> None:
@@ -341,10 +362,22 @@ def _note_runtime_image(instance: Instance, ctx: JobContext, previous: dict[str,
     )
 
 
+def _queue_setup(instance: Instance, job: Job, ctx: JobContext) -> None:
+    """Setup steps that waited for a running server (Satisfactory's claim after its ports were closed)
+    go on in their own job."""
+    if games.for_instance(instance).setup_steps:
+        from .game_handlers import enqueue_setup
+
+        if enqueue_setup(instance, user=job.user) is not None:
+            ctx.log("Setup steps follow in their own job")
+
+
 @register("start")
 def start(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = _instance(job)
     _set_desired(instance, DesiredState.RUNNING)
+    # (Satisfactory: start_server waits until it is ready, retries SteamCMD's failures and handles the
+    # start wrapper's refusal: restart policy "no")
     start_server(instance, ctx, apply_changes=True)
     if games.for_instance(instance).setup_steps:
         # setup steps that waited for a running server (Satisfactory's claim) go on now
@@ -454,21 +487,27 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
         else:
             ctx.progress(0.1, "The server has no container; creating it (world data is kept)")
         _recreate(job, instance, ctx, client, running=bool(status.get("running")), start=True, span=(0.2, 0.9))
+        watch_start(instance, ctx, client)
     else:
         ctx.progress(0.2, "Restarting server", force=True)
         try:
             _log_stop(ctx, client.restart(instance.id, timeout=instance.stop_timeout))
             _started(instance)  # also after a Kill that came in while the server was stopping
+            watch_start(instance, ctx, client)
         except AgentError as exc:
             if exc.error_code == "server_unclaimed" and unclaimed_refusal(instance, ctx, exc):
                 ctx.progress(0.2, "Recreating the container without its ports (the claim is checked again)")
                 apply_container(instance, ctx, start=True, span=(0.2, 0.9))
+                watch_start(instance, ctx, client)
+                _queue_setup(instance, job, ctx)
                 return {}
             if exc.error_code != "no_container":
                 raise
             # the server was stopped and its container was removed between the two requests
             ctx.progress(0.2, "The server has no container; creating it (world data is kept)")
             apply_container(instance, ctx, start=True, span=(0.2, 0.9))
+            watch_start(instance, ctx, client)
+    _queue_setup(instance, job, ctx)
     return {}
 
 
@@ -810,14 +849,23 @@ def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
     The agent deletes the archive (``delete_archive``) once its operation ran, also when the
     extraction failed. When the import is refused before the operation starts (the server is
     running: ``must_stop``, or another refusal), the panel deletes its own uploaded archive.
+
+    No entry may write a file with the server's secret (``secret_files.extract_protected``:
+    Factorio's ``config/rconpw``, Satisfactory's ``.mcpanel/`` and its claim): the agent skips them
+    (feature ``extract_protected``; an older agent is refused for those games, 409
+    ``agent_outdated``) and the log says how many it skipped.
     """
     from apps.nodes.client import AgentTimeout, AgentUnavailable
+
+    from . import secret_files
 
     instance = _instance(job)
     client = AgentClient(instance.node)
     p = job.params
     try:
         require_not_running(instance)
+        secret_files.require_extract_destination(instance, p.get("destination", ""))
+        protected = secret_files.require_extract_support(instance, client)
         ctx.progress(0.02, f"Extracting {p['path']}", force=True)
         op = client.extract(
             instance.id,
@@ -826,6 +874,7 @@ def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
             strip=p.get("strip", "auto"),
             overwrite=bool(p.get("overwrite")),
             delete_archive=bool(p.get("delete_archive")),
+            **({"protected": protected} if protected else {}),  # (Minecraft: the request as before)
         )
     except (AgentTimeout, AgentUnavailable):
         raise  # the agent may have started the operation (it deletes the archive), or cannot be reached
@@ -839,6 +888,12 @@ def extract_archive(job: Job, ctx: JobContext) -> dict[str, Any]:
         ctx.log(f"{result['existing_count']} existing file(s) were kept (overwrite was off)")
     if result.get("skipped_count"):
         ctx.log(f"{result['skipped_count']} unsafe entries skipped (links, special files or unsafe paths)")
+    if result.get("protected_count"):
+        names = ", ".join(str(n)[:200] for n in (result.get("protected") or [])[:10])
+        ctx.log(
+            f"{result['protected_count']} entr{'y was' if result['protected_count'] == 1 else 'ies were'} not "
+            f"extracted: the panel manages these files of the server and keeps its own ({names})"
+        )
     if p.get("mark_installed") and instance.installed_at is None:
         from django.utils import timezone
 

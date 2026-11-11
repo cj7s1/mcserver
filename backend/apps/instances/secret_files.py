@@ -11,6 +11,15 @@
   without ``instance.configure``.
 
 Paths are compared after normalising (no leading ``/``, no ``.`` parts, ``\\`` as ``/``).
+
+* **Archive extracts and imports** (job ``extract_archive``: the file manager's Extract and the
+  Import of a server archive) never write a secret file: the agent skips every entry that lands on
+  one of ``extract_protected`` (after its own path normalisation and the strip of a common folder;
+  compared ignoring case), and with the panel's folder ``.mcpanel`` holding one (Satisfactory's API
+  token), everything inside that folder (also the agent's claim marker). An agent without the
+  feature ``extract_protected`` would write them: such an extract is refused for those games.
+  Secret-bearing files (TShock's ``config.json``) are written as the file API writes them: the
+  panel puts its keys back before every apply (``before_apply``).
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from apps import games
-from apps.core.errors import ApiError
+from apps.core.errors import ApiError, ConflictError
 
 if TYPE_CHECKING:
     from apps.instances.models import Instance
@@ -80,6 +89,39 @@ def require_no_secret_inside(instance: Instance, path: Any) -> None:
             if not is_secret(instance, path)
             else MANAGED_FILE_MESSAGE
         )
+
+
+PANEL_FOLDER = ".mcpanel"  # the panel's (and the agent's) own folder in a server folder, when a game has one
+EXTRACT_PROTECTED_FEATURE = "extract_protected"  # the agent skips the archive entries the panel names
+
+
+def extract_protected(instance: Instance) -> list[str]:
+    """What an archive extract or import must never write (``[]``: Minecraft, Terraria): the secret
+    files, and the whole panel folder when one of them lives there."""
+    paths = set(secret_paths(instance))
+    if any(_within(p, PANEL_FOLDER) for p in paths):
+        paths = {p for p in paths if not _within(p, PANEL_FOLDER)} | {PANEL_FOLDER}
+    return sorted(paths)
+
+
+def require_extract_destination(instance: Instance, destination: Any) -> None:
+    """An archive is never extracted into a protected folder or onto a secret file (every entry
+    would be skipped there); compared ignoring case, as the agent compares."""
+    dest = norm(destination).casefold()
+    if dest and any(_within(dest, p.casefold()) for p in extract_protected(instance)):
+        raise refuse("This folder holds files the panel manages for the server; archives cannot be extracted into it")
+
+
+def require_extract_support(instance: Instance, client: Any) -> list[str]:
+    """``extract_protected(instance)``, refused (409 ``agent_outdated``) when there is something to
+    protect and the node's agent cannot skip it (it would extract the secret files as they are)."""
+    protected = extract_protected(instance)
+    if protected and not client.supports(EXTRACT_PROTECTED_FEATURE):
+        raise ConflictError(
+            "The node's agent is too old to keep the server's secret files when it extracts an archive. Update the agent first.",
+            code="agent_outdated",
+        )
+    return protected
 
 
 def zip_excludes(instance: Instance, folders: list[str], user: Any) -> list[str]:

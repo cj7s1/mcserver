@@ -223,6 +223,9 @@ class ExtractRequest(BaseModel):
     strip: Literal["auto", "none"] = "auto"
     overwrite: bool = False
     delete_archive: bool = False
+    # feature extract_protected: files and folders (relative to the server folder) that no entry may
+    # write, e.g. the game's secret files; the agent skips those entries (archive.extract)
+    protected: list[str] = Field(default_factory=list, max_length=32)
 
 
 class WorldReplaceRequest(BaseModel):

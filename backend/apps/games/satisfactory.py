@@ -21,9 +21,10 @@ What the panel knows about it (docs/design/GAME-DEFINITIONS.md 4.5 and 8.5, corr
   game and only then recreates the container with its ports published (``setup_state.ports_open``).
   The agent refuses to publish a server that still accepts an InitialAdmin login.
 * Control through the API only: no console, no broadcast, no player names (a count from
-  ``QueryServerState``); saves with ``SaveGame``; stop = ``SaveGame`` + ``Shutdown``. The game exits 0
-  after ``Shutdown``, so the container's restart policy is ``on-failure`` (Docker would restart an
-  ``unless-stopped`` container that exited 0).
+  ``QueryServerState``); saves with ``SaveGame``; stop = ``SaveGame`` + ``Shutdown``. The restart
+  policy is "no": only the agent starts the container, through its start wrapper, which refuses a
+  published start unless the agent verified the claim (the claim marker; review of 2026-11-11). The
+  install job and the Start job retry SteamCMD's failures themselves.
 * Saves (``saved/server/*.sav``): list (``EnumerateSessions`` while running), new game
   (``CreateNewGame``), import (``UploadSaveGame``) and export (``SaveGame``, then the file).
 """
@@ -166,6 +167,11 @@ CONFIG_FILES = (
 )
 VIRTUAL_CONFIGS = frozenset({"launch", "server-options"})
 
+# the start wrapper's exit code when it refused a published start without a verified claim (agent:
+# claimmarker.REFUSED_EXIT)
+START_REFUSED_EXIT = 78
+CLAIM_MARKER_FEATURE = "claim_marker"
+
 SETUP_STEPS = (
     SetupStep(
         "claim",
@@ -179,7 +185,12 @@ SETUP_STEPS = (
         "Join password",
         "Sets the client password you chose, or confirms that the server is open to anyone who knows its address.",
     ),
-    SetupStep("new_game", "Create the game", "Starts a new game (session) unless the server already has one."),
+    SetupStep(
+        "new_game",
+        "Load or create the game",
+        "Keeps the game the server plays; without one it loads the newest save of the server's session (or the "
+        "newest save there is), and creates a new game only when there is no save at all.",
+    ),
     SetupStep(
         "publish",
         "Publish the ports",
@@ -197,8 +208,10 @@ SESSION_FIELD = {
 }
 
 
-# the steps that run again when the claim may be lost (mark_unclaimed); new_game keeps an existing game
-RECLAIM_STEPS = ("claim", "access", "publish")
+# the steps that run again when the claim may be lost (mark_unclaimed). new_game too: without the
+# settings file (its autoLoadSessionName) the server starts with no game loaded (state 1); the step
+# keeps a loaded game, else loads the newest save, else creates one
+RECLAIM_STEPS = ("claim", "access", "new_game", "publish")
 
 
 def _touches_claim(path: str) -> bool:
@@ -211,6 +224,62 @@ def guard_stop_of(container: dict[str, Any] | None) -> dict[str, Any] | None:
     c = container or {}
     guard = c.get("guard_stop") or (c.get("last_run") or {}).get("guard_stop")
     return guard if isinstance(guard, dict) else None
+
+
+def start_refused(container: dict[str, Any] | None) -> bool:
+    """The container (or its last run) ended with the start wrapper's refusal (exit 78, only for a
+    container with published ports): it was started outside the panel without a verified claim."""
+    c = container or {}
+    if c.get("running") or c.get("restarting"):
+        return False
+    run = c if c.get("exists", True) and "exit_code" in c else (c.get("last_run") or {})
+    # (an exited container lists no ports; the wrapper exits 78 only for a published one)
+    return run.get("exit_code") == START_REFUSED_EXIT
+
+
+def forget_claim_marker(instance: Instance) -> None:
+    """Ask the agent to remove the claim marker (best effort: the agent removes it itself on every
+    restore and every change under ``saved/``, and the start wrapper compares it with the file)."""
+    from apps.nodes.client import AgentClient
+
+    try:
+        client = AgentClient(instance.node)
+        if client.supports(CLAIM_MARKER_FEATURE):
+            client.forget_claim(instance.id)
+    except ApiError as exc:
+        log.warning("Could not remove the claim marker of %s: %s", instance.pk, exc.detail)
+
+
+def game_loaded(state: dict[str, Any]) -> bool:
+    """``QueryServerState`` describes a loaded game (``isGameRunning``; without one the server still
+    names a default ``SERVER-SESSION...`` session, and ``SaveGame`` would not answer)."""
+    if not isinstance(state, dict):
+        return False
+    running = state.get("isGameRunning")
+    if running is not None:
+        return bool(running)
+    return bool(state.get("activeSessionName"))
+
+
+def newest_save(sessions: list[dict[str, Any]], remembered: str) -> dict[str, Any] | None:
+    """The newest save (by the game's ``saveDateTime``, ``YYYY.MM.DD-HH.MM.SS``) of the session the panel
+    remembers, else the newest save of any session; None without saves. Entries as the agent's
+    ``sessions`` action lists them (``{"name", "saves": [{"name", "session", "saved_at"}]}``)."""
+
+    def saves_of(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for entry in entries:
+            for save in entry.get("saves") or []:
+                if save.get("name"):
+                    out.append({**save, "session": save.get("session") or entry.get("name")})
+        return out
+
+    every = saves_of(sessions)
+    preferred = [s for s in every if remembered and s.get("session") == remembered]
+    pool = preferred or every
+    if not pool:
+        return None
+    return max(pool, key=lambda s: str(s.get("saved_at") or ""))
 
 
 def server_name_for(instance: Instance) -> str:
@@ -287,6 +356,8 @@ class SatisfactoryDefinition(GameDefinition):
     control_secret_file = TOKEN_FILE
     custom_network = False
     retryable_install_exits = frozenset({5, 8})
+    # the start wrapper's refusal of a published start without a verified claim (the Start job handles it)
+    start_refused_exit = START_REFUSED_EXIT
     install_attempts = 4
     allowed_user_env = frozenset({"TZ"})
     fixed_version = {
@@ -337,7 +408,7 @@ class SatisfactoryDefinition(GameDefinition):
             "memory_mb": int(data.get("memory_mb") or self.default_memory_mb()),
             "memory_overhead_mb": 0,
             "stop_timeout": self.default_stop_timeout,
-            "restart_policy": "on-failure",
+            "restart_policy": "no",
             "jvm_flags_preset": "none",
             "jvm_args": "",
         }
@@ -387,6 +458,7 @@ class SatisfactoryDefinition(GameDefinition):
         InstanceModel.objects.filter(pk=instance.pk).update(setup_state=state)
         if was_open:
             log.warning("Satisfactory server %s: ports closed until the claim is checked again (%s)", instance.pk, reason)
+        forget_claim_marker(instance)
         return was_open
 
     def copied_state(self, source: Instance) -> dict[str, Any]:
@@ -409,10 +481,18 @@ class SatisfactoryDefinition(GameDefinition):
             self.mark_unclaimed(instance, f"{why[:1].upper()}{why[1:]} under {CLAIM_DIR}/; the claim is checked again")
 
     def observed(self, instance: Instance, container: dict[str, Any] | None) -> None:
-        """The agent stopped the server because it answered as unclaimed (``guard_stop``)."""
+        """The agent stopped the server because it answered as unclaimed (``guard_stop``), or the start
+        wrapper refused a published start without a verified claim (exit 78, e.g. a hand ``docker
+        start``): close the ports, so the next start verifies the claim on an unpublished container."""
         guard = guard_stop_of(container)
         if guard and self.ports_open(instance):
             self.mark_unclaimed(instance, str(guard.get("message") or "The node agent found the server unclaimed"))
+        elif start_refused(container) and self.ports_open(instance):
+            self.mark_unclaimed(
+                instance,
+                "The server's start guard refused a start with published ports because its claim was not verified "
+                "(it was started outside the panel); the claim is verified again before the ports are opened",
+            )
 
     def game_env(self, instance: Instance) -> dict[str, str]:
         launch = self.launch_values(instance)
@@ -459,8 +539,9 @@ class SatisfactoryDefinition(GameDefinition):
                 code="network_not_allowed",
             )
         spec = super().build_spec(instance)
-        # Shutdown makes the game exit 0: Docker must not start it again (unless-stopped/always would)
-        spec["restart_policy"] = "no" if instance.restart_policy == "no" else "on-failure"
+        # only the agent starts it (through the start wrapper's claim check): Docker never does, not
+        # after an exit (Shutdown exits 0, SteamCMD 5/8: the panel's jobs retry) nor after a daemon restart
+        spec["restart_policy"] = "no"
         return spec
 
     def control_secret_value(self, instance: Instance) -> str | None:
@@ -471,7 +552,10 @@ class SatisfactoryDefinition(GameDefinition):
     def setup_status(self, instance: Instance) -> dict[str, Any] | None:
         status = super().setup_status(instance)
         if status is not None:
-            status["ports_open"] = self.ports_open(instance)
+            # published = the spec has the ports and the publish step finished (while it recreates the
+            # container the spec has them already, but nothing is published yet)
+            publish = next((s for s in status["steps"] if s["id"] == "publish"), {})
+            status["ports_open"] = self.ports_open(instance) and publish.get("status") == "done"
         return status
 
     def run_setup_step(self, instance: Instance, step: SetupStep, ctx: Any) -> str:
@@ -532,6 +616,8 @@ class SatisfactoryDefinition(GameDefinition):
         return f"Claimed as '{name}'; the API token is stored encrypted"
 
     def _setup_access(self, instance: Instance, ctx: Any, client: AgentClient) -> str:
+        from apps.instances.spec import rcon_password
+
         instance.refresh_from_db(fields=["secrets", "game_options"])
         password = instance.secret_values.get(CLIENT_PASSWORD) or ""
         access = (instance.game_options or {}).get("access")
@@ -540,30 +626,64 @@ class SatisfactoryDefinition(GameDefinition):
                 "Enter the join password in Settings -> Game settings -> Secrets (or clear it for an open server)",
                 code="secret_missing",
             )
-        result = client.game_action(instance.id, "client_password", {"password": password}, timeout=60)
+        # the game writes its settings file: the agent verifies the claim again (admin password) and
+        # records the file in the claim marker
+        result = client.game_action(
+            instance.id, "client_password", {"password": password, "admin_password": rcon_password(instance)}, timeout=90
+        )
         if result.get("protected"):
             return "Players need the join password"
         return "Open: anyone who knows the address can join (your explicit choice)"
 
     def _setup_new_game(self, instance: Instance, ctx: Any, client: AgentClient) -> str:
+        """Keep the game the server plays; without one (state 1: e.g. the settings file with its
+        autoload session was lost) load the newest save of the session the panel remembers, else the
+        newest save there is; create a new game only when there is no save."""
+        from apps.instances.spec import rcon_password
+
+        admin = rcon_password(instance)
+        state = client.game_action(instance.id, "status", {}, timeout=60).get("state") or {}
+        if game_loaded(state):
+            session = str(state.get("activeSessionName") or "")
+            self._remember_session(instance, session)
+            return f"The server plays '{session}'"
         sessions = client.game_action(instance.id, "sessions", {}, timeout=60)
-        current = sessions.get("current")
-        if any(s.get("saves") for s in sessions.get("sessions") or []):
-            self._remember_session(instance, current)
-            return f"The server already has a game ({current or 'not loaded'})"
+        remembered = str((instance.game_options or {}).get("session_name") or "")
+        save = newest_save(sessions.get("sessions") or [], remembered)
+        if save is not None:
+            ctx.progress(0.5, f"No game is loaded: loading the newest save '{save['name']}'", force=True)
+            result = client.game_action(
+                instance.id, "load_game", {"save_name": save["name"], "admin_password": admin}, timeout=300
+            )
+            session = str(result.get("session") or save.get("session") or "")
+            self._remember_session(instance, session)
+            return f"No game was loaded: loaded the newest save '{save['name']}' (session '{session}')"
         session = session_name_for(instance)
-        client.game_action(instance.id, "new_game", {"session_name": session}, timeout=300)
+        client.game_action(instance.id, "new_game", {"session_name": session, "admin_password": admin}, timeout=300)
         self._remember_session(instance, session)
         return f"New game '{session}'"
 
     def _setup_publish(self, instance: Instance, ctx: Any, client: AgentClient) -> str:
         from apps.instances.handlers import _recreate
+        from apps.instances.spec import rcon_password
 
+        if client.supports(CLAIM_MARKER_FEATURE):
+            # the agent verifies the claim on this unpublished container and records it in the claim
+            # marker: the start wrapper of the published container (and the agent) check it
+            ctx.progress(0.85, "Verifying the claim before the ports are opened", force=True)
+            client.game_action(instance.id, "verify_claim", {"admin_password": rcon_password(instance)}, timeout=180)
         self._open_ports(instance)
         instance.refresh_from_db()
         ctx.progress(0.9, "Recreating the container with its ports published (the game is saved first)", force=True)
         _recreate(ctx.job, instance, ctx, client, running=True, start=True, span=(0.9, 0.95))
         instance.refresh_from_db(fields=["setup_state", "ports"])
+        if self.ports_open(instance):
+            # restart policy "no": SteamCMD's failures at this start are retried here (the real-container
+            # run of 2026-11-11 saw exit 8 on the published container's first start)
+            from apps.instances.handlers import watch_start
+
+            watch_start(instance, ctx, client)
+            instance.refresh_from_db(fields=["setup_state", "ports"])
         if not self.ports_open(instance):
             # the agent refused: the server answered as unclaimed (handlers.unclaimed_refusal closed the
             # ports again and put the claim back); it was started unpublished
@@ -797,7 +917,8 @@ class SatisfactorySaves:
                 for session in answer.get("sessions") or []:
                     for save in session.get("saves") or []:
                         session_of[str(save.get("name"))] = str(session.get("name") or "")
-                current = str(answer.get("current") or current)
+                # what the server plays now (none while no game is loaded), not the remembered session
+                current = str(answer.get("current") or "")
                 live = True
             except ApiError:
                 pass  # loading: the files alone
@@ -955,7 +1076,11 @@ class SatisfactorySaves:
                 f"The server already has a session '{session}'; choose another name for the new game",
                 code="session_exists",
             )
-        client.game_action(instance.id, "new_game", {"session_name": session}, timeout=300)
+        from apps.instances.spec import rcon_password
+
+        client.game_action(
+            instance.id, "new_game", {"session_name": session, "admin_password": rcon_password(instance)}, timeout=300
+        )
         self.definition._remember_session(instance, session)
         ctx.log(f"New game '{session}'; the earlier sessions' saves stay in {SAVES_DIR}/")
         return {"session": session}
@@ -970,8 +1095,13 @@ class SatisfactorySaves:
         existing = {str(e["name"])[: -len(SAVE_SUFFIX)] for e in self._files(client, instance)}
         if name in existing:  # never overwrite a save of the server (the agent refuses it as well)
             name = f"{name}_{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"[:64]
+        from apps.instances.spec import rcon_password
+
         result = client.game_action(
-            instance.id, "upload_save", {"path": params["path"], "save_name": name, "load": True}, timeout=420
+            instance.id,
+            "upload_save",
+            {"path": params["path"], "save_name": name, "load": True, "admin_password": rcon_password(instance)},
+            timeout=420,
         )
         session = result.get("session")
         self.definition._remember_session(instance, session)

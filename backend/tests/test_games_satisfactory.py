@@ -58,6 +58,8 @@ class FakeGame:
         }
         self.fail: dict[str, Exception] = {}
         self.ports_seen_at_claim: list[Any] = []
+        self.saved_at: dict[str, str] = {}  # save name -> the game's saveDateTime
+        self.lost_claim = False
 
     def __call__(
         self, _client: Any, instance_id: Any, action: str, params: dict[str, Any] | None = None, timeout: float = 60
@@ -76,13 +78,39 @@ class FakeGame:
                 raise AgentError("claimed with another admin password", "claimed_elsewhere", 409)
             self.claimed, self.admin_password = True, params["admin_password"]
             return {"token": TOKEN, "claimed": "existing" if existing else "new"}
+        if action == "verify_claim":
+            if c["ports"]:
+                raise AgentError("only unpublished", "claim_unverified", 409)
+            # (a server set up before the test, _claimed_instance, counts as claimed with the panel's password)
+            if self.lost_claim or (self.admin_password is not None and params.get("admin_password") != self.admin_password):
+                raise AgentError("not claimed by this panel", "server_unclaimed", 409)
+            self.agent.claim_markers[str(instance_id)] = True
+            return {"claim_verified": True}
+        if action == "status":
+            return {
+                "api": "healthy",
+                "state": {
+                    "activeSessionName": self.current or "SERVER-SESSION528984508",
+                    "isGameRunning": bool(self.current),
+                },
+            }
+        if action == "load_game":
+            for session, saves in self.sessions.items():
+                if params["save_name"] in saves:
+                    self.current = session
+                    return {"session": session, "state": {"activeSessionName": session}}
+            raise AgentError("no such save", "api_error", 502)
         if action == "client_password":
             self.client_password = params["password"]
             return {"protected": bool(params["password"])}
         if action == "sessions":
             return {
-                "sessions": [{"name": n, "saves": [{"name": s} for s in saves]} for n, saves in self.sessions.items()],
+                "sessions": [
+                    {"name": n, "saves": [{"name": s, "session": n, "saved_at": self.saved_at.get(s, "")} for s in saves]}
+                    for n, saves in self.sessions.items()
+                ],
                 "current": self.current,
+                "game_loaded": bool(self.current),
             }
         if action == "new_game":
             name = params["session_name"]
@@ -208,7 +236,7 @@ def test_create_and_install_starts_without_ports(clients, fake_agent, game, djan
     data = resp.json()["instance"]
     inst = Instance.objects.get(pk=data["id"])
     assert inst.minecraft_version == "stable" and inst.image == IMAGE and inst.memory_mb == 12288
-    assert inst.restart_policy == "on-failure" and inst.stop_timeout == 120
+    assert inst.restart_policy == "no" and inst.stop_timeout == 120
     assert inst.game_options["access"] == "open" and inst.game_options["launch"]["max_players"] == 8
     assert [(p["name"], p["protocol"], p["host_port"]) for p in inst.ports] == [
         ("game", "udp", 7777),
@@ -218,7 +246,7 @@ def test_create_and_install_starts_without_ports(clients, fake_agent, game, djan
     spec = fake_agent.containers[str(inst.id)]["spec"]
     assert spec["game"] == "satisfactory" and spec["ports"] == []  # nothing published before the claim
     assert spec["env"]["MAXPLAYERS"] == "8" and spec["env"]["SERVERMESSAGINGPORT"] == "8888"
-    assert spec["env"]["DISABLESEASONALEVENTS"] == "false" and spec["restart_policy"] == "on-failure"
+    assert spec["env"]["DISABLESEASONALEVENTS"] == "false" and spec["restart_policy"] == "no"
     assert data["setup"]["needed"] is True and data["setup"]["next"] == "claim" and data["setup"]["ports_open"] is False
     assert fake_agent.get_file(inst.id, TOKEN_FILE) is None  # no token before the claim
 
@@ -268,8 +296,9 @@ def test_messaging_port_is_published_one_to_one(make_instance):
         (29011, 29011, "tcp"),
     ]
     assert spec["env"]["SERVERMESSAGINGPORT"] == "29011"
-    assert spec["restart_policy"] == "on-failure"  # Shutdown exits 0: never unless-stopped
-    inst.restart_policy = "no"
+    # only the agent starts it, through its start wrapper (review of 2026-11-11): never Docker by itself
+    assert spec["restart_policy"] == "no"
+    inst.restart_policy = "on-failure"
     assert build_spec(inst)["restart_policy"] == "no"
 
 
@@ -279,7 +308,8 @@ def test_install_runs_the_whole_setup(created, fake_agent, game):
     inst.refresh_from_db()
     setup = Job.objects.get(instance=inst, kind="setup")
     assert setup.status == JobStatus.SUCCEEDED, setup.error
-    assert game.actions() == ["claim", "client_password", "sessions", "new_game"]
+    # new_game asks whether a game is loaded first; publish verifies the claim on the unpublished container
+    assert game.actions() == ["claim", "client_password", "status", "sessions", "new_game", "verify_claim"]
     claim = game.calls[0][1]
     assert claim == {"server_name": "Ficsit Works", "admin_password": rcon_password(inst)}
     assert game.ports_seen_at_claim == [[]]  # the container had no published port while unclaimed
@@ -395,7 +425,7 @@ def test_new_game_step_keeps_an_existing_game(make_instance, fake_agent, game, d
     inst.refresh_from_db()
     assert (
         inst.game_options["session_name"] == "Old world"
-        and "already has a game" in inst.setup_state["steps"]["new_game"]["message"]
+        and "plays 'Old world'" in inst.setup_state["steps"]["new_game"]["message"]
     )
 
 
@@ -586,7 +616,10 @@ def test_saves_list_export_and_new_game(make_instance, fake_agent, game, clients
     job = Job.objects.get(pk=resp.json()["id"])
     assert job.status == JobStatus.SUCCEEDED, job.error
     assert job.result["session"] == "Second" and job.result["backup_id"]
-    assert fake_agent.called("create_backup") and game.calls[-1] == ("new_game", {"session_name": "Second"})
+    assert fake_agent.called("create_backup") and game.calls[-1] == (
+        "new_game",
+        {"session_name": "Second", "admin_password": rcon_password(inst)},
+    )
     inst.refresh_from_db()
     assert inst.game_options["session_name"] == "Second"
     assert fake_agent.get_file(inst.id, "saved/server/First_autosave_0.sav") == b"SAVE"

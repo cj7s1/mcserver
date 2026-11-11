@@ -75,3 +75,15 @@ def api(agent_settings, monkeypatch) -> Iterator:
 @pytest.fixture
 def auth() -> dict[str, str]:
     return {"Authorization": f"Bearer {TOKEN}"}
+
+
+@pytest.fixture(autouse=True)
+def _claim_marker_state(monkeypatch):
+    """The claim marker's per-process state starts empty in every test, and its settle wait is short
+    (the fake game writes its settings file synchronously)."""
+    from mcagent import claimmarker
+
+    monkeypatch.setattr(claimmarker, "_generation", {})
+    monkeypatch.setattr(claimmarker, "_changing", {})
+    monkeypatch.setattr(claimmarker, "SETTLE_STABLE", 0.05)
+    monkeypatch.setattr(claimmarker, "SETTLE_MAX", 2.0)

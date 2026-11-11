@@ -1220,6 +1220,9 @@ class ExtractView(APIView):
         strip = data.get("strip", "auto")
         if strip not in ("auto", "none"):
             raise ValidationError({"strip": ["Must be auto or none"]})
+        # entries that would write a secret file are skipped by the agent (the job checks again)
+        secret_files.require_extract_destination(instance, data.get("destination", ""))
+        secret_files.require_extract_support(instance, AgentClient(instance.node))
         _files_touched(instance, [str(data.get("destination", ""))], "an archive was extracted")
         job = enqueue(
             "extract_archive",
@@ -1262,6 +1265,9 @@ class ImportArchiveView(APIView):
         suffix = next(s for s in ARCHIVE_SUFFIXES if name.endswith(s))
         temp_name = f".mcpanel-import-{_secrets.token_hex(6)}{suffix}"
         client = AgentClient(instance.node)
+        # (before the upload) entries that would write a secret file are skipped by the agent
+        secret_files.require_extract_support(instance, client)
+        _files_touched(instance, [""], "a server archive was imported")
         client.upload(instance.id, temp_name, upload.chunks(1024 * 1024), overwrite=False)
         overwrite = request.query_params.get("overwrite") == "true"
         try:

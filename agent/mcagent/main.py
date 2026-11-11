@@ -40,6 +40,7 @@ from . import (
     __version__,
     backups,
     claimguard,
+    claimmarker,
     docker_ops,
     drivers,
     hashcache,
@@ -134,6 +135,9 @@ TEXT_LIMIT = 5 * 1024 * 1024
 #               guard_stop {code, message, at} for the run it stopped
 #   archive_excludes  GET /files/archive takes exclude= (repeatable, relative to the server folder): those
 #               files and folders are left out of the zip
+#   extract_protected  POST /files/extract takes "protected" (files and folders relative to the server
+#               folder): an entry that would write one of them, or something inside one, is skipped
+#               and reported (protected_count, protected) instead
 FEATURES = [
     "retire",
     "pull_newer",
@@ -143,6 +147,8 @@ FEATURES = [
     "game_actions",
     "claim_guard",
     "archive_excludes",
+    "extract_protected",
+    "claim_marker",
 ]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
@@ -398,8 +404,14 @@ async def _shutdown() -> None:
 
 
 def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
-    return SafeRoot(
-        docker_ops.instance_dir(settings, instance_id), settings.runtime_uid, settings.runtime_gid
+    """The server folder for the file API: the claim marker and the start wrapper cannot be written
+    through it, and a change under ``saved/`` removes the claim marker (``claimmarker.GuardedRoot``)."""
+    return claimmarker.GuardedRoot(
+        docker_ops.instance_dir(settings, instance_id),
+        settings.runtime_uid,
+        settings.runtime_gid,
+        settings=settings,
+        instance_id=instance_id,
     )
 
 
@@ -875,6 +887,17 @@ async def command(
 GAME_ACTION_TIMEOUT = 600.0
 
 
+@app.delete("/v1/instances/{instance_id}/claim-marker", dependencies=[Depends(require_token)])
+async def forget_claim(instance_id: UUID, settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    """Remove the claim marker (feature ``claim_marker``): the panel lost track of the claim
+    (``mark_unclaimed``), so no published start happens before its setup verified the claim again on
+    an unpublished container (``claimmarker``). Answers whether there was one."""
+    removed = await run_in_threadpool(
+        claimmarker.remove, settings, instance_id, "the panel asked for the claim to be verified again"
+    )
+    return {"removed": removed}
+
+
 @app.post("/v1/instances/{instance_id}/game/{action}", dependencies=[Depends(require_token)])
 async def game_action(
     instance_id: UUID,
@@ -883,8 +906,10 @@ async def game_action(
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
     """An operation of the running server's own control API, through its driver (feature
-    ``game_actions``; Satisfactory: ``claim``, ``client_password``, ``new_game``, ``sessions``,
-    ``save``, ``upload_save``, ``load_game``, ``options``, ``apply_options``, ``status``). The driver
+    ``game_actions``; Satisfactory: ``claim``, ``verify_claim``, ``client_password``, ``new_game``,
+    ``sessions``, ``save``, ``upload_save``, ``load_game``, ``options``, ``apply_options``, ``status``;
+    the ones that change the game's settings file take ``admin_password`` and write the claim
+    marker again, see ``claimmarker``). The driver
     validates ``params``; 409 ``not_running`` without a running server, 409 ``action_unsupported``
     for an operation its game does not have. Bounded by ``timeout`` (at most 600 s)."""
     request = body or GameActionRequest()
@@ -1105,7 +1130,15 @@ async def clone(
             raise
         return result({"warnings": warnings} if warnings else {})
 
-    op = registry.start("clone_target", [instance_id, body.target_instance_id], _clone)
+    def _clone_unverified(op: Operation) -> dict[str, Any]:
+        try:
+            return _clone(op)
+        finally:
+            # a copied claim marker describes the source's verification, not the clone's (its own
+            # setup verifies the copied claim before its ports are published)
+            claimmarker.remove(settings, body.target_instance_id, "the server folder was cloned")
+
+    op = registry.start("clone_target", [instance_id, body.target_instance_id], _clone_unverified)
     return {"operation": op.as_dict()}
 
 
@@ -1812,9 +1845,14 @@ async def files_fetch(
 async def files_extract(
     instance_id: UUID, body: ExtractRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    """Safely extract an archive that is already inside the instance (import server/world/server pack)."""
-    from .archive import extract
+    """Safely extract an archive that is already inside the instance (import server/world/server pack).
 
+    ``protected`` (feature ``extract_protected``): entries that would write one of these paths (or
+    inside one) are skipped and reported (``protected_count``, ``protected``); refused up front (400)
+    when a path is not a safe relative path."""
+    from .archive import extract, protected_paths
+
+    protected_paths(body.protected)  # an invalid list is refused before anything starts
     status = await run_in_threadpool(docker_ops.status, instance_id)
     if status.get("running"):
         raise AgentError("Stop the server before extracting archives into it", "must_stop", 409)
@@ -1833,6 +1871,7 @@ async def files_extract(
                 strip=body.strip,
                 overwrite=body.overwrite,
                 progress=lambda p, m: op.update(p * 0.98, m),
+                protected=body.protected,
             )
         finally:
             # also when the extraction failed: an uploaded archive must not stay in the folder
@@ -2045,6 +2084,7 @@ async def create_backup(
             )
         summary["warnings"] = saving.warnings + summary.get("warnings", [])
         summary["consistent"] = saving.consistent
+        summary["saving"] = saving.how  # how it was made consistent (the panel's job log says so)
         return summary
 
     op = registry.start("backup", [instance_id], _backup)
@@ -2132,8 +2172,16 @@ async def restore_backup(
             result["warnings"] = warnings
         return result
 
+    def _restore_unverified(op: Operation) -> dict[str, Any]:
+        claimmarker.remove(settings, target_id, "a restore of the server folder began")
+        try:
+            return _restore(op)
+        finally:
+            # a restored marker (from the backup) is not this run's verification
+            claimmarker.remove(settings, target_id, "the server folder was restored")
+
     kinds = [instance_id] if target_id == instance_id else [instance_id, target_id]
-    op = registry.start("restore", kinds, _restore)
+    op = registry.start("restore", kinds, _restore_unverified)
     return {"operation": op.as_dict()}
 
 
@@ -2237,6 +2285,15 @@ async def backup_restore_path(
     restic = Restic(settings, instance_id)
 
     def _do(op: Operation) -> dict[str, Any]:
+        try:
+            return _restore_path(op)
+        finally:
+            if parts[0] == claimmarker.FOLDER:
+                claimmarker.remove(settings, instance_id, "a restore of .mcpanel/ from a backup")
+            claimmarker.files_changed(settings, instance_id, [body.path], "a restore from a backup")
+
+    def _restore_path(op: Operation) -> dict[str, Any]:
+        claimmarker.files_changed(settings, instance_id, [body.path], "a restore from a backup")
         root = _root(settings, instance_id)
         name = parts[-1]
         parent_rel = "/".join(parts[:-1])
@@ -2382,6 +2439,10 @@ class _SavingState:
     running: bool = False
     paused: bool = False  # save-off and save-all flush both succeeded
     warnings: list[str] = field(default_factory=list)
+    # how the copy was made consistent, for the panel's job log: "stopped" (not running: the files
+    # were at rest), "paused" (saving paused, everything flushed), "saved" (the game saved right
+    # before), "no_game" (no game loaded: nothing to save), "failed", "skipped" (consistency none)
+    how: str = "stopped"
 
     @property
     def consistent(self) -> bool:
@@ -2488,17 +2549,23 @@ def _world_saving_paused(
         op.update(progress + 0.02 * step, message)
 
     try:
+        if state.running and consistency == "none":
+            state.how = "skipped"
         if state.running and consistency != "none":
             try:
                 if driver.can_pause_saving:
                     driver.pause_saving(send_pausing, report)
+                    state.how = "paused"
                 elif driver.can_save:
-                    driver.save(send, report, _log_waiter(instance_id))
+                    outcome = driver.save(send, report, _log_waiter(instance_id))
+                    # Satisfactory: no game loaded, so nothing was saved (and nothing changes)
+                    state.how = "no_game" if outcome == "nothing_loaded" else "saved"
                 else:
                     raise AgentError("this server's game cannot save on request", "save_unsupported", 409)
                 time.sleep(SAVE_SETTLE_SECONDS)
                 state.paused = True
             except Exception as exc:  # RCON, Docker (container gone meanwhile) or socket errors
+                state.how = "failed"
                 if consistency == "require":
                     raise AgentError(
                         f"Could not coordinate world saving: {exc}", "consistency_failed", 409
@@ -2676,7 +2743,15 @@ async def restore_snapshot(
     if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
         raise AgentError("Stop the server before rolling back to a snapshot", "must_stop", 409)
     snaps = snapshot_provider(settings, instance_id)
-    op = registry.start("restore", [instance_id], lambda _op: snaps.restore(name))
+
+    def _do(_op: Operation) -> Any:
+        claimmarker.remove(settings, instance_id, "a snapshot rollback began")
+        try:
+            return snaps.restore(name)
+        finally:
+            claimmarker.remove(settings, instance_id, "the server folder was rolled back to a snapshot")
+
+    op = registry.start("restore", [instance_id], _do)
     return {"operation": op.as_dict()}
 
 

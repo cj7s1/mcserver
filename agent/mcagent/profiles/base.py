@@ -163,6 +163,12 @@ class RuntimeProfile:
     # are uid:1000): the agent gives the server folder the runtime uid:gid after every stop and
     # before every backup (docker_ops.fix_ownership).
     fix_ownership: bool = False
+    # Docker's restart policy for every container of the profile, whatever the spec says (None: the
+    # spec's). Satisfactory: "no", so only the agent's start path (and its start wrapper) starts it.
+    restart_policy: str | None = None
+    # Run before every create and every start the agent makes (Satisfactory: writes the start
+    # wrapper, the container's entrypoint, into the server folder).
+    prepare_start: Callable[[Settings, Any], None] | None = None
 
     def env_port_error(self, env: Mapping[str, str] | None) -> str | None:
         """Why the ports the ``env_ports`` variables of ``env`` name are refused: such a port must

@@ -28,12 +28,17 @@ running panel container) for every server of another game:
   it. When the server shares its game port with another server of the node, the row also says
   which free number (above 65535: never a real port, so the old release can never publish it)
   it gets while the old release runs: migration instances ``0007_restore_other_games`` sets it
-  when it is undone, right before ``0006`` brings the unique index back.
+  when it is undone, right before ``0006`` brings the unique index back;
+* undoing ``0007`` also parks every recorded server on the node ``parked by upgrade.sh rollback
+  (other games)``, whose agent URL leads nowhere: the old release takes these servers for Minecraft
+  servers, and an Unarchive and a Start there would run the Minecraft image in their folders. On
+  the parked node every job of the old release on such a server fails at its first request to the
+  agent, before anything is changed (a delete too: delete them after the next upgrade).
 
 Player names longer than 16 characters go into ``mcpanel_rollback_player_names`` and out of the
 player history. When the panel is upgraded again, migration ``0007_restore_other_games`` puts all
-of it back (servers the owner deleted meanwhile are skipped), leaves the servers archived for the
-owner to unarchive, and drops both tables.
+of it back (the servers on their own node again; servers deleted meanwhile are skipped), leaves the
+servers archived for the owner to unarchive, drops both tables and removes the parked node.
 
 Exit status: 0 = nothing the rollback would lose or the old schema would refuse (check), or all
 of it was archived and recorded (``--archive``); 3 = check only: such servers or names exist and
@@ -64,6 +69,8 @@ SIDE_PLAYERS = "mcpanel_rollback_player_names"
 GAME_MIGRATION = ("instances", "0005_instance_game")
 NAMES_MIGRATION = ("metrics", "0002_games_phase2")
 RESTORE_MIGRATION = ("instances", "0007_restore_other_games")
+# where undoing 0007 puts the recorded servers while the old release runs (as in that migration)
+PARKED_NODE_NAME = "parked by upgrade.sh rollback (other games)"
 OLD_NAME_LENGTH = 16
 # game_port of a server while the old release runs, when another server of the node has its number
 ROLLBACK_PORT_BASE = 65536
@@ -286,7 +293,8 @@ class Command(BaseCommand):
         if servers and not archive:
             self._say(
                 "Archiving stops each of these servers through the panel (the game saves first), archives it and keeps "
-                f"what the rollback would remove in the table {SIDE_TABLE}."
+                f"what the rollback would remove in the table {SIDE_TABLE}. While the old version runs they are on "
+                f"the node '{PARKED_NODE_NAME}', which it cannot reach: it cannot start them."
             )
 
     # -- archiving -------------------------------------------------------------------------
@@ -316,8 +324,9 @@ class Command(BaseCommand):
             if moved:
                 self._say(f"Put aside {moved} player name(s) longer than {OLD_NAME_LENGTH} characters ({SIDE_PLAYERS}).")
         self._say(
-            f"Done: {len(servers)} server(s) archived and recorded in {SIDE_TABLE}. The next upgrade puts them back, "
-            "still archived."
+            f"Done: {len(servers)} server(s) archived and recorded in {SIDE_TABLE}. Undoing the migrations parks them "
+            f"on the node '{PARKED_NODE_NAME}' (the old version cannot start them there); the next upgrade puts "
+            "them back on their node, still archived."
         )
 
     def _archive_one(self, server: dict[str, Any], rollback_port: int | None, *, keep_first: bool) -> None:

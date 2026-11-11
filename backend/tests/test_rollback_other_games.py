@@ -326,3 +326,139 @@ def test_undoing_0006_refuses_while_a_server_of_another_game_is_not_recorded(mak
     # forward again: the guard does nothing (also on a database that has these migrations already)
     migrate(latest())
     assert MigrationExecutor(connection).migration_plan(latest()) == []
+
+
+# --- parked while the old release runs (a start there must not run the Minecraft image) ----------
+PARKED = "parked by upgrade.sh rollback (other games)"
+
+
+def parked_node() -> Any:
+    from apps.nodes.models import Node
+
+    return Node.objects.filter(name=PARKED).first()
+
+
+def node_of(instance_id: Any) -> int:
+    with connection.cursor() as cur:
+        cur.execute("SELECT node_id FROM instances_instance WHERE id = %s", [instance_id])
+        return int(cur.fetchone()[0])
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_rollback_parks_the_servers_of_other_games_and_the_next_upgrade_puts_them_back(
+    make_instance, fake_agent, node, schema_back_to_latest
+):
+    """The old release (082b949) takes a server of another game for a Minecraft server: after an
+    Unarchive its Start ran itzg/minecraft-server in the folder of a Terraria server. Undoing 0007
+    moves the recorded servers to a node whose agent cannot be reached; 0007 moves them back."""
+    from apps.nodes.models import Node
+
+    second = Node.objects.create(name="second", agent_url="http://second.invalid:8700", use_settings_token=True)
+    mc = make_instance(name="Survival", game_port=25600)
+    factorio = make_instance(**factorio_fields())  # UDP 25600 next to Survival's TCP 25600
+    terra = make_instance(**tshock_fields(game_port=25600, node=second))  # the same number on another node
+    # and a third: it shares 25600 with Terra on that node (archiving gives it 65536 there, the
+    # number Factory gets on its own node)
+    terra2 = make_instance(**tshock_fields(name="Terra2", game_port=25600, node=second))
+    out, error = run(*UNDO, "--archive")
+    assert error is None, out
+    assert f"parks them on the node '{PARKED}'" in out
+    assert parked_node() is None  # the new version runs on: nothing is parked yet
+
+    migrate(OLD)
+    parked = parked_node()
+    assert parked is not None and parked.pk not in (node.pk, second.pk)
+    # nothing to reach, nothing to send: an agent URL nothing listens on (no name to resolve), no token
+    assert parked.agent_url.startswith("http://127.0.0.1:1/") and not parked.is_default
+    assert parked.use_settings_token is False and parked.agent_token == "" and parked.tls_fingerprint == ""
+    assert Node.default().pk == node.pk  # new servers of the old release still go to the real node
+    assert {node_of(s.pk) for s in (factorio, terra, terra2)} == {parked.pk} and node_of(mc.pk) == node.pk
+    with connection.cursor() as cur:
+        cur.execute("SELECT game_port FROM instances_instance WHERE node_id = %s ORDER BY game_port", [parked.pk])
+        ports = [p for (p,) in cur.fetchall()]
+    # unique on the parked node (the index of the old release brought back): servers of two nodes
+    # met there with the same rollback port
+    assert ports == [25600, 65536, 65537]
+
+    migrate(latest())
+    factorio, terra = Instance.objects.get(pk=factorio.pk), Instance.objects.get(pk=terra.pk)
+    assert factorio.node_id == node.pk and factorio.game_port == 25600 and factorio.game == "factorio"
+    assert terra.node_id == second.pk and terra.game_port == 25600 and terra.game == "terraria"
+    terra2 = Instance.objects.get(pk=terra2.pk)
+    assert terra2.node_id == second.pk and terra2.game_port == 25600
+    assert factorio.archived_at is not None and terra.archived_at is not None
+    assert parked_node() is None and Node.objects.filter(pk__in=[node.pk, second.pk]).count() == 2
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_parked_server_whose_node_was_deleted_meanwhile_stays_parked(make_instance, fake_agent, schema_back_to_latest):
+    from apps.nodes.models import Node
+
+    lone = Node.objects.create(name="lone", agent_url="http://lone.invalid:8700", use_settings_token=True)
+    factorio = make_instance(**factorio_fields(node=lone))
+    terra = make_instance(**tshock_fields())
+    out, error = run(*UNDO, "--archive")
+    assert error is None, out
+    migrate(OLD)
+    parked = parked_node()
+    with connection.cursor() as cur:
+        # the old release: the owner deleted the node 'lone' (nothing on it any more) and the
+        # server Terra (its delete cannot reach the parked node; done here on the database)
+        cur.execute("DELETE FROM nodes_node WHERE id = %s", [lone.pk])
+        for table in ("audit_auditevent", "jobs_job"):
+            cur.execute(f"UPDATE {table} SET instance_id = NULL WHERE instance_id = %s", [terra.pk])
+        cur.execute("DELETE FROM instances_instance WHERE id = %s", [terra.pk])
+    migrate(latest())
+    factorio = Instance.objects.get(pk=factorio.pk)
+    # no node of its own to go back to: it stays where nothing can start it, archived, as Factorio
+    assert factorio.node_id == parked.pk and factorio.game == "factorio" and factorio.archived_at is not None
+    assert parked_node() is not None
+
+
+def record_by_hand(*instances: Any) -> None:
+    """What the archive step records, without its jobs (no fake agent: the real transport)."""
+    from apps.instances.management.commands.rollback_other_games import CREATE_SIDE_TABLES
+
+    with connection.cursor() as cur:
+        for statement in CREATE_SIDE_TABLES:
+            cur.execute(statement)
+        for instance in instances:
+            cur.execute(
+                f"INSERT INTO {SIDE_TABLE} (instance_id, name, game, data) "
+                "SELECT i.id, i.name, i.game, to_jsonb(i) FROM instances_instance i WHERE i.id = %s",
+                [instance.pk],
+            )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_parked_node_refuses_at_once_what_the_old_start_asks_first(make_instance, monkeypatch, schema_back_to_latest):
+    """The old release's Start job (082b949 handlers.start_server) asks AgentClient(instance.node)
+    .status() before anything else; its Recreate, Clone, Move and Delete ask the server's node
+    first as well. On the parked node that is refused at once, with the reason in the URL, and
+    no token is sent."""
+    import time
+
+    import httpx
+
+    from apps.nodes import client as client_module
+    from apps.nodes.client import AgentClient, AgentUnavailable
+
+    factorio = make_instance(**factorio_fields(archived_at="2026-11-01T00:00:00Z", status="archived"))
+    record_by_hand(factorio)
+    migrate(OLD)
+    parked = parked_node()
+    assert node_of(factorio.pk) == parked.pk
+    calls: list[tuple[str, str, str]] = []
+    real_request = httpx.request
+
+    def spy(method: str, url: str, **kwargs: Any) -> Any:
+        calls.append((method, url, kwargs["headers"]["Authorization"]))
+        return real_request(method, url, **kwargs)
+
+    monkeypatch.setattr(client_module.httpx, "request", spy)
+    began = time.monotonic()
+    with pytest.raises(AgentUnavailable) as refused:
+        AgentClient(parked).status(factorio.pk)
+    assert time.monotonic() - began < 5
+    assert "Cannot reach the node agent at http://127.0.0.1:1/parked-by-upgrade-rollback" in str(refused.value.detail)
+    assert calls == [("GET", f"{parked.agent_url}/v1/instances/{factorio.pk}/status", "Bearer ")]

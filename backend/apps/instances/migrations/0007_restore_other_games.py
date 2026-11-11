@@ -16,7 +16,16 @@ nothing, and running it again does nothing either.
 
 Undone (on the way back, before 0006 brings back the unique index on (node, game_port) for every
 server), it gives each recorded server that shares its game port with another server of the node
-the free number above 65535 the archive step chose (``rollback_game_port``).
+the free number above 65535 the archive step chose (``rollback_game_port``), and it parks every
+recorded server on a node of its own, ``parked by upgrade.sh rollback (other games)``, whose agent
+URL leads nowhere (``http://127.0.0.1:1/...``: refused at once, no name to resolve, no token sent).
+The old release takes these servers for Minecraft servers: an Unarchive and a Start there would
+run the Minecraft image in the folder of a Terraria or Factorio server. On the parked node every
+job of the old release that would touch the server (start, recreate, clone, move to another node,
+software update, delete) fails at its first request to the agent, before anything is changed. The
+row keeps the id of its real node (``data->>'node_id'`` of the side table, the row as it was), so
+going forward again moves it back there and removes the parked node once no server is on it (a
+server whose node was deleted meanwhile stays on it, archived).
 """
 
 from __future__ import annotations
@@ -40,6 +49,17 @@ TEXT_COLUMNS = (
 )
 JSON_COLUMNS = ("ports", "game_options", "setup_state", "env", "extra_ports")
 INT_COLUMNS = ("game_port",)
+# The node the recorded servers are on while the old release runs (see above). Kept in step with
+# rollback_other_games.PARKED_NODE_NAME and tests/test_rollback_other_games.py.
+PARKED_NODE_NAME = "parked by upgrade.sh rollback (other games)"
+PARKED_AGENT_URL = "http://127.0.0.1:1/parked-by-upgrade-rollback-other-games"
+PARKED_NOTE = (
+    "MCPanel: upgrade.sh rollback parked the servers of other games here (the version that runs does not know "
+    "them). Its agent URL leads nowhere on purpose. The next './scripts/upgrade.sh run' moves them back to their "
+    "node and removes this node."
+)
+# game_port of a parked server whose number another parked server has (as rollback_other_games)
+ROLLBACK_PORT_BASE = 65536
 
 
 def _tables(connection: Any) -> set[str]:
@@ -59,19 +79,42 @@ def _as_ids(value: Any) -> list[int]:
     return [int(v) for v in value or [] if isinstance(v, int) or str(v).isdigit()]
 
 
+def _parked_node_id(cur: Any) -> int | None:
+    cur.execute("SELECT id FROM nodes_node WHERE name = %s", [PARKED_NODE_NAME])
+    found = cur.fetchone()
+    return int(found[0]) if found else None
+
+
+def _node_back(cur: Any, row: dict[str, Any], current: int, parked: int | None) -> tuple[list[str], list[Any]]:
+    """The real node of a parked server, when it still exists."""
+    if parked is None or current != parked:
+        return [], []
+    try:
+        node_id = int(row.get("node_id"))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return [], []
+    if node_id == parked:
+        return [], []
+    cur.execute("SELECT 1 FROM nodes_node WHERE id = %s", [node_id])
+    if cur.fetchone() is None:
+        return [], []  # deleted meanwhile: the server stays on the parked node, archived
+    return ["node_id = %s"], [node_id]
+
+
 def restore(apps: Any, schema_editor: Any) -> None:
     connection = schema_editor.connection
     tables = _tables(connection)
     with connection.cursor() as cur:
         if SIDE_TABLE in tables:
+            parked = _parked_node_id(cur)
             cur.execute(f"SELECT instance_id, data, schedules_disabled FROM {SIDE_TABLE}")  # noqa: S608
             for instance_id, data, schedules in cur.fetchall():
                 row = _as_dict(data)
-                cur.execute("SELECT 1 FROM instances_instance WHERE id = %s", [instance_id])
-                if cur.fetchone() is None:
+                cur.execute("SELECT node_id FROM instances_instance WHERE id = %s", [instance_id])
+                found = cur.fetchone()
+                if found is None:
                     continue  # deleted while the old release ran
-                sets: list[str] = []
-                params: list[Any] = []
+                sets, params = _node_back(cur, row, int(found[0]), parked)
                 for column in TEXT_COLUMNS:
                     if isinstance(row.get(column), str):
                         sets.append(f"{column} = %s")
@@ -100,6 +143,12 @@ def restore(apps: Any, schema_editor: Any) -> None:
                         [instance_id, ids],
                     )
             cur.execute(f"DROP TABLE {SIDE_TABLE}")
+            if parked is not None:
+                cur.execute(
+                    "DELETE FROM nodes_node n WHERE n.id = %s AND NOT EXISTS "
+                    "(SELECT 1 FROM instances_instance i WHERE i.node_id = n.id)",
+                    [parked],
+                )
         if SIDE_PLAYERS in tables:
             cur.execute(
                 "INSERT INTO metrics_playerseen (instance_id, name, first_seen, last_seen, minutes_online, sessions) "  # noqa: S608
@@ -110,7 +159,53 @@ def restore(apps: Any, schema_editor: Any) -> None:
             cur.execute(f"DROP TABLE {SIDE_PLAYERS}")
 
 
+def _parked_node(cur: Any) -> int:
+    """The parked node (made, or the one a former rollback left), pointed nowhere again."""
+    parked = _parked_node_id(cur)
+    if parked is not None:
+        cur.execute(
+            "UPDATE nodes_node SET agent_url = %s, agent_token = '', use_settings_token = false, is_default = false, "
+            "tls_fingerprint = '', tls_cert_pem = '' WHERE id = %s",
+            [PARKED_AGENT_URL, parked],
+        )
+        return parked
+    # every column (old and new release have the same nodes table): Django sets no database defaults
+    cur.execute(
+        "INSERT INTO nodes_node (name, agent_url, agent_token, use_settings_token, is_default, public_address, "
+        "lan_address, tls_fingerprint, tls_cert_pem, last_seen_at, last_error, info, created_at) "
+        "VALUES (%s, %s, '', false, false, '', '', '', '', NULL, %s, '{}'::jsonb, now()) RETURNING id",
+        [PARKED_NODE_NAME, PARKED_AGENT_URL, PARKED_NOTE],
+    )
+    return int(cur.fetchone()[0])
+
+
+def park(cur: Any) -> int:
+    """Move the recorded servers to the parked node; returns how many. Their port numbers stay
+    unique on it (the index 0006 brings back): servers of different nodes may share one."""
+    cur.execute(
+        f"SELECT i.id, i.game_port FROM instances_instance i JOIN {SIDE_TABLE} s ON s.instance_id = i.id "  # noqa: S608
+        "ORDER BY s.recorded_at, i.id"
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return 0
+    parked = _parked_node(cur)
+    ids = [instance_id for instance_id, _port in rows]
+    cur.execute("SELECT game_port FROM instances_instance WHERE node_id = %s AND NOT (id = ANY(%s))", [parked, ids])
+    used = {int(port) for (port,) in cur.fetchall()}
+    for instance_id, port in rows:
+        if port in used:
+            port = ROLLBACK_PORT_BASE
+            while port in used:
+                port += 1
+            cur.execute("UPDATE instances_instance SET game_port = %s WHERE id = %s", [port, instance_id])
+        used.add(port)
+    cur.execute("UPDATE instances_instance SET node_id = %s WHERE id = ANY(%s)", [parked, ids])
+    return len(ids)
+
+
 def give_rollback_ports(apps: Any, schema_editor: Any) -> None:
+    """rollback ports; servers of other games parked on a node that cannot be reached"""
     connection = schema_editor.connection
     if SIDE_TABLE not in _tables(connection):
         return
@@ -119,6 +214,7 @@ def give_rollback_ports(apps: Any, schema_editor: Any) -> None:
             f"UPDATE instances_instance i SET game_port = s.rollback_game_port FROM {SIDE_TABLE} s "  # noqa: S608
             "WHERE i.id = s.instance_id AND s.rollback_game_port IS NOT NULL"
         )
+        park(cur)
 
 
 class Migration(migrations.Migration):

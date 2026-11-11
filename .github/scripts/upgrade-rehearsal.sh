@@ -15,7 +15,7 @@
 #      and list them
 #   -> rollback (with --archive-other-games in that case): it dumps the database first; then the
 #      old layout and the old images again, schema changes undone, data still there, the Factorio
-#      server archived and recorded.
+#      server archived, recorded and parked: Unarchive + Start in the old panel fails, no container.
 #      While its `docker compose up` replaces the containers the terminal is closed (SIGHUP to the
 #      whole process group): the rollback still finishes
 #   -> run again, with the terminal closed in the same way: the switch still finishes, and the
@@ -114,6 +114,14 @@ upgrade_in_a_terminal_that_closes() {
     left=$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" --format '{{.Names}}={{.State}}' | grep -E '^[0-9a-f]{12}_|=(created|exited|dead)$' | tr '\n' ' ')
     [ -z "$left" ] || die "containers are left half replaced or not started: $left"
     return "$code"
+}
+short() { git -C "$SITE" rev-parse --short "$1"; }
+# The services deploy/docker-compose.yml of revision REV defines (with today's .env and profiles),
+# sorted, as `services` prints them. The file is read from git, not checked out.
+compose_services_of() { # compose_services_of REV
+    local file="$SHIM/compose-$1.yml"
+    g show "$1:deploy/docker-compose.yml" >"$file" 2>/dev/null || return 1
+    (cd "$DEPLOY" && docker compose --project-directory "$DEPLOY" -f "$file" config --services) | sort | tr '\n' ' '
 }
 newest_log() { find "$DEPLOY" -maxdepth 1 -name 'upgrade-log-*.log' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-; }
 
@@ -284,8 +292,18 @@ for old in worker worker-periodic beat redis; do
     case " $NEW_SERVICES " in *" $old "*) continue ;; esac
     [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.service=$old")" ] || die "a $old container is left"
 done
-[ "$NEW_SERVICES" != "$OLD_SERVICES" ] || die "the layout did not change"
-ok "new layout: $NEW_SERVICES (was: $OLD_SERVICES)"
+# What the compose files define (with the profiles of .env): the old revision's, read from git, and
+# the new one's. The layout changes only when they differ (from before 2026-11-08 the old revision
+# has the 7-container layout; a newer one, e.g. 082b949, has panel, agent and postgres already).
+OLD_DEFINED=$(compose_services_of "$OLD_REV") || die "cannot read the services of deploy/docker-compose.yml at $(short "$OLD_REV")"
+NEW_DEFINED=$(dc config --services | sort | tr '\n' ' ')
+[ "$OLD_DEFINED" = "$OLD_SERVICES" ] || die "the old compose file defines '$OLD_DEFINED', but '$OLD_SERVICES' ran"
+[ "$NEW_SERVICES" = "$NEW_DEFINED" ] || die "running services are '$NEW_SERVICES', the new compose file defines '$NEW_DEFINED'"
+if [ "$NEW_DEFINED" != "$OLD_DEFINED" ]; then
+    ok "new layout: $NEW_SERVICES (was: $OLD_SERVICES)"
+else
+    ok "same layout as the old revision's compose file: $NEW_SERVICES"
+fi
 [ "$(stat -c %a "$STATE")" = 600 ] || die "upgrade-state.env is not mode 600"
 for file in "$DEPLOY"/upgrade-backup-*.sql "$DEPLOY"/upgrade-backup-*.env "$DEPLOY"/upgrade-log-*.log; do
     [ "$(stat -c %a "$file")" = 600 ] || die "$file is not mode 600"
@@ -331,6 +349,7 @@ if ! g cat-file -e "$OLD_REV:backend/apps/instances/migrations/0005_instance_gam
     ROLLBACK_FLAGS="--archive-other-games"
 fi
 FACTORIO=rehearsal-factorio
+PARKED="parked by upgrade.sh rollback (other games)" # the node undoing migration instances 0007 parks them on
 factorio_row() { sql "SELECT game_port, archived_at IS NOT NULL FROM instances_instance WHERE name = '$FACTORIO'"; }
 factorio_schedule_on() { sql "SELECT bool_or(s.enabled) FROM instances_schedule s JOIN instances_instance i ON i.id = s.instance_id WHERE i.name = '$FACTORIO' AND s.name = 'rehearsal'"; }
 if [ "$GAMES" = 1 ]; then
@@ -393,6 +412,28 @@ if [ "$GAMES" = 1 ]; then
     [ "$(sql "SELECT game FROM mcpanel_rollback_other_games")" = factorio ] || die "the Factorio server is not recorded"
     [ "$(factorio_schedule_on)" = f ] || die "the schedule of the Factorio server should be disabled"
     ok "the Factorio server is archived (game port 65536 while the old version runs), recorded, its schedule off"
+    parked=$(sql "SELECT n.name || '|' || n.agent_url || '|' || n.is_default FROM instances_instance i JOIN nodes_node n ON n.id = i.node_id WHERE i.name = '$FACTORIO'")
+    case "$parked" in
+        "$PARKED|http://127.0.0.1:1/"*"|false") ok "the Factorio server is parked: $parked" ;;
+        *) die "the Factorio server should be on the parked node that cannot be reached: $parked" ;;
+    esac
+    # The mistake of the gate run of 2026-11-10: in the old panel, Unarchive and then Start ran the
+    # Minecraft image in the folder of a server of another game. Parked, the start fails at once.
+    id=$(sql "SELECT id FROM instances_instance WHERE name = '$FACTORIO'")
+    [ "$(api POST "/api/instances/$id/unarchive")" = 200 ] || die "the old panel did not unarchive the Factorio server: $(cat "$OUT")"
+    [ "$(api POST "/api/instances/$id/power" '{"action":"start"}')" = 202 ] || die "the old panel refused the start request: $(cat "$OUT")"
+    job=$(sed -n 's/^{"id":"\([0-9a-f-]*\)".*/\1/p' "$OUT")
+    [ -n "$job" ] || die "the start request answered no job: $(cat "$OUT")"
+    for _ in $(seq 120); do
+        [ "$(api GET "/api/jobs/$job")" = 200 ] || die "cannot read job $job: $(cat "$OUT")"
+        grep -q -E '"status": *"(queued|running)"' "$OUT" || break
+        sleep 0.5
+    done
+    if ! grep -q -E '"status": *"failed"' "$OUT" || ! grep -q 'parked-by-upgrade-rollback' "$OUT"; then
+        die "the start in the old panel should fail on the parked node: $(cat "$OUT")"
+    fi
+    [ -z "$(docker ps -aq --filter "label=io.mcpanel.instance=$id")" ] || die "the old panel made a container for the Factorio server"
+    ok "Unarchive + Start in the old panel: the start fails on the parked node, no container ($(sed -n 's/.*"error": *"\([^"]*\)".*/\1/p' "$OUT" | cut -c1-110))"
 fi
 
 say "8. upgrade again; the terminal is closed while docker compose up replaces the containers"
@@ -408,7 +449,9 @@ if [ "$GAMES" = 1 ]; then
     [ "$(panel_py "from apps.instances.models import Instance; print(Instance.objects.get(name='$FACTORIO').secret_values)")" = "{'token': 'rehearsal-secret'}" ] || die "the secret of the Factorio server did not come back"
     [ "$(factorio_schedule_on)" = t ] || die "the schedule of the Factorio server should be enabled again"
     [ "$(sql "SELECT to_regclass('public.mcpanel_rollback_other_games') IS NULL")" = t ] || die "the side table should be dropped"
-    ok "the Factorio server is back (game, port, ports, options, secret, schedule), still archived; the side table is gone"
+    [ "$(sql "SELECT n.is_default FROM instances_instance i JOIN nodes_node n ON n.id = i.node_id WHERE i.name = '$FACTORIO'")" = t ] || die "the Factorio server should be on its own node again"
+    [ "$(sql "SELECT count(*) FROM nodes_node WHERE name = '$PARKED'")" = 0 ] || die "the parked node should be gone"
+    ok "the Factorio server is back (game, port, ports, options, secret, schedule, its node), still archived; the side table and the parked node are gone"
 fi
 tags=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -c '^mcpanel-rollback/')
 ok "rollback images kept: $tags (one generation)"

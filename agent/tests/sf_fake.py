@@ -79,7 +79,22 @@ class FakeSatisfactory:
         self.udp_state = 1
         self.udp_answers = True
         self.on_shutdown: Any = None
+        # the game's settings file (saved/ServerSettings.7777.sav): written like the real game does
+        # (build 517554, measured 2026-11-11): at the claim, a client password, a new game and a load of
+        # another session; not by tokens, options, saves, Shutdown or a start
+        self.settings_file: Path | None = None
+        self.settings_writes = 0
         self._start()
+
+    def touch_settings(self) -> None:
+        if self.settings_file is None:
+            return
+        self.settings_writes += 1
+        self.settings_file.parent.mkdir(parents=True, exist_ok=True)
+        self.settings_file.write_bytes(
+            f"settings v{self.settings_writes} claimed={self.claimed} pw={bool(self.client_password)} "
+            f"autoload={self.active_session}".encode()
+        )
 
     # --- servers -------------------------------------------------------------------------------
     def _start(self) -> None:
@@ -230,6 +245,7 @@ class FakeSatisfactory:
         self.claimed = True
         self.server_name = data["ServerName"]
         self.admin_password = data["AdminPassword"]
+        self.touch_settings()
         return 200, {"data": {"authenticationToken": self._token("Administrator")}}
 
     def f_RunCommand(self, data, level, files):
@@ -257,7 +273,8 @@ class FakeSatisfactory:
         return 200, {
             "data": {
                 "serverGameState": {
-                    "activeSessionName": self.active_session,
+                    # without a game the real server names a default session (and isGameRunning is false)
+                    "activeSessionName": self.active_session or "SERVER-SESSION528984508",
                     "numConnectedPlayers": self.players,
                     "playerLimit": self.player_limit,
                     "techTier": 0,
@@ -277,6 +294,7 @@ class FakeSatisfactory:
         if (denied := self._need(level, "Administrator", "APIToken")) is not None:
             return denied
         self.client_password = data.get("Password", "")
+        self.touch_settings()
         return 204, None
 
     def f_CreateNewGame(self, data, level, files):
@@ -298,6 +316,7 @@ class FakeSatisfactory:
         session = new["SessionName"]
         self.active_session = session
         self.udp_state = 3
+        self.touch_settings()
         self.sessions.setdefault(session, []).insert(
             0, {"saveName": f"{session}_autosave_0", "sessionName": session}
         )
@@ -307,6 +326,9 @@ class FakeSatisfactory:
         if (denied := self._need(level, "Administrator", "APIToken")) is not None:
             return denied
         name = data["SaveName"]
+        if not self.active_session:
+            # the real server does not answer SaveGame without a loaded game (the gate: 60-120 s)
+            return error("save_game_failed", "no game is loaded", 504)
         saves = self.sessions.setdefault(self.active_session, [])
         saves[:] = [s for s in saves if s["saveName"] != name]
         saves.insert(0, {"saveName": name, "sessionName": self.active_session})
@@ -354,8 +376,11 @@ class FakeSatisfactory:
             0, {"saveName": data["SaveName"], "sessionName": session}
         )
         if data.get("LoadSaveGame"):
+            changed = self.active_session != session
             self.active_session = session
             self.udp_state = 3
+            if changed:
+                self.touch_settings()
         return 202, None
 
     def f_LoadGame(self, data, level, files):
@@ -363,7 +388,11 @@ class FakeSatisfactory:
             return denied
         for session, saves in self.sessions.items():
             if any(s["saveName"] == data["SaveName"] for s in saves):
+                changed = self.active_session != session
                 self.active_session = session
+                self.udp_state = 3
+                if changed:
+                    self.touch_settings()
                 return 202, None
         return error("save_game_load_failed", "no such save")
 

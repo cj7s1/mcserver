@@ -78,8 +78,11 @@
 # port numbers. With --archive-other-games it first stops each of them through the running panel
 # (its Stop job: the game saves), archives it (its Archive job), disables its schedules and copies
 # its row into the table mcpanel_rollback_other_games, which no migration touches; a server that
-# shares its port number gets a number above 65535 while the old version runs. The next `run`
-# puts it all back (migration instances 0007) and leaves the servers archived.
+# shares its port number gets a number above 65535 while the old version runs. Undoing migration
+# instances 0007 parks these servers on a node of their own whose agent URL leads nowhere ("parked
+# by upgrade.sh rollback (other games)"): the old panel takes them for Minecraft servers, and there
+# every start (also after an Unarchive) fails before anything is changed. The next `run` puts it
+# all back (migration instances 0007: their own node again) and leaves the servers archived.
 #
 # `restore-db FILE` loads a dump written by step 3 into a new database and, when that worked,
 # swaps it with the current one, which is kept under another name. Everything but the database
@@ -1706,6 +1709,24 @@ dump_way_back() { # how to get the database of before the upgrade back, as lines
         "           ./scripts/upgrade.sh rollback"
 }
 
+# The database dump as one choice of a refusal that changed nothing (no dump of the rollback yet).
+dump_choice() {
+    local sql others
+    sql=$(state_get BACKUP_SQL) || sql=""
+    if [ -z "$sql" ]; then
+        printf '%s\n' "           - the database dump from before the upgrade is no choice: that run took none (--no-backup," \
+            "             or the database was down)."
+        return 0
+    fi
+    others=$(other_services)
+    printf '%s\n' "           - or go back with the database dump from before the upgrade. Everything the panel wrote since" \
+        "             then is lost, the servers of other games among it (they came with this version); server" \
+        "             files are not touched:"
+    [ -z "$others" ] || printf '               docker compose stop %s\n' "$others"
+    printf '%s\n' "               ./scripts/upgrade.sh restore-db $sql --yes" \
+        "               ./scripts/upgrade.sh rollback"
+}
+
 # Ask the upgraded version whether every migration can be undone: before anything is stopped, and
 # once more when the list changed while the containers were stopping. Migrations instances 0005/0006
 # answer "IRREVERSIBLE (other games)" while servers of other games are not archived and recorded:
@@ -1784,17 +1805,18 @@ check_other_games() { # check_other_games LINES FROM-REVISION
             say "  servers of other games: none, and no port number is shared (asked the upgraded version)"
             return 0
             ;;
-        3) ;;
-        4)
-            show_file "$TMP/games.out" 400
-            refuse "the rollback cannot go on now (see above). Nothing was changed."
+        3 | 4)
+            # the command's own last line (Django's "CommandError: ...") says what this script says
+            # next in its own words: a refusal, or that the archive step comes first
+            grep -v '^CommandError: ' "$TMP/games.out" >"$TMP/games.shown"
+            show_file "$TMP/games.shown" 400
+            [ "$code" = 3 ] || refuse "the rollback cannot go on now (see above). Nothing was changed."
             ;;
         *)
             show_file "$TMP/games.out"
             die "could not ask the upgraded version about the servers of other games (see above). Nothing was changed."
             ;;
     esac
-    show_file "$TMP/games.out" 400
     if [ "$ARCHIVE_OTHER" = 1 ]; then
         GAMES_ARCHIVE=1
         if [ "$DRY" = 1 ]; then
@@ -1814,9 +1836,9 @@ check_other_games() { # check_other_games LINES FROM-REVISION
              stops these servers through the panel (each game saves first), archives them, disables their
              schedules and keeps what the rollback removes in the database (table mcpanel_rollback_other_games;
              a server that shares its port number gets a number above 65535 while the old version runs).
-             The next './scripts/upgrade.sh run' puts it all back and leaves them archived;
-           - or the database dump (the servers of other games are not in it: they came with this version):
-$(dump_way_back)"
+             While the old version runs they are parked on a node it cannot reach, so it cannot start
+             them. The next './scripts/upgrade.sh run' puts it all back and leaves them archived;
+$(dump_choice)"
 }
 
 # Stop, archive and record the servers of other games through the running panel (its own jobs).
@@ -1995,8 +2017,10 @@ $(dump_way_back)"
     say ""
     if [ "$GAMES_ARCHIVE" = 1 ]; then
         say "The servers of other games are archived, and what they are is kept in the database (table"
-        say "mcpanel_rollback_other_games). Do not unarchive them in this version: it would take them for Minecraft"
-        say "servers. The next './scripts/upgrade.sh run' puts them back, still archived."
+        say "mcpanel_rollback_other_games). This version would take them for Minecraft servers, so they are parked"
+        say "on the node 'parked by upgrade.sh rollback (other games)', which it cannot reach: a start (also after an"
+        say "Unarchive) or a delete of one of them fails there and changes nothing. The next './scripts/upgrade.sh run'"
+        say "puts them back on their node, still archived."
         say ""
     fi
     if [ "$from" != "$to" ] || [ -n "$SCRIPT_GONE" ]; then

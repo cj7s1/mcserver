@@ -36,6 +36,13 @@ VARIANTS = (
     Variant("CUSTOM", "Custom server jar"),
 )
 
+# Commands that run another command, given as the rest of the line: ``execute … run <command>`` and
+# (since 1.20.2) ``return run <command>``, also under the ``minecraft:`` namespace that Paper/Spigot
+# register; and the stop command with that namespace (vanilla answers "Unknown or incomplete command"
+# for ``minecraft:stop``, Paper/Spigot run it).
+RUN_COMMANDS = frozenset({"execute", "minecraft:execute", "return", "minecraft:return"})
+STOP_TARGETS = frozenset({"stop", "minecraft:stop"})
+
 
 class MinecraftDefinition(GameDefinition):
     id = "minecraft"
@@ -103,6 +110,19 @@ class MinecraftDefinition(GameDefinition):
     def normalise_command(self, text: str) -> str:
         # RCON takes the command without the chat prefix the players type
         return text.lstrip("/")
+
+    def is_stop_command(self, text: str) -> bool:
+        """``stop`` (any case, leading slashes, blanks), and a command whose final ``run`` target is
+        stop: ``execute … run stop``, nested (``execute as @a run execute run /stop``),
+        ``return run stop``, ``minecraft:stop``. The stop command takes no arguments, so a line that
+        makes the server exit through ``run`` ends with ``run stop``; checking the end of the line
+        (and not the first ``run`` word) cannot be fooled by quoted or bracketed arguments that hold
+        the word ``run``. A line that only mentions the words (``say stop``, ``execute run say stop``,
+        ``tellraw @a "run stop"``) is no stop command."""
+        words = text.strip().lstrip("/").strip().lower().split()
+        if len(words) == 1:
+            return words[0] in STOP_TARGETS
+        return len(words) >= 3 and words[0] in RUN_COMMANDS and words[-2] == "run" and words[-1].lstrip("/") in STOP_TARGETS
 
     def broadcast(self, client: AgentClient, instance: Instance, text: str, *, message: str = "", color: str = "yellow") -> None:
         from apps.instances.power_warnings import UNKNOWN_COMMAND, tellraw_command

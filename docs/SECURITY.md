@@ -378,7 +378,19 @@ has no profile for.
 * **Public listing** is off by default for Factorio (`visibility.public=false`); the image's example
   file would list the server publicly.
 * **Exits from inside the game** (`/quit`) are not sent: the console runs the panel's Stop instead,
-  and the API and schedules refuse them (400 `stop_via_power`).
+  and the API and schedules refuse them (400 `stop_via_power`). Minecraft too (a deliberate change):
+  `stop`, `minecraft:stop` and any line whose final `run` target is stop (`execute ... run stop`,
+  `return run stop`, nested, any case, with or without slashes).
+* **Extract and import never write secret files.** The panel sends the agent the paths to protect
+  (`secret_files.extract_protected`: Factorio `config/rconpw`; Satisfactory the whole `.mcpanel/` folder
+  and `saved/ServerSettings.7777.sav`); the agent (feature `extract_protected`) skips every archive
+  entry whose final target (after normalisation, the strip of a common folder and the destination,
+  compared without case) is one of them or inside one, and a file entry that would replace a folder
+  above one; the job log names the skipped paths. A destination inside a protected path is refused
+  (403 `managed_file`), and an agent without the feature is refused for games with secret files (409
+  `agent_outdated`). TShock's `config.json` is extracted like a file-API write (the panel puts its
+  REST token back before every apply). Found by the real-container gate of 2026-11-11 (an extract
+  overwrote Factorio's RCON password file and Satisfactory's token file).
 * **Image VOLUMEs** are mounted into the server folder (or a tmpfs the profile names), so no data of
   a game server lives in an anonymous Docker volume outside it.
 
@@ -447,21 +459,44 @@ Games that take commands on their console only (Terraria) get one line at a time
 
 * **Claiming.** An unclaimed Satisfactory server belongs to whoever reaches its API first (a
   passwordless `InitialAdmin` login works until it is claimed). The panel never publishes such a
-  server: its spec has no ports until the setup's claim, join-password and new-game steps are done
-  (`setup_state.ports_open`). Before every start of a Satisfactory container with published ports
-  (apply, start, restart) the agent requires the claim file `saved/ServerSettings.7777.sav` (a non-empty
-  regular file, no symbolic link), the API token file, and, for a running container, an API that answers
-  as claimed within 20 s (409 `server_unclaimed`, or `claim_unverified` when it cannot tell: fail
-  closed). Docker's own restart policy cannot be intercepted, so a loop on the agent probes every run of
-  a running published container as soon as its API answers and stops an unclaimed one at once,
-  recording why (`guard_stop`). The panel closes the ports again (and recreates the container without
-  them before any start) whenever the claim may be lost: a restore, a restore of a path or a snapshot,
-  file uploads, edits, renames, deletes or extracts under `saved/`, the agent's refusal or `guard_stop`,
-  and a re-run of the claim step; the claim, join-password and publish steps then run again. Steps run
-  in order (409 `setup_order`), so `publish` cannot be forced before the claim. A server never joins
-  another network than the agent's instance network. The claim runs through the agent over the
-  instance network; the admin password is the server's control secret (encrypted in the database,
-  sent to the agent only in the claim request, never written to disk by the panel).
+  server: its spec has no ports until the setup's claim, join-password and game steps are done
+  (`setup_state.ports_open`). The game writes `saved/ServerSettings.7777.sav` before anybody claimed
+  it, so that file proves nothing; what counts is the **claim marker** `.mcpanel/claim-verified`
+  (size, `mtime_ns` and SHA-256 of that file), which only the agent writes, after it verified the
+  claim through the API (an `InitialAdmin` login is refused, an `Administrator` login with the panel's
+  admin password works) on a container **without published ports**, or right after the panel's own
+  change of the file (join password, new game, a load) on a published container whose marker matched
+  right before. The file API never writes the marker or the start wrapper (agent: 403 `managed_file`;
+  renames into or out of `.mcpanel/` are refused too), and extracts/imports skip `.mcpanel/` entirely.
+* **The start wrapper (fail closed inside the container).** The container's entrypoint is the agent's
+  `.mcpanel/start-guard.sh` (`/bin/sh`, written by the agent before every create and start it makes,
+  mode 0444). A container with published ports (`MCPANEL_PORTS_PUBLISHED` set at creation, reserved
+  for the agent) runs the image's `/init.sh` only while the marker matches the settings file;
+  otherwise it prints why and exits 78 before the game starts. So a hand `docker start`, a `docker
+  restart` or any other start outside the panel of a server whose claim may be lost never gets an API
+  answering on a published port (verified on real containers on 2026-11-11: 9,534 probes every 100 ms
+  from the host, none answered as unclaimed). The restart policy is `no`: Docker never starts the
+  server by itself (the panel's jobs retry SteamCMD's failures). Limits: the image's `chown -R /config`
+  gives the wrapper and the marker to the runtime uid, so a process inside the container could change
+  them for a later start; the agent writes the wrapper again before each of its own starts, and the
+  defences below still apply.
+* **The agent's checks.** Before every start of a container with published ports (apply, start,
+  restart) the agent requires the claim file, a matching claim marker, the API token file and, for a
+  running container, an API that answers as claimed within 20 s (409 `server_unclaimed`, or
+  `claim_unverified` when it cannot tell). A loop on the agent (every 2 s, and at once on Docker's
+  `start` events) stops a freshly started published run without a matching marker before its API is
+  up, probes every published run as soon as its API answers and stops an unclaimed one, records the
+  wrapper's refusals (exit 78) and removes the marker when the settings file changes outside an
+  operation of the panel (an admin in the game). The marker is removed whenever the claim may be lost:
+  the panel's `mark_unclaimed` (restores, restore of a path or a snapshot, file uploads, edits,
+  renames, deletes, extracts and imports under `saved/`, the agent's refusal, `guard_stop`, exit 78,
+  a re-run of the claim step) asks the agent to remove it, and the agent removes it itself on every
+  file operation under `saved/`, every restore, snapshot rollback and clone. The panel then closes the
+  ports, recreates the container without them before any start, and the claim, join-password, game
+  and publish steps run again (the publish step has the agent verify the claim on the unpublished
+  container first). Steps run in order (409 `setup_order`). A server never joins another network than
+  the agent's instance network. The admin password is the server's control secret (encrypted in the
+  database, sent to the agent only in the claim and verification requests, never written to disk).
 * **Client logins.** After the claim anyone who reaches the server can still log in as a client
   (and read its state) until a client password is set. The create wizard requires an explicit
   choice: a join password, or "open to anyone who knows the address"; the setup applies it and

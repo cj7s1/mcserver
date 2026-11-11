@@ -59,6 +59,8 @@ CURRENT_AGENT_FEATURES = (
     "game_actions",
     "claim_guard",
     "archive_excludes",
+    "extract_protected",
+    "claim_marker",
 )
 # GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; phase 1 had
 # Minecraft only, phase 3 adds Factorio)
@@ -89,6 +91,7 @@ class FakeAgent:
         "remove_container",
         "retire",
         "forget_last_run",
+        "forget_claim",
         "status",
         "start",
         "stop",
@@ -199,6 +202,10 @@ class FakeAgent:
         self.backup_warnings: list[str] = []
         # world reset: deleting the old world fails after it was moved aside (a warning plus "leftover")
         self.world_reset_delete_error: str | None = None
+        # Satisfactory claim markers the agent holds (instance id -> True); the fake game sets them
+        self.claim_markers: dict[str, bool] = {}
+        # the "saving" outcome create_backup reports while the server runs (None: "paused" as for Minecraft)
+        self.backup_saving: str | None = None
 
     @staticmethod
     def _current_container_format() -> int:
@@ -580,6 +587,10 @@ class FakeAgent:
 
     def forget_last_run(self, instance_id: Any) -> bool:
         return self.last_runs.pop(str(instance_id), None) is not None
+
+    def forget_claim(self, instance_id: Any) -> bool:
+        """DELETE /claim-marker (agents with ``claim_marker``): the marker of a Satisfactory server."""
+        return self.claim_markers.pop(str(instance_id), None) is not None
 
     def prepare(self, instance_id: Any, files: dict[str, str] | None = None) -> dict[str, Any]:
         iid = str(instance_id)
@@ -1586,6 +1597,8 @@ class FakeAgent:
                 "total_duration": 0.01,
                 "warnings": list(self.backup_warnings),
                 "consistent": paused or not running,
+                # how (agent main._SavingState.how); tests may set backup_saving for a game's own outcome
+                "saving": self.backup_saving or ("paused" if paused else "stopped" if not running else "skipped"),
             },
         )
 

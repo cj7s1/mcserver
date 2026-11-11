@@ -291,6 +291,11 @@ class AgentClient:
             "POST", f"/v1/instances/{instance_id}/command", json={"command": command, "timeout": timeout}, timeout=timeout + 10
         )["output"]
 
+    def forget_claim(self, instance_id: UUID) -> bool:
+        """Remove the server's claim marker (agents with ``claim_marker``; Satisfactory): no published
+        start until its setup verified the claim again on an unpublished container."""
+        return bool(self._json("DELETE", f"/v1/instances/{instance_id}/claim-marker").get("removed"))
+
     def game_action(
         self, instance_id: UUID, action: str, params: dict[str, Any] | None = None, timeout: float = 60
     ) -> dict[str, Any]:
@@ -481,18 +486,22 @@ class AgentClient:
         strip: str = "auto",
         overwrite: bool = False,
         delete_archive: bool = False,
+        protected: list[str] | None = None,
     ) -> dict[str, Any]:
-        return self._json(
-            "POST",
-            f"/v1/instances/{instance_id}/files/extract",
-            json={
-                "path": path,
-                "destination": destination,
-                "strip": strip,
-                "overwrite": overwrite,
-                "delete_archive": delete_archive,
-            },
-        )["operation"]
+        """``protected`` (agents with the ``extract_protected`` feature; an older agent ignores it, so
+        the caller checks first: ``secret_files.require_extract_support``): files and folders, relative
+        to the server folder, that no entry of the archive may write; the request is sent without the
+        key when there are none (Minecraft: as before)."""
+        body: dict[str, Any] = {
+            "path": path,
+            "destination": destination,
+            "strip": strip,
+            "overwrite": overwrite,
+            "delete_archive": delete_archive,
+        }
+        if protected:
+            body["protected"] = list(protected)
+        return self._json("POST", f"/v1/instances/{instance_id}/files/extract", json=body)["operation"]
 
     # -- worlds --------------------------------------------------------------------------
     def world_info(self, instance_id: UUID, level_name: str, layout: str, *, sizes: bool = True) -> dict[str, Any]:

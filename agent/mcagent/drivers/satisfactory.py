@@ -36,6 +36,7 @@ import uuid as uuidlib
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
+from .. import claimmarker
 from ..errors import AgentError
 from .base import QueryTarget, Report, Send, WaitLog
 from .http_api import GameApiError, HttpApiDriver, _ops
@@ -374,13 +375,24 @@ class SatisfactoryDriver(HttpApiDriver):
     def can_save(self) -> bool:
         return True
 
+    @staticmethod
+    def game_loaded(state: dict[str, Any]) -> bool:
+        """Whether ``QueryServerState`` describes a loaded game. Without one (state 1 Idle, e.g. after
+        the settings file with ``autoLoadSessionName`` was lost) the server still names a default
+        session (``SERVER-SESSION<digits>``) but ``isGameRunning`` is false, and ``SaveGame`` does not
+        answer (the real-container gate of 2026-11-11: 60-120 s timeouts)."""
+        running = _key(state, "isGameRunning")
+        if running is not None:
+            return bool(running)
+        return bool(_key(state, "activeSessionName"))
+
     def save_now(self, settings: Settings, c: Container, timeout: float = SAVE_TIMEOUT) -> str | None:
         """``SaveGame`` of the loaded session as ``<session>_mcpanel``; the API answers once the file
-        is written. None when no game is loaded (nothing to save)."""
+        is written. None when no game is loaded (nothing to save; ``SaveGame`` is not called)."""
         token = self.api_token(settings, c)
         state = self.state(settings, c, token)
         session = str(_key(state, "activeSessionName") or "")
-        if not session:
+        if not session or not self.game_loaded(state):
             return None
         name = save_name_for(session)
         self.call(settings, c, "SaveGame", {"SaveName": name}, token=token, timeout=timeout)
@@ -394,9 +406,12 @@ class SatisfactoryDriver(HttpApiDriver):
 
         return send
 
-    def save(self, send: Send, report: Report, wait_log: WaitLog | None = None) -> None:
+    def save(self, send: Send, report: Report, wait_log: WaitLog | None = None) -> str | None:
+        """``"nothing_loaded"`` when no game was loaded (nothing was saved; the files are at rest)."""
         report(0, "Saving the game (SaveGame)")
-        send("save", SAVE_TIMEOUT)
+        if send("save", SAVE_TIMEOUT) is None:
+            return "nothing_loaded"
+        return None
 
     # --- stop ----------------------------------------------------------------------------------------
     def stop(self, settings: Settings, c: Container, timeout: int, result: StopResult) -> bool:
@@ -496,8 +511,10 @@ class SatisfactoryDriver(HttpApiDriver):
         """Never publish an unclaimed server (409 ``server_unclaimed``):
 
         * the server folder must hold the claim (``saved/ServerSettings.7777.sav``, a regular,
-          non-empty file, no link) and the API token the panel writes before every apply (a
-          token file alone proves nothing: it stays when the claim is lost);
+          non-empty file, no link), the claim marker must match it (``claimmarker``: the agent
+          verified the claim through the API since the file last changed; the game writes the file
+          before anybody claimed it) and the API token the panel writes before every apply must be
+          there (a token file alone proves nothing: it stays when the claim is lost);
         * a running (or restarting) container must refuse an InitialAdmin login. The guard waits
           up to CLAIM_WAIT seconds for its API; when the claim cannot be verified (no answer,
           an unexpected answer) the publish is refused too (409 ``claim_unverified``).
@@ -511,6 +528,15 @@ class SatisfactoryDriver(HttpApiDriver):
         if not self.claim_file_present(settings, instance_id):
             raise AgentError(
                 message + f" Its claim ({self.claim_file}) is missing from the server folder.",
+                "server_unclaimed",
+                409,
+            )
+        if not claimmarker.matches(settings, UUID(str(instance_id)), self.claim_file):
+            # the file is written before anybody claims the server: only the agent's own verification
+            # (on an unpublished container) counts, recorded in the claim marker
+            raise AgentError(
+                message + f" Its claim has not been verified since {self.claim_file} last changed "
+                f"({claimmarker.MARKER} is missing or does not match).",
                 "server_unclaimed",
                 409,
             )
@@ -547,6 +573,7 @@ class SatisfactoryDriver(HttpApiDriver):
         {
             "status",
             "claim",
+            "verify_claim",
             "client_password",
             "new_game",
             "sessions",
@@ -558,12 +585,130 @@ class SatisfactoryDriver(HttpApiDriver):
         }
     )
 
+    # actions after which the game has written its settings file (claim, client password, the
+    # autoload session of a new or loaded game): the claim marker is verified and written again
+    CHANGES_SETTINGS: ClassVar[frozenset[str]] = frozenset(
+        {"claim", "client_password", "new_game", "load_game", "upload_save"}
+    )
+
     def game_action(
         self, settings: Settings, c: Container, action: str, params: dict[str, Any], timeout: float
     ) -> dict[str, Any]:
         if action not in self.ACTIONS:
             return super().game_action(settings, c, action, params, timeout)
-        return getattr(self, f"_action_{action}")(settings, c, params or {}, timeout)
+        params = params or {}
+        if action not in self.CHANGES_SETTINGS:
+            return getattr(self, f"_action_{action}")(settings, c, params, timeout)
+        instance_id = self._instance_of(c)
+        with claimmarker.panel_change(instance_id):
+            if action == "claim":
+                claimmarker.remove(settings, instance_id, "the claim runs again")
+            valid_before = claimmarker.matches(settings, instance_id, self.claim_file)
+            generation = claimmarker.generation(instance_id)
+            result = getattr(self, f"_action_{action}")(settings, c, params, timeout)
+            if action == "upload_save" and not result.get("loaded"):
+                return result  # stored, not loaded: the settings file is unchanged
+            try:
+                result["claim_verified"] = self._refresh_marker(
+                    settings,
+                    c,
+                    params.get("admin_password"),
+                    generation=generation,
+                    valid_before=valid_before,
+                )
+            except AgentError as exc:
+                if action == "claim":
+                    raise
+                log.warning("The claim of %s could not be verified after %s: %s", c.name, action, exc)
+                claimmarker.remove(settings, instance_id, f"the claim could not be verified after {action}")
+                result["claim_verified"] = False
+            return result
+
+    def _instance_of(self, c: Container) -> UUID:
+        try:
+            return UUID(str((c.labels or {}).get(_ops().LABEL_INSTANCE)))
+        except ValueError as exc:
+            raise AgentError("The container names no server", "invalid_request", 400) from exc
+
+    def verify_claim(self, settings: Settings, c: Container, admin_password: Any) -> None:
+        """The claim holds and is this panel's: an InitialAdmin login is refused, an Administrator
+        login with the panel's admin password (the server's control secret) works. Raises 409
+        ``server_unclaimed`` / ``claimed_elsewhere`` / ``claim_unverified`` otherwise."""
+        if not isinstance(admin_password, str) or not 8 <= len(admin_password) <= 128:
+            raise AgentError(
+                "The panel sent no admin password, so the claim cannot be verified", "claim_unverified", 409
+            )
+        try:
+            unclaimed = self.is_unclaimed(settings, c)
+        except GameApiError as exc:
+            raise AgentError(f"The claim could not be verified: {exc}", "claim_unverified", 409) from exc
+        if unclaimed:
+            raise AgentError(
+                "The server is not claimed (an InitialAdmin login works)", "server_unclaimed", 409
+            )
+        try:
+            data = self.call(
+                settings,
+                c,
+                "PasswordLogin",
+                {"MinimumPrivilegeLevel": "Administrator", "Password": admin_password},
+            )
+        except GameApiError as exc:
+            if exc.api_code == "wrong_password":
+                raise AgentError(
+                    "This server is claimed with another admin password, not by this panel",
+                    "claimed_elsewhere",
+                    409,
+                ) from exc
+            raise AgentError(f"The claim could not be verified: {exc}", "claim_unverified", 409) from exc
+        if not _key(data, "authenticationToken"):
+            raise AgentError("The admin login returned no token", "claim_unverified", 409)
+
+    def _refresh_marker(
+        self, settings: Settings, c: Container, admin_password: Any, *, generation: int, valid_before: bool
+    ) -> bool:
+        """Verify the claim and record the settings file in the claim marker. On a published
+        container only when the marker matched right before the panel's operation (the claim was
+        verified; the operation went through the panel's own token); otherwise the marker is removed
+        and the next published start goes through the panel's setup on an unpublished container."""
+        instance_id = self._instance_of(c)
+        c.reload()
+        if _ops().exposes_ports(c) and not valid_before:
+            claimmarker.remove(
+                settings,
+                instance_id,
+                "the settings file changed on a published server whose claim was not verified",
+            )
+            return False
+        fp = claimmarker.settle(settings, instance_id, self.claim_file)
+        if fp is None:
+            claimmarker.remove(settings, instance_id, f"{self.claim_file} is missing")
+            return False
+        self.verify_claim(settings, c, admin_password)
+        return claimmarker.write(settings, instance_id, self.claim_file, fp, since_generation=generation)
+
+    def _action_verify_claim(
+        self, settings: Settings, c: Container, params: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        """Verify the claim of a running server without published ports and write the claim marker
+        (the panel's ``publish`` step, before the ports are opened)."""
+        c.reload()
+        if _ops().exposes_ports(c):
+            raise AgentError(
+                "The claim is verified on a server without published ports only", "claim_unverified", 409
+            )
+        instance_id = self._instance_of(c)
+        generation = claimmarker.generation(instance_id)
+        self.wait_ready(settings, c, timeout=max(5.0, min(timeout, 120.0)))
+        fp = claimmarker.settle(settings, instance_id, self.claim_file)
+        if fp is None:
+            raise AgentError(f"{self.claim_file} is missing", "server_unclaimed", 409)
+        self.verify_claim(settings, c, params.get("admin_password"))
+        if not claimmarker.write(settings, instance_id, self.claim_file, fp, since_generation=generation):
+            raise AgentError(
+                "The server's files changed while its claim was verified; try again", "claim_unverified", 409
+            )
+        return {"claim_verified": True}
 
     def _action_status(
         self, settings: Settings, c: Container, params: dict[str, Any], timeout: float
@@ -733,7 +878,16 @@ class SatisfactoryDriver(HttpApiDriver):
         active = None
         if isinstance(current, int) and 0 <= current < len(sessions):
             active = sessions[current]["name"]
-        return {"sessions": sessions, "current": active}
+        # the session that is loaded now, as the server says (None while no game is loaded: the
+        # index above still points at a session then)
+        loaded = None
+        try:
+            state = self.state(settings, c, token)
+            loaded = self.game_loaded(state)
+            active = str(_key(state, "activeSessionName") or "") or None if loaded else None
+        except AgentError as exc:
+            log.debug("QueryServerState for the sessions of %s: %s", c.name, exc)
+        return {"sessions": sessions, "current": active, "game_loaded": loaded}
 
     def _action_save(
         self, settings: Settings, c: Container, params: dict[str, Any], timeout: float

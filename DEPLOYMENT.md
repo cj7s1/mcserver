@@ -189,8 +189,9 @@ A Satisfactory server:
   and checks it at every start (about 12 s on an NVMe drive). Clients and server must run the same
   build, so the server follows Steam's stable branch: there is no version to choose and no
   software update; **Update now** on the Overview is a restart. SteamCMD fails now and then
-  ("Timed out", exit 5; "Missing configuration", exit 8): the first start is retried (4 starts in
-  all), and the container's restart policy retries later starts.
+  ("Timed out", exit 5; "Missing configuration", exit 8): the panel's jobs start it again (4 starts
+  in all) at the first start and at every start they make (Start, Restart, the publish step, the
+  jobs that start a server again after their work), and wait until it is ready.
 * needs at least **8 GB** of memory (12 GB by default; 16 GB for big factories or more than 4
   players) and an x86-64 CPU that is not a generic VM CPU model.
 * runs as root inside the container with exactly CHOWN, DAC_OVERRIDE, SETUID and SETGID: the image
@@ -209,8 +210,20 @@ A Satisfactory server:
   first owns it. The install starts the server with no published port; the setup steps (Overview:
   "Setup needed") then claim it through the agent on the internal network with the server's control
   secret as admin password, store an API token for the panel, set the join password (or confirm an
-  open server: the wizard makes you choose), create the game and only then recreate the container
+  open server: the wizard makes you choose), load or create the game, have the agent verify the
+  claim once more and record it in `.mcpanel/claim-verified`, and only then recreate the container
   with its ports published. A server created stopped is set up at its first start.
+* **starts only through the panel while its ports are published.** The container's entrypoint is
+  the agent's start wrapper (`.mcpanel/start-guard.sh`): a `docker start`, a `docker restart` or a
+  restart of the Docker daemon of a published server whose claim was not verified since its
+  settings file changed exits at once with code **78** and the log line `MCPanel start guard: ...`
+  (Unraid's Docker page shows it stopped). Start it from the panel: it recreates the container
+  without ports, verifies the claim (running the setup again: claim, join password, game; a game is
+  loaded from the newest save of the server's session when none is loaded), and publishes again. The
+  restart policy is `no`, so Docker never starts it by itself, also not after a reboot of the host
+  (the Unraid shutdown hook's resume starts the servers that ran before a host shutdown). After an
+  upgrade from a release without the start wrapper, the first start of an existing Satisfactory
+  server runs this setup once (its container is recreated anyway: the restart policy changed).
 * has its settings in Settings -> Game settings: launch settings (max players, autosaves, tick
   rate, ...; applied at the next start) and, while it runs, the server options read from and
   written to its API (autosave interval, pause when empty, ...). The join password is in the same
@@ -221,7 +234,11 @@ A Satisfactory server:
   again), and the previous sessions stay. Backups leave out `gamefiles/`, and a restore keeps the
   game files that are on disk.
 * is stopped by saving through its API and calling its `Shutdown` function (it never saves on a
-  signal); its container uses the restart policy `on-failure`, because a clean shutdown exits 0.
+  signal; nothing is saved while no game is loaded); its container uses the restart policy `no`.
+* closes its ports again whenever its claim may be lost: a restore, a file change under `saved/`
+  (upload, edit, rename, delete, extract, import), a start the start wrapper refused, the agent's own
+  check. An admin in the game who changes a server setting (a client password) makes the settings file
+  change outside the panel: the server keeps running, and its next start goes through the setup once.
 * needs an agent of this release (`agent_lacks_game` otherwise).
 
 A registry mirror is set like Factorio's (`runtime_images`: `{"satisfactory": {"repository": "..."}}`,
@@ -697,21 +714,35 @@ and names the three ways on:
   migration undone: the servers archived so far stay archived, and `rollback --archive-other-games`
   goes on with the rest once the problem is fixed.
 * **The database dump from before the upgrade** (`restore-db`, below). The servers of other games
-  are not in it.
+  are not in it. The refusal prints its commands under this choice, or says that it is no choice when
+  that upgrade took no dump (`--no-backup`, or the database was down).
 
 The database migrations guard this themselves: undoing `instances 0006` or `0005` refuses while a
 server of another game exists that the archive step has not recorded (also when they are undone
 by hand with `manage.py migrate`), and `manage.py migrate --plan` shows
 `IRREVERSIBLE (other games)` for them meanwhile, so `rollback` stops nothing.
 
-While the old version runs, leave these servers archived: unarchived, it would take them for
-Minecraft servers. Deleting one there is fine (its folder is deleted, as usual). The next
-`./scripts/upgrade.sh run` puts everything back: the database migration `instances 0007` restores
-each recorded server that still exists (game, variant, ports, settings, secrets, setup state,
-control secret, port number, and the fields the old version may have changed for a Minecraft
-server), enables the schedules the archive step disabled, puts the long player names back and drops
-both tables. The servers stay archived; unarchive them in the panel (check their ports first if
-you created servers while the old version ran).
+When the rollback undoes `instances 0007` (right before 0006 and 0005), every recorded server of
+another game is moved to a node the rollback creates, **"parked by upgrade.sh rollback (other
+games)"** (agent URL `http://127.0.0.1:1/parked-by-upgrade-rollback-other-games`: nothing listens
+there, no token is sent; not the default node). The old version took a Terraria server for a
+Minecraft server, and its Unarchive + Start ran the Minecraft image in that folder (real-stack run of
+2026-11-10). On the parked node, Start, Recreate, Clone, Move to another node, Delete and file access
+of such a server fail at once with "Cannot reach the node agent at
+http://127.0.0.1:1/parked-by-upgrade-rollback-other-games: ..." and change nothing; Unarchive and the
+listing work. Delete such servers after the next upgrade, not in the old version. Leave the parked
+node alone in Settings -> Nodes: it shows that error and cannot be deleted while servers are on it.
+Parked servers that share a game port number get numbers from 65536 up while the old version runs,
+and the port numbers of parked servers are not reserved on their own node meanwhile (check ports
+after the next upgrade).
+
+The next `./scripts/upgrade.sh run --with-migrations` puts everything back: the database migration
+`instances 0007` restores each recorded server that still exists (game, variant, ports, settings,
+secrets, setup state, control secret, port number, its own node, and the fields the old version may
+have changed for a Minecraft server), enables the schedules the archive step disabled, puts the long
+player names back, drops both tables and deletes the parked node once no server is on it (a server
+whose node was deleted meanwhile stays parked). The servers stay archived; unarchive them in the
+panel (check their ports first if you created servers while the old version ran).
 
 ### Rollback images: do not prune them
 

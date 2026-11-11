@@ -1203,6 +1203,95 @@ def test_rollback_refuses_while_servers_of_other_games_exist_and_lists_them(game
     assert site.servers()["fa1"] == ["Factory", "factorio", "34197", "no"]
 
 
+def refusal_choices(stderr: str) -> list[list[str]]:
+    """The choices of a refusal ("- ..." lines under "Choose one:"), each with its lines."""
+    lines = stderr.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.rstrip().endswith("Choose one:"))
+    choices: list[list[str]] = []
+    indent = None
+    for line in lines[start + 1 :]:
+        stripped = line.lstrip()
+        if stripped.startswith("- "):
+            indent = len(line) - len(stripped)
+            choices.append([line])
+        elif choices and indent is not None and len(line) - len(stripped) > indent:
+            choices[-1].append(line)
+        else:
+            break
+    return choices
+
+
+def test_the_refusal_names_each_choice_with_what_it_takes(games_site):
+    """(7c) The database dump is a choice of its own with its commands under it, not a line ending
+    in a colon followed by a separate paragraph."""
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    (before_upgrade,) = site.state()["BACKUP_SQL"]
+    result = site.upgrade("rollback")
+    assert result.returncode == 2, result.both
+    choices = refusal_choices(result.stderr)
+    assert [c[0].split()[1] for c in choices] == ["keep", "./scripts/upgrade.sh", "or"], result.stderr
+    dump = " ".join(" ".join(choices[2]).split())
+    assert dump.startswith("- or go back with the database dump from before the upgrade. Everything the panel wrote")
+    assert dump.endswith(
+        f"server files are not touched: docker compose stop agent panel ./scripts/upgrade.sh restore-db {before_upgrade} --yes "
+        "./scripts/upgrade.sh rollback"
+    )
+    # nothing of the refusal is left outside its choices
+    tail = result.stderr.split(choices[-1][-1], 1)[1]
+    assert tail.strip() == "", tail
+    # no line ends in a colon without the lines it announces
+    lines = result.stderr.splitlines()
+    for i, line in enumerate(lines):
+        if line.rstrip().endswith(":") and not line.rstrip().endswith("Choose one:"):
+            nxt = lines[i + 1] if i + 1 < len(lines) else ""
+            assert len(nxt) - len(nxt.lstrip()) > len(line) - len(line.lstrip()), (line, nxt)
+
+
+def test_without_a_dump_of_the_upgrade_the_refusal_says_that_it_is_no_choice(tmp_path):
+    site = GamesSite(tmp_path)
+    assert site.upgrade("run", "--with-migrations", "--no-backup").returncode == 0
+    site.write("servers_db", MC_AND_FACTORIO)
+    result = site.upgrade("rollback")
+    assert result.returncode == 2, result.both
+    choices = refusal_choices(result.stderr)
+    assert len(choices) == 3 and "restore-db" not in result.stderr
+    assert " ".join(" ".join(choices[2]).split()) == (
+        "- the database dump from before the upgrade is no choice: that run took none (--no-backup, or the database was down)."
+    )
+
+
+def test_the_answer_of_the_check_is_shown_without_its_commanderror_line(games_site):
+    """(7b) `manage rollback_other_games` ends its check with Django's "CommandError: ..." (exit 3 or
+    4); the script says the same in its own words, so that line is not shown, neither before a
+    refusal nor before the archive step goes on."""
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    for args, code in ((("rollback",), 2), (("rollback", "--dry-run", "--archive-other-games"), 0)):
+        result = site.upgrade(*args)
+        assert result.returncode == code, result.both
+        assert "fa1  'Factory'  factorio" in result.stdout
+        assert "CommandError" not in result.both, result.both
+        site.forget_events()
+    back = site.upgrade("rollback", "--archive-other-games")
+    assert back.returncode == 0, back.both
+    assert "CommandError" not in back.both and "CommandError" not in site.logs()[-1].read_text()
+    lines = back.stdout.splitlines()
+    # the list of the check, then at once what the option does
+    listed = lines.index("  fa1  'Factory'  factorio")
+    assert lines[listed + 1].startswith("  --archive-other-games: these servers are stopped through the panel"), lines
+
+
+def test_a_blocked_check_is_shown_without_its_commanderror_line(games_site):
+    site = games_site
+    site.write("servers_db", MC_AND_FACTORIO)
+    site.toggle("games_busy")
+    result = site.upgrade("rollback", "--archive-other-games")
+    assert result.returncode == 2, result.both
+    assert "an operation is in progress" in result.stdout and "the rollback cannot go on now (see above)" in result.stderr
+    assert "CommandError" not in result.both
+
+
 def test_rollback_refuses_when_two_servers_share_a_port_number(games_site):
     site = games_site
     # Minecraft's TCP 25600 and Factorio's UDP 25600: allowed now, refused by the old unique index
@@ -1251,7 +1340,9 @@ def test_archive_other_games_then_rollback_then_run_puts_them_back(games_site):
     assert site.read("side_games") == ["fa1|factorio|25600", "te1|terraria|7777"]
     log = site.logs()[-1].read_text()
     assert "==> Archiving the servers of other games (through the running panel)" in log and "'Factory': archived" in log
-    assert "Do not unarchive them in this version" in " ".join(back.stdout.split())
+    words = " ".join(back.stdout.split())
+    assert "they are parked on the node 'parked by upgrade.sh rollback (other games)', which it cannot reach" in words
+    assert "puts them back on their node, still archived" in words
 
     # upgrade again: the new panel's migration 0007 puts them back, still archived
     site.git("checkout", "-q", "main")

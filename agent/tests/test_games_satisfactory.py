@@ -104,7 +104,17 @@ def test_container_runs_root_mode_with_four_capabilities(settings):
         "7777/udp": [("0.0.0.0", 29010)],
         "29011/tcp": [("0.0.0.0", 29011)],
     }
-    assert kw["restart_policy"] == {"Name": "on-failure", "MaximumRetryCount": 3}
+    # only the agent starts it (Docker never does), through the start wrapper (review of 2026-11-11, item 1)
+    assert kw["restart_policy"] == {"Name": "no"}
+    assert build_create_kwargs(settings, IID, sf_spec(restart_policy="on-failure"), "h")[
+        "restart_policy"
+    ] == {"Name": "no"}
+    assert kw["entrypoint"] == ["/bin/sh", "/config/.mcpanel/start-guard.sh"]
+    assert kw["environment"]["MCPANEL_PORTS_PUBLISHED"] == "1"
+    assert (
+        build_create_kwargs(settings, IID, sf_spec(ports=[]), "h")["environment"]["MCPANEL_PORTS_PUBLISHED"]
+        == "0"
+    )
 
 
 def test_the_messaging_port_is_the_one_the_variable_names(settings):
@@ -264,6 +274,9 @@ def write_token(settings, token: str) -> None:
 
 
 def claimed(settings, fake, drv, c) -> str:
+    """Claimed through the panel: the fake game writes its settings file into the server folder, the
+    agent verifies the claim (an unpublished container) and writes the claim marker."""
+    fake.settings_file = settings.instances_dir / str(IID) / satisfactory.CLAIM_FILE
     token = drv.game_action(settings, c, "claim", {"server_name": "Ficsit", "admin_password": ADMIN}, 30)[
         "token"
     ]
@@ -476,9 +489,9 @@ def test_claim_parameters_are_checked(settings, fake, params):
 def test_client_password_is_set_and_checked(settings, fake):
     drv, c = driver_for(fake), Container(fake.port)
     claimed(settings, fake, drv, c)
-    assert drv.game_action(settings, c, "client_password", {"password": "join-me"}, 30) == {"protected": True}
+    assert drv.game_action(settings, c, "client_password", {"password": "join-me"}, 30)["protected"] is True
     assert fake.client_password == "join-me"
-    assert drv.game_action(settings, c, "client_password", {"password": ""}, 30) == {"protected": False}
+    assert drv.game_action(settings, c, "client_password", {"password": ""}, 30)["protected"] is False
     fake.fail["SetClientPassword"] = (204, None)  # pretends, changes nothing
     fake.client_password = ""
     with pytest.raises(GameApiError):
@@ -767,8 +780,7 @@ def test_publish_guard(settings, fake):
     assert exc.value.code == "server_unclaimed"
     with pytest.raises(AgentError):  # no container, never claimed through the panel
         drv.publish_guard(settings, IID, None)
-    claimed(settings, fake, drv, c)
-    write_claim_file(settings)
+    claimed(settings, fake, drv, c)  # the game wrote its settings file, the agent the claim marker
     drv.publish_guard(settings, IID, c)
     drv.publish_guard(settings, IID, None)
     c.state = "exited"  # stopped: the claim file and the token decide

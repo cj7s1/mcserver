@@ -416,25 +416,40 @@ What the generic pieces do:
   (SteamCMD's exit 5/8); the install job then waits for the first start and starts the container
   again up to `install_attempts` times (`game_handlers.wait_first_start`). A first start that is not
   ready after 30 minutes fails the install job (`first_start_timeout`; the server goes on starting and
-  the setup job is queued to go on once it answers).
+  the setup job is queued to go on once it answers). Satisfactory's restart policy is "no", so every
+  start a job makes (`handlers.start_server`, the restart job, the publish step) waits the same way
+  (`handlers.watch_start`, at most 10 minutes, then the job ends with a note) and also handles the
+  start wrapper's refusal (exit 78: `mark_unclaimed`, started again unpublished, the setup follows).
 * **Rollback to a revision without games** (`upgrade.sh rollback`, see DEPLOYMENT.md): refused while
   servers of other games exist, unless `--archive-other-games` (`manage.py rollback_other_games`) stops
   and archives them through the panel's jobs and keeps their rows in a side table outside Django's
   migrations; migration `instances/0007_restore_other_games` puts them back (archived) on the next upgrade.
+  The reverse of 0007 parks the recorded servers on a node it creates ("parked by upgrade.sh rollback
+  (other games)", agent URL `http://127.0.0.1:1/...`: a loopback address, so the refusal is immediate
+  and no DNS lookup happens; no token): the 082b949 panel took a Terraria server for Minecraft and its
+  Unarchive + Start ran itzg in that folder (real-stack run of 2026-11-10), while on the parked node
+  every start, clone, move or delete fails with "node unreachable" (verified against the 082b949 code).
+  Parking happens in the undo of 0007, not in the archive step, so a rollback that fails after archiving
+  leaves startable servers in the new version. The original node comes from the side table's
+  `data->>'node_id'`; 0007 moves each server back and deletes the parked node once it is empty.
 * **Minecraft's world endpoints** (`/world`, `/world/replace`, `/world/reset`) refuse other games (409
   `unsupported_by_game`): they share the capabilities with the saves endpoints. A clone "without the
   worlds" of another game deletes the definition's save folders from the copy (`world_folders`).
 * **Backups' software record** keeps each definition's `software_keys` (Factorio: version, Space Age;
   Terraria: variant, version; Satisfactory: none), so a "Before update" backup sets the version back. The
   backup job's log says what "consistent" means for the game (`consistency_note`: saved right before the
-  copy, not paused).
+  copy, not paused), as it happened: the agent reports `saving` (`stopped`: the server was not running,
+  nothing saved; `no_game`; `saved`; `paused`), and the log line follows it.
 * **Agent support**: `games.require_agent_support` asks the agent again (no cache) before it refuses, and
   a migration checks the target node's agent before anything is stopped.
 * **Exits from inside the game**: Factorio's `/quit` exits 0, which Docker's restart policy would
   restart. The console turns stop words into the panel's Stop; `POST /command` and schedule commands
   refuse them for games with `refuse_stop_commands` (400 `stop_via_power`). Minecraft too since the
   real-stack run of 2026-11-11: `stop` over RCON exits the server and Docker started it again (a
-  deliberate change; a `stop` command schedule saved earlier is skipped with a note).
+  deliberate change; a `stop` command schedule saved earlier is skipped with a note). For Minecraft a
+  line also counts as `stop` when its final `run` target is stop: it starts with `execute` or `return`
+  (also as `minecraft:` names) and ends with `run stop` (nesting, any case, slashes on the line and the
+  target; `MinecraftDefinition.is_stop_command`); `minecraft:stop` counts too (Paper/Spigot run it).
 * **Variants with their own data** (Terraria): one agent profile per variant (`(game, variant)`), a
   spec names `variant`; `/v1/info` lists each variant's images and control under
   `variant_profiles`, and the panel checks the variant too (`require_agent_support(..., variant)`).
@@ -469,11 +484,20 @@ What the generic pieces do:
   `.mcpanel/api-token` and its claim `saved/ServerSettings.7777.sav`) are never downloaded (also not
   from the backup browser, not in a zip: the agent leaves them out, feature `archive_excludes`; an
   older agent's zip of a folder with one is refused), never written, overwritten, renamed or deleted
-  through the file API, and no folder holding one is renamed or deleted. Files with a secret inside
+  through the file API, and no folder holding one is renamed or deleted. Extract and import (job
+  `extract_archive`) never write them either: the panel sends `protected` =
+  `secret_files.extract_protected` (the secret paths; the whole `.mcpanel/` folder when a secret lives
+  there), and the agent (feature `extract_protected`) skips every entry whose final target (after its
+  normalisation, the strip of a common folder and the destination; compared without case) is one of
+  them or inside one, and a file entry that would replace a folder above one (`protected_count` /
+  `protected` in the result, a line in the job log); a destination inside a protected path is refused
+  (403 `managed_file`), an agent without the feature is refused for games with secret files (409
+  `agent_outdated`). TShock's `config.json` is extracted like a file-API write. Files with a secret inside
   (TShock's `config.json`) are masked like the editor in downloads and search results, and left out of
   zips for users without `instance.configure`. Backups keep them (restic is encrypted).
 * **Files changed outside the game** (`definition.files_touched`): restores, restore-path, snapshot
-  restores and the file manager's uploads, edits, renames, deletes and extracts tell the definition
+  restores, imports of a server archive and the file manager's uploads, edits, renames, deletes and
+  extracts tell the definition
   which paths changed (Satisfactory: anything under `saved/` closes the ports, see below).
 * **Saves** of games other than Minecraft (`definition.saves`; Factorio `FactorioSaves`):
   `GET /saves`, `POST /saves/reset` (job `saves_reset`), `POST /saves/import` (job `saves_import`),
@@ -505,9 +529,9 @@ uid 1000 only), the server folder at `/config`. SteamCMD downloads the game (2.9
 on the first start and validates it at every start; the server follows Steam's stable branch
 (`fixed_version` in the catalog: no version to pick, no software update, "Update now" = restart).
 `gamefiles/` is the profile's default backup exclude, and a restore moves it from the old server folder
-into the restored one (`main._carry_over_excluded`) instead of throwing it away. The first start is
-retried on SteamCMD's exit 5/8; later starts rely on the container's `on-failure` policy, which the
-definition forces because a clean `Shutdown` exits 0.
+into the restored one (`main._carry_over_excluded`) instead of throwing it away. The restart policy is
+"no" (the definition and the agent's profile force it): only the agent starts the container, through
+its start wrapper; every start a job makes is retried on SteamCMD's exit 5/8 (`handlers.watch_start`).
 
 Ports: the game (UDP) and the HTTPS API (TCP) share one host port number (`PortSpec.same_port_as`:
 `assign_named_ports` picks a number free for both protocols, the API port is never asked for); the
@@ -525,7 +549,9 @@ Control is the `satisfactory-api` driver (`agent/mcagent/drivers/satisfactory.py
 context of its own that accepts the self-signed certificate for that hop only (pinned per container run),
 bounded timeouts and answer sizes, the API token read from `.mcpanel/api-token` in the server folder.
 Errors usually come back as HTTP 200 with an `errorCode`, so every answer is checked. Saves are
-`SaveGame` as `<session>_mcpanel` (a session name with other characters than letters, digits, `_`, `-`,
+`SaveGame` as `<session>_mcpanel`, never while no game is loaded (`QueryServerState` `isGameRunning`
+false: the server still names a default `SERVER-SESSION...` session, and `SaveGame` would not answer;
+the stop, the backup, reset and import skip the save then, and the backup log says so) (a session name with other characters than letters, digits, `_`, `-`,
 or a long one: `<sanitised>_<8 hex of its hash>_mcpanel`, so two sessions never share a save; 204 once written; the newest save of the session is what the server
 loads at its next start); stop = SaveGame, `Shutdown`, wait for the exit, then `docker stop` (a no-op for
 an exited container); signals end the game without saving. Readiness is the agent's `udp-query` probe
@@ -533,44 +559,74 @@ an exited container); signals end the game without saving. Readiness is the agen
 through the driver (`drivers.QueryTarget`): the player count from `QueryServerState` (no names), the
 limit, the build, the server name. The panel reaches the other functions through the agent's
 `POST /v1/instances/{id}/game/{action}` (feature `game_actions`): `claim`, `client_password`,
-`new_game`, `sessions`, `save`, `upload_save`, `load_game`, `options`, `apply_options`, `status`.
+`verify_claim`, `new_game`, `sessions`, `save`, `upload_save`, `load_game`, `options`, `apply_options`,
+`status`.
 
 Claiming (setup steps `claim`, `access`, `new_game`, `publish`): the spec has no ports until
 `setup_state.ports_open`; the claim waits for readiness, logs in passwordless as InitialAdmin, claims with
 the control secret as admin password (or, when this panel claimed it before, logs in with it), generates
 an API token (returned once; stored in `Instance.secrets["api_token"]`, written to the token file before
 every apply through `control_secret_value`), then the join password (or the explicit "open" choice) is
-applied and checked, a game is created unless one exists, and the `publish` step recreates the container
-with its ports. A step that needs a running server raises `SetupWaiting` (pending, the job ends quietly);
+applied and checked, the `new_game` step keeps a loaded game, else loads the newest save of the session
+the panel remembers (else the newest save there is; `newest_save`, by the game's `saveDateTime`), and
+creates a game only without saves, and the `publish` step has the agent verify the claim on the
+unpublished container (`verify_claim`) and recreates the container with its ports. A step that needs a running server raises `SetupWaiting` (pending, the job ends quietly);
 the Start job enqueues the pending steps; a step whose earlier steps are not done is refused (409
 `setup_order`). Changing the join password in Settings re-runs the `access` step (`secrets_changed`);
 clearing it needs `"access": "open"` in the request (the UI asks first; `SecretSpec.clear_opens`).
 
-The published container is never left running unclaimed (feature `claim_guard`):
+The published container is never left running unclaimed (features `claim_guard`, `claim_marker`;
+`agent/mcagent/claimmarker.py`):
 
+* **The claim marker** `.mcpanel/claim-verified` records size, `mtime_ns` and SHA-256 of
+  `saved/ServerSettings.7777.sav` when the agent verified the claim through the API (`InitialAdmin`
+  refused, `Administrator` login with the admin password the panel sends works). The game writes that
+  file before anybody claimed it (and, measured on build 517554, at the claim, `SetClientPassword`,
+  `CreateNewGame` and a load of another session; not for tokens, server options, `SaveGame`,
+  `Shutdown` or a start), so the file alone proves nothing. The agent writes the marker only on a
+  container without published ports, or after the panel's own operation that changed the file
+  (`client_password`, `new_game`, `load_game`, `upload_save` with load: the driver's
+  `CHANGES_SETTINGS`) on a published container whose marker matched right before it; it waits until the
+  file is stable (`settle`), and a removal meanwhile (a per-server generation) cancels the write. It is
+  removed by the panel's `mark_unclaimed` (`DELETE /claim-marker`), by the agent on every file operation
+  under `saved/` (`claimmarker.GuardedRoot`, the file API's root; it also refuses writes onto the marker
+  and the wrapper and renames into or out of `.mcpanel/`), every restore, restore of a path, snapshot
+  rollback and clone, at a claim re-run, and by the check loop when the file changes outside the panel's
+  operations (`check_outside_change`).
+* **The start wrapper** `.mcpanel/start-guard.sh` is the container's entrypoint (`/bin/sh`, written by
+  the profile's `prepare_start` before every create and start the agent makes): with published ports
+  (`MCPANEL_PORTS_PUBLISHED`, injected at creation and reserved) it execs the image's `/init.sh` only
+  while the marker matches (GNU `stat`/`sha256sum` in the image), and exits 78 otherwise, before the
+  game runs. So a hand `docker start`/`docker restart` or a daemon restart never gets the API of an
+  unverified server answering on a published port (real containers, 2026-11-11).
 * The agent's `publish_guard` runs before every start of a container with published ports (apply,
-  `/start`, `/restart`; `docker_ops.start_guard`): the claim file `saved/ServerSettings.7777.sav` must be
-  a non-empty regular file (lstat, no symbolic link), the token file must exist, and a running container's
-  API is probed (up to 20 s): unclaimed -> 409 `server_unclaimed`, no answer or an unexpected one -> 409
-  `claim_unverified` (fail closed). A refused `/restart` stops nothing.
-* Docker's own `on-failure` restart cannot be intercepted, so a check loop on the agent
-  (`mcagent/claimguard.py`, every 2 s) probes each run of a running published container as soon as its
-  API answers; an unclaimed (or unexpectedly answering) server is stopped at once (no save) and the
-  agent records why (`guard_stop` in `/status`, kept outside the server folder).
-* The panel closes the ports (`mark_unclaimed`: `ports_open` false, `claim`, `access`, `publish`
-  pending) whenever the claim may be lost: a restore, a restore-path or snapshot restore, a file upload,
-  edit, rename, delete or extract under `saved/` (`files_touched`), a `guard_stop` the reconciler sees
-  (`observed`), a 409 `server_unclaimed` from the agent (`handlers.unclaimed_refusal`; the apply is then
-  made again without ports), and a re-run of the claim step (which first recreates a published
-  container without ports). While the ports are closed every start recreates a published container
-  unpublished (`must_apply_before_start`), and a job that started the server again queues the setup.
+  `/start`, `/restart`; `docker_ops.start_guard`): the claim file must be a non-empty regular file, the
+  marker must match it, the token file must exist, and a running container's API is probed (up to 20 s):
+  unclaimed -> 409 `server_unclaimed`, no answer or an unexpected one -> 409 `claim_unverified`. A
+  refused `/restart` stops nothing.
+* The check loop (`mcagent/claimguard.py`, every 2 s and at once on Docker's `start` events, read in
+  windows of 5 s with `since` = the previous `until`) stops a published run younger than 30 s without a
+  matching marker at once (before its API is up), probes every published run as soon as its API answers
+  and stops an unclaimed one (no save), and records the wrapper's refusal (a `die` event with exit 78);
+  `guard_stop` in `/status`, kept outside the server folder. A long-running server whose settings file
+  changed (an admin in the game) keeps running; only its marker goes.
+* The panel closes the ports (`mark_unclaimed`: `ports_open` false; `claim`, `access`, `new_game`,
+  `publish` pending; the agent's marker removed) whenever the claim may be lost: a restore, a
+  restore-path or snapshot restore, a file upload, edit, rename, delete, extract or import under
+  `saved/` (`files_touched`), a `guard_stop` or an exit 78 the reconciler sees (`observed`), a 409
+  `server_unclaimed` from the agent (`handlers.unclaimed_refusal`; the apply is then made again without
+  ports, the restart job too, and the setup is queued), and a re-run of the claim step (which first
+  recreates a published container without ports). While the ports are closed every start recreates a
+  published container unpublished (`must_apply_before_start`), and a job that started the server again
+  queues the setup. `setup.ports_open` in the API is true only once the publish step is done.
 * A clone or a server restored as new takes over the admin password, the secrets and a fresh setup
   (`copied_state`): its copied claim is logged into, it makes its own API token and publishes after its
   setup. A clone "without the worlds" leaves out `saved/server/` and `backups/` (`world_folders`).
 
 Settings are two virtual config "files" (`is_virtual_config`): launch settings kept in
 `game_options["launch"]` and passed as the image's variables (restart), and the server options read
-from and written to the API while it runs. Saves (`SatisfactorySaves`) run their own jobs
+from and written to the API while it runs. Saves (`SatisfactorySaves`; "current" is the session the
+server has loaded now, from the API, none while no game is loaded) run their own jobs
 (`run_reset`, `run_import`, `export`): a stopped server is started for them and stopped again (also when
 it never got ready), a safety backup comes first (without one the running game is saved first), and the
 earlier sessions stay in `saved/server/`. A new game under an existing session's name is refused

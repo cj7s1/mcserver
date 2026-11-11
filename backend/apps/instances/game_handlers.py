@@ -147,18 +147,32 @@ FIRST_START_POLL = 3.0
 FIRST_START_TIMEOUT = 30 * 60
 
 
-def wait_first_start(instance: Instance, ctx: JobContext, client: AgentClient, *, span: tuple[float, float]) -> None:
-    """Wait until a server that was just installed is ready; an exit with one of the definition's
-    ``retryable_install_exits`` (the image's download failed, e.g. SteamCMD's "Missing
-    configuration") starts it again, up to ``install_attempts`` starts in all. Other exits and the
-    last retryable one fail the job. Only for games that declare retryable exit codes."""
+START_WATCH_TIMEOUT = 10 * 60
+
+
+def wait_first_start(
+    instance: Instance, ctx: JobContext, client: AgentClient, *, span: tuple[float, float], first: bool = True
+) -> None:
+    """Wait until a server that was just installed (``first``) or started by the Start job is ready; an
+    exit with one of the definition's ``retryable_install_exits`` (the image's download failed, e.g.
+    SteamCMD's "Missing configuration") starts it again, up to ``install_attempts`` starts in all.
+    Other exits and the last retryable one fail the job. Only for games that declare retryable exit
+    codes (Satisfactory, whose restart policy is "no": Docker never retries for it).
+
+    The Start job (``first`` False) also handles the start wrapper's refusal (exit 78, Satisfactory: a
+    published container without a verified claim): the ports are closed (``mark_unclaimed``), the server
+    is started again unpublished and its setup verifies the claim; and a server that is not ready
+    within START_WATCH_TIMEOUT is left starting (the job ends with a note, it does not fail)."""
     definition = games.for_instance(instance)
     codes = definition.retryable_install_exits
     if not codes:
         return
+    refused_exit = getattr(definition, "start_refused_exit", None)
     attempts = 1
-    deadline = time.monotonic() + FIRST_START_TIMEOUT
+    timeout = FIRST_START_TIMEOUT if first else START_WATCH_TIMEOUT
+    deadline = time.monotonic() + timeout
     seen_started: str | None = None
+    what = "first start" if first else "start"
     while time.monotonic() < deadline:
         ctx.check_cancelled()
         status = client.status(instance.id)
@@ -168,13 +182,27 @@ def wait_first_start(instance: Instance, ctx: JobContext, client: AgentClient, *
         if status.get("exists") and not status.get("running") and not status.get("restarting"):
             code = status.get("exit_code")
             started = status.get("started_at")
+            if not first and refused_exit is not None and code == refused_exit and started != seen_started:
+                seen_started = started
+                definition.mark_unclaimed(
+                    instance,
+                    "The server's start guard refused to start it with published ports (its claim was not verified); "
+                    "the claim is verified again before the ports are opened",
+                )
+                ctx.log(
+                    "warning: the server's start guard refused a start with published ports because its claim was not "
+                    "verified; it is started without published ports and its setup verifies the claim again"
+                )
+                instance.refresh_from_db()
+                start_server(instance, ctx, span=span, admit=False, watch=False)
+                continue
             if code in codes and started != seen_started:
                 seen_started = started
                 if attempts >= definition.install_attempts:
                     raise ConflictError(
-                        f"The server's first start failed {attempts} times while the image downloaded the game "
+                        f"The server's {what} failed {attempts} times while the image downloaded the game "
                         f"(exit code {code}). See the console log.",
-                        code="install_failed",
+                        code="install_failed" if first else "start_failed",
                     )
                 attempts += 1
                 ctx.log(
@@ -183,10 +211,22 @@ def wait_first_start(instance: Instance, ctx: JobContext, client: AgentClient, *
                 client.start(instance.id)
             elif code not in codes:
                 raise ConflictError(
-                    f"The server exited during its first start (exit code {code}). See the console log.", code="install_failed"
+                    f"The server exited during its {what} (exit code {code}). See the console log.",
+                    code="install_failed" if first else "start_failed",
                 )
-        ctx.progress(span[0], "Waiting for the first start to finish (the image downloads the game)")
+        ctx.progress(
+            span[0],
+            "Waiting for the first start to finish (the image downloads the game)"
+            if first
+            else "Waiting for the server to start (the image checks the game files first)",
+        )
         ctx.sleep_until(time.monotonic() + FIRST_START_POLL)
+    if not first:
+        ctx.log(
+            f"The server was not ready within {START_WATCH_TIMEOUT // 60} minutes; it keeps starting (its status shows "
+            "when it is ready)"
+        )
+        return
     # not a success: the server never became ready (the job fails; the server goes on starting)
     raise ConflictError(
         f"The server did not become ready within {FIRST_START_TIMEOUT // 60} minutes of its first start (the image may "

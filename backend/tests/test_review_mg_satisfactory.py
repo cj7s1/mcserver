@@ -158,6 +158,10 @@ def test_a_start_after_the_ports_closed_recreates_the_container_unpublished(sf, 
         def agent_progress(self, *a, **k):
             return None
 
+        def check_cancelled(self): ...
+
+        def sleep_until(self, *a): ...
+
     start_server(sf, Ctx(), admit=False)
     assert fake_agent.containers[str(sf.id)]["running"] and not published(fake_agent, sf)
 
@@ -506,10 +510,18 @@ def test_first_start_deadline_fails_the_install(make_instance, fake_agent, monke
 
 
 def test_backup_log_says_what_consistent_means(sf, fake_agent, django_capture_on_commit_callbacks):
-    fake_agent.stop(sf.id)  # a stopped server's backup is consistent
+    # a running server: saved through the API right before the copy
+    fake_agent.backup_saving = "saved"
     job = run("backup", sf, django_capture_on_commit_callbacks)
     assert job.status == JobStatus.SUCCEEDED, job.error
     assert any("Consistent backup: the game was saved through its API" in line for line in job.log), job.log
+    # a stopped server's backup is consistent too, but nothing was saved (the gate of 2026-11-11, item 5)
+    fake_agent.backup_saving = None
+    fake_agent.stop(sf.id)
+    job = run("backup", sf, django_capture_on_commit_callbacks)
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    assert not any("SaveGame" in line for line in job.log), job.log
+    assert any("was not running" in line for line in job.log), job.log
 
 
 def test_tmodloader_saves_say_that_twld_is_left_out(clients, make_instance, fake_agent):
