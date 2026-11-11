@@ -57,6 +57,10 @@ for the new catalog shapes is not done yet; nothing of it has run on Unraid.**
   PZ's logs and ini (RCON password) are masked in every download and never zipped, its own backup zips are
   never handed out and switched off; Stop ends a job that only waits for the first start; HKMP's screen
   guard refuses `$` and its replies drop screen's "Remove dead screens"; Rust's empty description is sent.
+* Fix round 3 (re-test): a server that has not become ready in its run is stopped at once without a save
+  (agent `not_ready_stop_timeout`, 5 s; the panel says so when its Stop ends a first-start wait); backup and
+  restore requests name the game, so a server without container or last-run record keeps its game's
+  excludes and restore carry-over (agent features `stop_not_ready`, `backup_game_hint`).
 
 ## Real-container gate of the multi-game branch: fixes (branch `feature/multi-game`, 2026-11-11)
 
