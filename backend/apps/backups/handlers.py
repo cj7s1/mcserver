@@ -160,6 +160,7 @@ def run_backup(
             + _game_excludes(instance)
             + (list(policy.excludes or []) if policy_excludes else [])
             + list(excludes or []),
+            game=agent_game(instance),
         )
         done = client.wait_operation(
             op["id"], timeout=6 * 3600, interval=1.5, on_progress=ctx.agent_progress(span[0], span[1] - span[0])
@@ -395,6 +396,21 @@ def _game_excludes(instance: Instance) -> list[str]:
     return list(definition.default_backup_excludes) if definition is not None else []
 
 
+def agent_game(instance: Instance) -> dict[str, str] | None:
+    """``{"game", "variant"}`` for the agent's backup and restore requests: the agent takes the game from the
+    server's container or last-run record, and from this for a server that has neither (created stopped and
+    filled by an import), so its profile's backup excludes and the restore's carry-over apply. None for
+    Minecraft (requests as before)."""
+    game = instance.game or games.DEFAULT_GAME
+    if game == games.DEFAULT_GAME:
+        return None
+    hint = {"game": game}
+    definition = games.get_or_none(game)
+    if definition is not None and (variant := definition.agent_variant(instance)):
+        hint["variant"] = variant
+    return hint
+
+
 @register("backup")
 def backup_job(job: Job, ctx: JobContext) -> dict[str, Any]:
     instance = Instance.objects.select_related("node").get(pk=job.instance_id)
@@ -531,7 +547,7 @@ def restore_job(job: Job, ctx: JobContext) -> dict[str, Any]:
         progress.requested()
         # the files change: Satisfactory checks its claim again before the ports are published
         games.for_instance(instance).files_touched(instance, [""], "a backup was restored")
-        op = client.restore_backup(instance.id, backup.snapshot_id)
+        op = client.restore_backup(instance.id, backup.snapshot_id, game=agent_game(instance))
         progress.running()
         client.wait_operation(op["id"], timeout=6 * 3600, on_progress=ctx.agent_progress(0.5, 0.4))
     except Exception as exc:

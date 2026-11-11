@@ -251,8 +251,12 @@ class AgentClient:
     def start(self, instance_id: UUID) -> dict[str, Any]:
         return self._json("POST", f"/v1/instances/{instance_id}/start", timeout=120)
 
-    def stop(self, instance_id: UUID, timeout: int | None = None) -> dict[str, Any]:
-        body = {"timeout": timeout} if timeout else {}
+    def stop(self, instance_id: UUID, timeout: int | None = None, *, not_ready: bool = False) -> dict[str, Any]:
+        """``not_ready``: the server never became ready in this run (the panel still waited for its first start):
+        an agent with the feature ``stop_not_ready`` stops it at once (nothing to save); older agents ignore it."""
+        body: dict[str, Any] = {"timeout": timeout} if timeout else {}
+        if not_ready:
+            body["not_ready"] = True
         return self._json("POST", f"/v1/instances/{instance_id}/stop", json=body, timeout=(timeout or 120) + STOP_EXTRA_SECONDS)
 
     def restart(self, instance_id: UUID, timeout: int | None = None) -> dict[str, Any]:
@@ -544,18 +548,33 @@ class AgentClient:
         return self._json("GET", f"/v1/instances/{instance_id}/backups", timeout=timeout)["snapshots"]
 
     def create_backup(
-        self, instance_id: UUID, backup_id: str, *, tags: list[str], consistency: str = "auto", excludes: list[str] | None = None
+        self,
+        instance_id: UUID,
+        backup_id: str,
+        *,
+        tags: list[str],
+        consistency: str = "auto",
+        excludes: list[str] | None = None,
+        game: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        return self._json(
-            "POST",
-            f"/v1/instances/{instance_id}/backups",
-            json={"backup_id": backup_id, "tags": tags, "consistency": consistency, "excludes": excludes or []},
-        )["operation"]
+        """``game``: ``{"game", "variant"}`` of a server of another game than Minecraft, which the agent uses for
+        a server without container or last-run record (its profile's backup excludes); older agents ignore it."""
+        body: dict[str, Any] = {"backup_id": backup_id, "tags": tags, "consistency": consistency, "excludes": excludes or []}
+        body.update(game or {})
+        return self._json("POST", f"/v1/instances/{instance_id}/backups", json=body)["operation"]
 
-    def restore_backup(self, instance_id: UUID, snapshot_id: str, target_instance_id: UUID | None = None) -> dict[str, Any]:
+    def restore_backup(
+        self,
+        instance_id: UUID,
+        snapshot_id: str,
+        target_instance_id: UUID | None = None,
+        *,
+        game: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         body: dict[str, Any] = {"snapshot_id": snapshot_id}
         if target_instance_id:
             body["target_instance_id"] = str(target_instance_id)
+        body.update(game or {})  # (the game files a restore in place keeps: see create_backup)
         return self._json("POST", f"/v1/instances/{instance_id}/backups/restore", json=body)["operation"]
 
     def forget_backups(self, instance_id: UUID, snapshot_ids: list[str], prune: bool = True) -> dict[str, Any]:

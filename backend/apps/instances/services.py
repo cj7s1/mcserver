@@ -295,8 +295,10 @@ def enqueue_power(
     warn_message: str = "",
     title: str | None = None,
     allow_overcommit: bool = False,
+    not_ready: bool = False,
 ) -> Job:
     """Queue start/stop/restart. With ``warn_minutes`` players are warned in game first.
+    ``not_ready`` (a stop): the server never became ready in this run, the agent stops it at once.
 
     A warning job is enqueued non-exclusive and only takes the instance lock for its last
     seconds (see power_warnings). An immediate stop/restart supersedes a pending countdown.
@@ -329,6 +331,8 @@ def enqueue_power(
         params: dict[str, Any] = {"warn_minutes": warn, "warn_message": warn_message}
         if allow_overcommit:
             params["allow_overcommit"] = True
+        if not_ready:
+            params["not_ready"] = True
         return enqueue(
             action,
             title=f"{base_title} ({warn} min warning)",
@@ -337,13 +341,10 @@ def enqueue_power(
             params=params,
             exclusive=False,
         )
-    job = enqueue(
-        action,
-        title=base_title,
-        instance=instance,
-        user=user,
-        params={"allow_overcommit": True} if allow_overcommit and action != "stop" else None,
-    )
+    immediate: dict[str, Any] = {"allow_overcommit": True} if allow_overcommit and action != "stop" else {}
+    if not_ready and action == "stop":
+        immediate["not_ready"] = True
+    job = enqueue(action, title=base_title, instance=instance, user=user, params=immediate or None)
     if countdown is not None:
         try:
             cancel_countdown(countdown.id, message=f"Superseded by '{base_title}'", notify_players=False)
@@ -427,6 +428,8 @@ def power(
         warn_minutes=warn_minutes,
         warn_message=warn_message,
         allow_overcommit=allow_overcommit,
+        # the ended job still waited for the first start: the server has nothing to save yet (BUG-9)
+        not_ready=superseded is not None,
     )
     details: dict[str, Any] = {"job": str(job.id)}
     if allow_overcommit:

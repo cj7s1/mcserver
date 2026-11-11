@@ -411,6 +411,13 @@ def _log_stop(ctx: JobContext, answer: Any) -> None:
     info = answer.get("stop") if isinstance(answer, dict) else None
     if not isinstance(info, dict):
         return
+    if info.get("not_ready"):
+        # (stopped with a short timeout, maybe killed: there was no world loaded, so nothing to lose)
+        ctx.log(
+            "The server had not become ready in this run (its image was still downloading or installing the game): "
+            "it was stopped at once; there was nothing to save"
+        )
+        return
     if info.get("flushed"):
         ctx.log(f"The world was saved ({_save_command(ctx)}) before the server was stopped")
     if info.get("stop_sent_via_rcon"):
@@ -462,7 +469,11 @@ def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
     status = AgentClient(instance.node).status(instance.id)
     if status.get("exists"):
         try:
-            _log_stop(ctx, AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout))
+            # (not_ready: this stop ended a job that still waited for the first start: the agent stops it at once)
+            answer = AgentClient(instance.node).stop(
+                instance.id, timeout=instance.stop_timeout, not_ready=bool((job.params or {}).get("not_ready"))
+            )
+            _log_stop(ctx, answer)
         except AgentError as exc:
             if exc.error_code != "no_container":
                 raise
