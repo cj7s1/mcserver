@@ -151,6 +151,7 @@ class TShockDriver(ControlDriver):
         if target is None:
             if (c.attrs.get("HostConfig") or {}).get("NetworkMode") == "host":
                 return "127.0.0.1", self.port
+            _ops().pernet.ensure_attached(c)  # the agent talks to it on its own network (FX-1)
             for net in ((c.attrs.get("NetworkSettings") or {}).get("Networks") or {}).values():
                 if net.get("IPAddress"):
                     return str(net["IPAddress"]), self.port

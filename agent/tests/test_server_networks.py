@@ -289,7 +289,8 @@ def test_startup_recreates_joins_and_sweeps(settings, docker):
 
     done = pernet.startup(settings, lock_for)
     assert done["recreated"] == [a] and locks == [A, B]  # A to create again, B to sweep
-    assert _subnet(docker, a) == "10.213.0.0/29" and a in docker.ctrs[OWN].nets
+    # created again, but not joined: its server is stopped (FX-1: joined right before it starts)
+    assert _subnet(docker, a) == "10.213.0.0/29" and a not in docker.ctrs[OWN].nets
     assert done["removed"] == [b] and b not in docker.nets
     assert "bystander" in docker.nets  # not a server network
 
@@ -410,4 +411,111 @@ def test_the_sweep_leaves_a_network_whose_server_is_busy(settings, docker):
 
     done = pernet.startup(settings, busy)
     assert done["removed"] == [] and name in docker.nets
-    assert asked == [(A, 0.0)]  # asked without waiting
+    assert set(asked) == {(A, 0.0)}  # asked without waiting (the sweep, and leaving the network)
+    assert name in docker.ctrs[OWN].nets  # a busy server's network is not left either
+
+
+# --- FX-1: the agent is on a server's network only while that server runs ---------------------------------
+def _server_ctr(docker, cid, iid, name, running):
+    docker.ctrs[cid] = Ctr(
+        cid, {"io.mcpanel.managed": "true", "io.mcpanel.instance": str(iid)}, [name], running
+    )
+    return docker.ctrs[cid]
+
+
+@contextlib.contextmanager
+def _free_lock(iid, wait=None):
+    yield
+
+
+def test_a_running_servers_network_is_joined_on_demand(settings, docker):
+    name = pernet.prepare(settings, A)
+    pernet.detach_self(name)  # e.g. the agent's container was recreated
+    assert name not in docker.ctrs[OWN].nets
+    stopped = _server_ctr(docker, "ca", A, name, running=False)
+    pernet.ensure_attached(stopped)
+    assert name not in docker.ctrs[OWN].nets  # a stopped server needs nobody on its network
+    stopped.running = True
+    pernet.ensure_attached(stopped)
+    assert name in docker.ctrs[OWN].nets
+    calls_before = len(docker.ctrs[OWN].nets)
+    pernet.ensure_attached(stopped)  # known to be joined: no Docker call, nothing changes
+    assert len(docker.ctrs[OWN].nets) == calls_before
+
+
+def test_a_stopped_container_takes_the_agent_off_its_network(settings, docker):
+    name = pernet.prepare(settings, A)
+    c = _server_ctr(docker, "ca", A, name, running=False)
+    pernet.detach_for(c)
+    assert name not in docker.ctrs[OWN].nets and name not in pernet._attached
+
+
+def test_create_leaves_the_network_until_the_start(settings, docker, monkeypatch):
+    docker.api.api_version = "1.47"
+    docker.api.create_container = lambda **kw: {"Id": "new"}
+    monkeypatch.setattr(docker.containers, "get", lambda cid: docker.ctrs.get(cid) or SimpleNamespace(id=cid))
+    monkeypatch.setattr(docker_ops, "ensure_network", lambda _s: None)
+    docker_ops.create_container(settings, A, _spec(), "h")
+    assert "zz_mcpanel_i_111111111111" in docker.nets
+    assert "zz_mcpanel_i_111111111111" not in docker.ctrs[OWN].nets  # joined again right before the start
+
+
+def test_reconcile_joins_running_servers_and_leaves_the_others(settings, docker):
+    a, b = pernet.prepare(settings, A), pernet.prepare(settings, B)
+    docker.ctrs[OWN].nets.remove(a)  # missed: A runs, the agent is not on its network
+    _server_ctr(docker, "ca", A, a, running=True)
+    _server_ctr(docker, "cb", B, b, running=False)  # B stopped by itself (a crash)
+    moved = pernet.reconcile(settings, _free_lock)
+    assert moved == {"joined": [a], "left": [b]}
+    assert a in docker.ctrs[OWN].nets and b not in docker.ctrs[OWN].nets
+
+
+def test_reconcile_never_waits_for_a_busy_server(settings, docker):
+    from mcagent.errors import AgentError
+
+    b = pernet.prepare(settings, B)
+    _server_ctr(docker, "cb", B, b, running=False)
+
+    @contextlib.contextmanager
+    def busy(iid, wait=None):
+        assert wait == 0.0
+        raise AgentError("busy", "instance_busy", 409)
+        yield  # pragma: no cover
+
+    assert pernet.reconcile(settings, busy) == {"joined": [], "left": []}
+    assert b in docker.ctrs[OWN].nets  # its start may be under way: looked at again next time
+
+
+def test_shutdown_leaves_every_server_network_within_its_bound(settings, docker, monkeypatch):
+    import threading
+    import time
+
+    a, b = pernet.prepare(settings, A), pernet.prepare(settings, B)
+    assert pernet.detach_all(timeout=2.0) == 2
+    assert not {a, b} & set(docker.ctrs[OWN].nets)
+    # Docker going down: a call that hangs does not hold the shutdown
+    pernet.prepare(settings, C)
+    hang = threading.Event()
+    monkeypatch.setattr(docker.api, "disconnect_container_from_network", lambda *a, **k: hang.wait(10))
+    started = time.monotonic()
+    pernet.detach_all(timeout=0.3)
+    assert time.monotonic() - started < 1.5
+    hang.set()
+
+
+def test_graceful_stop_takes_the_agent_off_the_network(settings, docker, monkeypatch):
+    name = pernet.prepare(settings, A)
+    c = _server_ctr(docker, "ca", A, name, running=True)
+    c.status = "running"
+    c.name = "mcpanel-a"
+    c.labels["io.mcpanel.game"] = "hkmp"  # a game whose driver has no stop of its own
+
+    def stop(timeout=None):
+        c.running = False
+        c.status = "exited"
+
+    c.stop = stop
+    c.reload = lambda: None
+    monkeypatch.setattr(docker_ops, "fix_ownership", lambda *a, **k: None)
+    docker_ops.graceful_stop(settings, c, 10)
+    assert name not in docker.ctrs[OWN].nets

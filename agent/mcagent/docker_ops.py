@@ -996,12 +996,13 @@ def create_container(
     write_agent_files(settings, instance_id, profile, spec)
     if pinned_ref is not None:
         kwargs["image"] = pinned_ref  # the known image, not what the moved tag names now (R-2)
+    own_network = None
     if spec.network is None and kwargs["network"] == settings.instance_network:
         # a spec without a network (the panel's default): the server's own bridge (A-1, pernet), else
         # the shared instance network as before
-        own = pernet.prepare(settings, instance_id)
-        if own is not None:
-            kwargs["network"] = own
+        own_network = pernet.prepare(settings, instance_id)
+        if own_network is not None:
+            kwargs["network"] = own_network
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
     # docker-py's high-level containers.create() cannot set Config.StopTimeout: it rejects a
@@ -1021,6 +1022,11 @@ def create_container(
         raise AgentError(
             f"Docker refused to create the container: {exc.explanation or exc}", "create_failed", 502
         ) from exc
+    finally:
+        if own_network is not None:
+            # joined to check that it can be; the agent stays on a server's network only while the server
+            # runs (FX-1), and is joined again right before the start
+            pernet.leave_if_unused(own_network)
 
 
 def remove_container(
@@ -1601,6 +1607,7 @@ def graceful_stop(
     elif not _driver_stop(settings, c, timeout, result):
         c.stop(timeout=timeout)
     result.exit_code = _stopped_exit_code(c)
+    pernet.detach_for(c)  # stopped: the agent leaves its network (FX-1)
     if profile is not None and profile.fix_ownership:
         instance = (c.labels or {}).get(LABEL_INSTANCE)
         if instance and (warning := fix_ownership(settings, UUID(str(instance)))) is not None:
@@ -1706,6 +1713,9 @@ def kill(instance_id: UUID) -> None:
         return
     if c.status in ("running", "restarting", "paused"):
         c.kill()
+        with contextlib.suppress(Exception):
+            c.reload()
+            pernet.detach_for(c)  # (when it has exited already; else the sweep does it)
 
 
 def _parse_ts(value: str | None) -> str | None:
@@ -1738,6 +1748,8 @@ def describe(c: Container) -> dict[str, Any]:
                 }
             )
     health_log = health.get("Log") or []
+    if state.get("Running"):
+        pernet.ensure_attached(c)  # the agent talks to it there (after an agent restart, a missed start)
     described = {
         "exists": True,
         "id": c.id,
@@ -1935,6 +1947,7 @@ def _health_entry(key: tuple[str, str]) -> dict[str, Any]:
 def _probe_tcp(c: Container, port: int, settings: Settings) -> bool:
     import socket
 
+    pernet.ensure_attached(c)
     host: str | None
     target_port = port
     info_ports = (c.attrs.get("NetworkSettings") or {}).get("Ports") or {}
@@ -1970,6 +1983,7 @@ def container_address(c: Container, port: int, protocol: str, settings: Settings
     its address on its network (127.0.0.1 with host networking), or with AGENT_RCON_MODE=published
     the published host port on 127.0.0.1. None when there is none."""
     attrs = c.attrs or {}
+    pernet.ensure_attached(c)
     if settings.rcon_mode == "published":
         for b in ((attrs.get("NetworkSettings") or {}).get("Ports") or {}).get(f"{port}/{protocol}") or []:
             if b.get("HostPort"):

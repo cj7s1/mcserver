@@ -463,6 +463,14 @@ async def _startup() -> None:
     _spawn("leftover-sweep", maintenance.sweep_leftovers, settings, started_at, _busy)
     _spawn("saving-recovery", _saving_recovery_loop, settings, _background_stop)
     _spawn("claim-guard", claimguard.run, settings, _background_stop)
+    # the agent is on a server's network only while that server runs (FX-1)
+    _spawn(
+        "server-networks",
+        pernet.run_sweeper,
+        settings,
+        lambda iid, wait=LIFECYCLE_LOCK_WAIT: docker_ops.instance_lock(iid, wait=wait),
+        _background_stop,
+    )
 
 
 # At most one background pass per folder (four at a time) for /files/hashes calls.
@@ -473,6 +481,9 @@ _hash_jobs = hashcache.HashJobs(workers=4)
 async def _shutdown() -> None:
     global _hash_jobs
     _background_stop.set()
+    # leave every server network (bounded): a network removed while the stack is down must not keep the
+    # agent's container from starting again (FX-1)
+    await run_in_threadpool(pernet.detach_all)
     _hash_jobs.shutdown()  # stop background hashing so the process can exit promptly
     _hash_jobs = hashcache.HashJobs(workers=4)
     settings = get_settings()

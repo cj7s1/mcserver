@@ -12,8 +12,12 @@ server no longer sees its neighbours.
 * Unraid deletes user-defined networks at a Docker restart unless "Preserve user defined networks" is
   on, and compose recreates the agent's container at every upgrade: at the agent's start (:func:`startup`)
   and before every start of a server (``docker_ops.reattach_recreated_networks``) a missing server
-  network is created again with its name and subnet, and the agent attaches itself to every server
-  network.
+  network is created again with its name and subnet.
+* The agent is on a server's network only while that server runs (FX-1: Docker keeps a container's
+  networks in its configuration, and a container whose stored network is gone cannot start, so the agent
+  itself would not start): it joins right before the server's start (and on demand, :func:`ensure_attached`),
+  leaves when the server stops (:func:`detach_for`, the sweep :func:`run_sweeper`), and leaves all of them at
+  its own shutdown (:func:`detach_all`).
 * Nothing changes for a container that exists on the shared network: it keeps it until it is recreated.
 * Fallback, never a dead server: switched off (``AGENT_PER_SERVER_NETWORKS=false``), an invalid pool, an
   agent that does not run in a container or cannot find its own container, an exhausted pool or a network
@@ -66,6 +70,11 @@ _lock = threading.RLock()  # allocation, the state file, network create/remove
 _status: dict[str, Any] = {"reason": None, "fallbacks": 0}
 _logged: set[str] = set()
 _own: dict[str, str | None] = {}
+# server networks the agent's container is on, as far as this process knows (attach/detach keep it, the
+# sweep refreshes it from Docker): a request checks it without asking Docker
+_attached: set[str] = set()
+SWEEP_SECONDS = 15.0  # FX-1: the agent leaves the network of a server that stopped by itself within this
+DETACH_ALL_SECONDS = 5.0  # at the agent's shutdown (the Docker daemon may be going down already)
 
 
 class Unavailable(Exception):
@@ -362,11 +371,81 @@ def attach_self(name: str) -> None:
     except APIError as exc:
         text = str(exc.explanation or exc).lower()
         if "already exists" in text or "already attached" in text or "is already connected" in text:
+            _attached.add(name)
             return
         raise Unavailable(f"the agent could not join network {name}: {exc.explanation or exc}") from exc
+    _attached.add(name)
 
 
-def ensure(settings: Settings, instance_id: UUID) -> str:
+def detach_self(name: str) -> None:
+    """Leave network ``name`` (FX-1: Docker keeps every network of a container in its configuration, and a
+    container whose stored network no longer exists cannot start; the agent is on a server's network only
+    while that server runs). Never raises: not attached or the network gone is the same result."""
+    own = own_container_id()
+    _attached.discard(name)
+    if own is None:
+        return
+    try:
+        _client().api.disconnect_container_from_network(own, name, force=True)
+    except Exception as exc:  # not connected, network gone, Docker going down
+        log.debug("leaving network %s: %s", name, exc)
+
+
+def server_networks_of(c: Any) -> list[str]:
+    """The server networks container ``c`` is on (from its attributes, no Docker call)."""
+    nets = ((getattr(c, "attrs", None) or {}).get("NetworkSettings") or {}).get("Networks") or {}
+    return [n for n in nets if is_server_network(n)]
+
+
+def _live(c: Any) -> bool:
+    state = (getattr(c, "attrs", None) or {}).get("State") or {}
+    return bool(state.get("Running") or state.get("Restarting"))
+
+
+def ensure_attached(c: Any) -> None:
+    """Make sure the agent is on the server network of the running container ``c`` before it talks to it
+    (RCON, the game's API, A2S, readiness probes): after an agent restart or a missed start the sweep may not
+    have come by yet. Attaching is idempotent and takes no lock (the lock may be held by the very stop that
+    needs RCON); leaving always happens under the server's lock with a fresh look at the container. Costs
+    no Docker call when the network is known to be joined. Never raises."""
+    if not _live(c) or own_container_id() is None:
+        return
+    for name in server_networks_of(c):
+        if name in _attached:
+            continue
+        try:
+            attach_self(name)
+            log.info("Joined network %s of running container %s", name, getattr(c, "name", "?"))
+        except Exception as exc:
+            log.debug("could not join network %s: %s", name, exc)
+
+
+def leave_if_unused(name: str) -> None:
+    """Leave ``name`` unless a running container (other than the agent) is on it: a container was just
+    created there and is not started yet (it is joined again right before its start). Never raises."""
+    own = own_container_id()
+    if own is None or name not in _attached:
+        return
+    try:
+        users = _client().containers.list(all=True, filters={"network": name})
+    except Exception as exc:
+        log.debug("could not look at network %s: %s", name, exc)
+        return
+    if any(_live(c) and str(c.id) != own and not str(c.id).startswith(own) for c in users):
+        return
+    detach_self(name)
+
+
+def detach_for(c: Any) -> None:
+    """Leave the server networks of container ``c`` once it has stopped (the agent stopped or killed it).
+    Never raises."""
+    if _live(c):
+        return
+    for name in server_networks_of(c):
+        detach_self(name)
+
+
+def ensure(settings: Settings, instance_id: UUID, *, attach: bool = True) -> str:
     """The server's network, created when missing (with its recorded subnet, else a free one of the pool)
     and joined by the agent. The caller holds the server's lock. Unavailable when it cannot be used;
     AgentError 409 ``foreign_network`` when the name is taken by a network that is not the agent's."""
@@ -402,6 +481,8 @@ def ensure(settings: Settings, instance_id: UUID) -> str:
             else:
                 _write(settings, state)
                 raise Unavailable(f"Docker refused {MAX_CREATE_TRIES} subnets of the pool")
+    if not attach:  # (a stopped server's network made again at the agent's start: joined when it starts)
+        return name
     try:
         attach_self(name)
     except Unavailable:
@@ -449,6 +530,7 @@ def release(settings: Settings, instance_id: UUID) -> bool:
             if own:
                 with contextlib.suppress(APIError, NotFound):
                     _client().api.disconnect_container_from_network(own, name, force=True)
+            _attached.discard(name)
             net.remove()
             log.info("Removed network %s (no container of server %s left on it)", name, instance_id)
             return True
@@ -471,13 +553,14 @@ def server_networks() -> list[Any]:
 
 
 def startup(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
-    """At the agent's start (Docker answering): create the network again of every server that has a
-    container on a missing server network, join every server network, and remove the ones no container
-    uses any more. ``lock_for(instance_id, wait=None)``: the server's lock (a context manager; AgentError
-    ``instance_busy`` when not free within ``wait``). Never raises."""
+    """At the agent's start (Docker answering): create the network again of every server whose container
+    is on a missing server network (not joined: the agent joins it when the server runs), remove the server
+    networks no container uses any more, then join the networks of running servers and leave every other
+    one (:func:`reconcile`). ``lock_for(instance_id, wait=None)``: the server's lock (a context manager;
+    AgentError ``instance_busy`` when not free within ``wait``). Never raises."""
     from . import docker_ops
 
-    done: dict[str, list[str]] = {"recreated": [], "joined": [], "removed": []}
+    done: dict[str, list[str]] = {"recreated": [], "joined": [], "left": [], "removed": []}
     if not settings.per_server_networks and not _has_server_networks():
         return done
     own = own_container_id(refresh=True)
@@ -488,17 +571,16 @@ def startup(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
         return done
     existing = {n.name for n in server_networks()}
     for c in containers:
-        nets = ((c.attrs or {}).get("NetworkSettings") or {}).get("Networks") or {}
         iid = (c.labels or {}).get(LABEL_INSTANCE)
-        for name in nets:
-            if not is_server_network(name) or name in existing or not iid:
+        for name in server_networks_of(c):
+            if name in existing or not iid:
                 continue
             try:
                 instance_id = UUID(iid)
                 if network_name(instance_id) != name:
                     continue
                 with lock_for(instance_id):
-                    ensure(settings, instance_id)
+                    ensure(settings, instance_id, attach=False)
                 done["recreated"].append(name)
                 existing.add(name)
             except Exception as exc:
@@ -507,35 +589,124 @@ def startup(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
                 )
     for net in server_networks():
         try:
-            if not _users(net, own):
-                labels = (net.attrs or {}).get("Labels") or {}
-                iid = labels.get(LABEL_INSTANCE)
-                if not iid:
-                    continue
-                # under the server's lock, never waiting for it (R-7): a create that holds it may have just
-                # made this network for a container it is about to create; skipped then, swept next start
-                try:
-                    with lock_for(UUID(iid), 0.0):
-                        if release(settings, UUID(iid)):  # (looks at the containers again, locked)
-                            done["removed"].append(net.name)
-                except AgentError as exc:
-                    if exc.code != "instance_busy":
-                        raise
-                    log.info("Network %s left in place: its server is busy", net.name)
+            if _users(net, own):
                 continue
-            if own is not None:
-                attach_self(net.name)
-                done["joined"].append(net.name)
+            labels = (net.attrs or {}).get("Labels") or {}
+            iid = labels.get(LABEL_INSTANCE)
+            if not iid:
+                continue
+            # under the server's lock, never waiting for it (R-7): a create that holds it may have just
+            # made this network for a container it is about to create; skipped then, swept next start
+            try:
+                with lock_for(UUID(iid), 0.0):
+                    if release(settings, UUID(iid)):  # (looks at the containers again, locked)
+                        done["removed"].append(net.name)
+            except AgentError as exc:
+                if exc.code != "instance_busy":
+                    raise
+                log.info("Network %s left in place: its server is busy", net.name)
         except Exception as exc:
             log.warning("Network %s: %s", net.name, exc)
+    moved = reconcile(settings, lock_for)
+    done["joined"], done["left"] = moved["joined"], moved["left"]
     if any(done.values()):
         log.info(
-            "Server networks at start: joined %d, created again %d, removed %d",
+            "Server networks at start: joined %d, left %d, created again %d, removed %d",
             len(done["joined"]),
+            len(done["left"]),
             len(done["recreated"]),
             len(done["removed"]),
         )
     return done
+
+
+def reconcile(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
+    """Make the agent's attachments match the running servers (FX-1): join the server network of every
+    running managed container, leave every other server network. A leave happens under the server's lock
+    (never waiting for it: a busy server is looked at again next time) after a fresh look at the containers
+    on that network. Never raises."""
+    from . import docker_ops
+
+    done: dict[str, list[str]] = {"joined": [], "left": []}
+    own = own_container_id()
+    if own is None:
+        return done
+    try:
+        mine = set(server_networks_of(_client().containers.get(own)))
+        containers = docker_ops.client().containers.list(all=True, filters={"label": f"{LABEL_MANAGED}=true"})
+    except Exception as exc:
+        log.debug("server networks not reconciled (Docker): %s", exc)
+        return done
+    _attached.intersection_update(mine)
+    _attached.update(mine)
+    needed = {name for c in containers if _live(c) for name in server_networks_of(c)}
+    for name in sorted(needed - mine):
+        try:
+            attach_self(name)
+            done["joined"].append(name)
+        except Exception as exc:
+            log.warning("Could not join network %s of a running server: %s", name, exc)
+    for name in sorted(mine - needed):
+        try:
+            net = _get(name)
+            iid = ((net.attrs or {}).get("Labels") or {}).get(LABEL_INSTANCE) if net is not None else None
+            if net is None or not iid:
+                detach_self(name)  # gone already, or not a network of a server: nothing to protect
+                done["left"].append(name)
+                continue
+            with lock_for(UUID(iid), 0.0):
+                users = _client().containers.list(all=True, filters={"network": name})
+                if any(_live(c) and str(c.id) != own and not str(c.id).startswith(own) for c in users):
+                    continue  # it started meanwhile
+                detach_self(name)
+                done["left"].append(name)
+        except AgentError as exc:
+            if exc.code != "instance_busy":
+                log.warning("Network %s: %s", name, exc)
+        except Exception as exc:
+            log.warning("Could not leave network %s: %s", name, exc)
+    return done
+
+
+def run_sweeper(settings: Settings, lock_for: Any, stop: threading.Event) -> None:
+    """Every SWEEP_SECONDS: :func:`reconcile` (a server that stopped by itself, an attachment missed). Only
+    when the agent runs in a container it found; never raises."""
+    while not stop.wait(SWEEP_SECONDS):
+        if own_container_id() is None:
+            continue
+        try:
+            moved = reconcile(settings, lock_for)
+        except Exception:
+            log.exception("Reconciling the server networks failed")
+            continue
+        if moved["joined"] or moved["left"]:
+            log.info("Server networks: joined %s, left %s", moved["joined"], moved["left"])
+
+
+def detach_all(timeout: float = DETACH_ALL_SECONDS) -> int:
+    """At the agent's shutdown: leave every server network (best effort, at most ``timeout`` seconds; the
+    Docker daemon may be going down), so that the agent's stored configuration names only its own networks
+    (FX-1). Returns how many it left in time."""
+    left: list[str] = []
+
+    def run() -> None:
+        own = own_container_id()
+        if own is None:
+            return
+        try:
+            names = server_networks_of(_client().containers.get(own))
+        except Exception:
+            names = sorted(_attached)
+        for name in names:
+            detach_self(name)
+            left.append(name)
+
+    worker = threading.Thread(target=run, name="leave-server-networks", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if left:
+        log.info("Left %d server networks at shutdown", len(left))
+    return len(left)
 
 
 def _has_server_networks() -> bool:
