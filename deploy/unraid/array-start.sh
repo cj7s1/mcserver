@@ -317,15 +317,19 @@ missing_networks() { # missing_networks ID SERVICE: the wanted networks it is no
     printf '%s' "${missing% }"
 }
 
-# What this script stopped is started again whatever happens (also when it is ended in between).
+# What this script stops is started again whatever happens, also when it is ended in between: a container is
+# noted here BEFORE its `docker stop` and forgotten only after its `docker start` returned, so every signal
+# lands while it is noted (bash runs the trap when the command at work has ended). `docker start` of a
+# container that runs already does nothing and succeeds, so starting one that was not stopped yet is harmless.
 STOPPED=()
 start_stopped() {
     local id
+    trap '' TERM HUP INT # a second signal must not cut this short
     for id in "${STOPPED[@]}"; do
         [ -n "${id}" ] || continue
         docker start "${id}" >/dev/null 2>&1 || note "could not start ${id} again: 'docker logs ${id}' says why"
+        forget_stopped "${id}"
     done
-    STOPPED=()
 }
 forget_stopped() { # forget_stopped ID: it was started (or tried) by repair itself
     local i
@@ -341,8 +345,8 @@ repair() { # repair ID SERVICE NAME
         return 0
     fi
     note "Stack: ${name} is not on ${missing// /, } (Docker lost the attachment at a start): stop, connect it with the alias ${service}, start"
+    [ "${DRY}" = 1 ] || STOPPED+=("${id}") # before the stop: see start_stopped
     act docker stop -t 30 "${id}" >/dev/null 2>&1
-    [ "${DRY}" = 1 ] || STOPPED+=("${id}")
     for net in ${missing}; do
         act docker network connect --alias "${service}" "${net}" "${id}" 2>/dev/null && continue
         # "endpoint ... already exists": connected meanwhile (by the agent): that is what we wanted
@@ -403,6 +407,7 @@ stack_step() {
     done <<<"${broken}"
     [ "${DRY}" = 1 ] && return 0
     start_stopped
+    trap - TERM HUP INT # nothing is stopped any more: signals end the script as usual again
     while IFS='|' read -r id service running mode nets name; do
         [ -n "${id}" ] || continue
         [ "${running}" = true ] || [ -n "$(missing_networks "${id}" "${service}")" ] ||

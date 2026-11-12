@@ -46,6 +46,12 @@ set_row() { # set_row ID FIELD VALUE (fields: 1 id 2 service 3 running 4 mode 5 
     mv "$tmp" "$F/containers"
 }
 field() { rows | while IFS='|' read -r id service running mode nets name oneoff; do [ "$id" = "$1" ] && eval "printf '%s' \"\$$2\""; done; }
+block() { # block CMD: with $F/block_CMD (seconds) this call waits once, after it marked $F/in_CMD
+    [ -e "$F/block_$1" ] || return 0
+    : >"$F/in_$1"
+    sleep "$(cat "$F/block_$1")"
+    rm -f "$F/block_$1"
+}
 case "$1" in
     compose)
         if [ "$2" = version ] && { [ -x "$CLI/docker-compose" ] || [ -e "$F/compose_builtin" ]; }; then
@@ -62,8 +68,9 @@ case "$1" in
             *'range $k'*) for n in $nets; do printf '%s ' "$n"; done; echo ;;
             *) set -- $nets; printf '%s|%s|%s|%s|/%s|%s\n' "$service" "$running" "$mode" "$#" "$name" "$oneoff" ;;
         esac ;;
-    stop) set_row "${*: -1}" 3 false ;;
+    stop) block stop; set_row "${*: -1}" 3 false ;;
     start)
+        block start
         id=${*: -1}
         [ -n "$(field "$id" nets)" ] || { echo "failed to set up container networking" >&2; exit 1; }
         set_row "$id" 3 true ;;
@@ -84,7 +91,7 @@ case "$1" in
             connect)
                 id=${*: -1}
                 net=${*: -2:1}
-                [ ! -e "$F/connect_sleep" ] || sleep "$(cat "$F/connect_sleep")"
+                block connect
                 [ ! -e "$F/connect_fails" ] || { echo "Error response from daemon: connect refused" >&2; exit 1; }
                 nets=$(field "$id" nets)
                 case " $nets " in *" $net "*)
@@ -357,10 +364,7 @@ def test_a_container_is_looked_at_again_right_before_the_repair(box):
     assert box.calls("stop") == [] and box.calls("start") == []
 
 
-def test_what_the_script_stopped_is_started_again_when_it_is_ended(box):
-    (box.fake / "compose_builtin").touch()
-    box.containers(("p1", "panel", "true", "mcpanel_internal", NONE, "mcpanel-panel-1"))
-    (box.fake / "connect_sleep").write_text("3\n")
+def start_script(box: Box) -> subprocess.Popen[str]:
     env = {
         "PATH": f"{box.bin}:/usr/bin:/bin",
         "FAKE": str(box.fake),
@@ -371,14 +375,67 @@ def test_what_the_script_stopped_is_started_again_when_it_is_ended(box):
         "MCPANEL_HOOK_ROOT": str(box.plugins),
         "MCPANEL_DISK_CFG": str(box.plugins / "no-disk.cfg"),
     }
-    run = subprocess.Popen(["bash", str(box.unraid / "array-start.sh")], env=env, stdout=subprocess.PIPE, text=True)
+    return subprocess.Popen(
+        ["bash", str(box.unraid / "array-start.sh")], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+
+def wait_for(path: Path) -> None:
     end = time.monotonic() + 20
-    while not box.calls("stop") and time.monotonic() < end:
-        time.sleep(0.05)
-    run.terminate()  # the end of a User Script, a shutdown
-    run.wait(timeout=30)
+    while not path.exists():
+        assert time.monotonic() < end, f"{path.name} never came"
+        time.sleep(0.02)
+
+
+def broken_panel(box: Box) -> None:
+    (box.fake / "compose_builtin").touch()
+    box.containers(("p1", "panel", "true", "mcpanel_internal", NONE, "mcpanel-panel-1"))
+
+
+@pytest.mark.parametrize("step", ["stop", "connect", "start"])
+def test_what_the_script_stops_is_started_again_whenever_it_is_ended(box, step):
+    # F-7: a signal (the end of a User Script, a shutdown) while the script's docker stop, connect or start runs:
+    # the container is noted before its stop, so the EXIT trap starts it in every case
+    broken_panel(box)
+    (box.fake / f"block_{step}").write_text("1\n")
+    run = start_script(box)
+    wait_for(box.fake / f"in_{step}")
+    run.terminate()
+    run.communicate(timeout=30)
+    assert run.returncode == 143
     assert box.calls("stop") == ["stop -t 30 p1"]
-    assert box.calls("start") == ["start p1"], "the EXIT trap starts what the script stopped"
+    starts = box.calls("start")
+    assert starts and set(starts) == {"start p1"}, "the EXIT trap starts what the script stopped"
+    if step == "start":
+        assert starts == ["start p1", "start p1"]  # its own start, then the trap's: a no-op on a running container
+    if step != "stop":  # once connected, the trap's start brings it up on its network
+        assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "mcpanel_internal"]
+
+
+def test_a_second_signal_does_not_cut_the_trap_short(box):
+    broken_panel(box)
+    (box.fake / "block_connect").write_text("1\n")
+    (box.fake / "block_start").write_text("1\n")
+    run = start_script(box)
+    wait_for(box.fake / "in_connect")
+    run.terminate()  # the first signal: the trap starts the panel (its start blocks a moment)
+    wait_for(box.fake / "in_start")
+    run.terminate()  # a second one while the trap is at work
+    run.communicate(timeout=30)
+    assert run.returncode == 143
+    assert box.calls("start") == ["start p1"]
+    assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "mcpanel_internal"]
+
+
+def test_starting_a_running_container_again_is_harmless(box):
+    # what the trap relies on: a start of a container that runs (or was never stopped) succeeds and changes nothing
+    broken_panel(box)
+    box.containers(("p1", "panel", "true", "mcpanel_internal", INTERNAL, "mcpanel-panel-1"))
+    done = subprocess.run(["docker", "start", "p1"], env={"PATH": f"{box.bin}:/usr/bin:/bin", "FAKE": str(box.fake)})
+    assert done.returncode == 0 and box.container("p1")[2:5] == ["true", "mcpanel_internal", INTERNAL]
+    text = (UNRAID / "array-start.sh").read_text()
+    assert text.index('STOPPED+=("${id}")') < text.index('act docker stop -t 30 "${id}"')
+    assert "trap '' TERM HUP INT" in text
 
 
 def test_one_off_containers_are_not_part_of_the_stack(box):
