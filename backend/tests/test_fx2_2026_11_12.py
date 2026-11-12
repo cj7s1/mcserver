@@ -47,3 +47,19 @@ def test_the_share_card_warns_about_offline_mode(make_instance: Any, fake_agent:
     card = clients["owner"].get(f"/api/instances/{inst.id}/share").json()
     checks = {c["id"]: c for c in card["checklist"]}
     assert checks["online_mode"] == {**checks["online_mode"], "ok": True, "hint": ""} and card["protection"]["on"] is True
+
+
+def test_the_open_warning_follows_offline_mode(make_instance: Any, fake_agent: Any, clients: Any) -> None:
+    from apps.instances.share import OFFLINE_WARNING
+
+    inst = make_instance()
+    for whitelist in ("true", "false"):
+        fake_agent.put_file(inst.id, "server.properties", f"white-list={whitelist}\nonline-mode=false\n")
+        card = clients["owner"].get(f"/api/instances/{inst.id}/share").json()
+        assert card["open_warning"] == OFFLINE_WARNING and "Minecraft account who" not in card["open_warning"]
+        protection = {c["id"]: c for c in card["checklist"]}["protection"]
+        assert protection["ok"] is False and "without a Minecraft account" in protection["hint"]
+    fake_agent.put_file(inst.id, "server.properties", "white-list=false\nonline-mode=true\n")
+    card = clients["owner"].get(f"/api/instances/{inst.id}/share").json()
+    assert card["open_warning"].startswith("Anyone with a Minecraft account who knows the address")
+    assert {c["id"]: c for c in card["checklist"]}["protection"]["hint"] == card["open_warning"]

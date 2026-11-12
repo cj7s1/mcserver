@@ -69,6 +69,12 @@ OFFLINE_HINT = (
 )
 
 
+OFFLINE_WARNING = (
+    "Online mode is off: anyone who knows the address can join under any name, without a Minecraft account, "
+    "even while the whitelist is on."
+)
+
+
 def _minecraft_properties(instance: Instance, client: Any) -> dict[str, str] | None:
     """server.properties of a Minecraft server ({} before it was written; None: not Minecraft, or unreadable)."""
     if (instance.game or "minecraft") != "minecraft":
@@ -193,7 +199,8 @@ def share_card(instance: Instance, user: Any, *, with_password: bool = False) ->
         "protection": {"kind": guide.protection, "on": protected, "label": PROTECTION_LABELS[guide.protection]},
         "steps": guide.steps,
         "requirements": guide.requirements,
-        "open_warning": guide.open_warning,
+        # (who can join: in offline mode anyone, without an account and under any name, whitelist or not)
+        "open_warning": OFFLINE_WARNING if offline else guide.open_warning,
         "invite_text": "\n".join(lines),
         "invite_has_password": show_password,
         "checklist": checklist,
