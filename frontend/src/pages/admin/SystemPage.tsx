@@ -12,6 +12,7 @@ import type { SystemInfo, SystemSettings } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useGames } from "../modpacks/modpackQueries";
 import { AdminCallout, AdminNoPermission } from "./admin-shared";
+import { DiscordSection } from "./system/DiscordSection";
 import { NodesSection } from "./system/NodesSection";
 import { NotificationsSection } from "./system/NotificationsSection";
 import { GameImagesSection } from "./system/GameImagesSection";
@@ -109,6 +110,7 @@ export default function SystemPage() {
             <GameImagesSection key={JSON.stringify(settings.data.values.runtime_images ?? {})} settings={settings.data} games={games.data ?? []} />
           )}
           {canSettings && <NotificationsSection />}
+          {canSettings && <DiscordSection />}
           <SecurityNotesSection />
         </div>
 

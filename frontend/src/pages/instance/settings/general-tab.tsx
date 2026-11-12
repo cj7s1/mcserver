@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { errorMessage } from "@/lib/api";
 import { useInstances } from "@/lib/queries";
 import type { Instance } from "@/lib/types";
+import { DiscordServerSection } from "./discord-section";
 import { Field, fieldErrorsOf, ReadOnlyNotice, SaveBar, usePatchInstance, useReportDirty, type TabProps } from "./settings-ui";
 
 type Fields = Pick<Instance, "name" | "description" | "group" | "icon_url">;
@@ -140,6 +141,7 @@ export function GeneralTab({ instance, can, onDirtyChange }: TabProps) {
           </div>
         </div>
       </Section>
+      <DiscordServerSection instance={instance} canEdit={canEdit && !instance.archived_at} />
       {canEdit && (
         <SaveBar
           count={changed.length}
