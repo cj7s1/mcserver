@@ -115,7 +115,9 @@ def create_other_game(request: Request, data: dict[str, Any], node: Node, defini
             "secrets": sorted(data.get("secrets") or {}),
         },
     )
-    schedule_data = ScheduleSerializer(backup_schedule).data if backup_schedule is not None else None
+    schedule_data = (
+        ScheduleSerializer(backup_schedule, context={"request": request}).data if backup_schedule is not None else None
+    )
     if schedule_data is not None:
         audit.record(
             "schedule.created",

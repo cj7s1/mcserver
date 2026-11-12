@@ -115,7 +115,7 @@ def test_the_exempt_routes_need_no_header(users: Any) -> None:
     assert client.get("/api/health").status_code in (200, 503)
     assert client.post("/api/auth/logout").status_code == 204
     # a new sign-in from the same browser is a new token; the old one is gone with the old session
-    again, new = _signed_in()
+    _again, new = _signed_in()
     assert new != token
 
 
@@ -173,7 +173,7 @@ def test_a_ticket_is_bound_to_its_session_path_query_and_time(
         # a tampered ticket
         client.get(ticketed[:-3] + "abc"),
     ]
-    other, other_token = _signed_in("manager")
+    other, _other_token = _signed_in("manager")
     refused.append(other.get(ticketed))  # another session (with its own cookie)
     for resp in refused:
         assert resp.status_code in (401, 403), resp.content

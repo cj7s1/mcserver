@@ -60,9 +60,19 @@ class AuditListView(APIView):
             limit = max(1, min(int(qp.get("limit", "100")), 500))
         except ValueError:
             limit = 100
+        from apps.instances.serializers import hide_console_fields
+
         rows = AuditEventSerializer(qs[:limit], many=True).data
-        if not request.user.has_panel_perm("system.audit"):
-            # a server's trail for its configurers: who did what, not from which address (D-13)
-            for row in rows:
+        auditor = request.user.has_panel_perm("system.audit")
+        for row in rows:
+            if not auditor:
+                # a server's trail for its configurers: who did what, not from which address (D-13)
                 row["ip_address"] = None
+            if (
+                str(row.get("action") or "").startswith("schedule.")
+                and isinstance(row.get("details"), dict)
+                and row.get("instance")
+            ):
+                # a scheduled command and its output stay the console's to show (D-13)
+                row["details"] = hide_console_fields(row["details"], request.user, row["instance"])
         return Response(rows)

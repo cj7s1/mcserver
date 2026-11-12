@@ -199,7 +199,9 @@ class InstanceListView(APIView):
                 "modpack_version": instance.modpack_version_id,
             },
         )
-        schedule_data = ScheduleSerializer(backup_schedule).data if backup_schedule is not None else None
+        schedule_data = (
+            ScheduleSerializer(backup_schedule, context={"request": request}).data if backup_schedule is not None else None
+        )
         if schedule_data is not None:
             audit.record(
                 "schedule.created",
@@ -1125,24 +1127,19 @@ class ScheduleListView(APIView):
     @extend_schema(responses={200: ScheduleSerializer(many=True)})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
-        rows = ScheduleSerializer(instance.schedules.all(), many=True).data
-        if not request.user.has_panel_perm("instance.console", instance):
-            # what a scheduled command typed and the console answered is the console's to show (D-13)
-            for row in rows:
-                if row.get("action") == "command":
-                    row["last_result"] = None
-                    row["payload"] = {**(row.get("payload") or {}), "command": None}
-        return Response(rows)
+        # (what a scheduled command typed and the console answered is the console's to show, D-13)
+        return Response(ScheduleSerializer(instance.schedules.all(), many=True, context={"request": request}).data)
 
     @extend_schema(request=ScheduleSerializer, responses={201: ScheduleSerializer})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.schedules")
-        ser = ScheduleSerializer(data=request.data, context={"instance": instance})
+        ser = ScheduleSerializer(data=request.data, context={"instance": instance, "request": request})
         ser.is_valid(raise_exception=True)
         require_schedule_action(request.user, instance, ser.validated_data["action"], ser.validated_data.get("payload"))
         sched = ser.save(instance=instance)
-        audit.record("schedule.created", request=request, instance=instance, target=sched, details=ser.data)
-        return Response(ScheduleSerializer(sched).data, status=status.HTTP_201_CREATED)
+        # (the audit log keeps the whole schedule; its answers hide the console fields like these, D-13)
+        audit.record("schedule.created", request=request, instance=instance, target=sched, details=ScheduleSerializer(sched).data)
+        return Response(ScheduleSerializer(sched, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
 class ScheduleDetailView(APIView):
@@ -1156,7 +1153,7 @@ class ScheduleDetailView(APIView):
     @extend_schema(request=ScheduleSerializer, responses={200: ScheduleSerializer})
     def patch(self, request: Request, pk: str, sid: int) -> Response:
         sched = self._get(request, pk, sid)
-        ser = ScheduleSerializer(sched, data=request.data, partial=True)
+        ser = ScheduleSerializer(sched, data=request.data, partial=True, context={"request": request})
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
         changed = {k for k, v in data.items() if getattr(sched, k) != v}
@@ -1169,8 +1166,10 @@ class ScheduleDetailView(APIView):
             )
         # a new due time, and the wait of an earlier due time (deferral while busy) is over too
         sched = ser.save(next_run_at=None, deferred_at=None)
-        audit.record("schedule.updated", request=request, instance=sched.instance, target=sched, details=ser.data)
-        return Response(ScheduleSerializer(sched).data)
+        audit.record(
+            "schedule.updated", request=request, instance=sched.instance, target=sched, details=ScheduleSerializer(sched).data
+        )
+        return Response(ScheduleSerializer(sched, context={"request": request}).data)
 
     @extend_schema(responses={204: None})
     def delete(self, request: Request, pk: str, sid: int) -> Response:

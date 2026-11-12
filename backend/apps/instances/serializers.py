@@ -749,7 +749,23 @@ def parse_curseforge_ref(value: str) -> tuple[str, str | None] | None:
     return None
 
 
+def hide_console_fields(data: dict[str, Any], user: Any, instance: Any) -> dict[str, Any]:
+    """A schedule as ``user`` may see it (D-13): what a scheduled command types and the console answered
+    (``payload.command``, ``last_result``) is the console's to show; for a user without ``instance.console`` on
+    the server both are null. ``data`` is a schedule's fields (an answer, or an audit entry's details)."""
+    if data.get("action") != "command" or user is None or user.has_panel_perm("instance.console", instance):
+        return data
+    payload = data.get("payload")
+    out = {**data, "payload": {**payload, "command": None} if isinstance(payload, dict) else payload}
+    if "last_result" in out:
+        out["last_result"] = None
+    return out
+
+
 class ScheduleSerializer(serializers.ModelSerializer):
+    """Every answer that carries a schedule goes through this serializer with the request (``context["request"]``):
+    the console fields are hidden from users without ``instance.console`` (``hide_console_fields``)."""
+
     class Meta:
         model = Schedule
         fields = [
@@ -766,6 +782,14 @@ class ScheduleSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["last_run_at", "next_run_at", "last_result", "created_at"]
+
+    def to_representation(self, instance: Any) -> Any:
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if user is not None and getattr(user, "is_authenticated", False):
+            data = hide_console_fields(data, user, instance.instance_id)
+        return data
 
     def validate_action(self, value: str) -> str:
         if value not in Schedule.ACTIONS:

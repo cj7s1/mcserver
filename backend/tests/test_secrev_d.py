@@ -680,3 +680,45 @@ def test_d3_unlock_login_clears_the_counters(users: Any) -> None:
     assert "Unlocked 'owner'" in out.getvalue()
     assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 200
     assert AuditEvent.objects.filter(action="auth.login_unlocked").exists()
+
+
+@pytest.mark.django_db
+def test_d13_every_answer_with_a_schedule_hides_the_console_fields(
+    make_instance: Any, make_user: Any, client_for: Any, users: Any
+) -> None:
+    """Follow-up of the frontend's round 1: PATCH and POST answered the command unhidden."""
+    from apps.instances.models import Schedule
+
+    inst = make_instance()
+    sched = Schedule.objects.create(
+        instance=inst,
+        name="op",
+        action="command",
+        cron="0 * * * *",
+        payload={"command": "op mallory"},
+        last_result="Made mallory op",
+    )
+    pauser = client_for(_grant(make_user, inst, "pauser", ["instance.schedules", "instance.command"]))
+    resp = pauser.patch(f"/api/instances/{inst.id}/schedules/{sched.id}", {"enabled": False}, format="json")
+    assert resp.status_code == 200, resp.content
+    assert resp.json()["payload"]["command"] is None and resp.json()["last_result"] is None
+    resp = pauser.post(
+        f"/api/instances/{inst.id}/schedules",
+        {"name": "say", "action": "command", "cron": "0 3 * * *", "payload": {"command": "say hi"}},
+        format="json",
+    )
+    assert resp.status_code == 201, resp.content
+    assert resp.json()["payload"]["command"] is None
+    # the audit log keeps the whole schedule; its answer hides it from a configurer without the console
+    configurer = client_for(_grant(make_user, inst, "cfg2", ["instance.configure"]))
+    trail = [r for r in configurer.get(f"/api/audit?instance={inst.id}").json() if r["action"].startswith("schedule.")]
+    assert trail and all(r["details"]["payload"]["command"] is None for r in trail)
+    owner_trail = client_for(users["owner"]).get(f"/api/audit?instance={inst.id}").json()
+    assert {"op mallory", "say hi"} <= {
+        r["details"]["payload"]["command"] for r in owner_trail if r["action"].startswith("schedule.")
+    }
+    # with the console permission everything is shown
+    consoler = client_for(_grant(make_user, inst, "con2", ["instance.schedules", "instance.console"]))
+    resp = consoler.patch(f"/api/instances/{inst.id}/schedules/{sched.id}", {"enabled": False}, format="json")
+    assert resp.json()["payload"]["command"] == "op mallory" and resp.json()["last_result"] == "Made mallory op"
+
