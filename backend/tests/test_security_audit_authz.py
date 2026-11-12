@@ -128,7 +128,9 @@ class WsClient:
         token = SESSION_TOKENS.get(self.session_key)
         if out["type"] == "websocket.accept" and auth and token:
             await self.send_json_to({"type": "auth", "token": token})
-            await asyncio.sleep(0.15)  # (the consumer checks it and joins its groups before it sends anything)
+            ok = await self.receive_json_from(timeout=3)  # the consumer's first frame (D-1: before anything else)
+            assert ok == {"type": "auth_ok"}, ok
+            await asyncio.sleep(0.05)  # (the events consumer joins its group right after)
         return out["type"] == "websocket.accept", out
 
     async def send_json_to(self, data: dict[str, Any]) -> None:

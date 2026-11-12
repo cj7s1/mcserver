@@ -251,6 +251,7 @@ async def test_websockets_send_nothing_before_the_auth_frame(path: str, ws_env: 
     comm = _communicator(url, key)
     assert (await comm.connect(auth=False))[0]
     await comm.send_json_to({"type": "auth", "token": token})
+    assert await comm.receive_json_from(timeout=2) == {"type": "auth_ok"}  # the first server frame
     if path == "console":
         assert (await comm.receive_json_from(timeout=2))["type"] == "hello"
     else:
@@ -324,3 +325,17 @@ def test_r13_a_session_from_before_the_upgrade_may_sign_out_without_a_token(user
     client.mcpanel_no_token = True
     assert client.post("/api/auth/logout").status_code == 204
     assert not SessionStore(key).exists(key)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_auth_ok_comes_first_also_without_the_binding(ws_env: Any, settings: Any) -> None:  # noqa: F811
+    inst, key = await _db(_ws_user)
+    settings.MCPANEL_SESSION_BINDING = False
+    comm = _communicator(f"/ws/instances/{inst.id}/console/", key)
+    assert (await comm.connect(auth=False))[0]
+    assert await comm.receive_json_from(timeout=2) == {"type": "auth_ok"}
+    assert (await comm.receive_json_from(timeout=2))["type"] == "hello"
+    await comm.send_json_to({"type": "auth", "token": "anything"})  # (ignored)
+    assert await comm.receive_nothing(0.2)
+    await comm.disconnect()

@@ -43,6 +43,8 @@ CLOSE_UNAUTHENTICATED = 4401
 CLOSE_FORBIDDEN = 4403
 # D-1 (I-7): the first frame of the client must be {"type": "auth", "token": <the session token>} within this
 AUTH_TIMEOUT_SECONDS = 10.0
+# ... and the server's first frame after it is this one, on every consumer
+AUTH_OK = {"type": "auth_ok"}
 
 
 @database_sync_to_async
@@ -205,6 +207,7 @@ class _GuardedConsumer(AsyncJsonWebsocketConsumer):
         await self.accept()
         if not session_binding.enabled():
             self._authed = True
+            await self.send_json(AUTH_OK)  # (the first frame in either mode; a later auth frame is ignored)
             await self.authenticated()
             return
         self._auth_task = asyncio.create_task(self._auth_deadline())
@@ -238,6 +241,7 @@ class _GuardedConsumer(AsyncJsonWebsocketConsumer):
                 return
             self._authed = True
             await _cancel(self._auth_task)
+            await self.send_json(AUTH_OK)  # the first server frame: the client may go on (before hello, events)
             await self.authenticated()
             return
         if isinstance(content, dict) and content.get("type") != "auth":
