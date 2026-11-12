@@ -77,7 +77,12 @@ def test_commands_that_change_things_refuse_while_others_can_write_the_checkout(
         assert repair_line(shown.stderr) == f"chmod -R go-w {shlex.quote(str(site.root))}", args
     assert site.upgrade("status").returncode == 0
     plan = site.upgrade("dry-run")
-    assert plan.returncode == 0 and "Nothing was changed. To do it: ./scripts/upgrade.sh run --with-migrations" in plan.stdout
+    # its last line names the repair first, then the run that works after it (FX-3)
+    repair = f"chmod -R go-w {shlex.quote(str(site.root))}"
+    assert plan.returncode == 0
+    assert plan.stdout.rstrip().splitlines()[-1] == (
+        f"Nothing was changed. To do it: {repair} && ./scripts/upgrade.sh run --with-migrations"
+    )
     assert_nothing_changed(site, images)
 
     # the repair it names is enough

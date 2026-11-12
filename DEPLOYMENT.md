@@ -309,7 +309,7 @@ variant with `AGENT_GAME_TERRARIA_<VARIANT>_IMAGES` (e.g. `AGENT_GAME_TERRARIA_T
 | `AGENT_PER_SERVER_NETWORKS` | `true` | Every server gets a bridge network of its own, `zz_mcpanel_i_<12 hex>`; `false` puts every server on the shared `mcpanel_instances` network, where the servers reach each other |
 | `AGENT_INSTANCE_POOL` | `10.213.0.0/16` | The private IPv4 range the agent cuts into /29s for those networks (at least a /28); the firewall script reads it too |
 | `AGENT_REFUSE_BRIDGE_GATEWAYS` | `true` | The agent refuses requests from the gateway of every bridge it is attached to (how a game container that goes through the host arrives). Off only when the agent is called from the host itself through a bridge address, or when Docker's userland proxy hands remote clients over from the gateway (rootless Docker, `"iptables": false`): a multi-node panel that suddenly gets 403 from a node agent is that case |
-| `AGENT_IMAGE_DIGEST_CHECK` | `true` | Palworld `v2.8.1`, Valheim `1.4.1`, HKMP `v2.4.3-2`, Project Zomboid `v1.2.0` (and Rust's image) are pinned to the digest checked when the release was made: a re-pushed tag fails with 409 `image_digest_mismatch`, naming both digests. Off only to run such a tag after checking that image yourself |
+| `AGENT_IMAGE_DIGEST_CHECK` | `true` | Palworld `v2.8.1`, Valheim `1.4.1`, HKMP `v2.4.3-2`, Project Zomboid `v1.2.0` (and Rust's image) are pinned to the digest checked when the release was made: a re-pushed tag is not pulled while the pinned image is on the host (the container is made from it, with a warning); without it the start fails with 409 `image_digest_mismatch`, naming both digests. Off only to run such a tag after checking that image yourself |
 
 * An existing server moves to its own network when its container is made again: at its next start
   (a stopped server has no container) or a change that recreates it. Mixed hosts work. When the agent
@@ -1011,6 +1011,8 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
 
 | Symptom | Check |
 |---|---|
+| The `agent` container does not start: "network ... not found" | A game server's network was removed while Docker was down (on Unraid: Settings → Docker → "Preserve user defined networks" must be on). In `deploy/`: `docker compose up -d --force-recreate agent`; the agent makes the missing networks again. `./scripts/upgrade.sh status` names the command when the agent is not running. |
+| A server shows "failed" (exit code 128) after the host started | Docker could not start its container because its network was missing. Press Start: the agent makes the network again. |
 | Browser shows "Bad Request (400)" | Add the host you typed to `MCPANEL_ALLOWED_HOSTS`. |
 | Login works but actions fail with CSRF errors | Add the exact origin (`http://ip:port`) to `MCPANEL_CSRF_TRUSTED_ORIGINS`. |
 | "Node agent unreachable" | `docker compose logs agent`. Check that the token in `.env` is the same for panel and agent (both read `MCPANEL_AGENT_TOKEN`). |

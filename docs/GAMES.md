@@ -62,9 +62,10 @@ server can reach".
   again. A backup remembers the world it was made with (Valheim's world name, Rust's identity, seed and
   size, Project Zomboid's server name), and restoring it sets them back.
 * **Images:** Palworld, Valheim, HKMP and Project Zomboid run exact image tags pinned to the digest checked
-  for this release, Rust its image's digest: if a maintainer pushes a tag again, the server does not start
-  (`image_digest_mismatch`) until a release of the panel has checked the new image (or you switch the
-  check off after checking it yourself: `AGENT_IMAGE_DIGEST_CHECK`, DEPLOYMENT.md).
+  for this release, Rust its image's digest. If a maintainer pushes a tag again, the server keeps running
+  the pinned image while it is on the host (the start says so); only on a host without it does the start
+  fail (`image_digest_mismatch`) until a release of the panel has checked the new image (or you switch
+  the check off after checking it yourself: `AGENT_IMAGE_DIGEST_CHECK`, DEPLOYMENT.md).
 * **Network:** every server has a Docker network of its own; the other servers cannot reach its ports.
   Palworld, Project Zomboid, Counter-Strike 2 and Rust refuse host networking and other networks.
 * Files that may hold the server's passwords (Project Zomboid's logs and ini, Counter-Strike 2's

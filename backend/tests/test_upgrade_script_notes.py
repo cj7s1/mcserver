@@ -57,11 +57,24 @@ def test_run_says_sign_in_once_and_reload_and_rollback_names_the_server_networks
     assert back.stdout.index("==> Rolled back") < back.stdout.index(NETWORKS) < back.stdout.index("The source tree")
 
 
+def test_the_dry_run_of_rollback_names_the_server_networks_too(tmp_path: Path):
+    """FX-4: the owner decides on the dry run; it says what the real rollback will say."""
+    site = Site(tmp_path)
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    site.forget_events()
+    plan = site.upgrade("rollback", "--dry-run")
+    assert plan.returncode == 0, plan.both
+    assert NETWORKS in plan.stdout
+    assert plan.stdout.index(NETWORKS) < plan.stdout.index("Nothing was changed. To do it: ./scripts/upgrade.sh rollback")
+    assert not site.events("STOP ")  # nothing was changed
+
+
 def test_no_sign_in_or_network_note_when_the_other_version_has_them(tmp_path: Path):
     site = SiteWithBoth(tmp_path)
     done = site.upgrade("run", "--with-migrations")
     assert done.returncode == 0, done.both
     assert SIGN_IN not in done.stdout and done.stdout.rstrip().splitlines()[-1].startswith(RELOAD)
+    assert NETWORKS not in site.upgrade("rollback", "--dry-run").stdout
     back = site.upgrade("rollback")
     assert back.returncode == 0, back.both
     assert NETWORKS not in back.stdout
@@ -72,3 +85,15 @@ def test_the_upgrade_notes_say_the_same(doc: str):
     text = words((Path(__file__).resolve().parents[2] / doc).read_text())
     assert "reload" in text.lower() and "everyone signs in once" in text.lower()
     assert "console, player list and the save before a stop do not work until" in text
+
+
+def test_status_names_the_repair_of_an_agent_that_does_not_run(tmp_path: Path):
+    """FX-1: an agent container that cannot start ("network ... not found") is repaired by recreating it."""
+    site = Site(tmp_path)
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    hint = "recreate it: docker compose up -d --force-recreate agent"
+    assert hint not in words(site.upgrade("status").stdout)
+    site.stop_services("agent")
+    status = site.upgrade("status")
+    assert status.returncode == 0 and hint in words(status.stdout)
+    assert 'If it does not start with "network ... not found"' in words(status.stdout)

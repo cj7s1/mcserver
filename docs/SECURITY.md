@@ -236,8 +236,12 @@ other: a server reaches itself and the agent, no other server. Checked on real D
 two servers on their own networks could not reach each other's RCON or game port, the agent API
 answered 403 from both, and the internet worked. The network keeps its subnet
 (`<data root>/agent/server-networks.json`), goes with the server's last container, and is made again
-with the same name and subnet when it is missing (Unraid removes user-defined networks when Docker
-restarts, unless "Preserve user defined networks" is on). Labels `io.mcpanel.managed=true`,
+with the same name and subnet when it is missing. On Unraid, **"Preserve user defined networks"
+(Settings -> Docker) must be on**, as the stack's own Compose networks have always needed: otherwise
+Unraid removes user-defined networks when Docker restarts. If a server's network was removed while
+Docker was down anyway, the agent container may not start ("network ... not found": `docker compose
+up -d --force-recreate agent` in `deploy/` repairs it), and a server Docker could not start shows as
+failed after the host start: Start starts it again. Labels `io.mcpanel.managed=true`,
 `io.mcpanel.instance=<id>`, `io.mcpanel.network=server`; `GET /v1/info` reports `per_server_networks`.
 
 A server stays on the shared `mcpanel_instances` network (where the servers reach each other, as
@@ -274,9 +278,13 @@ network's subnet to the host and to private ranges (10/8, 172.16/12, 192.168/16,
 the `--allow` entries the owner adds; the internet stays open. **It has not run on an Unraid host yet**
 (it was loaded into a real kernel in a container's own network namespace and is tested against
 stand-ins); check it after installing as UNRAID.md says. Unraid forgets the rules at every boot, so
-it runs at every array start. IPv4 only: it says so when a network has IPv6. The agent's own traffic
-is not affected: it joins the server networks with gateway priority -1000 (and their names sort after
-the compose networks for older Docker versions), so its default route stays on its compose network.
+it runs at every array start. IPv4 only: it says so when a network has IPv6. **The agent itself
+cannot open new connections to LAN addresses either** while the rules are installed: its default route
+is the shared instance network (Docker picks a container's gateway by network name, and
+`mcpanel_instances` sorts before `mcpanel_internal`), whose subnet is one of the rules' sources. The
+server networks never take that route (the agent joins them with gateway priority -1000). The agent
+needs only the internet (downloads); a LAN target it must reach (an HTTPS proxy, a restic server) goes
+in with `--allow`, which opens that target to the game containers as well.
 
 Not reachable from a game container: the agent's API (it refuses requests from the instance networks
 and the bridge gateways even with a valid token, above), Postgres, the panel's container address,
@@ -476,10 +484,12 @@ the compose file 666, in the `appdata` share, which is exported over SMB.
 * **Game server images.** A runtime profile allows only its own repositories and tag pattern. Rust's
   image (only `latest` exists) is pinned by digest; Palworld `v2.8.1`, Valheim `1.4.1`, HKMP
   `v2.4.3-2` and Project Zomboid `v1.2.0` are pinned to the digest of their tag as checked for this
-  release: when the image of such a tag is not that digest (the maintainer pushed the tag again),
-  creating the container fails with 409 `image_digest_mismatch`, naming both digests
-  (`AGENT_IMAGE_DIGEST_CHECK=false` switches the check off; only after checking the new image). The
-  other tags of the other games are exact versions, which their maintainers can still move.
+  release: such a tag is not pulled again while the image on the host is the pinned one. When the tag
+  was moved anyway (the maintainer pushed it again), the container is made from
+  `<repository>@<pinned digest>` while that image is on the host, with a warning in the apply's answer;
+  only when no pinned image exists does creating it fail with 409 `image_digest_mismatch`, naming both
+  digests (`AGENT_IMAGE_DIGEST_CHECK=false` switches the check off; only after checking the new image).
+  The other tags of the other games are exact versions, which their maintainers can still move.
   Minecraft's `itzg/minecraft-server` tag follows the server's image channel and is pulled again at
   a start at most once a day; the `pinned:<version>` channel stops that.
 
@@ -555,9 +565,11 @@ would stop that server itself at array stop and count it as stopped by hand.
   such an operation registered meanwhile. Clone copies through file descriptors (no extended
   attributes any more).
 * **Bounded answers:** a folder listing and the backup browser show at most 20,000 entries of one
-  folder, search looks at most at 50,000 files or 30 s (`truncated: true`), a zip download holds at
-  most 200,000 files (413 `archive_too_large`), mod hashing reads at most 64 GiB per pass and one pass
-  per server at a time, and a log line is cut at 16 KiB with a note.
+  folder, search looks at most at 50,000 files or 30 s (`truncated: true`), a zip download is built
+  while it streams after its size and depth were checked (413 `archive_too_large` beyond them), mod
+  hashing reads at most 64 GiB per pass and one pass per server at a time, and a log line is cut at
+  16 KiB with a note. A clone that cannot copy everything fails (500 `clone_incomplete`, naming the
+  first paths) instead of succeeding with files missing.
 * **Player actions run with an id only.** On Rust and Palworld a typed name that matches more than one
   online player, or (`op`/`ban` on Rust, `ban` on Palworld) a display name at all, answers 409
   `ambiguous_player` with the candidates to pick from; TShock kicks and bans the exact name; a

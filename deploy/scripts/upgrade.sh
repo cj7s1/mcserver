@@ -193,6 +193,7 @@ WAY_BACK=""       # ... and the line every failure from then on ends with
 RUNNING_PID=""    # another_runs: the command of this script that is still at work, ...
 RUNNING_LOG=""    # ... its log ...
 RUNNING_WHAT=""   # ... and "<command line> | started <time>"
+LOOSE_REPAIR=""   # check_modes: the command that makes the checkout right, when group or others can write it
 
 # Everything the script prints goes through say and warn, and with a log into the log as well.
 log_line() {
@@ -344,6 +345,7 @@ check_modes() { # check_modes refuse|warn
     printf -v repair 'chmod -R go-w %q' "$TOP_DIR"
     # chmod -R leaves the target of a symbolic link alone; named on the command line it is changed
     [ ! -L "$DEPLOY_DIR/.env" ] || printf -v repair '%s && chmod go-w %q' "$repair" "$DEPLOY_DIR/.env"
+    LOOSE_REPAIR=$repair # the dry runs end with it, before the command they name
     if [ "$1" = refuse ]; then
         refuse "refusing: group or others can write to $count file(s) or folder(s) of this checkout (mode, path):$shown
          Root runs this script, builds the panel and the agent (Docker socket) from these files and runs
@@ -1083,6 +1085,11 @@ cmd_status() {
     else
         say "Containers:"
         show_containers
+        if service_container agent >/dev/null && ! service_container agent running >/dev/null; then
+            # a server network removed while Docker was down leaves the agent's endpoint behind (FX-1)
+            say "  The agent is not running. If it does not start with \"network ... not found\" (a server's"
+            say "  network was removed while Docker was down), recreate it: docker compose up -d --force-recreate agent"
+        fi
     fi
     say ""
     show_supervisor
@@ -1583,7 +1590,7 @@ cmd_run() {
             say "Nothing was changed. 'run' would refuse now:"
             say "  $BLOCKED"
         else
-            say "Nothing was changed. To do it: $(next_command)"
+            say "Nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }$(next_command)"
         fi
         return 0
     fi
@@ -2007,7 +2014,8 @@ cmd_rollback() {
     check_jobs "before the rollback"
     if [ "$DRY" = 1 ]; then
         say ""
-        say "Nothing was changed. To do it: ./scripts/upgrade.sh rollback$([ "$GAMES_ARCHIVE" = 1 ] && printf ' --archive-other-games')"
+        network_rollback_note "$from"
+        say "Nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }./scripts/upgrade.sh rollback$([ "$GAMES_ARCHIVE" = 1 ] && printf ' --archive-other-games')"
         return 0
     fi
 
@@ -2276,7 +2284,7 @@ cmd_restore_db() {
          Nothing was changed."
     fi
     if [ "$YES" != 1 ]; then
-        refuse "nothing was changed. To do it: ./scripts/upgrade.sh restore-db $file --yes"
+        refuse "nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }./scripts/upgrade.sh restore-db $file --yes"
     fi
 
     # From here on the database changes, and a closed terminal no longer ends the command.

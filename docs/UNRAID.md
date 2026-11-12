@@ -34,6 +34,11 @@ hidden in Community Applications by default. No Compose plugin has been tested w
 Start, upgrade and roll back MCPanel from the command line as described below, not as a stack of
 a Compose plugin: `upgrade.sh` and the shutdown hook were only tested that way.
 
+**Settings → Docker → "Preserve user defined networks" must be on** (advanced view; change it while
+Docker is stopped). The stack's own Compose networks and every game server's network
+(`zz_mcpanel_i_...`) are user-defined networks, which Unraid otherwise removes whenever Docker
+restarts.
+
 ## 2. Choose storage paths
 
 Minecraft worlds do many small random writes, so put them on a **pool** (SSD cache), not the parity
@@ -286,6 +291,10 @@ once. A server that must reach something on your LAN (a database, a proxy): `ins
 192.168.1.20:5432` (an address or range, optionally one port; stored in `deploy/instance-firewall.env`
 and repeated by every later `install`; `--forget 192.168.1.20:5432` drops it). A DNS server that is not
 in `/etc/resolv.conf`: `--allow-dns <ip>`. On an additional node: `--env /path/to/deploy/node.env`.
+The agent itself cannot open new connections to LAN addresses either while the rules are installed (its
+default route is the shared instance network, one of the rules' sources); it needs only the internet. A
+LAN target it must reach (an HTTPS proxy, a restic server) goes in with `--allow` too, which opens it to
+the game servers as well.
 
 Not covered: IPv6 (`status` and `install` say so when one of these networks has IPv6), servers on host
 networking or `br0`, and traffic between servers that are both still on the shared `mcpanel_instances`
@@ -534,6 +543,13 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
 * **A server stays busy after the `panel` row was stopped during a job:** the job is marked as
   failed about 6 minutes later, or at once with **Mark as failed** on the Activity page.
 * **Servers did not come back after a reboot:** see UNRAID-SHUTDOWN.md, "How the servers come back".
+* **The `agent` container does not start, with "network ... not found":** a game server's network was
+  removed while Docker was down (check "Preserve user defined networks", section 1). In `deploy/`:
+  `docker compose up -d --force-recreate agent`; the agent then makes the missing networks again.
+  `./scripts/upgrade.sh status` names this command when the agent is not running.
+* **A server shows "failed" after the host started (exit code 128):** Docker could not start its
+  container because its network was missing. Press **Start**: the agent makes the network again and
+  starts it.
 
 ## 10. When the cache drive died
 

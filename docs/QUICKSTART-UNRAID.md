@@ -68,6 +68,9 @@ You need:
    Manager** plugin is deprecated and hidden in Community Applications by default. You only need
    the command from it: this guide starts MCPanel from the terminal, not as a stack of the
    plugin. No Compose plugin has been tested with MCPanel.
+3. Under **Settings → Docker** (advanced view), **Preserve user defined networks** must be **Yes**
+   (change it while Docker is stopped). MCPanel's own networks and every game server's network are
+   user-defined: without it Unraid removes them whenever Docker restarts.
 
 ## 2. Prepare the storage
 

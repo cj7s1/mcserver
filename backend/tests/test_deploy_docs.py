@@ -140,7 +140,9 @@ def test_security_md_describes_the_fixes_of_both_rounds():
         "`node.low_disk_space`",
         "the five upload endpoints",
         "**Operations that need a stopped server**",
-        "a zip download holds at most 200,000 files (413 `archive_too_large`)",
+        "a zip download is built while it streams after its size and depth were checked",
+        "500 `clone_incomplete`",
+        "only when no pinned image exists does creating it fail with 409 `image_digest_mismatch`",
     ):
         assert needle in flat, needle
     # statements the fixes made wrong
@@ -211,3 +213,25 @@ def test_the_create_wizards_who_can_join_texts_say_what_games_md_says():
     ):
         assert phrase in wizard, phrase
         assert phrase.replace("online mode is on and the whitelist is off", "online mode on, whitelist off") in games, phrase
+
+
+# --- the end-to-end run of 2026-11-12 (FX-1, FX-2, FX-5) --------------------------------------------------
+def test_preserve_user_defined_networks_is_required_and_the_recoveries_are_named():
+    for path in ("docs/QUICKSTART-UNRAID.md", "docs/UNRAID.md", "docs/SECURITY.md"):
+        text = words(path)
+        assert "Preserve user defined networks" in text, path
+        assert 'unless "Preserve user defined networks" is on)' not in text, path
+    assert '**"Preserve user defined networks" (Settings -> Docker) must be on**' in words("docs/SECURITY.md")
+    for path in ("docs/UNRAID.md", "DEPLOYMENT.md"):
+        text = words(path)
+        assert "docker compose up -d --force-recreate agent" in text and "network ... not found" in text, path
+        assert "exit code 128" in text and "Start" in text, path
+
+
+def test_the_firewall_docs_say_the_agent_reaches_no_lan_address_either():
+    security = words("docs/SECURITY.md")
+    assert "**The agent itself cannot open new connections to LAN addresses either**" in security
+    assert "`mcpanel_instances` sorts before `mcpanel_internal`" in security
+    assert "The server networks never take that route (the agent joins them with gateway priority -1000)" in security
+    assert "The agent's own traffic is not affected" not in security
+    assert "The agent itself cannot open new connections to LAN addresses either" in words("docs/UNRAID.md")
