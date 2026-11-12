@@ -141,21 +141,44 @@ sql() { docker exec "$(dc ps -q postgres)" sh -c 'psql -X -q -At -U "$POSTGRES_U
 # Python in the running panel (Django shell); its last line of output
 panel_py() { dc exec -T panel python manage.py shell -v 0 -c "$1" </dev/null | tail -n 1; }
 csrf() { grep mcpanel_csrftoken "$JAR" | tr '\t' ' ' | rev | cut -d' ' -f1 | rev; }
+# The session token of the last login or setup (security review D-1, interface I-7): a panel that
+# binds its sessions answers it with the login and wants it as X-MCPanel-Session-Token on every
+# /api/ call; an older panel answers none and ignores the header. Empty until a login.
+SESSION_TOKEN=""
 api() { # api METHOD PATH [JSON] -> HTTP status; body in $OUT
     local method="$1" path="$2" body="${3:-}"
-    curl -sS -o "$OUT" -w '%{http_code}' -b "$JAR" -c "$JAR" -X "$method" \
+    local -a bound=()
+    [ -z "$SESSION_TOKEN" ] || bound=(-H "X-MCPanel-Session-Token: $SESSION_TOKEN")
+    curl -sS -o "$OUT" -w '%{http_code}' -b "$JAR" -c "$JAR" -X "$method" ${bound[@]+"${bound[@]}"} \
         -H "X-CSRFToken: $(csrf)" -H "Origin: $URL" -H "Referer: $URL/" -H 'Content-Type: application/json' \
         ${body:+-d "$body"} "$URL$path"
 }
+# After a login or setup: its answer ($OUT) holds the token (43 URL-safe base64 characters). Called
+# in this shell, not inside $(api ...), which runs in a subshell.
+remember_session_token() {
+    SESSION_TOKEN=$(sed -n 's/.*"session_token": *"\([A-Za-z0-9_-]*\)".*/\1/p' "$OUT" | head -n 1)
+}
 login() {
     rm -f "$JAR"
+    SESSION_TOKEN=""
     curl -fsS -c "$JAR" -o /dev/null "$URL/api/auth/state" || return 1
-    [ "$(api POST /api/auth/login "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")" = 200 ]
+    [ "$(api POST /api/auth/login "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")" = 200 ] || return 1
+    remember_session_token
 }
 data_is_there() { # the account logs in and the changed setting has its value
+    local kept status
     login || die "$1: the owner account cannot log in"
     [ "$(api GET /api/system/settings)" = 200 ] || die "$1: /api/system/settings answered $(cat "$OUT")"
     grep -q '"default_memory_mb": *3072' "$OUT" || die "$1: the changed setting is gone: $(cat "$OUT")"
+    if [ -n "$SESSION_TOKEN" ]; then # a panel that binds sessions: the cookie alone is not enough
+        kept=$SESSION_TOKEN
+        SESSION_TOKEN=""
+        status=$(api GET /api/system/settings)
+        SESSION_TOKEN=$kept
+        [ "$status" = 401 ] && grep -q session_token_required "$OUT" ||
+            die "$1: a call with the session cookie only answered $status: $(cat "$OUT")"
+        ok "$1: the session cookie alone is refused (session_token_required)"
+    fi
     [ "$(sql "SELECT count(*) FROM accounts_user")" = 1 ] || die "$1: expected exactly one user"
     ok "$1: the owner account logs in, the changed setting is there, $(sql "SELECT count(*) FROM audit_auditevent") audit entries"
 }
@@ -194,6 +217,7 @@ OLD_PANEL_IMAGE=$(panel_image)
 PANEL_IMAGE_NAME=$(docker inspect -f '{{.Config.Image}}' "$(dc ps -q panel)")
 curl -fsS -c "$JAR" -o /dev/null "$URL/api/auth/state" || die "the panel does not answer at $URL"
 [ "$(api POST /api/auth/setup "{\"username\":\"$USERNAME\",\"password\":\"$PASSWORD\"}")" = 201 ] || die "creating the owner account failed: $(cat "$OUT")"
+remember_session_token
 [ "$(api PATCH /api/system/settings '{"values":{"default_memory_mb":3072}}')" = 200 ] || die "changing a setting failed: $(cat "$OUT")"
 data_is_there "old layout"
 
