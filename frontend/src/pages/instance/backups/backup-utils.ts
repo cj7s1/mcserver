@@ -24,6 +24,8 @@ export interface BackupFileEntry {
 export interface BackupFilesResponse {
   path: string;
   entries: BackupFileEntry[];
+  /** The folder holds more entries than one listing returns (B-6): only these are shown. */
+  truncated?: boolean;
 }
 
 export interface RestoreAsNewResponse {

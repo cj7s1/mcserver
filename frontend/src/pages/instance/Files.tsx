@@ -28,6 +28,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import { CutOffNotice } from "@/components/CutOffNotice";
 import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -60,6 +61,8 @@ import { DropZone, UploadConflictDialog, UploadList, useFileUploads } from "./fi
 interface Listing {
   path: string;
   entries: FileEntry[];
+  /** The folder holds more entries than one listing returns (the node's cap, B-6): only these are shown. */
+  truncated?: boolean;
 }
 
 const LIVE_STATUSES = ["running", "starting", "unhealthy", "restarting", "stopping"];
@@ -379,6 +382,12 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
           </div>
         )}
 
+        {listing.data?.truncated && (
+          <CutOffNotice className="mx-4 mt-3">
+            List cut off at {entries.length.toLocaleString()} entries: this folder holds more than the node lists at once. Open a
+            subfolder, or use Search contents to find a file.
+          </CutOffNotice>
+        )}
         {listing.isLoading ? (
           <LoadingState label="Loading folder…" />
         ) : listing.error ? (

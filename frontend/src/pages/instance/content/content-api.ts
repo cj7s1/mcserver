@@ -521,6 +521,8 @@ export const SEARCH_PAGE_SIZE = 20;
 
 /** How often the inventory is re-read while the node is still hashing files. */
 export const INVENTORY_POLL_MS = 1_000;
+/** An inventory the node marks incomplete without files pending (B-6): looked at again now and then. */
+export const INCOMPLETE_POLL_MS = 10_000;
 
 /** Files the node has not read (hashed) yet, so they are not identified. */
 export function pendingCount(inventory: ContentInventory | undefined): number {
@@ -538,7 +540,13 @@ export function useContentInventory(instanceId: string) {
     queryKey: contentKeys.inventory(instanceId),
     queryFn: ({ signal }) => api.get<ContentInventory>(contentPath(instanceId), { progressive: 1 }, signal),
     staleTime: 30_000,
-    refetchInterval: (query) => (pendingCount(query.state.data) > 0 ? INVENTORY_POLL_MS : false),
+    // also while the node says its pass is not complete (capped, B-6): the list fills in as it reads on
+    refetchInterval: (query) =>
+      pendingCount(query.state.data) > 0
+        ? INVENTORY_POLL_MS
+        : query.state.data?.identification.complete === false
+          ? INCOMPLETE_POLL_MS
+          : false,
     retry: false,
   });
 }

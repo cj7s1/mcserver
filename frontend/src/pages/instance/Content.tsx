@@ -181,8 +181,14 @@ function ContentManager({ instance, can }: { instance: Instance; can: (code: Per
         </Notice>
       )}
       {canEdit && env.locked && <Notice tone="info">{env.locked}</Notice>}
+      {pending === 0 && inv.identification.complete === false && (
+        // the node's pass stopped at its cap (B-6): the list is not the folder's whole content yet
+        <Notice tone="info" title="Not all files checked yet">
+          <p>The server node has not read every file of this folder yet. The list is completed as it reads them; check again shortly.</p>
+        </Notice>
+      )}
       {pending > 0 && (
-        <Notice tone="info" title={`Identifying ${noun.many}: ${inv.summary.total - pending} of ${inv.summary.total} read`}>
+        <Notice tone="info" title={`Identifying ${noun.many}: ${inv.summary.total - pending} of ${inv.summary.total} read (not all files checked yet)`}>
           <p>
             The server node reads each jar once to identify it on Modrinth and remembers the result, so this is only slow the first
             time (or after files change). The list updates as files are read.

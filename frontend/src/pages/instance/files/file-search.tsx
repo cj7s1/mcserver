@@ -2,6 +2,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { FileText, Loader2, Search } from "lucide-react";
 import { useMemo, useState } from "react";
+import { CutOffNotice } from "@/components/CutOffNotice";
 import { EmptyState, ErrorState } from "@/components/States";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -18,6 +19,7 @@ interface SearchHit {
 }
 
 const MAX_RESULTS = 200;
+const SEARCH_CUT_OFF = "Search stopped early: the node looks at a limited number of files (or for a limited time), so not every match is listed. Search a smaller folder to see the rest.";
 
 function Highlight({ text, query }: { text: string; query: string }) {
   const i = text.toLowerCase().indexOf(query.toLowerCase());
@@ -48,7 +50,10 @@ export function FileSearchSheet({
   const [wholeServer, setWholeServer] = useState(false);
   const search = useMutation({
     mutationFn: (vars: { query: string; path: string }) =>
-      api.post<{ results: SearchHit[] }>(`/instances/${instanceId}/files/search`, vars).then((r) => ({ ...vars, results: r.results })),
+      api
+        .post<{ results: SearchHit[]; truncated?: boolean }>(`/instances/${instanceId}/files/search`, vars)
+        // truncated: the node stopped early (its cap on files looked at, or time; B-6)
+        .then((r) => ({ ...vars, results: r.results, truncated: !!r.truncated })),
   });
   const effectiveScope = wholeServer ? "" : scope;
   const data = search.data;
@@ -127,17 +132,22 @@ export function FileSearchSheet({
           ) : !data ? (
             <EmptyState icon={<Search className="size-5" />} title="Find text across files" description="Type at least 2 characters." />
           ) : data.results.length === 0 ? (
-            <EmptyState
-              title="No matches"
-              description={
-                <>
-                  Nothing matched <span className="font-mono">{data.query}</span> in{" "}
-                  <span className="font-mono">/{data.path}</span>.
-                </>
-              }
-            />
+            <div className="grid gap-3">
+              {data.truncated && <CutOffNotice>{SEARCH_CUT_OFF}</CutOffNotice>}
+              <EmptyState
+                title="No matches"
+                description={
+                  <>
+                    Nothing matched <span className="font-mono">{data.query}</span> in{" "}
+                    <span className="font-mono">/{data.path}</span>
+                    {data.truncated ? " in the files searched so far" : ""}.
+                  </>
+                }
+              />
+            </div>
           ) : (
             <div className="grid gap-3">
+              {data.truncated && <CutOffNotice>{SEARCH_CUT_OFF}</CutOffNotice>}
               <p className="text-xs text-muted-foreground">
                 {data.results.length >= MAX_RESULTS
                   ? `Showing the first ${MAX_RESULTS} matches — narrow the search to see more.`

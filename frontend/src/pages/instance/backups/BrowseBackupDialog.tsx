@@ -5,6 +5,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
+import { CutOffNotice } from "@/components/CutOffNotice";
 import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -109,6 +110,9 @@ export function BrowseBackupDialog({
           )}
         </div>
 
+        {list.data?.truncated && (
+          <CutOffNotice>List cut off at {entries.length.toLocaleString()} entries: open a subfolder to see the rest.</CutOffNotice>
+        )}
         <div className="min-h-0 overflow-auto rounded-lg border">
           {list.isLoading ? (
             <LoadingState label="Reading snapshot…" />
