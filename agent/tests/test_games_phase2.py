@@ -197,6 +197,33 @@ def test_image_volumes_in_the_create_arguments(settings, monkeypatch):
     assert kwargs["tmpfs"] == {"/tmp/cache": docker_ops.IMAGE_VOLUME_TMPFS_OPTIONS}
 
 
+def test_a_bind_below_the_server_folder_takes_dockers_restarts_away(settings, monkeypatch):
+    """B-5 (security review 2026-11-11): Docker's own restarts never run check_bind_sources, so a
+    container that mounts a folder below the server folder gets restart policy "no"."""
+    monkeypatch.setattr(profiles, "PROFILES", dict(profiles.PROFILES))
+    profile = profiles.register(_testgame(mount_image_volumes=True, mounts=(Mount(".", "/srv/game"),)))
+    spec = InstanceSpec(
+        name="T",
+        image="example/testgame:1",
+        memory_limit_mb=1024,
+        rcon_password="x" * 16,
+        game=profile.game,
+        ports=[{"container_port": 7777, "host_port": 7777, "protocol": "udp"}],
+    )
+    assert spec.restart_policy == "unless-stopped"
+    plain = build_create_kwargs(settings, IID, spec, "h", image_volumes=["/srv/game"])
+    assert plain["restart_policy"] == {"Name": "unless-stopped"}  # the folder itself only
+    for declared in (["/var/lib/thing"], ["/srv/game/logs"]):  # .volumes/..., below the "." mount
+        kwargs = build_create_kwargs(settings, IID, spec, "h", image_volumes=declared)
+        assert kwargs["restart_policy"] == {"Name": "no"}, declared
+    # a profile mount of a sub-folder (Valheim, Project Zomboid: their policy is "no" anyway)
+    profiles.register(_testgame(mount_image_volumes=True))
+    assert build_create_kwargs(settings, IID, spec, "h")["restart_policy"] == {"Name": "no"}
+    # Factorio as its image is today (VOLUME /factorio = its mount): unchanged
+    fz = build_create_kwargs(settings, IID, fz_spec(), "h", image_volumes=["/factorio"])
+    assert fz["restart_policy"] == {"Name": "unless-stopped"}
+
+
 def test_a_declared_volume_path_with_dotdot_is_refused():
     with pytest.raises(AgentError):
         image_volume_plan(factorio.PROFILE, ["/factorio/../etc"])

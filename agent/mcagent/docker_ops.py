@@ -486,6 +486,14 @@ def image_volume_plan(
     return binds, tmpfs
 
 
+def _binds_below_the_folder(profile: RuntimeProfile, volume_binds: dict[str, str]) -> bool:
+    """Whether the container mounts a folder below the server folder (not only the folder itself):
+    a profile mount of a sub-folder, or a VOLUME of the image that goes to ``.volumes/`` or below a mount."""
+    if any(m.subdir not in ("", ".") for m in profile.mounts):
+        return True
+    return any(rel not in ("", ".") for rel in volume_binds.values())
+
+
 def _ports_distinct(spec: InstanceSpec) -> None:
     hosts: set[tuple[int, str]] = set()
     containers: set[tuple[int, str]] = set()
@@ -588,6 +596,10 @@ def build_create_kwargs(
     labels.update(profiles.labels_for(spec))  # none for Minecraft
     # a profile may fix the policy (Satisfactory: "no", only the agent starts it); Minecraft's is the spec's
     restart_policy = profile.restart_policy or spec.restart_policy
+    if restart_policy != "no" and _binds_below_the_folder(profile, volume_binds):
+        # Docker's own restarts never run check_bind_sources: a container that mounts a folder below
+        # the server folder (the game can replace it with a link) is only started by the agent (B-5)
+        restart_policy = "no"
     kwargs: dict[str, Any] = {
         "image": image,
         "name": container_name(instance_id),
