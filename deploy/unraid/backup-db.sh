@@ -18,10 +18,12 @@
 #   bash /mnt/user/appdata/mcpanel-src/deploy/unraid/backup-db.sh /mnt/user/Backups/mcpanel-db
 # and schedule it daily (a copy pasted into User Scripts gets no fixes from later updates).
 #
-# Root runs it. It refuses (FAILED, nothing written) while group or others can write this script,
-# its folder or the .env it copies: whoever can change them (an SMB user, a container that mounts
-# the folder) could run code as root here. The message names the repair (in a checkout:
-# chmod -R go-w <checkout>).
+# Root runs it, unattended. Whoever can write this script, its folder or the .env it copies (an SMB
+# user, a container that mounts the folder) could run code as root here. When group or others can,
+# a run as root inside the MCPanel checkout tightens the checkout itself (chmod -R go-w), says so on
+# stderr and in the syslog, and makes the dump: a refusal nobody reads would leave the panel
+# without its nightly copy. Not as root, for a path outside the checkout, or when that does not
+# help, it refuses (FAILED, nothing written) and names the repair.
 #
 # The last line of the output always says how it went:
 #   mcpanel-db backup: OK ...      exit status 0
@@ -70,7 +72,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         -h | --help)
-            sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -95,23 +97,33 @@ loose_modes() {
 }
 HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || fail "cannot find the folder of $0"
 TOP=$(CDPATH='' cd -- "$HERE/../.." 2>/dev/null && pwd) || TOP=""
-# refuse_loose PATH...: FAILED while group or others can write one of them. In an MCPanel
-# checkout the repair is a chmod of the whole checkout (a `git pull` under a loose umask rewrites
-# more files than these); for paths outside it, of those paths.
+# refuse_loose PATH...: while group or others can write one of them: as root, when they are all
+# inside the MCPanel checkout, tighten the checkout (its real path, so no symbolic link on the
+# command line; chmod -R does not follow the links it meets inside) and go on with a warning;
+# otherwise FAILED. The repair is a chmod of the whole checkout (a `git pull` under a loose umask
+# rewrites more files than these); for paths outside it, of those paths.
 refuse_loose() {
-    local found mode path repair="" others=""
+    local found mode path repair="" others="" real list
     found=$(loose_modes "$@")
     [ -n "$found" ] || return 0
-    printf 'group or others can write to (mode, path):\n'
     while read -r mode path; do
-        printf '  %s %s\n' "$mode" "$path"
         if [ -n "$TOP" ] && [ "$TOP/deploy/unraid" -ef "$HERE" ] && [[ "$path" == "$TOP"/* ]]; then
             printf -v repair 'chmod -R go-w %q' "$TOP"
         else
             printf -v others '%s %q' "$others" "$path"
         fi
     done <<<"$found"
+    list=${found//$'\n'/, }
+    if [ -z "$others" ] && [ "$(id -u)" = 0 ] && real=$(CDPATH='' cd -P -- "$TOP" 2>/dev/null && pwd -P) &&
+        chmod -R go-w -- "$real" 2>/dev/null && [ -z "$(loose_modes "$@")" ]; then
+        list="permissions of $TOP were loose and have been tightened (chmod -R go-w; were: $list); if you did not expect this, check 'git status' there"
+        printf 'mcpanel-db backup: WARNING: %s\n' "$list" >&2
+        logger -t mcpanel -- "mcpanel-db backup: $list" 2>/dev/null || true
+        return 0
+    fi
     [ -z "$others" ] || repair="${repair:+$repair && }chmod go-w$others"
+    printf 'group or others can write to (mode, path):\n'
+    while read -r mode path; do printf '  %s %s\n' "$mode" "$path"; done <<<"$found"
     printf 'Whoever can change these (an SMB user, a container that mounts the folder) could run code as root here.\n'
     fail "group or others can write to what root runs or copies here (listed above); repair it as root, then run this again: $repair"
 }

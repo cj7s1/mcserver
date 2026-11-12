@@ -95,9 +95,11 @@ cd mcpanel-src/deploy
 * Root runs scripts from this folder: the upgrade, the shutdown hook at every array start and the
   daily database copy. `appdata` is usually reachable over SMB and from other containers, so only
   root may be able to change these files: `umask 022` and `chmod -R go-w` see to that (without them
-  the Unraid terminal can leave every file writable by everybody). The scripts check it and refuse
-  to run otherwise, printing the same `chmod -R go-w` command. Whoever can write to `appdata`
-  itself could still swap the whole folder: see docs/SECURITY.md, "The source folder".
+  the Unraid terminal can leave every file writable by everybody). The scripts check it. The
+  upgrade refuses to run otherwise and prints the same `chmod -R go-w` command; the shutdown hook
+  installer and the daily database copy, which run unattended, run that command themselves, warn in
+  the syslog ("permissions of ... were loose and have been tightened") and go on. Whoever can write
+  to `appdata` itself could still swap the whole folder: see docs/SECURITY.md, "The source folder".
 * If `git` is missing: install it with a plugin (NerdTools or un-get), or download the zip from the
   GitHub page (**Code → Download ZIP**), unpack it to `/mnt/user/appdata/mcpanel-src`, run
   `chmod -R go-w /mnt/user/appdata/mcpanel-src`, and continue.

@@ -122,8 +122,8 @@ For Unraid specifics (paths, UID/GID 99:100, the Docker tab, pools vs user share
 [DEPLOYMENT.md](DEPLOYMENT.md).
 
 To upgrade later: `(umask 022 && git pull)`, then in `deploy/`: `./scripts/upgrade.sh dry-run`, then the
-`run` command it prints. The scripts refuse a checkout that group or others can write and print the
-repair (`chmod -R go-w <checkout>`).
+`run` command it prints. It refuses a checkout that group or others can write and prints the repair
+(`chmod -R go-w <checkout>`).
 
 > Modded servers run third-party code. Docker raises the bar but is not a strong sandbox, so only install
 > content you trust. Never expose the panel to the internet without HTTPS, and preferably use a VPN.

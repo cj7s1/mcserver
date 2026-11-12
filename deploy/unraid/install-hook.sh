@@ -20,8 +20,11 @@
 #
 # Root runs this script at every array start and the hook it installs at shutdown. Whoever can
 # write this script, the hook file or their folder (an SMB user, a container that mounts the
-# folder) could run code as root then. So "install" and "remove" refuse while group or others can
-# write one of them, and say how to repair it; "status" warns (see check_modes).
+# folder) could run code as root then. When group or others can write one of them, "install" and
+# "remove" run as root tighten the MCPanel checkout themselves (chmod -R go-w), say so on stderr
+# and in the syslog, and go on: a refusal at an unattended array start would leave the server
+# without its shutdown hook. Not as root, outside a checkout, or when that does not help, they
+# refuse and print the repair; "status" only warns (see check_modes).
 set -u
 # The folders "install" makes: never writable by group or others, whatever the umask of the
 # shell or of User Scripts that runs this.
@@ -79,32 +82,43 @@ loose_modes() {
 # check_modes refuse|warn: this script, the hook file and their folder must not be writable by
 # group or others. In an MCPanel checkout the repair is a chmod of the whole checkout (a `git pull`
 # under a loose umask rewrites more files than these); elsewhere (a copy in /boot/config/mcpanel)
-# of the paths found.
+# of the paths found. "install" and "remove" (refuse) run as root do the checkout's repair
+# themselves and go on when it worked; a path outside the checkout is never changed.
 check_modes() {
-    local found top repair line nl
+    local found top real repair line nl how="'install' and 'remove' refuse until it is repaired (as root):"
     found="$(loose_modes "${SELF}" "${SOURCE}" "${HERE}")"
     [ -n "${found}" ] || return 0
+    nl=$'\n'
     top="$(cd "${HERE}/../.." 2>/dev/null && pwd)"
     if [ -n "${top}" ] && [ "${top}/deploy/unraid" -ef "${HERE}" ]; then
         printf -v repair 'chmod -R go-w %q' "${top}"
+        how="'install' and 'remove' run as root repair it themselves; or now (as root):"
+        # Its real path: no symbolic link on the command line (chmod -R does not follow the links
+        # it meets inside), so nothing outside the checkout is changed.
+        if [ "$1" = refuse ] && [ "$(id -u)" -eq 0 ] && real="$(cd -P "${top}" 2>/dev/null && pwd -P)" &&
+            chmod -R go-w -- "${real}" 2>/dev/null && [ -z "$(loose_modes "${SELF}" "${SOURCE}" "${HERE}")" ]; then
+            line="permissions of ${top} were loose and have been tightened (chmod -R go-w; were: ${found//${nl}/, }); if you did not expect this, check 'git status' there"
+            printf 'install-hook: WARNING: %s\n' "${line}" >&2
+            logger -t mcpanel -- "shutdown hook: ${line}" 2>/dev/null || true
+            return 0
+        fi
     else
         repair="chmod go-w"
         while read -r _ line; do printf -v repair '%s %q' "${repair}" "${line}"; done <<<"${found}"
     fi
-    nl=$'\n'
     found="    ${found//${nl}/${nl}    }"
     if [ "$1" = refuse ]; then
         logger -t mcpanel -- "shutdown hook NOT installed or removed: group or others can write to ${HERE} (repair as root: ${repair})" 2>/dev/null || true
         fail "refusing: group or others can write to what root runs here (mode, path):
 ${found}
 Whoever can change these files (an SMB user, a container that mounts the folder) could run code
-as root at the next array start or shutdown. Nothing was changed. Repair it (as root), then run
-this command again:
+as root at the next array start or shutdown. The hook was neither installed nor removed. Repair it
+(as root), then run this command again:
     ${repair}"
     fi
     say "WARNING: group or others can write to what root runs here (mode, path):"
     say "${found}"
-    say "         'install' and 'remove' refuse until it is repaired (as root):"
+    say "         ${how}"
     say "    ${repair}"
 }
 

@@ -25,8 +25,9 @@ cd mcserver/deploy
 
 Root (or a member of the `docker` group, which amounts to the same) runs the scripts of this
 checkout and builds the images from it, so only its owner may be able to change it.
-`scripts/upgrade.sh`, `unraid/install-hook.sh` and `unraid/backup-db.sh` refuse to run while group
-or others can write the files they depend on, and print the repair (`chmod -R go-w <checkout>`).
+`scripts/upgrade.sh` refuses to run while group or others can write the files it depends on, and
+prints the repair (`chmod -R go-w <checkout>`); `unraid/install-hook.sh` and `unraid/backup-db.sh`,
+which run unattended as root, run that repair themselves, warn in the syslog and go on.
 Where the default umask is 002 (distributions that give every user a group of their own), clone
 and pull with `umask 022` as above. docs/SECURITY.md, "The source folder", has the details.
 
@@ -884,9 +885,11 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
   container of the Compose project (without the login sessions), writes
   `mcpanel-db-<date>-<time>.sql.gz` and next to it `mcpanel-db-<date>-<time>.env`, a copy of
   `deploy/.env`, into its destination folder, and keeps the newest 14 of each pair. The folder is
-  made 0700 and the files 0600. A dump that `pg_dump` did not finish is never kept. Root runs it,
-  so it ends with `FAILED`, writing nothing, while group or others can write the script, its folder
-  or the `.env` it copies; the message names the repair (`chmod -R go-w <checkout>`).
+  made 0700 and the files 0600. A dump that `pg_dump` did not finish is never kept. When group or
+  others can write the script, its folder or the `.env` it copies, a run as root from the checkout
+  runs `chmod -R go-w <checkout>` itself, warns on stderr and in the syslog, and makes the dump;
+  otherwise (not root, an `.env` outside the checkout) it ends with `FAILED`, writing nothing, and
+  names the repair.
 
   ```
   backup-db.sh [--project NAME] [--env FILE] [--keep N] [DEST_DIR]

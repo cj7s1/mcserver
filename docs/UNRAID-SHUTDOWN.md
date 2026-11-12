@@ -105,11 +105,15 @@ bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh status
 This copies the hook to `/usr/local/emhttp/plugins/mcpanel/event/stopping_docker`. That folder
 is in RAM and is rebuilt at every boot, so the install has to run again at every boot.
 
-`install` and `remove` refuse while group or others can write `install-hook.sh`, `stopping_docker`
-or their folder: root runs both. The message, also written to the syslog with the tag `mcpanel`,
-names the repair: `chmod -R go-w /mnt/user/appdata/mcpanel-src` for the checkout, a `chmod go-w` of
-the files found for a copy elsewhere. `status` only warns. See docs/SECURITY.md, "The source
-folder".
+Root runs `install-hook.sh` and `stopping_docker`, so nobody else may be able to change them. When
+group or others can write one of them or their folder, `install` and `remove`, run as root from the
+MCPanel checkout, run `chmod -R go-w` on the checkout themselves and go on, with a warning on the
+screen and in the syslog (tag `mcpanel`: "permissions of ... were loose and have been tightened";
+if you did not expect it, check `git status` there): a refusal at an unattended array start would
+leave the server without its hook. Not as root, for a copy elsewhere (`/boot/config/mcpanel`), or
+when the `chmod` fails, they refuse and name the repair: `chmod -R go-w
+/mnt/user/appdata/mcpanel-src` for the checkout, a `chmod go-w` of the files found for a copy.
+`status` only warns. See docs/SECURITY.md, "The source folder".
 
 Pick one way to run the install at every boot:
 

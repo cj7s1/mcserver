@@ -37,6 +37,11 @@ def test_d2_the_checkout_is_cloned_pulled_and_repaired_so_that_only_root_can_cha
     # what the check cannot cover is said, too
     assert "can rename the whole checkout and put another one in its place" in security
     assert "chmod -R go-w" in read("docs/UNRAID-SHUTDOWN.md")
+    # the two scripts that run unattended repair it themselves (as root, in the checkout) and say so
+    assert "were loose and have been tightened" in security and "check 'git status' there" in security
+    for path in ("docs/QUICKSTART-UNRAID.md", "docs/UNRAID.md", "docs/UNRAID-SHUTDOWN.md", "DEPLOYMENT.md"):
+        text = words(path)
+        assert "themselves" in text and "syslog" in text, path
 
 
 # --- A-1, A-9: what the network isolates, who can join -------------------------------------------------

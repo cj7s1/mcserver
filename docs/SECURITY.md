@@ -313,16 +313,25 @@ from it. Whoever can change a file there runs code as root at the next upgrade, 
 shutdown or nightly dump. On the owner's server (review of 2026-11-11) the scripts were mode 777 and
 the compose file 666, in the `appdata` share, which is exported over SMB.
 
-* **The scripts check it before they change anything.** `upgrade.sh run`, `rollback` and
+* **`upgrade.sh` refuses before it changes anything.** `upgrade.sh run`, `rollback` and
   `restore-db --yes` refuse (exit 2) while group or others can write a file or folder that git
   tracks, the checkout's own folder, `.git`, `.git/config`, `.git/hooks` or `deploy/.env` (followed
   when it is a symbolic link); `status`, `dry-run` and `rollback --dry-run` only warn.
-  `install-hook.sh install` and `remove` refuse while group or others can write the script,
-  `stopping_docker` or their folder (`status` warns; the refusal also goes to the syslog), and
-  `backup-db.sh` ends with `FAILED` while they can write the script, its folder or the `.env` it
-  copies. Every message lists what it found and names the repair: `chmod -R go-w <checkout>`, and
+  Every refusal lists what it found and names the repair: `chmod -R go-w <checkout>`, and
   `chmod go-w <path>` for a path outside the checkout (a copy of the hook files in
   `/boot/config/mcpanel`, an `.env` given with `--env`).
+* **The unattended two repair it themselves.** `install-hook.sh` (at every array start) checks
+  itself, `stopping_docker` and their folder; `backup-db.sh` (every night) itself, its folder and
+  the `.env` it copies. When group or others can write one of them, a run as root from the MCPanel
+  checkout runs `chmod -R go-w` on the checkout (its real path: no symbolic link on the command
+  line, and `chmod -R` does not follow the links it meets, so nothing outside the checkout is
+  changed), writes "permissions of <checkout> were loose and have been tightened ...; if you did
+  not expect this, check 'git status' there" to stderr and the syslog (tag `mcpanel`), and goes on.
+  A refusal nobody reads would leave the server without its shutdown hook or the panel without its
+  nightly dump. Not as root, for a path outside the checkout, or when the `chmod` fails or leaves
+  something loose, they refuse as above (`install-hook.sh status` only warns). No self-check
+  protects against a script someone already changed; what it does is close the loose state and
+  tell you.
 * **git as root.** `upgrade.sh` runs git with `-c core.fsmonitor= -c core.hooksPath=/dev/null`, so
   no command from `.git/config` or `.git/hooks` runs, and under `umask 022`: a `rollback` checkout
   never leaves files writable by others. `install-hook.sh` makes its folders under `umask 022` too.

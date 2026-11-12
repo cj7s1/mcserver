@@ -79,9 +79,10 @@ nano .env
 ```
 
 Root runs `upgrade.sh`, `install-hook.sh` and `backup-db.sh` from this folder, so nobody but root
-may be able to change its files: `upgrade.sh`, the hook installer and the database copy refuse to
-run while group or others can write them, and print the repair (`chmod -R go-w <the folder>`).
-docs/SECURITY.md, "The source folder", has the details and what this check cannot cover.
+may be able to change its files. While group or others can write them, `upgrade.sh` refuses and
+prints the repair (`chmod -R go-w <the folder>`); the hook installer and the database copy, which
+run unattended, run that repair themselves, warn in the syslog and go on. docs/SECURITY.md, "The
+source folder", has the details and what this check cannot cover.
 
 Unraid-specific values:
 
