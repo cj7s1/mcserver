@@ -261,6 +261,14 @@ checkout (after an update of MCPanel) or the upstream branch has a newer plugin 
 
 **First-run checklist** (what only a real Unraid server can show):
 
+Or let the script walk you through it, as root in the terminal: `bash
+/mnt/user/appdata/mcpanel-src/deploy/unraid/first-run.sh` shows every item below as OK / TO DO / NEEDS YOU
+and the command to run next; `... first-run.sh dry-run` the plugin's exact commands; `... first-run.sh run`
+steps 1 to 4 (it asks before each change; `--yes` answers yes; safe to run again); `... first-run.sh
+after-reboot` step 5; `... first-run.sh firewall` (optional) the firewall with a self-test from a throw-away
+container, removed again when the internet stops working (`firewall test`, `firewall remove`). It changes
+nothing itself: every change goes through the plugin. Not run on a real Unraid server yet either.
+
 1. After the install, the plugin manager's window shows "MCPanel plugin installed. Its page: Settings >
    User Utilities > MCPanel." and three more lines (the last: "NOT RUN ON A REAL UNRAID HOST YET ...").
    In the terminal, `find /usr/local/emhttp/plugins/mcpanel -perm /022` prints nothing.

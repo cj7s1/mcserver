@@ -47,6 +47,20 @@ columns of the servers table with database defaults; a rollback loses only their
   when empty; System → Discord and each server's Settings → General → Discord; Users → Invite a friend, and a
   friend's app with only their servers' status, Start/Stop and Share card.
 
+## The plugin's first-run checklist as a script (branch `feature/first-run-script`, 2026-11-12)
+
+The owner installed the plugin (2026.11.12a) on his server and asked for a script that does the checklist.
+`deploy/unraid/first-run.sh` (root, in Unraid's terminal; also as a single copied file): `status` (default, changes
+nothing: every checklist item OK / TO DO / NEEDS YOU / CANNOT TELL and the next command), `dry-run` (the runner's
+`describe` of every step), `run [--yes] [--compose-bin|--checkout|--project]` (steps 1-4: checks, saving the
+settings, e.g. the Compose binary linked by hand, the four read-only tasks with their logs, the boot tasks; asks
+before each change; stops with the runner's repair; a second run changes nothing), `after-reboot` (step 5), and
+`firewall [test|remove]` (install through the runner, then a self-test from a throw-away container on the instance
+network; removed again when the internet does not work or the owner says no). Every change goes through the
+installed runner (`facts`, `save`, `describe`, `start`); waiting reads the task's log ("Finished:") and `facts`:
+**no plugin update needed**. Tests: `tests/test_deploy_first_run.py` (the real runner, stand-ins for docker, id,
+logger, curl, ip, iptables; status and dry-run write nothing). **Not run on a real Unraid server yet.**
+
 ## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section A)
 
 **Not run on Unraid yet.** Built from the conventions of the plugins on the owner's server (Unraid 7.3.4,

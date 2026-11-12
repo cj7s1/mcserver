@@ -129,6 +129,7 @@ jobs:
             .github/scripts/panel-acceptance.sh .github/scripts/upgrade-rehearsal.sh deploy/unraid/stopping_docker \
             deploy/unraid/instance-firewall.sh deploy/unraid/array-start.sh
           shellcheck --exclude=SC2016 deploy/unraid/install-hook.sh
+          shellcheck deploy/unraid/first-run.sh
           shellcheck deploy/unraid/plugin/build.sh deploy/unraid/plugin/src/bin/mcpanel \
             deploy/unraid/plugin/src/event/docker_started deploy/unraid/plugin/src/install/*.sh
       - name: Unraid plugin (mcpanel.plg is a fresh build; PHP 8.4 lint and the page's endpoint)

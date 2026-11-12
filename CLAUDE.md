@@ -17,7 +17,8 @@ backend/    Django 5.2 + DRF + Channels + Celery. mcpanel/ (settings, urls, asgi
 frontend/   React 19 + TS 7 + Vite 8 + Tailwind 4 + shadcn/ui (radix-nova) + TanStack Query + react-router 8 + xterm.js
 deploy/     docker-compose.yml (prod: panel, agent, postgres), docker-compose.node.yml, docker-compose.dev.yml,
             .env.example, scripts/ (generate-secrets.sh, upgrade.sh), unraid/ (stopping_docker hook, install-hook.sh, backup-db.sh,
-            instance-firewall.sh, array-start.sh: the one User Script at array start; plugin/: the Unraid plugin, src/ + build.sh -> mcpanel.plg)
+            instance-firewall.sh, array-start.sh: the one User Script at array start; plugin/: the Unraid plugin, src/ + build.sh -> mcpanel.plg;
+            first-run.sh: the plugin's first-run checklist as a program, through the plugin's runner)
 docs/       QUICKSTART-UNRAID.md, UNRAID.md, UNRAID-SHUTDOWN.md, SECURITY.md, FRIENDS.md, GAMES.md, reference/ (upstream notes)
 .github/    workflows/ci.yml, scripts/ (panel-acceptance.sh, upgrade-rehearsal.sh: real containers)
 scripts/cloud-dev/  sandbox-only helpers (egress forwarder, env files, start-services.sh)
