@@ -67,7 +67,7 @@ from uuid import UUID
 
 from . import claimmarker
 from .config import Settings
-from .errors import AgentError
+from .errors import AgentError, game_text
 
 log = logging.getLogger(__name__)
 
@@ -356,10 +356,11 @@ class ClaimGuard:
             return key
         try:
             result = driver.claim_state(self.settings, c)
-        except AgentError as exc:
-            log.warning("The claim of %s could not be verified: %s", c.name, exc)
+        except Exception as exc:  # also a reply the parser did not expect: fail closed (B-3)
+            detail = game_text(exc)
+            log.warning("The claim of %s could not be verified: %s", c.name, detail)
             self.stop(
-                c, instance_id, key, "claim_unverified", MESSAGES["claim_unverified"].format(detail=exc)
+                c, instance_id, key, "claim_unverified", MESSAGES["claim_unverified"].format(detail=detail)
             )
             return key
         if result == "unclaimed":

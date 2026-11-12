@@ -240,12 +240,13 @@ def sweep_leftovers(
         _sweep(settings, started_at, busy, report)
     except Exception:
         log.exception("Sweeping leftovers of interrupted operations failed")
+    # %r: the names of what is swept may come from the game (one line, quoted; B-9)
     for path in report.removed:
-        log.info("Removed leftover of an interrupted operation: %s", path)
+        log.info("Removed leftover of an interrupted operation: %r", path)
     for path in report.kept:
-        log.warning("Kept leftover of an interrupted operation (it may be the only copy of data): %s", path)
+        log.warning("Kept leftover of an interrupted operation (it may be the only copy of data): %r", path)
     for problem in report.failed:
-        log.warning("Could not remove leftover of an interrupted operation: %s", problem)
+        log.warning("Could not remove leftover of an interrupted operation: %r", problem)
     return report.as_dict()
 
 

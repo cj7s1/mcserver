@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from .. import claimmarker
-from ..errors import AgentError
+from ..errors import AgentError, game_text
 from .base import QueryTarget, Report, Send, WaitLog
 from .http_api import GameApiError, HttpApiDriver, _ops
 
@@ -244,8 +244,9 @@ class SatisfactoryDriver(HttpApiDriver):
     @staticmethod
     def _result(function: str, status: int, parsed: Any) -> dict[str, Any] | None:
         if isinstance(parsed, dict) and _key(parsed, "errorCode"):
-            code = str(_key(parsed, "errorCode"))
-            message = str(_key(parsed, "errorMessage") or code)
+            # the game's own text: one line, clipped (B-9)
+            code = game_text(_key(parsed, "errorCode"), 100)
+            message = game_text(_key(parsed, "errorMessage") or code)
             agent_code, agent_status = "api_error", 502
             if status == 401 or code in ("invalid_token", "token_invalid"):
                 agent_code, agent_status = "api_unauthorized", 409
@@ -434,13 +435,13 @@ class SatisfactoryDriver(HttpApiDriver):
                 result.warnings.append("No game was loaded, so there was nothing to save before the stop")
             else:
                 result.flushed = True
-        except AgentError as exc:
-            result.warnings.append(f"The game was not saved before the stop (SaveGame): {exc}")
+        except Exception as exc:  # also a reply the parser did not expect: the stop goes on (B-3)
+            result.warnings.append(f"The game was not saved before the stop (SaveGame): {game_text(exc)}")
         try:
             self.call(settings, c, "Shutdown", {}, token=token, timeout=SHUTDOWN_TIMEOUT)
-        except AgentError as exc:
+        except Exception as exc:
             result.warnings.append(
-                f"The Shutdown API call failed ({exc}); the server was stopped with a signal instead"
+                f"The Shutdown API call failed ({game_text(exc)}); the server was stopped with a signal instead"
             )
             c.stop(timeout=timeout)
             return True

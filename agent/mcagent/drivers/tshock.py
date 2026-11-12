@@ -35,7 +35,7 @@ import urllib.request
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
-from ..errors import AgentError
+from ..errors import AgentError, game_text
 from .base import ControlDriver, Report, Send, WaitLog
 from .console import ConsoleDriver
 
@@ -135,8 +135,8 @@ class TShockDriver(ControlDriver):
         try:
             root = SafeRoot(ops.instance_dir(settings, UUID(instance)))
             data = json.loads(root.read_bytes(self.config_file, CONFIG_MAX_BYTES).decode("utf-8-sig"))
-        except (PathError, ValueError, OSError) as exc:
-            log.debug("TShock config of %s not readable: %s", c.name, exc)
+        except (PathError, ValueError, OSError, RecursionError) as exc:
+            log.debug("TShock config of %s not readable: %s", c.name, game_text(exc))
             return None
         tokens = ((data.get("Settings") or {}) if isinstance(data, dict) else {}).get("ApplicationRestTokens")
         if not isinstance(tokens, dict):
@@ -196,13 +196,15 @@ class TShockDriver(ControlDriver):
             raise RestUnavailable(f"TShock's REST API is not reachable ({type(exc).__name__})") from None
         try:
             data = json.loads(body.decode("utf-8", errors="replace"))
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise AgentError(
                 f"TShock answered {path} with something that is not JSON", "rest_failed", 502
             ) from exc
         status = str(data.get("status", code)) if isinstance(data, dict) else str(code)
         if status != "200":
-            error = plain(str((data or {}).get("error") or (data or {}).get("response") or f"HTTP {status}"))
+            error = game_text(
+                plain(str((data or {}).get("error") or (data or {}).get("response") or f"HTTP {status}"))
+            )
             raise AgentError(f"TShock: {error}", "rest_failed", 502)
         return data
 

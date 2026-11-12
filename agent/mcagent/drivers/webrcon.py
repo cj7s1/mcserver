@@ -40,7 +40,7 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
-from ..errors import AgentError
+from ..errors import AgentError, game_text
 from .base import ControlDriver, QueryTarget, Report, Send, WaitLog
 
 if TYPE_CHECKING:
@@ -167,7 +167,7 @@ def _talk(ws: Any, ident: int, command: str, deadline: float, timeout: float) ->
             raw = ws.recv(timeout=left)
             try:
                 frame = json.loads(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):  # deep nesting raises RecursionError
                 continue  # not JSON: console noise, never a reply
             if isinstance(frame, dict) and frame.get("Identifier") == ident:
                 return frame
@@ -279,9 +279,9 @@ class WebRconDriver(ControlDriver):
             try:
                 self.run(settings, c, self.save_command, _ops().flush_timeout(timeout))
                 result.flushed = True
-            except AgentError as exc:
+            except Exception as exc:  # also a reply the parser did not expect: the stop goes on (B-3)
                 result.warnings.append(
-                    f"The world was not saved before the stop ({self.save_command}): {exc}"
+                    f"The world was not saved before the stop ({self.save_command}): {game_text(exc)}"
                 )
         c.stop(timeout=timeout)
         return True
@@ -309,7 +309,7 @@ class WebRconDriver(ControlDriver):
             text = self.run(settings, c, "playerlist" if action == "players" else "serverinfo", timeout)
             try:
                 data = json.loads(text) if text.strip() else ([] if action == "players" else {})
-            except ValueError as exc:
+            except (ValueError, RecursionError) as exc:
                 raise AgentError(
                     f"Rust answered {action} with something that is not JSON", "rcon_failed", 502
                 ) from exc

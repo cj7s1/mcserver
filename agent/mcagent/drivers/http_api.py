@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
-from ..errors import AgentError
+from ..errors import AgentError, game_text
 from .base import ControlDriver
 
 if TYPE_CHECKING:
@@ -99,7 +99,7 @@ class ApiResponse:
             return None
         try:
             return json.loads(self.body.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError):  # deep nesting raises RecursionError
             return None
 
 
@@ -224,7 +224,8 @@ def http_request(
         raise GameApiError(f"The game's API did not answer within {timeout:g} s", "api_timeout", 504) from exc
     except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
         raise GameApiError(
-            f"The game's API is not reachable (the server is probably still starting): {type(exc).__name__}: {exc}",
+            "The game's API is not reachable (the server is probably still starting): "
+            f"{type(exc).__name__}: {game_text(exc)}",
             "api_unavailable",
             409,
         ) from exc

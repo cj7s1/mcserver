@@ -56,6 +56,7 @@ from .auth import require_token, websocket_authorized
 from .backups import Restic, restic_available
 from .config import Settings, get_settings
 from .docker_ops import AgentError
+from .errors import game_text
 from .operations import Operation, registry
 from .rcon import RconError, run_command
 from .safefs import PathError, SafeRoot
@@ -2360,7 +2361,10 @@ async def backup_download(
                 # restic failed part-way: abort the chunked response, so the download fails
                 # instead of ending as a complete-looking, truncated file
                 log.warning(
-                    "restic dump of %s failed after streaming: exit %s %s", path, code, stream.stderr[-300:]
+                    "restic dump of %r failed after streaming: exit %s %s",
+                    path,
+                    code,
+                    game_text(stream.stderr[-300:]),
                 )
                 raise AgentError(f"restic dump failed (exit code {code})", "restic_failed", 500)
         finally:

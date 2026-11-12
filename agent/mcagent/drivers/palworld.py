@@ -34,7 +34,7 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
-from ..errors import AgentError
+from ..errors import AgentError, game_text
 from .base import QueryTarget, Report, Send, WaitLog
 from .http_api import GameApiError, HttpApiDriver
 
@@ -253,8 +253,10 @@ class PalworldDriver(HttpApiDriver):
             try:
                 self.call(settings, c, "POST", "save", timeout=_ops().flush_timeout(timeout))
                 result.flushed = True
-            except AgentError as exc:
-                result.warnings.append(f"The world was not saved through the REST API before the stop: {exc}")
+            except Exception as exc:  # also a reply the parser did not expect: the stop goes on (B-3)
+                result.warnings.append(
+                    f"The world was not saved through the REST API before the stop: {game_text(exc)}"
+                )
         c.stop(timeout=timeout)
         return True
 

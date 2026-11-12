@@ -25,6 +25,7 @@ from typing import Any
 from uuid import UUID
 
 import docker
+import requests
 from docker.errors import APIError, ImageNotFound, NotFound
 
 # _create_container_args is docker-py's own (private) conversion from containers.create()
@@ -34,7 +35,7 @@ from docker.models.containers import Container, _create_container_args
 from . import claimguard, drivers, lastrun, profiles
 from .config import Settings, get_settings
 from .drivers.minecraft import GAME_PORT, RCON_PORT, SAVE_BEFORE_STOP, STOP_COMMAND
-from .errors import AgentError
+from .errors import AgentError, game_text
 from .profiles import LABEL_GAME, LABEL_VARIANT, RuntimeProfile
 from .rcon import RconError, RconUnavailable, run_command_sync
 from .schemas import InstanceSpec
@@ -1353,7 +1354,7 @@ def graceful_stop(
         result.not_ready = True
         log.info("Stopping %s at once: it has not become ready in this run (nothing to save)", c.name)
         c.stop(timeout=int(profile.not_ready_stop_timeout or timeout))
-    elif not drivers.for_container(c).stop(settings, c, timeout, result):
+    elif not _driver_stop(settings, c, timeout, result):
         c.stop(timeout=timeout)
     result.exit_code = _stopped_exit_code(c)
     if profile is not None and profile.fix_ownership:
@@ -1363,6 +1364,23 @@ def graceful_stop(
     for warning in result.warnings:
         log.warning("Stopping %s: %s", c.name, warning)
     return result
+
+
+def _driver_stop(settings: Settings, c: Container, timeout: int, result: StopResult) -> bool:
+    """The stop of the container's control driver. Docker's own errors propagate (as from ``docker
+    stop``); anything else the driver raises (a reply of the game it did not expect) is a warning and
+    returns False, so that the caller's ``docker stop`` still runs (B-3)."""
+    try:
+        return bool(drivers.for_container(c).stop(settings, c, timeout, result))
+    except (docker.errors.DockerException, requests.exceptions.RequestException):
+        raise
+    except Exception as exc:
+        log.warning("The stop of %s through its game failed unexpectedly: %s", c.name, game_text(exc))
+        result.warnings.append(
+            f"The save before the stop failed unexpectedly ({type(exc).__name__}: {game_text(exc)}); "
+            "the server was stopped with a signal"
+        )
+        return False
 
 
 def fix_ownership(settings: Settings, instance_id: UUID, skip: tuple[str, ...] = ()) -> str | None:

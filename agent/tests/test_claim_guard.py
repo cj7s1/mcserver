@@ -386,6 +386,22 @@ def test_loop_fails_closed_on_an_unknown_error_code(settings, fake, use_fake_dri
     assert c.state == "exited" and claimguard.load(settings, IID)["code"] == "claim_unverified"
 
 
+def test_loop_fails_closed_on_a_reply_the_parser_did_not_expect(settings, fake, use_fake_driver, monkeypatch):
+    """B-3: an exception that is not an AgentError (deeply nested JSON raises RecursionError) stops the
+    published run like claim_unverified, instead of being logged while the run goes on."""
+    c = Published(fake.port)
+    monkeypatch.setattr(docker_ops, "client", lambda: _Docker([c]))
+
+    def unexpected(*_a, **_k):
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON array\nforged")
+
+    monkeypatch.setattr(sfd.SatisfactoryDriver, "claim_state", unexpected)
+    claimguard.ClaimGuard(settings).check_all()
+    assert c.state == "exited"
+    record = claimguard.load(settings, IID)
+    assert record["code"] == "claim_unverified" and "\n" not in record["message"]
+
+
 def test_a_later_claimed_run_clears_the_record(
     api, auth, settings, fake, use_fake_driver, one_container, monkeypatch
 ):

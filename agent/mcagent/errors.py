@@ -46,9 +46,29 @@ Codes of the container checks:
 
 from __future__ import annotations
 
+import re
+
 
 class AgentError(Exception):
     def __init__(self, message: str, code: str = "agent_error", status: int = 400) -> None:
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+# --- text that comes from a game (B-9) ---------------------------------------------------------------
+GAME_TEXT_MAX = 300
+# control characters (C0 incl. newline/tab, DEL, C1) and the Unicode line/paragraph separators
+_GAME_TEXT_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
+def game_text(value: object, limit: int = GAME_TEXT_MAX) -> str:
+    """Text a game supplied (an error message of its API, a reply), fit for an error message or an
+    agent log line: one line (control characters become a blank) and at most ``limit`` characters
+    (cut with "..."). Never raises."""
+    try:
+        text = str(value)
+    except Exception:
+        return "?"
+    text = _GAME_TEXT_CONTROL.sub(" ", text[: limit * 4]).strip()
+    return text if len(text) <= limit else text[: max(0, limit - 3)] + "..."
