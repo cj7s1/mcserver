@@ -14,8 +14,16 @@
 # project in the label com.docker.compose.project.working_dir), else next to this script
 # (../.env); --env names it.
 #
-# In User Scripts: add a script, paste this file (or a line that runs it from the MCPanel
-# checkout) and schedule it daily. The last line of the output always says how it went:
+# In User Scripts: add a script with a line that runs it from the MCPanel checkout
+#   bash /mnt/user/appdata/mcpanel-src/deploy/unraid/backup-db.sh /mnt/user/Backups/mcpanel-db
+# and schedule it daily (a copy pasted into User Scripts gets no fixes from later updates).
+#
+# Root runs it. It refuses (FAILED, nothing written) while group or others can write this script,
+# its folder or the .env it copies: whoever can change them (an SMB user, a container that mounts
+# the folder) could run code as root here. The message names the repair (in a checkout:
+# chmod -R go-w <checkout>).
+#
+# The last line of the output always says how it went:
 #   mcpanel-db backup: OK ...      exit status 0
 #   mcpanel-db backup: FAILED ...  exit status 1 (nothing half-written is left behind)
 #
@@ -62,7 +70,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         -h | --help)
-            sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         -*)
@@ -78,6 +86,36 @@ done
 [[ "$PROJECT" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || fail "'$PROJECT' is not a Compose project name"
 [[ "$KEEP" =~ ^[1-9][0-9]*$ ]] || fail "--keep must be a whole number of at least 1"
 [ -n "$DEST" ] || fail "no destination folder"
+
+# Who can change what root runs or copies here. loose_modes ABSOLUTE-PATH...: lines "<mode> <path>"
+# of those that group or others can write (symbolic links followed).
+loose_modes() {
+    find -L "$@" -maxdepth 0 -perm /022 -printf '%m %p\n' 2>/dev/null
+    return 0
+}
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd) || fail "cannot find the folder of $0"
+TOP=$(CDPATH='' cd -- "$HERE/../.." 2>/dev/null && pwd) || TOP=""
+# refuse_loose PATH...: FAILED while group or others can write one of them. In an MCPanel
+# checkout the repair is a chmod of the whole checkout (a `git pull` under a loose umask rewrites
+# more files than these); for paths outside it, of those paths.
+refuse_loose() {
+    local found mode path repair="" others=""
+    found=$(loose_modes "$@")
+    [ -n "$found" ] || return 0
+    printf 'group or others can write to (mode, path):\n'
+    while read -r mode path; do
+        printf '  %s %s\n' "$mode" "$path"
+        if [ -n "$TOP" ] && [ "$TOP/deploy/unraid" -ef "$HERE" ] && [[ "$path" == "$TOP"/* ]]; then
+            printf -v repair 'chmod -R go-w %q' "$TOP"
+        else
+            printf -v others '%s %q' "$others" "$path"
+        fi
+    done <<<"$found"
+    [ -z "$others" ] || repair="${repair:+$repair && }chmod go-w$others"
+    printf 'Whoever can change these (an SMB user, a container that mounts the folder) could run code as root here.\n'
+    fail "group or others can write to what root runs or copies here (listed above); repair it as root, then run this again: $repair"
+}
+refuse_loose "$HERE/$(basename -- "$0")" "$HERE"
 case "$DEST" in
     /*) ;;
     *) fail "the destination must be an absolute path (got '$DEST')" ;;
@@ -98,6 +136,7 @@ if [ -z "$ENV_FILE" ]; then
     fi
 fi
 [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ] && [ -r "$ENV_FILE" ] || fail "cannot find deploy/.env (pass it with --env FILE)"
+refuse_loose "$(CDPATH='' cd -- "$(dirname -- "$ENV_FILE")" && pwd)/$(basename -- "$ENV_FILE")"
 
 umask 077
 mkdir -p "$DEST" 2>/dev/null || fail "cannot create $DEST"

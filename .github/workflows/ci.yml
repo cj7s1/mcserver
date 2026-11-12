@@ -209,6 +209,7 @@ jobs:
       - uses: docker/setup-buildx-action@v4
       - name: A deployment of the old revision (a clone, like the checkout on a server)
         run: |
+          umask 022   # upgrade.sh refuses a checkout that group or others can write (security review D-2)
           git clone --quiet "$GITHUB_WORKSPACE" "$RUNNER_TEMP/site"
           git -C "$RUNNER_TEMP/site" checkout --quiet -B rehearsal "$OLD_LAYOUT_REV"
           git -C "$RUNNER_TEMP/site" config user.email ci@example.invalid

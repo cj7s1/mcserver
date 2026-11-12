@@ -17,9 +17,18 @@
 #
 # "install" and "status" also read Unraid's shutdown time-out and warn when it is too short
 # for the hook (see check_shutdown_timeout).
+#
+# Root runs this script at every array start and the hook it installs at shutdown. Whoever can
+# write this script, the hook file or their folder (an SMB user, a container that mounts the
+# folder) could run code as root then. So "install" and "remove" refuse while group or others can
+# write one of them, and say how to repair it; "status" warns (see check_modes).
 set -u
+# The folders "install" makes: never writable by group or others, whatever the umask of the
+# shell or of User Scripts that runs this.
+umask 022
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
 SOURCE="${HERE}/stopping_docker"
 # MCPANEL_HOOK_ROOT and MCPANEL_DISK_CFG are for trying this script out somewhere else; leave
 # them unset on Unraid.
@@ -58,6 +67,45 @@ need_unraid() {
 
 need_root() {
     [ -n "${MCPANEL_HOOK_ROOT:-}" ] || [ "$(id -u)" -eq 0 ] || fail "run this as root (the Unraid terminal is root)"
+}
+
+# loose_modes ABSOLUTE-PATH...: lines "<mode> <path>" of those that group or others can write
+# (symbolic links followed).
+loose_modes() {
+    find -L "$@" -maxdepth 0 -perm /022 -printf '%m %p\n' 2>/dev/null
+    return 0
+}
+
+# check_modes refuse|warn: this script, the hook file and their folder must not be writable by
+# group or others. In an MCPanel checkout the repair is a chmod of the whole checkout (a `git pull`
+# under a loose umask rewrites more files than these); elsewhere (a copy in /boot/config/mcpanel)
+# of the paths found.
+check_modes() {
+    local found top repair line nl
+    found="$(loose_modes "${SELF}" "${SOURCE}" "${HERE}")"
+    [ -n "${found}" ] || return 0
+    top="$(cd "${HERE}/../.." 2>/dev/null && pwd)"
+    if [ -n "${top}" ] && [ "${top}/deploy/unraid" -ef "${HERE}" ]; then
+        printf -v repair 'chmod -R go-w %q' "${top}"
+    else
+        repair="chmod go-w"
+        while read -r _ line; do printf -v repair '%s %q' "${repair}" "${line}"; done <<<"${found}"
+    fi
+    nl=$'\n'
+    found="    ${found//${nl}/${nl}    }"
+    if [ "$1" = refuse ]; then
+        logger -t mcpanel -- "shutdown hook NOT installed or removed: group or others can write to ${HERE} (repair as root: ${repair})" 2>/dev/null || true
+        fail "refusing: group or others can write to what root runs here (mode, path):
+${found}
+Whoever can change these files (an SMB user, a container that mounts the folder) could run code
+as root at the next array start or shutdown. Nothing was changed. Repair it (as root), then run
+this command again:
+    ${repair}"
+    fi
+    say "WARNING: group or others can write to what root runs here (mode, path):"
+    say "${found}"
+    say "         'install' and 'remove' refuse until it is repaired (as root):"
+    say "    ${repair}"
 }
 
 # The hook as it is installed for a Compose project: the source with that name as the default
@@ -118,6 +166,7 @@ cmd_install() {
     [[ "${project}" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] ||
         fail "not a Compose project name: '${project}' (lowercase letters, digits, - and _; see 'docker compose ls')"
     need_source
+    check_modes refuse
     need_unraid
     need_root
     mkdir -p "${EVENT_DIR}" || fail "could not create ${EVENT_DIR}"
@@ -139,6 +188,7 @@ cmd_status() {
     local project
     [ "$#" -eq 0 ] || usage
     need_source
+    check_modes warn
     if [ ! -e "${TARGET}" ]; then
         say "Not installed: ${TARGET} does not exist."
         say "Install it with: bash ${HERE}/install-hook.sh install"
@@ -166,6 +216,7 @@ cmd_status() {
 
 cmd_remove() {
     [ "$#" -eq 0 ] || usage
+    check_modes refuse
     need_unraid
     need_root
     if [ ! -e "${TARGET}" ]; then

@@ -71,11 +71,17 @@ If the repository is private, clone with a GitHub personal access token.
 
 ```bash
 cd /mnt/user/appdata
-git clone https://github.com/cj7s1/mcserver.git mcpanel-src
+(umask 022 && git clone https://github.com/cj7s1/mcserver.git mcpanel-src)
+chmod -R go-w mcpanel-src
 cd mcpanel-src/deploy
 ./scripts/generate-secrets.sh
 nano .env
 ```
+
+Root runs `upgrade.sh`, `install-hook.sh` and `backup-db.sh` from this folder, so nobody but root
+may be able to change its files: `upgrade.sh`, the hook installer and the database copy refuse to
+run while group or others can write them, and print the repair (`chmod -R go-w <the folder>`).
+docs/SECURITY.md, "The source folder", has the details and what this check cannot cover.
 
 Unraid-specific values:
 
@@ -379,13 +385,15 @@ managed from this panel over HTTPS with a pinned certificate. See DEPLOYMENT.md,
 ## 8. Updating
 
 ```bash
-cd /mnt/user/appdata/mcpanel-src && git pull
+cd /mnt/user/appdata/mcpanel-src && (umask 022 && git pull)
 cd deploy
 ./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
 ./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
 
-Use the command the dry run prints in its last line. **The first upgrade from the version with
+`umask 022` keeps the files `git pull` rewrites writable by root only; when group or others can
+write a file of the folder, the dry run warns and `run` refuses with the repair
+(`chmod -R go-w /mnt/user/appdata/mcpanel-src`). Use the command the dry run prints in its last line. **The first upgrade from the version with
 seven platform containers is `./scripts/upgrade.sh run --with-migrations`**: the new version
 changes the database schema, and a plain `run` refuses before it changes anything.
 

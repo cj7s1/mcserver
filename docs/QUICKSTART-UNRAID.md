@@ -87,12 +87,20 @@ We'll use these folders (create nothing yet, Docker creates them):
 
 ```bash
 cd /mnt/user/appdata
-git clone -b main https://github.com/cj7s1/mcserver.git mcpanel-src
+(umask 022 && git clone -b main https://github.com/cj7s1/mcserver.git mcpanel-src)
+chmod -R go-w mcpanel-src
 cd mcpanel-src/deploy
 ```
 
+* Root runs scripts from this folder: the upgrade, the shutdown hook at every array start and the
+  daily database copy. `appdata` is usually reachable over SMB and from other containers, so only
+  root may be able to change these files: `umask 022` and `chmod -R go-w` see to that (without them
+  the Unraid terminal can leave every file writable by everybody). The scripts check it and refuse
+  to run otherwise, printing the same `chmod -R go-w` command. Whoever can write to `appdata`
+  itself could still swap the whole folder: see docs/SECURITY.md, "The source folder".
 * If `git` is missing: install it with a plugin (NerdTools or un-get), or download the zip from the
-  GitHub page (**Code → Download ZIP**), unpack it to `/mnt/user/appdata/mcpanel-src`, and continue.
+  GitHub page (**Code → Download ZIP**), unpack it to `/mnt/user/appdata/mcpanel-src`, run
+  `chmod -R go-w /mnt/user/appdata/mcpanel-src`, and continue.
 * If the repository is **private**, GitHub asks for a username and password. Use your GitHub
   username and a **personal access token** (GitHub → Settings → Developer settings → Personal access
   tokens) as the password.
@@ -360,11 +368,16 @@ before you stop the array.
 ## 12. Updating MCPanel
 
 ```bash
-cd /mnt/user/appdata/mcpanel-src && git pull
+cd /mnt/user/appdata/mcpanel-src && (umask 022 && git pull)
 cd deploy
 ./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
 ./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
+
+`umask 022` keeps the files `git pull` rewrites writable by root only. If group or others can
+write a file of the source folder, the dry run warns and `run` refuses before it changes anything;
+both print the repair, `chmod -R go-w /mnt/user/appdata/mcpanel-src` (adjust the path to yours).
+A folder installed before this check needs it once.
 
 The dry run ends with the command to use. When the new version changes the database, that
 command is `./scripts/upgrade.sh run --with-migrations`, and a plain `run` refuses without

@@ -115,8 +115,19 @@
 #                                       from its first change on (a command that refuses or only
 #                                       shows something leaves none; the newest 10 are kept)
 #
+# Who can change this checkout: root runs this script, builds the panel and the agent (which gets
+# the Docker socket) from the checkout and runs git in it. `run`, `rollback` and `restore-db --yes`
+# refuse, before they change anything, while group or others can write a file or folder that git
+# tracks here, the checkout's own folder, its .git folder, .git/config, .git/hooks or deploy/.env;
+# `status` and the dry runs only warn. The message names the repair (`chmod -R go-w <checkout>`).
+# git runs without fsmonitor and hooks, and everything the script writes gets umask 022 or stricter.
+# Files that a `git pull` rewrites get the umask of the shell that pulls: `(umask 022 && git pull)`.
+#
 # Needs bash, docker with the compose plugin, and git. Nothing else.
 set -uo pipefail
+# Whatever the umask of the shell (with 000 every file a `git checkout` of `rollback` rewrites would
+# be writable by everybody). Files with secrets are written under umask 077 where they are made.
+umask 022
 
 # The standard error the script was started with. Messages go there (warn), also from a trap that
 # runs while the output of a command is redirected into a file.
@@ -284,7 +295,68 @@ dc() {
         *) (cd "$DEPLOY_DIR" && docker compose "$@") ;;
     esac
 }
-g() { git -C "$DEPLOY_DIR" "$@"; }
+# git runs as root here: no fsmonitor command and no hooks, whatever .git/config or .git/hooks hold.
+GIT_SAFE=(-c core.fsmonitor= -c core.hooksPath=/dev/null)
+g() { git "${GIT_SAFE[@]}" -C "$DEPLOY_DIR" "$@"; }
+
+# --- who can change what root runs ----------------------------------------------------------------
+# Whoever can write the files root runs and builds from (an SMB user, a container that mounts the
+# folder) could run code as root on this host. The check covers what git tracks (and the folders
+# that hold it), the checkout's own folder, .git, .git/config, .git/hooks and deploy/.env.
+TOP_DIR=$(dirname -- "$DEPLOY_DIR")
+
+loose_modes() { # lines "<mode> <path>" (relative to TOP_DIR) of what group or others can write
+    local -a paths=(./. ./.git ./.git/config ./.git/hooks)
+    local -A seen=()
+    local file dir mode name
+    while IFS= read -r -d '' file; do
+        paths+=("./$file")
+        dir=$file
+        while [[ "$dir" == */* ]]; do
+            dir=${dir%/*}
+            [ -z "${seen[$dir]:-}" ] || break
+            seen[$dir]=1
+            paths+=("./$dir")
+        done
+    done < <(git "${GIT_SAFE[@]}" -C "$TOP_DIR" ls-files -z 2>/dev/null)
+    (
+        cd "$TOP_DIR" || exit 0
+        # A symbolic link is skipped: what it points to is checked on its own. deploy/.env is
+        # followed (-L), wherever it points.
+        find "${paths[@]}" -maxdepth 0 ! -type l -perm /022 -printf '%m %p\n' 2>/dev/null
+        [ ! -e deploy/.env ] || find -L ./deploy/.env -maxdepth 0 -perm /022 -printf '%m %p\n' 2>/dev/null
+    ) | while read -r mode name; do
+        printf '%s %s\n' "$mode" "${name#./}"
+    done
+}
+
+check_modes() { # check_modes refuse|warn
+    local found line count=0 shown="" repair
+    found=$(loose_modes)
+    [ -n "$found" ] || return 0
+    while IFS= read -r line; do
+        count=$((count + 1))
+        [ "$count" -gt 8 ] || shown="$shown
+           $line"
+    done <<<"$found"
+    [ "$count" -le 8 ] || shown="$shown
+           ... and $((count - 8)) more"
+    printf -v repair 'chmod -R go-w %q' "$TOP_DIR"
+    # chmod -R leaves the target of a symbolic link alone; named on the command line it is changed
+    [ ! -L "$DEPLOY_DIR/.env" ] || printf -v repair '%s && chmod go-w %q' "$repair" "$DEPLOY_DIR/.env"
+    if [ "$1" = refuse ]; then
+        refuse "refusing: group or others can write to $count file(s) or folder(s) of this checkout (mode, path):$shown
+         Root runs this script, builds the panel and the agent (Docker socket) from these files and runs
+         git here: whoever can change them (an SMB user, a container that mounts the folder) could run
+         code as root on this host. Nothing was changed. Repair it (as root), then run this command again:
+           $repair
+         To keep it that way, pull with: (umask 022 && git pull)"
+    fi
+    warn "WARNING: group or others can write to $count file(s) or folder(s) of this checkout (mode, path):$shown
+         'run', 'rollback' and 'restore-db' refuse until it is repaired (as root):
+           $repair
+         To keep it that way, pull with: (umask 022 && git pull)"
+}
 
 in_list() { # in_list WORD LIST...
     local word="$1" item
@@ -992,7 +1064,7 @@ cmd_status() {
         say "              source tree; 'git checkout --detach $(short "$FROM_REV")' is the checkout that fits what runs."
     fi
     if [ "$branch" != "(detached)" ] && upstream=$(g rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null); then
-        remote_rev=$(run_limited 15 git -C "$DEPLOY_DIR" ls-remote "${upstream%%/*}" "refs/heads/${upstream#*/}" 2>/dev/null)
+        remote_rev=$(run_limited 15 git "${GIT_SAFE[@]}" -C "$DEPLOY_DIR" ls-remote "${upstream%%/*}" "refs/heads/${upstream#*/}" 2>/dev/null)
         remote_rev=${remote_rev%%[[:space:]]*}
         if [ -z "$remote_rev" ]; then
             say "Upstream:     $upstream could not be asked"
@@ -2234,6 +2306,13 @@ main() {
         shift
     done
     case "$TIMEOUT" in '' | *[!0-9]*) die "--timeout needs a number of seconds" ;; esac
+    # Before anything else: can others change what root runs here? Commands that change things
+    # refuse, the others warn.
+    case "$command" in
+        status | dry-run) check_modes warn ;;
+        run | rollback) if [ "$DRY" = 1 ]; then check_modes warn; else check_modes refuse; fi ;;
+        restore-db) if [ "$YES" = 1 ]; then check_modes refuse; else check_modes warn; fi ;;
+    esac
     # What these three print goes into a log as well, once they begin to change things (begin_log).
     case "$command" in
         run | rollback) [ "$DRY" = 1 ] || LOG_WANTED=1 ;;

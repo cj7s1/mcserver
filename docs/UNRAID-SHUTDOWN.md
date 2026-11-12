@@ -103,7 +103,15 @@ bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh status
 ```
 
 This copies the hook to `/usr/local/emhttp/plugins/mcpanel/event/stopping_docker`. That folder
-is in RAM and is rebuilt at every boot, so the install has to run again at every boot. Pick one:
+is in RAM and is rebuilt at every boot, so the install has to run again at every boot.
+
+`install` and `remove` refuse while group or others can write `install-hook.sh`, `stopping_docker`
+or their folder: root runs both. The message, also written to the syslog with the tag `mcpanel`,
+names the repair: `chmod -R go-w /mnt/user/appdata/mcpanel-src` for the checkout, a `chmod go-w` of
+the files found for a copy elsewhere. `status` only warns. See docs/SECURITY.md, "The source
+folder".
+
+Pick one way to run the install at every boot:
 
 **User Scripts plugin.** Add a script with these two lines and set its schedule to
 **At Startup of Array**:

@@ -18,10 +18,17 @@ stop, reboot and shutdown.
 ## Install
 
 ```bash
-git clone https://github.com/cj7s1/mcserver.git
+(umask 022 && git clone https://github.com/cj7s1/mcserver.git)
 cd mcserver/deploy
 ./scripts/generate-secrets.sh        # writes .env with random secrets; refuses to overwrite
 ```
+
+Root (or a member of the `docker` group, which amounts to the same) runs the scripts of this
+checkout and builds the images from it, so only its owner may be able to change it.
+`scripts/upgrade.sh`, `unraid/install-hook.sh` and `unraid/backup-db.sh` refuse to run while group
+or others can write the files they depend on, and print the repair (`chmod -R go-w <checkout>`).
+Where the default umask is 002 (distributions that give every user a group of their own), clone
+and pull with `umask 022` as above. docs/SECURITY.md, "The source folder", has the details.
 
 Edit `.env` (every variable is documented in `deploy/.env.example`):
 
@@ -500,11 +507,19 @@ Notes:
 ## Upgrading
 
 ```bash
-cd mcserver && git pull
+cd mcserver && (umask 022 && git pull)
 cd deploy
 ./scripts/upgrade.sh dry-run     # shows what will happen; changes nothing
 ./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
+
+`git pull` writes the files it changes with the umask of your shell; `umask 022` keeps them
+writable by their owner only. Before anything else, `run`, `rollback` and `restore-db --yes` refuse
+(exit 2) while group or others can write a file or folder git tracks in the checkout, the
+checkout's folder, `.git`, `.git/config`, `.git/hooks` or `deploy/.env`; `status` and the dry runs
+only warn. The message lists them and names the repair, `chmod -R go-w <checkout>`. The script runs
+git without fsmonitor and hooks (`-c core.fsmonitor= -c core.hooksPath=/dev/null`) and under
+`umask 022`.
 
 The dry run ends with `Nothing was changed. To do it: ...`. Use the command it prints. When the new
 version changes the database schema, that command is `./scripts/upgrade.sh run --with-migrations`,
@@ -860,7 +875,9 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
   container of the Compose project (without the login sessions), writes
   `mcpanel-db-<date>-<time>.sql.gz` and next to it `mcpanel-db-<date>-<time>.env`, a copy of
   `deploy/.env`, into its destination folder, and keeps the newest 14 of each pair. The folder is
-  made 0700 and the files 0600. A dump that `pg_dump` did not finish is never kept.
+  made 0700 and the files 0600. A dump that `pg_dump` did not finish is never kept. Root runs it,
+  so it ends with `FAILED`, writing nothing, while group or others can write the script, its folder
+  or the `.env` it copies; the message names the repair (`chmod -R go-w <checkout>`).
 
   ```
   backup-db.sh [--project NAME] [--env FILE] [--keep N] [DEST_DIR]

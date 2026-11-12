@@ -33,6 +33,9 @@
 #
 # The same sequences against a stand-in for docker: backend/tests/test_upgrade_script.py.
 set -uo pipefail
+# The fast-forward and checkouts below write files with this umask: upgrade.sh refuses a checkout
+# whose files group or others can write (security review 2026-11-11, D-2).
+umask 022
 
 SITE=${1:?usage: upgrade-rehearsal.sh SITE NEW_REV [URL]}
 NEW_REV=${2:?usage: upgrade-rehearsal.sh SITE NEW_REV [URL]}

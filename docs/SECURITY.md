@@ -273,6 +273,40 @@ folder off network shares and store copies like passwords.
 The images of the version before the last upgrade stay on the host under the names
 `mcpanel-rollback/...`. They contain no secrets (secrets come from `.env` at start).
 
+## The source folder
+
+Root runs `deploy/scripts/upgrade.sh`, `deploy/unraid/install-hook.sh` (at every array start; it
+installs `stopping_docker`, which root runs at shutdown) and `deploy/unraid/backup-db.sh` (daily)
+from the checkout, and `upgrade.sh` builds the panel and the agent (which gets the Docker socket)
+from it. Whoever can change a file there runs code as root at the next upgrade, array start,
+shutdown or nightly dump. On the owner's server (review of 2026-11-11) the scripts were mode 777 and
+the compose file 666, in the `appdata` share, which is exported over SMB.
+
+* **The scripts check it before they change anything.** `upgrade.sh run`, `rollback` and
+  `restore-db --yes` refuse (exit 2) while group or others can write a file or folder that git
+  tracks, the checkout's own folder, `.git`, `.git/config`, `.git/hooks` or `deploy/.env` (followed
+  when it is a symbolic link); `status`, `dry-run` and `rollback --dry-run` only warn.
+  `install-hook.sh install` and `remove` refuse while group or others can write the script,
+  `stopping_docker` or their folder (`status` warns; the refusal also goes to the syslog), and
+  `backup-db.sh` ends with `FAILED` while they can write the script, its folder or the `.env` it
+  copies. Every message lists what it found and names the repair: `chmod -R go-w <checkout>`, and
+  `chmod go-w <path>` for a path outside the checkout (a copy of the hook files in
+  `/boot/config/mcpanel`, an `.env` given with `--env`).
+* **git as root.** `upgrade.sh` runs git with `-c core.fsmonitor= -c core.hooksPath=/dev/null`, so
+  no command from `.git/config` or `.git/hooks` runs, and under `umask 022`: a `rollback` checkout
+  never leaves files writable by others. `install-hook.sh` makes its folders under `umask 022` too.
+* **`git pull` is yours.** It writes the files it changes with the umask of your shell, and the
+  Unraid terminal can leave them writable by everybody. Pull with `(umask 022 && git pull)`; the
+  documented commands do.
+* **What the check cannot see.** Whoever can write the folder that holds the checkout
+  (`/mnt/user/appdata` on Unraid: mode 777 on the owner's server) can rename the whole checkout and
+  put another one in its place. The paths in User Scripts and `/boot/config/go` then run that one,
+  and its scripts check nothing. So keep that folder out of other people's reach as well: do not
+  export `appdata` over SMB or NFS with write access for other users (Shares → appdata → SMB
+  Security Settings), and do not give containers you do not fully trust a mount of `/mnt/user` or
+  of `appdata` as a whole. Files git does not track are not checked (adding one needs write access
+  to a folder that is).
+
 ## Images
 
 * The panel and agent images are built on your host and never pulled (`pull_policy: never`): an
