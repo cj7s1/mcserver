@@ -2,7 +2,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { qk } from "./queries";
-import { sendAuthFrame } from "./session-token";
+import { noteSocketFrame, sendAuthFrame } from "./session-token";
 import type { AuthState } from "./types";
 
 export function wsUrl(path: string): string {
@@ -60,12 +60,14 @@ export function useLiveEvents(enabled: boolean): boolean {
       sock.onopen = () => {
         // first frame: this browser's session token (D-1); the panel sends no event before it
         sendAuthFrame(sock);
-        setConnected(true);
         retry.current = 1000;
       };
       sock.onmessage = (ev) => {
+        // live once the panel accepted the token: its auth_ok (or, from a panel without it, its first event)
+        setConnected(true);
         try {
           const msg = JSON.parse(ev.data) as { type: string; instance_id: string | null; payload: any };
+          if (noteSocketFrame(sock, msg)) return;
           applyLiveEvent(qc, msg);
         } catch {
           /* ignore malformed */

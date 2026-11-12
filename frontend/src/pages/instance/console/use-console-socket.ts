@@ -7,7 +7,9 @@
  * Stop of the server or refused; `id` names the command it answers, whose command_result with the same
  * text follows; `job_id` is the stop job). Unknown types are ignored.
  * Client → server: auth{token} first (this browser's session token, D-1: the panel sends nothing, not even
- * hello, and takes no other frame before it), then command{id,command}.
+ * hello, and takes no other frame before it), then command{id,command}. The panel accepts the token with
+ * auth_ok (its first frame; a panel without it starts with hello): commands sent before that wait in a
+ * queue and go out then, in order; a close drops them (the page reports them as without result).
  *
  * Reconnects with exponential backoff (1 s → 30 s). The backoff only resets once a
  * connection has stayed up for a while so a server that accepts and immediately
@@ -16,7 +18,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { closeSocket, sessionStillValid, wsUrl } from "@/lib/events";
-import { sendAuthFrame, socketAuthenticated } from "@/lib/session-token";
+import { noteSocketFrame, sendAuthFrame, socketAccepted, socketAuthenticated } from "@/lib/session-token";
 
 export type ConsoleServerMessage =
   | { type: "hello"; can_command: boolean }
@@ -54,6 +56,8 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
   const [containerState, setContainerState] = useState<string | null>(null);
   const [retryAt, setRetryAt] = useState<number | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  /** frames the page sent before the panel accepted the socket's auth frame */
+  const queueRef = useRef<string[]>([]);
   const reconnectRef = useRef<() => void>(() => {});
   const qc = useQueryClient();
 
@@ -74,6 +78,7 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
       const sock = new WebSocket(wsUrl(`/ws/instances/${instanceId}/console/`));
       ws = sock;
       wsRef.current = sock;
+      queueRef.current = [];
       sock.onopen = () => {
         sendAuthFrame(sock);
         healthyTimer = setTimeout(() => {
@@ -89,6 +94,14 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
         } catch {
           return;
         }
+        const wasAccepted = socketAccepted(sock);
+        const authOk = noteSocketFrame(sock, msg);
+        if (!wasAccepted && socketAccepted(sock) && wsRef.current === sock) {
+          const queued = queueRef.current;
+          queueRef.current = [];
+          for (const frame of queued) sock.send(frame);
+        }
+        if (authOk) return;
         switch (msg.type) {
           case "hello":
             setCanCommand(!!msg.can_command);
@@ -110,7 +123,10 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
         handler.current(msg);
       };
       sock.onclose = (ev: CloseEvent) => {
-        if (wsRef.current === sock) wsRef.current = null;
+        if (wsRef.current === sock) {
+          wsRef.current = null;
+          queueRef.current = [];
+        }
         clearTimeout(healthyTimer);
         if (life.disposed || ws !== sock) return;
         handler.current({ type: "_disconnected" });
@@ -168,9 +184,11 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
 
   const send = useCallback((msg: { type: "command"; id: string; command: string }): boolean => {
     const ws = wsRef.current;
-    // never before the auth frame (sent first thing on open); the input waits for hello anyway
+    // never before the auth frame (sent first thing on open)
     if (!ws || ws.readyState !== WebSocket.OPEN || !socketAuthenticated(ws)) return false;
-    ws.send(JSON.stringify(msg));
+    // and only once the panel accepted it: until then the frame waits (the input waits for hello anyway)
+    if (socketAccepted(ws)) ws.send(JSON.stringify(msg));
+    else queueRef.current.push(JSON.stringify(msg));
     return true;
   }, []);
 

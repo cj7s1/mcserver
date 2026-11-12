@@ -337,25 +337,58 @@ describe("WebSockets", () => {
     return ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
   }
 
-  it("the live events socket sends the auth frame first, on every connect; the token is not in its URL", () => {
+  const serverSends = (sock: FakeSocket, msg: unknown) => act(() => sock.onmessage?.({ data: JSON.stringify(msg) }));
+
+  it("the live events socket sends the auth frame first and is live on auth_ok; the token is not in its URL", () => {
     const view = renderHook(() => useLiveEvents(true), { wrapper: wrap() });
     const sock = FakeSocket.all[0];
     expect(sock.sent).toEqual([]);
     act(() => sock.open());
     expect(sock.sent).toEqual([JSON.stringify({ type: "auth", token: TOKEN })]);
+    expect(view.result.current).toBe(false); // open, but not accepted yet
+    serverSends(sock, { type: "auth_ok" });
+    expect(view.result.current).toBe(true);
     expect(sock.url).not.toContain(TOKEN);
     view.unmount();
   });
 
-  it("the console sends the auth frame before any command, and no command before it", () => {
-    const view = renderHook(() => useConsoleSocket("abc", () => {}), { wrapper: wrap() });
+  it("a panel without auth_ok: the first event makes the events socket live", () => {
+    const view = renderHook(() => useLiveEvents(true), { wrapper: wrap() });
+    const sock = FakeSocket.all[0];
+    act(() => sock.open());
+    serverSends(sock, { type: "instance.status", instance_id: "x", payload: {} });
+    expect(view.result.current).toBe(true);
+    view.unmount();
+  });
+
+  it("the console: auth frame first; a command sent before auth_ok waits for it and is not shown to the page", () => {
+    const seen: string[] = [];
+    const view = renderHook(() => useConsoleSocket("abc", (m) => seen.push(m.type)), { wrapper: wrap() });
     const sock = FakeSocket.all[0];
     expect(view.result.current.send({ type: "command", id: "c0", command: "list" })).toBe(false);
     act(() => sock.open());
     expect(view.result.current.send({ type: "command", id: "c1", command: "list" })).toBe(true);
+    expect(sock.sent.map((f) => JSON.parse(f).type)).toEqual(["auth"]);
+    serverSends(sock, { type: "auth_ok" });
     expect(sock.sent.map((f) => JSON.parse(f).type)).toEqual(["auth", "command"]);
+    expect(JSON.parse(sock.sent[1])).toEqual({ type: "command", id: "c1", command: "list" });
+    expect(seen).not.toContain("auth_ok");
+    serverSends(sock, { type: "hello", can_command: true });
+    expect(view.result.current.send({ type: "command", id: "c2", command: "say hi" })).toBe(true);
+    expect(sock.sent).toHaveLength(3);
     expect(JSON.parse(sock.sent[0])).toEqual({ type: "auth", token: TOKEN });
     expect(sock.url).toBe(`ws://${window.location.host}/ws/instances/abc/console/`);
+    view.unmount();
+  });
+
+  it("the console with a panel that sends no auth_ok: its hello accepts the socket", () => {
+    const view = renderHook(() => useConsoleSocket("abc", () => {}), { wrapper: wrap() });
+    const sock = FakeSocket.all[0];
+    act(() => sock.open());
+    view.result.current.send({ type: "command", id: "c1", command: "list" });
+    serverSends(sock, { type: "hello", can_command: true });
+    expect(sock.sent.map((f) => JSON.parse(f).type)).toEqual(["auth", "command"]);
+    expect(view.result.current.state).toBe("connected");
     view.unmount();
   });
 });

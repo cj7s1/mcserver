@@ -59,6 +59,7 @@ export function sessionTokenHeaders(token: string | null = getSessionToken()): R
 }
 
 const authedSockets = new WeakSet<WebSocket>();
+const acceptedSockets = new WeakSet<WebSocket>();
 
 /**
  * The first frame of every panel WebSocket (console, live events): `{"type": "auth", "token": ...}`. The
@@ -70,7 +71,23 @@ export function sendAuthFrame(sock: WebSocket): void {
   authedSockets.add(sock);
 }
 
-/** Whether `sock` already sent its auth frame (only then may the page send its own frames). */
+/** Whether `sock` already sent its auth frame. */
 export function socketAuthenticated(sock: WebSocket | null | undefined): boolean {
   return !!sock && authedSockets.has(sock);
+}
+
+/**
+ * Call for every frame the panel sends. The panel answers a good auth frame with `{"type": "auth_ok"}` as
+ * its first frame; a panel that does not send it yet starts with its usual frames, so any first frame
+ * after the auth frame accepts the socket. Returns true for `auth_ok` itself, which carries nothing else
+ * (the caller skips it).
+ */
+export function noteSocketFrame(sock: WebSocket, msg: unknown): boolean {
+  if (authedSockets.has(sock)) acceptedSockets.add(sock);
+  return !!msg && typeof msg === "object" && (msg as { type?: unknown }).type === "auth_ok";
+}
+
+/** Whether the panel accepted `sock`'s auth frame (only then are the page's own frames sent). */
+export function socketAccepted(sock: WebSocket | null | undefined): boolean {
+  return !!sock && acceptedSockets.has(sock);
 }
