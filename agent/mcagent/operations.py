@@ -92,8 +92,11 @@ class OperationRegistry:
             return self._ops.get(op_id) if op_id else None
 
     def assert_lifecycle_allowed(self, instance_id: UUID) -> None:
+        """409 ``instance_busy`` while an operation that blocks the lifecycle is pending or running for the
+        server. One that already finished does not block, also before its runner has cleared it (as
+        :meth:`start` already judged it)."""
         op = self.active_for(instance_id)
-        if op and op.kind in BLOCKS_LIFECYCLE:
+        if op and op.kind in BLOCKS_LIFECYCLE and op.status in ("pending", "running"):
             raise AgentError(f"Instance is busy with a '{op.kind}' operation", "instance_busy", 409)
 
     def start(
