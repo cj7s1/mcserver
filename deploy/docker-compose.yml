@@ -9,7 +9,7 @@
 #
 # Services (three containers):
 #   postgres  the database
-#   agent     the ONLY service with the Docker socket; creates the Minecraft containers
+#   agent     the ONLY service with the Docker socket; creates the game server containers
 #   panel     everything else, as processes of one container under a small supervisor
 #             (backend/container/supervise.py): redis (Unix socket only, no persistence),
 #             web (UI + API + WebSockets), worker (Celery: jobs, and periodic tasks when a
@@ -26,12 +26,14 @@
 #   internal           panel, agent, postgres (and redis with the profile). Not marked
 #                      `internal: true` because the panel needs outbound HTTPS to
 #                      Mojang/Modrinth/CurseForge/FTB.
-#   mcpanel_instances  shared by the agent and every Minecraft container it creates,
-#                      so the agent reaches RCON (25575) via the container IP without
-#                      publishing it. Postgres/Redis/panel are NOT on this network.
-#                      Minecraft containers (third-party mod code) can reach the agent
-#                      port on it; every agent request except /v1/health requires
-#                      the bearer token, so keep MCPANEL_AGENT_TOKEN long and secret.
+#   mcpanel_instances  shared by the agent and every game server container it creates,
+#                      so the agent reaches their control ports (RCON, REST, WebRCON)
+#                      via the container IP without publishing them. Postgres/Redis/
+#                      panel are NOT on this network. The agent refuses every request
+#                      that comes from this network, even with a valid token
+#                      (agent/mcagent/netguard.py). The game servers on it reach each
+#                      other's ports: one bridge for all (docs/SECURITY.md, "What a
+#                      compromised game server can reach").
 #
 # Minecraft server containers are created by the agent through the Docker API, not by
 # Compose: `docker compose down` leaves running servers alone (and Compose will report

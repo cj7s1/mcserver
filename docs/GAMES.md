@@ -1,11 +1,35 @@
 # Game notes: Palworld, Valheim, Project Zomboid, HKMP, Counter-Strike 2, Rust
 
 What you need to know before you create a server of one of these games: which ports to forward on your
-router, how long the first start takes and how much disk and memory it needs, and the few rules of each
-game. Minecraft, Factorio, Satisfactory and Terraria are described in the [README](../README.md) and
-[docs/UNRAID.md](UNRAID.md) section 5.
+router, who can join once you do, how long the first start takes and how much disk and memory it needs,
+and the few rules of each game. Minecraft, Factorio, Satisfactory and Terraria are described in the
+[README](../README.md) and [docs/UNRAID.md](UNRAID.md) section 5.
 
-All six have in common:
+## Who can join by default
+
+Once a game's port is forwarded on your router, this is who can join, for all ten games, until you
+change the settings:
+
+| Game | Default |
+|---|---|
+| Minecraft | any Mojang account (online mode on, whitelist off); not listed anywhere |
+| Factorio | anyone with a factorio.com account; the game password is optional; not listed publicly |
+| Satisfactory | your choice at creation: a join password or open; the panel publishes it only after it claimed it |
+| Terraria, tModLoader, TShock | **anyone**: the server password is empty by default |
+| Palworld | **anyone** unless you set a join password (Secrets); not on the community server list |
+| Valheim | only with the join password (required); not listed |
+| Project Zomboid | **anyone can create an account** ("Anyone may create an account" is on; off = whitelist only); not listed |
+| HKMP | **anyone** (its whitelist is off) |
+| Counter-Strike 2 | **anyone** unless you set a join password; with a GSLT the server is listed in Steam's browser |
+| Rust | **anyone**: the panel offers no password or whitelist, and Rust servers normally appear in the in-game server list |
+
+Forwarding Satisfactory's TCP port (the game needs it) also puts its HTTPS API on the internet,
+protected by the admin password the panel generated. A server's host address is `0.0.0.0` by
+default: every IPv4 address of the host, VPN interfaces included. What a game server can reach if it
+is compromised (every other game server on the same Docker network, the host, the LAN):
+[docs/SECURITY.md](SECURITY.md), "What a compromised game server can reach".
+
+## What the six have in common
 
 * **No version to choose.** The image downloads the game from Steam (Project Zomboid: with
   DepotDownloader) on the first start and checks for an update at every start, so the server always runs
@@ -30,8 +54,8 @@ All six have in common:
 
 ## Palworld
 
-* **Ports:** forward the game port, UDP 8211 by default. The REST API the panel uses (8212) stays inside
-  the panel's Docker network.
+* **Ports:** forward the game port, UDP 8211 by default. The REST API the panel uses (8212) is never
+  published (the other game servers on the panel's Docker network can still reach it).
 * **First start:** about 1-2 minutes; the game takes about 4.6 GB in the server folder (left out of
   backups). Later starts take seconds.
 * **Memory:** at least 8 GB, 16 GB by default; big worlds and many players need more.
@@ -62,7 +86,8 @@ All six have in common:
 
 ## Project Zomboid
 
-* **Ports:** forward both UDP ports, 16261 and 16262 by default. RCON stays inside the panel's network.
+* **Ports:** forward both UDP ports, 16261 and 16262 by default. RCON (27015/tcp) is never published.
+* **Privileges:** the image runs the game as root (it never drops to `MC_UID`): docs/SECURITY.md.
 * **First start:** a few minutes; the game takes about 7 GB on disk (left out of backups). Every start
   validates the game files (about half a minute).
 * **Memory:** at least 4 GB, 8 GB by default. The Java heap is the server's memory minus 2 GB.
@@ -91,7 +116,7 @@ All six have in common:
 ## Counter-Strike 2
 
 * **Ports:** forward the game port on UDP, 27015 by default (and the CSTV port, UDP 27020, while CSTV is
-  on). RCON uses the same number on TCP inside the panel's network: never forward the TCP port.
+  on). RCON uses the same number on TCP and is never published: never forward the TCP port.
 * **First start:** the whole game is downloaded: about **60 GB** in the server folder. Check the free
   space first; on a slow line the first start takes hours (the panel waits up to 4 hours for it).
 * **Memory:** at least 2 GB, 4 GB by default.
@@ -105,7 +130,7 @@ All six have in common:
 ## Rust
 
 * **Ports:** forward the game port and the query port on UDP (28015 and 28017 by default), and with Rust+
-  on the app port on TCP (28082). WebRCON stays inside the panel's network.
+  on the app port on TCP (28082). WebRCON (28016/tcp) is never published.
 * **First start:** the game (about 10 GB) is downloaded and the map is generated: several minutes, longer
   for big maps.
 * **Memory:** at least 10 GB, 16 GB by default.

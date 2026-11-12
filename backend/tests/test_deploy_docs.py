@@ -37,3 +37,50 @@ def test_d2_the_checkout_is_cloned_pulled_and_repaired_so_that_only_root_can_cha
     # what the check cannot cover is said, too
     assert "can rename the whole checkout and put another one in its place" in security
     assert "chmod -R go-w" in read("docs/UNRAID-SHUTDOWN.md")
+
+
+# --- A-1, A-9: what the network isolates, who can join -------------------------------------------------
+def test_a1_no_document_claims_the_game_servers_are_isolated_from_each_other():
+    security = words("docs/SECURITY.md")
+    assert "only the agent reaches them on the container network" not in security
+    assert "**which every game server shares**" in security
+    assert "nothing on your network can take it over first" not in words("docs/UNRAID.md")
+    assert "nothing outside the host can take it over first" in words("docs/UNRAID.md")
+    games = read("docs/GAMES.md")
+    assert "inside the panel's network" not in games and "inside the panel's Docker network" not in words("docs/GAMES.md")
+    header = read("deploy/docker-compose.yml").split("name: mcpanel", 1)[0]
+    assert "can reach the agent port" not in header and "only the token" not in header
+    assert "The agent refuses every request" in header and "reach each" in header
+
+
+def test_a9_who_can_join_and_what_a_compromised_server_reaches_are_documented():
+    games = read("docs/GAMES.md")
+    table = games.split("## Who can join by default", 1)[1].split("\n## ", 1)[0]
+    for game in (
+        "Minecraft",
+        "Factorio",
+        "Satisfactory",
+        "Terraria, tModLoader, TShock",
+        "Palworld",
+        "Valheim",
+        "Project Zomboid",
+        "HKMP",
+        "Counter-Strike 2",
+        "Rust",
+    ):
+        assert f"| {game} |" in table, game
+    assert "**anyone can create an account**" in table and "no password or whitelist" in table
+    readme = words("README.md")
+    assert '"Who can join by default"' in readme and '"What a compromised game server can reach"' in readme
+    security = read("docs/SECURITY.md")
+    assert "### What a compromised game server can reach" in security
+    assert "### Palworld, Valheim, Project Zomboid, HKMP, Counter-Strike 2, Rust" in security
+    flat = words("docs/SECURITY.md")
+    for needle in (
+        "`-adminpassword`",
+        "VPN interfaces (Tailscale, WireGuard) included",
+        "Rust's WebRCON (28016)",
+        "The Docker host on every address:",
+        "The LAN and the internet",
+    ):
+        assert needle in flat, needle

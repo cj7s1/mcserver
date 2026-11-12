@@ -155,17 +155,48 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
   SWAG, Caddy, Traefik…) and set `MCPANEL_BEHIND_TLS_PROXY=true`, `MCPANEL_SECURE_COOKIES=true`,
   `MCPANEL_ALLOWED_HOSTS` and `MCPANEL_CSRF_TRUSTED_ORIGINS` to the public hostname. Prefer a VPN
   (WireGuard/Tailscale) over exposing the panel publicly at all.
-* The panel never configures router port forwarding, UPnP or DNS. Minecraft game ports are published
-  on the Docker host only; making them reachable from the internet is a deliberate step you take on
-  your router.
-* RCON (Minecraft 25575, Factorio 27015) and TShock's REST API (7878) are never published; only the agent reaches them on the
-  container network. Game ports are published per protocol (Factorio: UDP).
+* The panel never configures router port forwarding, UPnP or DNS. Game ports are published on the
+  Docker host only; making them reachable from the internet is a deliberate step you take on your
+  router. A server's host address (`host_ip`) is `0.0.0.0` by default: every IPv4 address of the
+  host, VPN interfaces (Tailscale, WireGuard) included, and no IPv6.
+* Control ports are never published, for any game and by any path (create, a change of ports,
+  clone, restore, import): RCON (Minecraft 25575, Factorio and Project Zomboid 27015,
+  Counter-Strike 2 on its game port's number over TCP), TShock's REST API (7878), Palworld's REST
+  API (8212), Rust's WebRCON (28016) and its web page (8080). The agent reaches them over the
+  instance network `mcpanel_instances`, **which every game server shares**: the other game servers
+  reach them too (next section). Game ports are published per protocol (Factorio: UDP).
 * Redis (job queue, live events, cache) has no password and its cache holds pickled objects, so
   whoever can write to it can run code in the panel. It therefore has no network listener at all:
   it runs inside the panel container on a Unix socket (`--port 0`, mode 700) in `/run/mcpanel`, a
   memory-only directory of the panel's runtime user. Nothing outside that container can reach it,
   the agent and the Minecraft containers included. Only with the optional `external-redis` Compose
   profile is Redis a container on the internal network again, as it was before.
+
+### What a compromised game server can reach
+
+A game server runs code you do not control (mods, plugins, the game itself, and whoever exploits a
+bug in it through its forwarded port). Docker's namespaces and the dropped capabilities contain the
+process; the network is Docker's default and MCPanel does not restrict it yet:
+
+* **Every other game server.** All game servers sit on one bridge, `mcpanel_instances`, with
+  Docker's default of open traffic between its members. Code in one of them reaches every other
+  server's control ports (the list above) and game ports, also of servers you did not forward or
+  bound to one address, and Docker's DNS resolves their names. The control secrets the panel
+  generates are 32 random characters (191 bits) and cannot be guessed; what is exposed is anything
+  weaker: an admin password you chose yourself (Palworld's REST API uses it), a Minecraft backend in
+  offline mode behind Velocity or BungeeCord (whoever reaches its port joins under any name), and a
+  new Satisfactory server during its first setup: the panel claims it before it publishes any port,
+  but a neighbour on the bridge can claim it first. The setup then stops with "claimed with another
+  admin password" and the server is never published.
+* **The Docker host on every address:** the Unraid web UI, SMB/NFS, every port another container
+  publishes on the host, and the panel's own port when it is published on a LAN address.
+* **The LAN and the internet** (Docker's default outbound NAT). It cannot simply be cut: Minecraft
+  checks accounts with Mojang, and the Steam images download the game at every start.
+
+Not reachable from a game container: the agent's API (it refuses requests from the instance
+network even with a valid token, above), Postgres, the panel's container address, Redis, a panel
+published on `127.0.0.1`, and containers on other Docker networks. No profile grants `NET_RAW` or
+`NET_ADMIN`, so a game container cannot spoof addresses or sniff the bridge.
 
 ## One panel container
 
@@ -374,7 +405,7 @@ would stop that server itself at array stop and count it as stopped by hand.
 * World saving that a backup switched off (`save-off`) is switched on again even if the agent
   process ends during the pause (a marker file; `save-on` at shutdown, at start and every 30 s).
 
-## Games other than Minecraft (Factorio, Satisfactory, Terraria)
+## Games other than Minecraft (Factorio, Satisfactory, Terraria, and six Steam games)
 
 Each game is reviewed code: a definition in the panel and a runtime profile in the agent
 (ARCHITECTURE.md, "Games"). The panel and users still cannot choose images, mounts, capabilities,
@@ -400,8 +431,9 @@ has no profile for.
   The agent replaces the password with `********` in every log text it hands out (the console, the
   log download, the last-run record), so console viewers in the panel do not see it; `docker logs`
   on the host still shows it. It only grants RCON, which is reachable from the instance network
-  only. The panel writes it to `config/rconpw` before every start (from the server's encrypted
-  control secret); the file API never hands that file out (download, zips: the agent leaves it out,
+  only, which every game server shares ("What a compromised game server can reach"). The panel
+  writes it to `config/rconpw` before every start (from the server's encrypted control secret); the
+  file API never hands that file out (download, zips: the agent leaves it out,
   backup browser) and never writes, renames or deletes it or its folder (403 `managed_file`); it is in
   backups (restic, encrypted).
 * **Secrets per server** (`Instance.secrets`, for tokens a game needs) are encrypted like the RCON
@@ -494,8 +526,10 @@ Games that take commands on their console only (Terraria) get one line at a time
 * **Claiming.** An unclaimed Satisfactory server belongs to whoever reaches its API first (a
   passwordless `InitialAdmin` login works until it is claimed). The panel never publishes such a
   server: its spec has no ports until the setup's claim, join-password and game steps are done
-  (`setup_state.ports_open`). The game writes `saved/ServerSettings.7777.sav` before anybody claimed
-  it, so that file proves nothing; what counts is the **claim marker** `.mcpanel/claim-verified`
+  (`setup_state.ports_open`). Until the claim, another game server on the instance network can reach
+  the API and claim it first ("What a compromised game server can reach"); the setup then stops
+  with `claimed_elsewhere` and the server stays unpublished. The game writes
+  `saved/ServerSettings.7777.sav` before anybody claimed it, so that file proves nothing; what counts is the **claim marker** `.mcpanel/claim-verified`
   (size, `mtime_ns` and SHA-256 of that file), which only the agent writes, after it verified the
   claim through the API (an `InitialAdmin` login is refused, an `Administrator` login with the panel's
   admin password works) on a container **without published ports**, or right after the panel's own
@@ -560,6 +594,46 @@ Games that take commands on their console only (Terraria) get one line at a time
   container (a different port would be a new, unclaimed server). Its variables that download other
   branches, skip updates or print every variable (`STEAMAPPID`, `STEAMBETA*`, `SKIPUPDATE`,
   `DEBUG`, ...) are refused by the panel and the agent.
+
+### Palworld, Valheim, Project Zomboid, HKMP, Counter-Strike 2, Rust
+
+The same rules as above: a reviewed definition and profile per game, the image and tag allow-list,
+an environment allow-list with a pattern for every value (the panel checks it, the agent again),
+the control ports in `never_publish`, `no-new-privileges`, only folders inside the server's own
+folder mounted, and `restart_policy: no` (Docker never starts these servers by itself). Their images download the game
+from Steam at every start (HKMP's server is in its image): code from the internet, into the server
+folder. Rust's image is pinned by digest; the others are exact version tags, which whoever controls
+the image's repository can still move.
+
+| Game | Who runs the game | Capabilities | Control port (never published) |
+|---|---|---|---|
+| Palworld | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE FOWNER SETUID SETGID | REST API 8212/tcp (HTTP Basic with the admin password); RCON 25575/tcp is off |
+| Valheim | root at start; supervisord stays root and runs the game as `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE SETUID SETGID KILL | none (no remote console); the image's ports 80 and 9001 are off |
+| Project Zomboid | **root**: the image never drops privileges | CHOWN DAC_OVERRIDE FOWNER | RCON 27015/tcp |
+| HKMP | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE FOWNER SETUID SETGID | none (console input through the one exec) |
+| Counter-Strike 2 | uid 1000:1000 from the start (the image's user) | none (Docker's init as PID 1) | RCON on the game port's number over TCP |
+| Rust | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE SETUID SETGID | WebRCON 28016/tcp and its web page 8080/tcp |
+
+* **Project Zomboid's game runs as root** with three capabilities: the process that reads packets
+  from the internet on its UDP ports is uid 0. Unraid has no user namespaces, so uid 0 in the
+  container is uid 0 of the host, held back only by the namespaces, the capability set and Docker's
+  seccomp profile. Treat a Project Zomboid server (and its mods) as the most privileged of the six.
+* **Secrets on the command line.** Project Zomboid's image passes the admin password as
+  `-adminpassword`, and Rust's start line carries the RCON password: anything that can list the
+  host's processes (`ps`) reads them, and the launchers print them into the container log. The
+  agent masks them in every log text it hands out (console, log download, last-run record, command
+  replies); `docker logs` on the host still shows them. Counter-Strike 2's image writes the RCON
+  password into `server.cfg` at every start; the file API never writes that file, and the editor and
+  downloads mask it.
+* **Image defaults never survive.** The panel generates the control secret (32 characters, 191
+  bits) and the admin passwords (Palworld 24 characters, Project Zomboid 20), and the agent always
+  replaces the images' defaults (CS2's `changeme`, Rust's `docker`, Project Zomboid's `admin`); an
+  injected value must match the variable's pattern.
+* **Who owns the files.** `MC_UID`/`MC_GID` is 99:100 on Unraid (`nobody:users`), the owner of all
+  share data, and Counter-Strike 2's fixed 1000 is normally the first Unraid user account. A game
+  that breaks out of its container as that uid, even without root, reaches what that uid owns.
+* **Who can join** once a port is forwarded: docs/GAMES.md, "Who can join by default". Rust has no
+  password or whitelist in the panel, and Project Zomboid lets anyone create an account by default.
 
 ## Reporting
 

@@ -128,6 +128,13 @@ repair (`chmod -R go-w <checkout>`).
 > Modded servers run third-party code. Docker raises the bar but is not a strong sandbox, so only install
 > content you trust. Never expose the panel to the internet without HTTPS, and preferably use a VPN.
 
+> **Before you forward a game's port**, check who can join: Terraria, Palworld, HKMP and
+> Counter-Strike 2 let anyone in until you set a password, Rust has no password or whitelist in the
+> panel, and Project Zomboid lets anyone create an account
+> ([docs/GAMES.md](docs/GAMES.md), "Who can join by default"). A compromised game server can reach
+> the other game servers, the host and your LAN
+> ([docs/SECURITY.md](docs/SECURITY.md), "What a compromised game server can reach").
+
 ## Development
 
 See [CLAUDE.md](CLAUDE.md) for repository layout and commands, and [TESTING.md](TESTING.md) for the test

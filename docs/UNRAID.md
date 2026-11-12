@@ -203,7 +203,9 @@ stops them before Docker stops, and starts them again after boot:
   as root with four capabilities and drops to `MC_UID`/`MC_GID` (99:100), so its files belong to
   `nobody:users` too. The game itself (2.8 GB) is downloaded into the server folder on the first
   start and left out of backups; give it at least 8 GB of RAM (12 GB by default). The panel claims
-  the server before its ports are published, so nothing on your network can take it over first.
+  the server before its ports are published, so nothing outside the host can take it over first.
+  Another game server on the same Docker network could (a compromised one, docs/SECURITY.md): the
+  setup then stops with "claimed with another admin password" and the server is never published.
 * A Terraria server uses **TCP** 7777 by default (the next free TCP port when that one is taken, for
   example by a Satisfactory server); forward that TCP port. Vanilla and tModLoader run as root with
   five capabilities and drop to `MC_UID`; because the image cannot reuse the existing group 100
