@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -276,13 +277,23 @@ def test_lines_that_are_refused(line):
 @pytest.mark.parametrize(
     "line",
     ["C-c", "c-d", "M-x", "^C", "S-Tab", "Escape", "enter", "Up", "F1", "KPEnter", "0x03", "MouseDown1Pane",
-     "-R", "-t other", "say done;", "x;"],
+     "-R", "-t other", "say done\\;", "x\\;"],
 )  # fmt: skip
 def test_tmux_guard_refuses_what_tmux_would_not_type(line):
     with pytest.raises(AgentError):
         console_io.sanitise_line(line, guard="tmux")
-    if not line.startswith("-") and not line.endswith(";"):
+    if not line.startswith("-"):
         assert console_io.sanitise_line(line) == line  # without the guard (stdin) it is just text
+
+
+@pytest.mark.parametrize(("line", "typed"), [("kick griefer;", "kick griefer\\;"), ("ban x;;", "ban x;\\;")])
+def test_a_line_ending_in_a_semicolon_is_typed_escaped(fake_api, line, typed):
+    """C-6 (security review 2026-11-11): a player named "griefer;" can be kicked. tmux reads a final ";" as
+    its command separator (nothing is typed) and types a final "\\;" as ";" (checked with tmux 3.8)."""
+    assert console_io.sanitise_line(line, guard="tmux") == line
+    assert drivers.for_profile(terraria.VANILLA).write(FakeContainer(), line) == line
+    (call,) = fake_api.created
+    assert call["cmd"] == ["inject", typed]
 
 
 def test_exec_template_rules():
@@ -695,3 +706,25 @@ def test_command_endpoint_refuses_a_bad_line(api, auth, monkeypatch, fake_api):
     r = api.post(f"/v1/instances/{IID}/command", headers=auth, json={"command": "C-c"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "console_line_refused"
     assert fake_api.created == []
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+def test_tmux_types_the_escaped_semicolon_literally(tmp_path):
+    """C-6, against a real tmux: what tmux_text hands to send-keys is typed as the line."""
+    import subprocess
+
+    tmux = ["tmux", "-S", str(tmp_path / "sock"), "-f", "/dev/null"]
+    subprocess.run([*tmux, "new-session", "-d", "-s", "t", "-x", "100", "-y", "10", "cat"], check=True)
+    try:
+        time.sleep(0.3)
+        for line in ("kick griefer;", "ban x;;", "say a;b"):
+            typed = console_io.tmux_text(console_io.sanitise_line(line, guard="tmux"))
+            subprocess.run([*tmux, "send-keys", "-t", "t", typed, "Enter"], check=True)
+        time.sleep(0.5)
+        pane = subprocess.run(
+            [*tmux, "capture-pane", "-t", "t", "-p"], check=True, capture_output=True, text=True
+        )
+        shown = [ln for ln in pane.stdout.splitlines() if ln.strip()]
+        assert shown == ["kick griefer;", "kick griefer;", "ban x;;", "ban x;;", "say a;b", "say a;b"]
+    finally:
+        subprocess.run([*tmux, "kill-server"], check=False)

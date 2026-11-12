@@ -42,7 +42,9 @@ SECRET_FILE = "config/rconpw"  # noqa: S105 - a path, not a password
 DEFAULT_IMAGES = ("factoriotools/factorio", "docker.io/factoriotools/factorio")
 TAG_PATTERN = r"\d{1,4}\.\d{1,4}\.\d{1,5}-rootless"
 READY_PATTERN = r"Starting RCON interface at"
-SAVE_DONE_PATTERN = r"Saving finished"
+# the game's own line ("   600.707 Info AppManagerStates.cpp:2131: Saving finished"), never a chat line
+# ("... [CHAT] name: Saving finished") (C-3)
+SAVE_DONE_PATTERN = r"^\s*\d+\.\d+ Info \S+: Saving finished\s*$"
 
 # The variables the panel sets, with the values the agent accepts.
 ENV_VALUES = {

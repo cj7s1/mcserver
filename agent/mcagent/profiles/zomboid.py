@@ -43,7 +43,9 @@ DEFAULT_IMAGES = (
 )
 TAG_PATTERN = r"v\d{1,3}\.\d{1,3}\.\d{1,3}"
 READY_PATTERN = r"\*\*\* SERVER STARTED \*\*\*\*"
-SAVE_DONE_PATTERN = r"Saving finish"
+# the game's own line ("LOG  : General      f:0 st:395,038,282> Saving finish"): the message right after
+# the channel's prefix, never text of a chat line (C-3)
+SAVE_DONE_PATTERN = r"^LOG\s*:\s*General\b[^>]*>(?:\s*[\d,]+>)?\s*Saving finish\.?\s*$"
 
 ENV_VALUES: dict[str, str] = {
     "TZ": steam.TZ,

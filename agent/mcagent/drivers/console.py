@@ -181,7 +181,8 @@ class ConsoleDriver(ControlDriver):
         """Write the line; the exec program's output (exec transport), else None."""
         if self.transport == "exec":
             assert self.exec_argv is not None
-            return console_io.exec_line(c, self.exec_argv, line, user=self.exec_user(c))
+            typed = console_io.tmux_text(line) if self.guard == "tmux" else line
+            return console_io.exec_line(c, self.exec_argv, typed, user=self.exec_user(c))
         console_io.write_stdin(c, line)
         return None
 

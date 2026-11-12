@@ -17,7 +17,8 @@ most the profile's length, printable only (no control, format, surrogate or priv
 characters, no line or paragraph separators). With the ``tmux`` guard, lines tmux would not type
 literally are refused as well: a single word that tmux reads as a key name (``C-c``, ``Escape``,
 ``0x03``, ``F1``, ...), a line that starts with ``-`` (an option of ``send-keys``) or ends with
-``;`` (tmux's command separator).
+a backslash and ``;``. A final ``;`` (tmux's command separator) is typed as ``\\;``
+(:func:`tmux_text`), which tmux types as ``;``.
 
 Lines of one server are written one at a time (:func:`console_lock`, a per-server lock of its
 own: the lifecycle lock is held while a restart stops the server, and the stop may itself write
@@ -110,8 +111,9 @@ def sanitise_line(text: str, *, max_len: int = DEFAULT_MAX_LINE, guard: str | No
     if guard == "tmux":
         if line.startswith("-"):
             raise refused("it starts with '-'")
-        if line.endswith(";"):
-            raise refused("it ends with ';'")
+        if line.endswith("\\;"):
+            # tmux reads a final "\;" as an escaped ";" and would type the line without the backslash
+            raise refused("it ends with '\\;', which the console cannot type as it is")
         if is_tmux_key(line):
             raise refused(f"'{line}' would be sent as a key, not as text")
     elif guard == "screen":
@@ -125,6 +127,14 @@ def sanitise_line(text: str, *, max_len: int = DEFAULT_MAX_LINE, guard: str | No
     elif guard is not None:
         raise ValueError(f"Unknown console guard {guard!r}")
     return line
+
+
+def tmux_text(line: str) -> str:
+    """The argument ``tmux send-keys`` types as ``line``: tmux reads an argument that ends in ";" as a
+    command separator (nothing is typed), and types a final backslash-semicolon as ";" (C-6; checked with
+    tmux 3.8).
+    For a line that passed the ``tmux`` guard."""
+    return line[:-1] + "\\;" if line.endswith(";") else line
 
 
 def validate_exec_template(argv: Sequence[str]) -> tuple[str, ...]:

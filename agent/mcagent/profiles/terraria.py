@@ -58,7 +58,8 @@ VANILLA_TAG = r"terraria-\d{1,3}\.\d{1,3}\.\d{1,3}(?:\.\d{1,3})?"
 TMODLOADER_TAG = r"tmodloader-\d{4}\.\d{1,2}\.\d{1,3}\.\d{1,3}"
 TSHOCK_TAG = r"tshock-\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}-\d{1,3}\.\d{1,3}\.\d{1,3}"
 READY_PATTERN = r"Server started"
-SAVE_DONE_LOG = r"Backing up world file"
+# the server's own line (vanilla/tModLoader print it after the ": " prompt), never chat ("<name> text") (C-3)
+SAVE_DONE_LOG = r"^(?::\s*)?Backing up world file\s*$"
 PASSIVELEMON_CAPS = ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID")
 PASSIVELEMON_DATA = "/opt/terraria/config"
 TSHOCK_DATA = "/config"

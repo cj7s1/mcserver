@@ -439,7 +439,7 @@ def test_factorio_driver_from_its_options():
     assert isinstance(d, RconDriver)
     assert (d.port, d.secret_env, d.secret_file) == (27015, None, "config/rconpw")
     assert (d.commands.save_before_stop, d.commands.stop) == ("/server-save", None)
-    assert d.commands.save_done_log == "Saving finished"
+    assert d.commands.save_done_log == factorio.SAVE_DONE_PATTERN
     assert d.can_save and not d.can_pause_saving
     with pytest.raises(ValueError):
         RconDriver(port=27015, commands=RconCommands())
@@ -505,7 +505,7 @@ def test_save_waits_for_the_log_line():
         lambda i, m: reports.append(m),
         lambda p, s, t: waits.append((p, t)) or True,
     )
-    assert sent == [("/server-save", 120)] and waits == [("Saving finished", 120)]
+    assert sent == [("/server-save", 120)] and waits == [(factorio.SAVE_DONE_PATTERN, 120)]
     assert reports == ["Saving the map (/server-save)"]
     with pytest.raises(AgentError) as exc:
         driver.save(lambda *_a: None, lambda *_a: None, lambda *_a: False)
@@ -516,7 +516,7 @@ def test_save_waits_for_the_log_line():
 def test_backup_save_of_factorio_waits_for_the_log(agent_settings, monkeypatch):
     sent: list[str] = []
     c = _Container(labels={"io.mcpanel.game": "factorio"})
-    c.log_text = b"Saving finished\n"
+    c.log_text = b" 600.707 Info AppManagerStates.cpp:2131: Saving finished\n"
     monkeypatch.setattr(docker_ops, "status", lambda _iid: {"running": True, "game": "factorio"})
     monkeypatch.setattr(docker_ops, "running_container", lambda _iid: c)
     monkeypatch.setattr(main, "_rcon", lambda _s, _i, cmd, _t: sent.append(cmd))
@@ -568,7 +568,7 @@ def test_stop_saves_and_waits_for_saving_finished(stopping, monkeypatch):
     result = docker_ops.graceful_stop(stopping.settings, stopping.container, 120)
     assert stopping.sent == [(27015, SECRET, "/server-save")]
     assert stopping.log == [("rcon", "/server-save"), ("waited",), ("docker stop", 120)]
-    assert waited == [("Saving finished", docker_ops.flush_timeout(120))]
+    assert waited == [(factorio.SAVE_DONE_PATTERN, docker_ops.flush_timeout(120))]
     assert result.flushed is True and result.warnings == [] and result.stop_sent_via_rcon is False
 
 

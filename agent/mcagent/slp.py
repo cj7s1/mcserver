@@ -106,8 +106,16 @@ def _plain_text(component: Any, depth: int = 0) -> str:
     return ""
 
 
+# a player count above this is not believable (and would not fit the panel's integer column; C-1)
+MAX_COUNT = 100_000
+
+
 def _count(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    """A player count the server reported: an int in 0..MAX_COUNT, anything else 0 (as before for a
+    value that is not a count)."""
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_COUNT:
+        return value
+    return 0
 
 
 def parse_status(text: str) -> dict[str, Any]:

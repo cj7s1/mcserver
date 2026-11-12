@@ -212,6 +212,16 @@ def test_status_parsing_is_bounded_and_defensive():
         slp.parse_status("not json")
 
 
+def test_a_lying_player_count_is_not_passed_on():
+    """C-1 (security review 2026-11-11): counts above 100,000 (and beyond the panel's integer column) are
+    not believable; they read as 0 like any other value that is not a count."""
+    reply = json.dumps({"players": {"online": 10**12, "max": 2**40, "sample": []}, "version": {"name": "x"}})
+    status = slp.parse_status(reply)
+    assert status["online"] == 0 and status["max"] == 0
+    ok = slp.parse_status(json.dumps({"players": {"online": 100_000, "max": 20}}))
+    assert ok["online"] == 100_000 and ok["max"] == 20
+
+
 @pytest.mark.parametrize("value", [0, 1, 127, 128, 255, 25565, 2**31 - 1, -1])
 def test_varint_round_trip(value):
     encoded = slp.varint(value)

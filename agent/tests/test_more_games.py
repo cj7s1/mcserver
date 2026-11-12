@@ -844,7 +844,7 @@ def test_zomboid_saves_and_waits_for_the_line(settings, monkeypatch):
     c = RconContainer({"RCON_PASSWORD": PASSWORD})
     result = StopResult()
     drivers.for_profile(zomboid.PROFILE).stop(settings, c, 120, result)
-    assert calls == ["save", "Saving finish"] and result.flushed and c.stopped_with == 120
+    assert calls == ["save", zomboid.SAVE_DONE_PATTERN] and result.flushed and c.stopped_with == 120
 
 
 class SrcdsFake:
