@@ -105,7 +105,7 @@ def players(instance: Any) -> int | None:
 def _line(instance: Any) -> str:
     count = players(instance)
     who = f", {count} player{'' if count == 1 else 's'} online" if count is not None else ""
-    return f"**{instance.name}** ({instance_label(instance)}): {STATE_WORDS.get(instance.status, instance.status)}{who}"
+    return f"{instance.name} ({instance_label(instance)}): {STATE_WORDS.get(instance.status, instance.status)}{who}"
 
 
 def instance_label(instance: Any) -> str:
@@ -224,7 +224,7 @@ def start_run(caller: Caller, instance: Any) -> Reply:
     except ApiError as exc:
         return Reply(f"{instance.name} was not started: {_clip(str(exc.detail), 600)}")
     return Reply(
-        f"Starting {instance.name}… I will tell you when it is ready.",
+        f"Starting {instance.name}… I will post here when it is ready; /status {instance.name} always shows how it goes.",
         ephemeral=False,
         follow=(str(instance.pk), str(job.pk)),
         announce=f"{caller.name} is starting {instance.name}.",

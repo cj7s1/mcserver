@@ -78,7 +78,7 @@ def test_status_shows_the_fresh_player_count_and_the_address(make_instance: Any)
     inst = _available(make_instance, name="Survival", status="running")
     _players(inst, 2)
     text = logic.status(FRIEND, "survival").text
-    assert "**Survival** (Minecraft" in text and "running, 2 players online" in text
+    assert "Survival (Minecraft" in text and "running, 2 players online" in text
     assert f"Address: play.example.org:{inst.game_port}" in text
     MetricSample.objects.all().delete()
     _players(inst, 2, age=600)  # an old count is not shown
@@ -204,12 +204,18 @@ def test_the_service_user_cannot_sign_in() -> None:
 
 
 # --- the discord.py side, with fakes of its interaction objects --------------------------------------------
+def _pings_nobody(allowed: Any) -> None:
+    """Every message the bot sends says that it mentions nobody (F-8 of the review of 2026-11-12)."""
+    assert allowed.everyone is False and allowed.users is False and allowed.roles is False
+
+
 class FakeResponse:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool]] = []
         self.deferred: dict[str, bool] | None = None
 
-    async def send_message(self, text: str, *, ephemeral: bool = False) -> None:
+    async def send_message(self, text: str, *, ephemeral: bool = False, allowed_mentions: Any) -> None:
+        _pings_nobody(allowed_mentions)
         self.sent.append((text, ephemeral))
 
     async def defer(self, *, ephemeral: bool = False, thinking: bool = False) -> None:
@@ -220,7 +226,8 @@ class FakeFollowup:
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool]] = []
 
-    async def send(self, text: str, *, ephemeral: bool = False) -> None:
+    async def send(self, text: str, *, ephemeral: bool = False, allowed_mentions: Any) -> None:
+        _pings_nobody(allowed_mentions)
         self.sent.append((text, ephemeral))
 
 
@@ -241,7 +248,8 @@ class FakeChannel:
     def __init__(self) -> None:
         self.sent: list[str] = []
 
-    async def send(self, text: str) -> None:
+    async def send(self, text: str, *, allowed_mentions: Any) -> None:
+        _pings_nobody(allowed_mentions)
         self.sent.append(text)
 
 
@@ -292,7 +300,10 @@ def test_a_start_from_discord_is_answered_announced_and_followed(
     with django_capture_on_commit_callbacks(execute=False):
         async_to_sync(scenario)()
     assert interaction.response.deferred == {"ephemeral": False, "thinking": True}
-    assert interaction.followup.sent[0] == ("Starting Survival… I will tell you when it is ready.", False)
+    assert interaction.followup.sent[0] == (
+        "Starting Survival… I will post here when it is ready; /status Survival always shows how it goes.",
+        False,
+    )
     assert interaction.followup.sent[-1][0] == "Survival is ready."
     assert client.channel.sent == ["Robin is starting Survival.", "Survival is ready."]
     # used in the announcement channel itself: no second copy there
@@ -549,3 +560,81 @@ def test_per_server_discord_fields(clients: Any, make_instance: Any) -> None:
     inst.refresh_from_db()
     assert inst.discord_available and inst.discord_roles == sorted([ROLE, OTHER_ROLE]) and inst.discord_share_password
     assert clients["owner"].patch(url, {"discord_roles": ["not-an-id"]}, format="json").status_code == 400
+
+
+# --- review of 2026-11-12: F-1 the database, F-8 mentions -----------------------------------------------------
+@pytest.mark.django_db(transaction=True)
+def test_the_bot_survives_a_dropped_database_connection() -> None:
+    """An upgrade recreates Postgres: the bot's next command must open a new connection (F-1)."""
+    import psycopg
+    from django.db import connection
+
+    connection.ensure_connection()
+    pid = connection.connection.info.backend_pid
+    db = connection.settings_dict
+    with psycopg.connect(
+        host=db["HOST"], port=db["PORT"], user=db["USER"], password=db["PASSWORD"], dbname=db["NAME"], autocommit=True
+    ) as admin:
+        admin.execute("select pg_terminate_backend(%s)", [pid])
+    assert async_to_sync(bot._db(Instance.objects.count))() == 0
+    assert async_to_sync(bot._db(logic.servers))(FRIEND).text.startswith("No server is available")
+
+
+def test_the_settings_watcher_survives_errors(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    client = bot.make_client(SETTINGS)
+    monkeypatch.setattr(bot, "SETTINGS_POLL_SECONDS", 0.001)
+    calls = {"n": 0}
+    turned_off = config.BotSettings(enabled=False, guild_id=GUILD, roles=(), token=TOKEN)
+
+    def flaky() -> config.BotSettings:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("database connection lost")
+        return turned_off if calls["n"] > 3 else SETTINGS.__class__(**{**SETTINGS.__dict__, "roles": (OTHER_ROLE,)})
+
+    monkeypatch.setattr(config, "load", flaky)
+    async_to_sync(client._watch)()
+    # it went on after two errors, took the new roles at once, and ended the connection when the bot was turned off
+    assert calls["n"] == 4 and client.settings_changed and client.is_closed()
+    assert client.settings.roles == (OTHER_ROLE,)
+    assert "could not read the bot's settings (RuntimeError), 2 time(s) in a row" in caplog.text
+
+
+def test_the_watcher_gives_up_the_connection_after_repeated_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = bot.make_client(SETTINGS)
+    monkeypatch.setattr(bot, "SETTINGS_POLL_SECONDS", 0.001)
+
+    def broken() -> config.BotSettings:
+        raise RuntimeError("database is gone")
+
+    monkeypatch.setattr(config, "load", broken)
+    async_to_sync(client._watch)()
+    assert client.watch_failed and client.is_closed() and not client.settings_changed
+
+    # run() then starts over with fresh settings (or the process exits and the supervisor starts it again)
+    class WatchFailed(FakeGatewayClient):
+        async def start(self, token: str) -> None:
+            self.watch_failed = True
+
+    monkeypatch.setattr(bot, "make_client", lambda _s: WatchFailed())
+    kind, message, _ready = async_to_sync(bot.connect_once)(SETTINGS)
+    assert kind == "network" and message == "The bot could not read its settings from the panel's database"
+
+
+def test_names_never_ping_format_or_link(make_instance: Any) -> None:
+    name = "@everyone [free](https://evil.example) **x**"
+    _available(make_instance, name=name, status="stopped")
+    _pings_nobody(bot.make_client(SETTINGS).allowed_mentions)
+    caller = logic.Caller(id="923456789012345678", name="<@&223456789012345678> # boss", role_ids=frozenset({ROLE}))
+    interaction, client = FakeInteraction(caller), FakeClient()
+
+    async def scenario() -> None:
+        task = await bot.handle_start(interaction, SETTINGS, name, client=client)
+        if task is not None:
+            task.cancel()
+
+    async_to_sync(scenario)()
+    posted = [*interaction.texts(), *client.channel.sent]
+    assert posted and all("@everyone" not in t and "<@&" not in t.replace("<@​&", "") for t in posted)
+    assert all("https://" not in t and "](" not in t.replace("\\](", "") for t in posted)
+    assert bot.clean("# Big\n- item **b** @here discord.gg/x") == "\\# Big\n\\- item \\*\\*b\\*\\* @​here discord.gg​/x"

@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from asgiref.sync import sync_to_async
+from django.db import connections
 
 from . import config, logic, state
 
@@ -28,6 +31,50 @@ RETRY_MAX = 300.0  # ... at most 5 minutes apart
 REJECTED_RETRY = 1800.0  # Discord refused the token or the guild: every 30 minutes, or at once on a settings change
 WAIT_POLL_SECONDS = 10.0  # while waiting: how often the settings are read (and the status refreshed)
 WRONG_GUILD = "This bot only answers in its own Discord server."
+WATCH_FAILURES_MAX = 5  # the settings watcher's failures in a row before the connection is made again
+
+
+def _fresh_connections() -> None:
+    """``close_old_connections()`` for this long-lived process: a database connection the server dropped (an
+    upgrade recreates Postgres) is closed, so the next query opens a new one. Not inside a transaction (tests)."""
+    for conn in connections.all(initialized_only=True):
+        if not conn.in_atomic_block:
+            conn.close_if_unusable_or_obsolete()
+
+
+def _db(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """``sync_to_async(fn)`` with fresh database connections before and after (as Django does per request)."""
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        _fresh_connections()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _fresh_connections()
+
+    return sync_to_async(call)
+
+
+def no_mentions() -> Any:
+    """Nothing the bot posts pings anyone (a member's nickname or a server name may hold @everyone or a role)."""
+    import discord
+
+    return discord.AllowedMentions.none()
+
+
+_MARKDOWN = re.compile(r"([\\*_~`|\[\]>])")
+_MENTION = re.compile(r"@(everyone|here|[!&]?[0-9]{15,22})")
+_LINE_START = re.compile(r"(?m)^(\s*)([#-])")
+_URL = re.compile(r"(?i)\b(https?|discord\.gg)(:|/)")
+
+
+def clean(text: str) -> str:
+    """What the bot posts, with Discord's markdown, mentions, headings, quotes and links made plain text: names
+    (of members and servers) and error texts are printed as they are, never formatted, linked or pinging."""
+    text = _MARKDOWN.sub(r"\\\1", str(text))
+    text = _MENTION.sub("@\u200b\\1", text)
+    text = _LINE_START.sub(r"\1\\\2", text)
+    return _URL.sub("\\1\u200b\\2", text)
 
 
 def caller_of(interaction: Any) -> logic.Caller:
@@ -42,7 +89,7 @@ def right_guild(interaction: Any, settings: config.BotSettings) -> bool:
 
 
 async def _send(interaction: Any, reply: logic.Reply) -> None:
-    await interaction.response.send_message(reply.text, ephemeral=reply.ephemeral)
+    await interaction.response.send_message(clean(reply.text), ephemeral=reply.ephemeral, allowed_mentions=no_mentions())
 
 
 async def _announce(client: Any, settings: config.BotSettings, text: str, interaction: Any = None) -> None:
@@ -53,7 +100,7 @@ async def _announce(client: Any, settings: config.BotSettings, text: str, intera
     try:
         channel = client.get_channel(int(settings.channel_id))
         if channel is not None:
-            await channel.send(text)
+            await channel.send(clean(text), allowed_mentions=no_mentions())
     except Exception as exc:  # an announcement is a courtesy: never the command's failure
         log.info("could not announce in the channel: %s", type(exc).__name__)
 
@@ -63,14 +110,14 @@ async def follow(interaction: Any, client: Any, settings: config.BotSettings, in
     deadline = time.monotonic() + logic.FOLLOW_SECONDS
     message = None
     while time.monotonic() < deadline:
-        message = await sync_to_async(logic.follow_up)(instance_id, job_id)
+        message = await _db(logic.follow_up)(instance_id, job_id)
         if message is not None:
             break
         await asyncio.sleep(FOLLOW_POLL_SECONDS)
     if message is None:
-        message = await sync_to_async(logic.follow_timeout)(instance_id)
+        message = await _db(logic.follow_timeout)(instance_id)
     try:
-        await interaction.followup.send(message)
+        await interaction.followup.send(clean(message), allowed_mentions=no_mentions())
     except Exception as exc:  # the interaction may have expired (15 minutes)
         log.info("could not send the follow-up: %s", type(exc).__name__)
     await _announce(client, settings, message, interaction)
@@ -80,41 +127,41 @@ async def follow(interaction: Any, client: Any, settings: config.BotSettings, in
 # --- the command handlers ------------------------------------------------------------------------------------
 async def handle_servers(interaction: Any, settings: config.BotSettings) -> None:
     if not right_guild(interaction, settings):
-        await interaction.response.send_message(WRONG_GUILD, ephemeral=True)
+        await interaction.response.send_message(WRONG_GUILD, ephemeral=True, allowed_mentions=no_mentions())
         return
-    await _send(interaction, await sync_to_async(logic.servers)(caller_of(interaction)))
+    await _send(interaction, await _db(logic.servers)(caller_of(interaction)))
 
 
 async def handle_status(interaction: Any, settings: config.BotSettings, server: str) -> None:
     if not right_guild(interaction, settings):
-        await interaction.response.send_message(WRONG_GUILD, ephemeral=True)
+        await interaction.response.send_message(WRONG_GUILD, ephemeral=True, allowed_mentions=no_mentions())
         return
-    await _send(interaction, await sync_to_async(logic.status)(caller_of(interaction), server))
+    await _send(interaction, await _db(logic.status)(caller_of(interaction), server))
 
 
 async def handle_join(interaction: Any, settings: config.BotSettings, server: str) -> None:
     if not right_guild(interaction, settings):
-        await interaction.response.send_message(WRONG_GUILD, ephemeral=True)
+        await interaction.response.send_message(WRONG_GUILD, ephemeral=True, allowed_mentions=no_mentions())
         return
     # (reading the join password may ask the node: Discord wants an answer within 3 seconds, so defer first)
     await interaction.response.defer(ephemeral=True, thinking=True)
-    reply = await sync_to_async(logic.join)(caller_of(interaction), server)
-    await interaction.followup.send(reply.text, ephemeral=True)
+    reply = await _db(logic.join)(caller_of(interaction), server)
+    await interaction.followup.send(clean(reply.text), ephemeral=True, allowed_mentions=no_mentions())
 
 
 async def handle_start(interaction: Any, settings: config.BotSettings, server: str, client: Any = None) -> asyncio.Task | None:
     if not right_guild(interaction, settings):
-        await interaction.response.send_message(WRONG_GUILD, ephemeral=True)
+        await interaction.response.send_message(WRONG_GUILD, ephemeral=True, allowed_mentions=no_mentions())
         return None
     caller = caller_of(interaction)
-    instance, refusal = await sync_to_async(logic.start_check)(caller, server, settings)
+    instance, refusal = await _db(logic.start_check)(caller, server, settings)
     if refusal is not None:
         await _send(interaction, refusal)
         return None
     # (the memory admission may ask the node: defer, then answer in public)
     await interaction.response.defer(thinking=True)
-    reply = await sync_to_async(logic.start_run)(caller, instance)
-    await interaction.followup.send(reply.text)
+    reply = await _db(logic.start_run)(caller, instance)
+    await interaction.followup.send(clean(reply.text), allowed_mentions=no_mentions())
     if reply.follow is None:
         return None
     await _announce(client, settings, reply.announce, interaction)
@@ -125,23 +172,23 @@ async def handle_stop(
     interaction: Any, settings: config.BotSettings, server: str, confirm: bool = False, client: Any = None
 ) -> None:
     if not right_guild(interaction, settings):
-        await interaction.response.send_message(WRONG_GUILD, ephemeral=True)
+        await interaction.response.send_message(WRONG_GUILD, ephemeral=True, allowed_mentions=no_mentions())
         return
     caller = caller_of(interaction)
-    instance, refusal = await sync_to_async(logic.stop_check)(caller, server, settings, confirm=confirm)
+    instance, refusal = await _db(logic.stop_check)(caller, server, settings, confirm=confirm)
     if refusal is not None:
         await _send(interaction, refusal)
         return
     await interaction.response.defer(thinking=True)
-    reply = await sync_to_async(logic.stop_run)(caller, instance)
-    await interaction.followup.send(reply.text)
+    reply = await _db(logic.stop_run)(caller, instance)
+    await interaction.followup.send(clean(reply.text), allowed_mentions=no_mentions())
     await _announce(client, settings, reply.announce, interaction)
 
 
 async def handle_complete(interaction: Any, settings: config.BotSettings, current: str) -> list[str]:
     if not right_guild(interaction, settings):
         return []
-    return await sync_to_async(logic.complete)(current)
+    return await _db(logic.complete)(current)
 
 
 # --- discord.py ------------------------------------------------------------------------------------------------
@@ -154,10 +201,11 @@ def make_client(settings: config.BotSettings) -> Any:
         def __init__(self) -> None:
             intents = discord.Intents.none()
             intents.guilds = True  # the guild's roles and channels (no privileged intent)
-            super().__init__(intents=intents)
+            super().__init__(intents=intents, allowed_mentions=no_mentions())
             self.settings = settings
             self.tree = app_commands.CommandTree(self)
             self.settings_changed = False  # (set by _watch before it ends the connection)
+            self.watch_failed = False  # (the watcher could not read the settings WATCH_FAILURES_MAX times)
             self.was_ready = False
             self.tasks: set[asyncio.Task] = set()
             guild = discord.Object(id=int(settings.guild_id))
@@ -239,26 +287,41 @@ def make_client(settings: config.BotSettings) -> Any:
             }
 
         async def _watch(self) -> None:
-            """Every SETTINGS_POLL_SECONDS: a change of token, guild or "enabled" ends this connection (the
-            supervisor starts the process again at once through the wake file, or keeps it idle when off)."""
+            """Every SETTINGS_POLL_SECONDS: a change of token, guild or "enabled" ends this connection (run()
+            connects again with the new settings, or ends when the bot was turned off); roles and channel apply at
+            once. An error (the database is gone for a moment) is logged and tried again; after
+            WATCH_FAILURES_MAX in a row the connection ends too, so run() starts over with fresh settings (or
+            the process exits and the supervisor starts it again)."""
             started = self.settings.fingerprint()
             last_status = 0.0
+            failures = 0
             while not self.is_closed():
                 await asyncio.sleep(SETTINGS_POLL_SECONDS)
                 if self.is_closed():
                     return  # (the connection ended meanwhile; run() goes on with a new client)
-                current = await sync_to_async(config.load)()
-                if current.fingerprint() != started:
-                    log.info("the bot's settings changed; reconnecting")
-                    self.settings_changed = True
-                    await self.close()
-                    return
-                self.settings = current  # roles and channel take effect at once
-                if not self.is_ready():
-                    await sync_to_async(state.write_status)()  # (reconnecting: still alive)
-                elif time.monotonic() - last_status >= STATUS_EVERY_SECONDS:
-                    await sync_to_async(state.write_status)(**self.describe(), connected=True)
-                    last_status = time.monotonic()
+                try:
+                    current = await _db(config.load)()
+                    if current.fingerprint() != started:
+                        log.info("the bot's settings changed; reconnecting")
+                        self.settings_changed = True
+                        await self.close()
+                        return
+                    self.settings = current  # roles and channel take effect at once
+                    if not self.is_ready():
+                        await sync_to_async(state.write_status)()  # (reconnecting: still alive)
+                    elif time.monotonic() - last_status >= STATUS_EVERY_SECONDS:
+                        await sync_to_async(state.write_status)(**self.describe(), connected=True)
+                        last_status = time.monotonic()
+                    failures = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    failures += 1
+                    log.warning("could not read the bot's settings (%s), %d time(s) in a row", type(exc).__name__, failures)
+                    if failures >= WATCH_FAILURES_MAX:
+                        self.watch_failed = True
+                        await self.close()
+                        return
 
     return PanelBot()
 
@@ -299,6 +362,8 @@ async def connect_once(settings: config.BotSettings) -> tuple[str, str, bool]:
             await client.close()
     if getattr(client, "settings_changed", False):
         return "changed", "", bool(getattr(client, "was_ready", False))
+    if getattr(client, "watch_failed", False):
+        return "network", "The bot could not read its settings from the panel's database", False
     return "network", "The connection to Discord ended", bool(getattr(client, "was_ready", False))
 
 
@@ -309,7 +374,7 @@ async def wait_for_change(settings: config.BotSettings, seconds: float) -> bool:
     started = settings.fingerprint()
     while time.monotonic() < deadline:
         await asyncio.sleep(min(WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        current = await sync_to_async(config.load)()
+        current = await _db(config.load)()
         if current.fingerprint() != started:
             return True
         await sync_to_async(state.write_status)()
@@ -323,7 +388,7 @@ async def run() -> int:
     keeps the process idle until its next try or a wake-up from the settings page."""
     delay = RETRY_FIRST
     while True:
-        settings = await sync_to_async(config.load)()
+        settings = await _db(config.load)()
         if not settings.usable:
             await sync_to_async(state.write_status)(connected=False, state="idle", last_error="", retry_at=None)
             return 78
