@@ -927,7 +927,7 @@ def test_apply_holds_the_lock_from_the_creation_of_the_new_container_to_its_star
         _try_the_lock(attempts, instance_id)
         return real_remove(instance_id, **kwargs)
 
-    def create(_settings, instance_id, _spec, _hash, *, name=None):
+    def create(_settings, instance_id, _spec, _hash, *, name=None, warnings=None):
         _try_the_lock(attempts, instance_id)
         assert name == docker_ops.replacement_name(instance_id)  # the old container is still there
         return new_container

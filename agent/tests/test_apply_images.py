@@ -139,7 +139,7 @@ def host(monkeypatch, agent_settings):
     monkeypatch.setattr(docker_ops, "host_cpus", lambda: 24)
     created: list[dict] = []
 
-    def create(settings, instance_id, spec, spec_hash, *, name=None):
+    def create(settings, instance_id, spec, spec_hash, *, name=None, warnings=None):
         docker_ops.build_create_kwargs(settings, instance_id, spec, spec_hash)  # the real checks
         if fake.refuse_create:
             raise AgentError("Docker refused to create the container: no space left", "create_failed", 502)
