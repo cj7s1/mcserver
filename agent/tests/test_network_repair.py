@@ -297,3 +297,163 @@ def test_every_stack_network_seen_before_is_given_back(settings, monkeypatch):
     assert sorted(net for _cid, net, _a in docker.connected) == ["mcpanel_instances", "mcpanel_internal"]
     stored = (settings.state_dir / platformnet.STATE_FILE).read_text()
     assert "mcpanel/agent" in stored
+
+
+# --- lost compose aliases (Unraid's Docker start script reconnects endpoints without them) -----------------------
+class Endpointed(Ctr):
+    """A container whose endpoints carry aliases, IP and MAC."""
+
+    def __init__(self, cid, endpoints, **kw):
+        super().__init__(cid, nets=list(endpoints), **kw)
+        self.endpoints = endpoints
+
+    @property
+    def attrs(self):
+        base = super().attrs
+        base["NetworkSettings"]["Networks"] = {n: dict(self.endpoints[n]) for n in self.nets}
+        return base
+
+
+class AliasDocker(Docker):
+    def __init__(self, containers, projects, refuse_ip=False):
+        super().__init__(containers)
+        self.projects = projects
+        self.refuse_ip = refuse_ip
+        self.calls: list = []
+        self.api = SimpleNamespace(
+            connect_container_to_network=self._connect_ep, disconnect_container_from_network=self._disconnect
+        )
+        self.networks = SimpleNamespace(get=self._net)
+
+    def _net(self, name):
+        project = self.projects.get(name)
+        return SimpleNamespace(attrs={"Labels": {"com.docker.compose.project": project} if project else {}})
+
+    def _disconnect(self, cid, net, force=False):
+        self.calls.append(("disconnect", cid, net, force))
+        self.ctrs[cid].nets.remove(net)
+
+    def _connect_ep(self, cid, net, ipv4_address=None, aliases=None, mac_address=None, **_kw):
+        if ipv4_address and self.refuse_ip:
+            raise APIError(
+                "user specified IP address is supported only when connecting to networks with user configured subnets"
+            )
+        self.calls.append(("connect", cid, net, ipv4_address, tuple(aliases or ()), mac_address))
+        c = self.ctrs[cid]
+        c.endpoints[net] = {
+            **c.endpoints.get(net, {}),
+            "Aliases": list(aliases or []),
+            "IPAddress": ipv4_address or "172.30.0.9",
+        }
+        c.nets.append(net)
+
+
+def _db(aliases=()):
+    return Endpointed(
+        "d1",
+        {
+            "mcpanel_internal": {
+                "Aliases": list(aliases),
+                "DNSNames": ["mcpanel-postgres-1", "d1"],
+                "IPAddress": "172.30.0.5",
+                "MacAddress": "02:42:ac:1e:00:05",
+            }
+        },
+        mode="mcpanel_internal",
+        status="running",
+        labels={**PROJECT, "com.docker.compose.service": "postgres"},
+        name="mcpanel-postgres-1",
+    )
+
+
+def _alias_platform(monkeypatch, *ctrs, projects=None, refuse_ip=False):
+    docker = AliasDocker(
+        ctrs, projects or {"mcpanel_internal": "mcpanel", "mcpanel_instances": "mcpanel"}, refuse_ip
+    )
+    monkeypatch.setattr(docker_ops, "client", lambda: docker)
+    monkeypatch.setattr(pernet, "_own", {"id": AGENT})
+    monkeypatch.setattr(platformnet, "_tries", {})
+    monkeypatch.setattr(platformnet, "_recent", platformnet.collections.deque(maxlen=20))
+    return docker
+
+
+def _named_agent():
+    names = {
+        "Aliases": ["mcpanel-agent-1", "agent"],
+        "IPAddress": "172.30.0.2",
+        "MacAddress": "02:42:ac:1e:00:02",
+    }
+    return Endpointed(
+        AGENT, {"mcpanel_internal": dict(names), "mcpanel_instances": dict(names)}, mode="mcpanel_internal",
+        status="running", labels={**PROJECT, "com.docker.compose.service": "agent"}, name="mcpanel-agent-1",
+    )  # fmt: skip
+
+
+def test_lost_aliases_come_back_with_ip_and_mac_kept(settings, monkeypatch):
+    db = _db(aliases=())  # Unraid's reconnect: MAC only, no aliases
+    docker = _alias_platform(monkeypatch, _named_agent(), db)
+    done = platformnet.repair_once(settings, now=1000.0)
+    assert done == [{"container": "mcpanel-postgres-1", "result": "restored"}]
+    assert docker.calls == [
+        ("disconnect", "d1", "mcpanel_internal", True),
+        (
+            "connect",
+            "d1",
+            "mcpanel_internal",
+            "172.30.0.5",
+            ("postgres", "mcpanel-postgres-1"),
+            "02:42:ac:1e:00:05",
+        ),
+    ]
+    assert db.events == []  # a running container is not stopped for this
+    recent = platformnet.status(settings)["recent"][0]
+    assert recent["action"] == "reconnect with aliases" and recent["result"] == "restored"
+
+
+def test_a_network_without_a_configured_subnet_lets_docker_pick_the_address(settings, monkeypatch):
+    db = _db()
+    docker = _alias_platform(monkeypatch, _named_agent(), db, refuse_ip=True)
+    assert platformnet.repair_once(settings, now=1000.0)[0]["result"] == "restored"
+    assert docker.calls[-1] == (
+        "connect",
+        "d1",
+        "mcpanel_internal",
+        None,
+        ("postgres", "mcpanel-postgres-1"),
+        "02:42:ac:1e:00:05",
+    )
+
+
+def test_named_endpoints_and_other_projects_are_left_alone(settings, monkeypatch):
+    fine = _db(aliases=["mcpanel-postgres-1", "postgres"])
+    foreign_net = Endpointed(
+        "e1", {"elsewhere_default": {"Aliases": [], "IPAddress": "172.31.0.2"}}, mode="elsewhere_default",
+        status="running", labels={**PROJECT, "com.docker.compose.service": "postgres"}, name="mcpanel-x-1",
+    )  # fmt: skip
+    other_project = Endpointed(
+        "o1", {"other_default": {"Aliases": [], "IPAddress": "172.32.0.2"}}, mode="other_default",
+        status="running", labels={"com.docker.compose.project": "other", "com.docker.compose.service": "web"},
+    )  # fmt: skip
+    docker = _alias_platform(
+        monkeypatch, _named_agent(), fine, foreign_net, other_project,
+        projects={"mcpanel_internal": "mcpanel", "mcpanel_instances": "mcpanel", "elsewhere_default": "elsewhere", "other_default": "other"},
+    )  # fmt: skip
+    assert platformnet.repair_once(settings, now=1000.0) == [] and docker.calls == []
+
+
+def test_the_agents_own_aliases_come_back(settings, monkeypatch):
+    me = _named_agent()
+    me.endpoints["mcpanel_internal"]["Aliases"] = []
+    docker = _alias_platform(monkeypatch, me)
+    assert platformnet.repair_once(settings, now=1000.0)[0]["result"] == "restored"
+    assert [c[2] for c in docker.calls] == ["mcpanel_internal", "mcpanel_internal"]
+
+
+def test_aliases_removed_again_and_again_end_in_giving_up(settings, monkeypatch, caplog):
+    db = _db()
+    _alias_platform(monkeypatch, _named_agent(), db)
+    tries = 0
+    for t in (0, 100, 300, 600, 900, 1200):
+        db.endpoints["mcpanel_internal"]["Aliases"] = []  # removed again (deliberately, or by the script)
+        tries += len(platformnet.repair_once(settings, now=1000.0 + t))
+    assert tries == 3 and any("not repairing it any more" in r.message for r in caplog.records)

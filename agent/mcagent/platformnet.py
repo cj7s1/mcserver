@@ -159,6 +159,79 @@ def _connect(cid: str, network: str, aliases: list[str]) -> None:
     _client().api.connect_container_to_network(cid, network, aliases=aliases or None)
 
 
+def _say_given_up(cid: str, name: str, what: str) -> None:
+    if _gave_up_now(cid) and not _tries[cid].get("said"):
+        _tries[cid]["said"] = True
+        log.warning(
+            "Container %s %s after %d repairs (or they were undone, e.g. deliberately); not repairing it any more",
+            name,
+            what,
+            MAX_ATTEMPTS,
+        )
+
+
+def _names(endpoint: dict[str, Any]) -> set[str]:
+    """The names an endpoint answers to on its network: its aliases and (Docker 25+) its DNS names."""
+    return {str(n) for n in [*(endpoint.get("Aliases") or []), *(endpoint.get("DNSNames") or [])] if n}
+
+
+def _project_of(network: str, cache: dict[str, str | None]) -> str | None:
+    if network not in cache:
+        try:
+            labels = (_client().networks.get(network).attrs or {}).get("Labels") or {}
+            cache[network] = labels.get(LABEL_PROJECT) or None
+        except Exception:
+            cache[network] = None
+    return cache[network]
+
+
+def _restore_aliases(
+    c: Any, cid: str, service: str, networks: list[str], attrs: dict[str, Any]
+) -> dict[str, Any]:
+    """Reconnect ``c`` to each of ``networks`` with its compose aliases (its service name and container
+    name), keeping its IP address and MAC address there. Docker has no call that changes an endpoint's
+    aliases in place, so this is one disconnect and connect per network: a cut of well under a second for
+    a running container, done once (the attempt limits of the module apply)."""
+    name = str(c.name).lstrip("/")
+    aliases = [a for a in (service, name) if a]
+    api = _client().api
+    results = []
+    for network in networks:
+        ep = _networks(attrs).get(network) or {}
+        ip = ep.get("IPAddress") or None
+        mac = ep.get("MacAddress") or None
+        log.warning(
+            "Container %s is on %s but does not answer to its service name %r there (an endpoint reconnected "
+            "without its aliases, e.g. by Unraid's Docker start script); reconnecting it with aliases %s "
+            "(IP %s, MAC %s kept)",
+            name,
+            network,
+            service,
+            aliases,
+            ip,
+            mac,
+        )
+        try:
+            api.disconnect_container_from_network(cid, network, force=True)
+            try:
+                api.connect_container_to_network(
+                    cid, network, ipv4_address=ip, aliases=aliases, mac_address=mac
+                )
+            except Exception as exc:
+                # a fixed address is refused on a network without a user-configured subnet: Docker picks one
+                if "user specified ip address" not in str(exc).lower():
+                    raise
+                api.connect_container_to_network(cid, network, aliases=aliases, mac_address=mac)
+            now_names = _names(_networks(_client().containers.get(cid).attrs or {}).get(network) or {})
+            results.append("restored" if service in now_names else "failed")
+        except Exception as exc:
+            log.warning("Restoring the aliases of %s on %s failed: %s", name, network, exc)
+            results.append(f"failed: {type(exc).__name__}")
+    result = "restored" if all(r == "restored" for r in results) else "; ".join(results)
+    _record(name, service, ", ".join(networks), "reconnect with aliases", result)
+    return {"container": name, "result": result}
+
+
 def repair_once(settings: Settings, *, now: float | None = None) -> list[dict[str, Any]]:
     """One pass (see the module docstring). Returns the repairs it tried. Never raises."""
     from . import pernet
@@ -184,6 +257,7 @@ def repair_once(settings: Settings, *, now: float | None = None) -> list[dict[st
 
     seen = _load_seen(settings)
     before = json.dumps(seen, sort_keys=True)
+    net_projects: dict[str, str | None] = {}
     for c in members:
         try:
             c.reload()
@@ -198,6 +272,25 @@ def repair_once(settings: Settings, *, now: float | None = None) -> list[dict[st
             network = _intended(attrs)
             state = attrs.get("State") or {}
             is_me = str(c.id) == own or str(c.id).startswith(own)
+            service = labels.get(LABEL_SERVICE) or ""
+            # on its networks, but not answering to its service name there (Unraid's start script reconnects
+            # endpoints with a MAC address and no aliases): the aliases come back
+            unnamed = [
+                n
+                for n in stack
+                if service
+                and _project_of(n, net_projects) == project
+                and service not in _names(_networks(attrs).get(n) or {})
+            ]
+            if is_me and any(n not in _networks(attrs) for n in (network, settings.instance_network) if n):
+                unnamed = []  # missing networks first (below); its names come with them
+            if unnamed and (is_me or state.get("Running") or state.get("Restarting")):
+                cid = str(c.id)
+                if _may_try(cid, now):
+                    done.append(_restore_aliases(c, cid, service, unnamed, attrs))
+                else:
+                    _say_given_up(cid, c.name, "still answers to no service name")
+                continue
             wanted = list(dict.fromkeys([*(seen.get(key) or []), *([network] if network else [])]))
             if is_me:
                 # the agent: its stack networks, whatever server networks it is on meanwhile
@@ -211,16 +304,8 @@ def repair_once(settings: Settings, *, now: float | None = None) -> list[dict[st
                 continue
             cid = str(c.id)
             if not _may_try(cid, now):
-                if _gave_up_now(cid) and not _tries[cid].get("said"):
-                    _tries[cid]["said"] = True
-                    log.warning(
-                        "Container %s still has no network after %d repairs (or they were undone, e.g. by a "
-                        "deliberate docker network disconnect); not repairing it any more",
-                        c.name,
-                        MAX_ATTEMPTS,
-                    )
+                _say_given_up(cid, c.name, "still has no network")
                 continue
-            service = labels.get(LABEL_SERVICE) or ""
             aliases = [a for a in (service, str(c.name).lstrip("/")) if a]
             if is_me:
                 targets = missing
