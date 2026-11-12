@@ -526,6 +526,21 @@ export interface Instance {
   agent_networks?: AgentNetworks | null;
   /** false: this server cannot be given a custom Docker network (its game's `custom_network`, R-8). */
   custom_network?: boolean;
+  /**
+   * true: the short answer a Friend gets (B4): only the status keys (id, name, game, status, connection,
+   * permissions, ...); every other field is missing. The page then offers status, Start/Stop and the Share card.
+   */
+  limited?: boolean;
+  /** Stop when empty (B2): minutes without players before the server is stopped; 0 = off; else 5..1440. */
+  idle_stop_minutes?: number;
+  /** Why "stop when empty" cannot be offered for this server (the panel cannot read its player count); null = it can. */
+  idle_stop_unavailable?: string | null;
+  /** Discord (B3): the bot lists and accepts this server. */
+  discord_available?: boolean;
+  /** Discord role ids that may start/stop this server instead of the default roles ([] = the defaults). */
+  discord_roles?: string[];
+  /** Discord's /join shows the join password (everyone in the Discord server can then read it). */
+  discord_share_password?: boolean;
   desired_state: "running" | "stopped";
   status: InstanceStatus;
   status_detail: string;

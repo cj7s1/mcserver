@@ -20,6 +20,7 @@ import { instanceSections, sectionPath } from "@/lib/sections";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ModpackUpdateBadge } from "./modpack/UpdateBadge";
+import { ShareButton } from "./share/ShareCard";
 import { DISMISS_HINT, powerButtons } from "./power-controls";
 
 export interface InstanceContext {
@@ -156,7 +157,10 @@ export function InstanceLayout() {
               </p>
             </div>
           </div>
-          <PowerControls {...ctx} />
+          <div className="flex flex-wrap items-center gap-2">
+            {!instance.archived_at && <ShareButton instance={instance} />}
+            <PowerControls {...ctx} />
+          </div>
         </div>
         {instance.status_detail && !["running"].includes(instance.status) && (
           <p className={cn("mt-2 text-sm", instance.status === "failed" ? "text-destructive" : "text-muted-foreground")}>

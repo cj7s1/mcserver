@@ -17,6 +17,7 @@ import { useNow } from "./overview/overview-utils";
 import { useStatSamples } from "./overview/live-samples";
 import { ResourceCharts } from "./overview/resource-charts";
 import { SetupCard } from "./overview/SetupCard";
+import { ShareCard } from "./share/ShareCard";
 import { StatTiles } from "./overview/stat-tiles";
 
 /** Disk usage is expensive to measure (directory walk on the node), so it is polled separately and rarely. */
@@ -159,6 +160,8 @@ function OverviewContent() {
       <StatTiles instance={instance} stats={stats.data} latest={latest} disk={disk} now={now} />
 
       {!instance.archived_at && <ResourceCharts instanceId={instance.id} samples={samples} running={running} />}
+
+      {!instance.archived_at && <ShareCard instance={instance} />}
 
       <div className="grid gap-4 lg:grid-cols-2">
         <ConnectionCard instance={instance} />
