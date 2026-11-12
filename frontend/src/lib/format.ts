@@ -11,6 +11,7 @@ export function formatBytes(bytes: number | null | undefined, digits = 1): strin
 }
 
 export function formatMemoryMb(mb: number): string {
+  if (typeof mb !== "number" || !Number.isFinite(mb)) return "—"; // not in a friend's short answer (B4)
   return mb >= 1024 ? `${(mb / 1024).toFixed(mb % 1024 === 0 ? 0 : 1)} GB` : `${mb} MB`;
 }
 

@@ -129,11 +129,13 @@ export function ServerQuickActions({
               </Link>
             </DropdownMenuItem>
           )}
-          <DropdownMenuItem asChild>
-            <Link to={`${base}/settings`}>
-              <Settings /> Settings
-            </Link>
-          </DropdownMenuItem>
+          {!instance.limited && (
+            <DropdownMenuItem asChild>
+              <Link to={`${base}/settings`}>
+                <Settings /> Settings
+              </Link>
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       {confirm && (

@@ -128,8 +128,12 @@ function visible(i: Instance, s: { perm?: PermissionCode; requires?: readonly Ga
   return (!s.perm || hasPerm(i.permissions, s.perm)) && hasCapabilities(i, s.requires);
 }
 
-/** The sections of a server the user may open, in tab order. */
+/**
+ * The sections of a server the user may open, in tab order. A friend's short answer (`limited`, B4) has the
+ * overview only (the page shows status, Start/Stop and the Share card there).
+ */
 export function instanceSections(i: Instance): InstanceSection[] {
+  if (i.limited) return INSTANCE_SECTIONS.filter((s) => s.key === "overview");
   return INSTANCE_SECTIONS.filter((s) => visible(i, s));
 }
 

@@ -35,6 +35,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useAuth } from "@/hooks/use-auth";
 import { useTheme } from "@/hooks/use-theme";
 import { useLiveEvents } from "@/lib/events";
+import { useFriendOnly } from "@/lib/limited";
 import { useInstances } from "@/lib/queries";
 import type { PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -46,14 +47,16 @@ interface NavItem {
   icon: ReactNode;
   perm?: PermissionCode;
   end?: boolean;
+  /** Not shown to a user who is only a friend (B4): nothing there for them. */
+  notForFriends?: boolean;
 }
 
 const MAIN_NAV: NavItem[] = [
   { to: "/", label: "Dashboard", icon: <LayoutDashboard />, end: true },
   { to: "/servers", label: "Servers", icon: <Server />, end: true },
   { to: "/servers/new", label: "Create server", icon: <Plus />, perm: "instance.create" },
-  { to: "/modpacks", label: "Modpacks", icon: <Package /> },
-  { to: "/activity", label: "Activity", icon: <Activity /> },
+  { to: "/modpacks", label: "Modpacks", icon: <Package />, notForFriends: true },
+  { to: "/activity", label: "Activity", icon: <Activity />, notForFriends: true },
 ];
 
 const ADMIN_NAV: NavItem[] = [
@@ -66,6 +69,7 @@ const PALETTE_NAV: PaletteNavGroup[] = [
   { heading: "Navigation", items: MAIN_NAV },
   { heading: "Administration", items: ADMIN_NAV },
 ];
+const FRIEND_PALETTE_NAV: PaletteNavGroup[] = [{ heading: "Navigation", items: MAIN_NAV.filter((i) => !i.notForFriends) }];
 
 function Logo() {
   return (
@@ -83,10 +87,11 @@ function Logo() {
 
 function NavList({ items, onNavigate }: { items: NavItem[]; onNavigate?: () => void }) {
   const { can } = useAuth();
+  const friend = useFriendOnly();
   return (
     <nav className="grid gap-0.5">
       {items
-        .filter((i) => !i.perm || can(i.perm))
+        .filter((i) => (!i.perm || can(i.perm)) && !(friend && i.notForFriends))
         .map((item) => (
           <NavLink
             key={item.to}
@@ -201,6 +206,7 @@ function UserMenu() {
 export function AppLayout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const live = useLiveEvents(true);
+  const friend = useFriendOnly();
   const location = useLocation();
   const wide = /\/servers\/[^/]+\/(console|files)/.test(location.pathname);
   return (
@@ -219,7 +225,7 @@ export function AppLayout() {
           <Button variant="ghost" size="icon-sm" className="md:hidden" onClick={() => setMobileOpen(true)} aria-label="Open navigation">
             <Menu />
           </Button>
-          <CommandPalette navigation={PALETTE_NAV} />
+          <CommandPalette navigation={friend ? FRIEND_PALETTE_NAV : PALETTE_NAV} />
           <div className="flex-1" />
           <Tooltip>
             <TooltipTrigger asChild>

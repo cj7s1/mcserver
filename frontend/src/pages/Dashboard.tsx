@@ -31,6 +31,7 @@ import { jobStatusLabel } from "./activity/job-utils";
 import { softwareLabel } from "./instance/InstanceLayout";
 import { ServerQuickActions } from "./library/ServerActions";
 import { memoryCommitment, statusBucket, statusRank } from "./library/server-utils";
+import { friendOnly } from "@/lib/limited";
 
 const MAX_STATS = 6;
 const MAX_ROWS = 8;
@@ -40,6 +41,8 @@ export default function Dashboard() {
   const instances = useInstances();
   const system = useSystemInfo();
   const canCreate = can("instance.create");
+  // a friend (B4): their servers only, without the activity and host panels (they would answer 403 or nothing)
+  const friend = friendOnly(user, instances.data);
 
   const list = instances.data ?? [];
   const sorted = [...list].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
@@ -145,18 +148,20 @@ export default function Dashboard() {
               </div>
             )}
           </Section>
-          <RecentActivity />
+          {!friend && <RecentActivity />}
         </div>
 
-        <div className="grid min-w-0 grid-cols-1 content-start gap-4">
-          <HostCapacity
-            system={system.data}
-            isLoading={system.isLoading}
-            error={system.error}
-            onRetry={() => system.refetch()}
-            instances={list}
-          />
-        </div>
+        {!friend && (
+          <div className="grid min-w-0 grid-cols-1 content-start gap-4">
+            <HostCapacity
+              system={system.data}
+              isLoading={system.isLoading}
+              error={system.error}
+              onRetry={() => system.refetch()}
+              instances={list}
+            />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -240,7 +245,9 @@ function StatTile({
   );
 }
 
-function DashboardServerRow({ instance, withStats }: { instance: Instance; withStats: boolean }) {
+function DashboardServerRow({ instance, withStats: wanted }: { instance: Instance; withStats: boolean }) {
+  // a friend's server (limited, B4) has no stats for them
+  const withStats = wanted && !instance.limited;
   const { data: stats } = useStats(instance.id, withStats);
   const live = withStats && stats?.running;
   const job = instance.active_job;

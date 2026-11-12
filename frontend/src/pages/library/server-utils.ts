@@ -89,7 +89,10 @@ export function loaderText(i: Instance): string {
 }
 
 export function portText(i: Instance): string {
-  return `${i.game_port}${i.extra_ports?.length ? ` +${i.extra_ports.length}` : ""}`;
+  // a friend's short answer (B4) has no game_port: the connection's port
+  const port = i.game_port ?? i.connection?.host_port;
+  if (port === undefined || port === null) return "—";
+  return `${port}${i.extra_ports?.length ? ` +${i.extra_ports.length}` : ""}`;
 }
 
 /** Text matched by the library search box. */

@@ -359,6 +359,8 @@ export type PermissionCode =
   | "system.nodes"
   | "instance.create"
   | "instance.view"
+  /** "See status": the Friend role's code only (B4; never in GET /permissions, implied by instance.view). */
+  | "instance.overview"
   | "instance.control"
   | "instance.console"
   | "instance.command"

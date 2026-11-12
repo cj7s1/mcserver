@@ -20,7 +20,7 @@ import { instanceSections, sectionPath } from "@/lib/sections";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { ModpackUpdateBadge } from "./modpack/UpdateBadge";
-import { ShareButton } from "./share/ShareCard";
+import { ShareButton, ShareCard } from "./share/ShareCard";
 import { DISMISS_HINT, powerButtons } from "./power-controls";
 
 export interface InstanceContext {
@@ -152,13 +152,20 @@ export function InstanceLayout() {
                 <ModpackUpdateBadge instance={instance} />
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
-                {softwareLabel(instance)}
-                {hasCapability(instance, "jvm") && ` · Java ${instance.java_version}`} · port {portLabel(instance)}
+                {instance.limited ? (
+                  // a friend's short answer (B4) has no Java version or port fields
+                  softwareLabel(instance)
+                ) : (
+                  <>
+                    {softwareLabel(instance)}
+                    {hasCapability(instance, "jvm") && ` · Java ${instance.java_version}`} · port {portLabel(instance)}
+                  </>
+                )}
               </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            {!instance.archived_at && <ShareButton instance={instance} />}
+            {!instance.archived_at && !instance.limited && <ShareButton instance={instance} />}
             <PowerControls {...ctx} />
           </div>
         </div>
@@ -178,26 +185,33 @@ export function InstanceLayout() {
           <PowerCountdownBanner instance={instance} canControl={can("instance.control")} className="mt-3" />
         )}
       </div>
-      <nav ref={tabsRef} className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
-        <div className="flex min-w-max gap-1">
-          {instanceSections(instance).map((t) => (
-            <NavLink
-              key={t.key}
-              to={sectionPath(instance, t)}
-              end={!t.path}
-              className={({ isActive }) =>
-                cn(
-                  "border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground",
-                  isActive && "border-primary font-medium text-foreground",
-                )
-              }
-            >
-              {t.label(instance)}
-            </NavLink>
-          ))}
-        </div>
-      </nav>
-      <Outlet context={ctx} />
+      {instance.limited ? (
+        // a friend (B4): status and Start/Stop above, the Share card here; no tabs, nothing that answers 403
+        <ShareCard instance={instance} />
+      ) : (
+        <>
+          <nav ref={tabsRef} className="-mx-3 overflow-x-auto border-b px-3 md:mx-0 md:px-0" aria-label="Server sections">
+            <div className="flex min-w-max gap-1">
+              {instanceSections(instance).map((t) => (
+                <NavLink
+                  key={t.key}
+                  to={sectionPath(instance, t)}
+                  end={!t.path}
+                  className={({ isActive }) =>
+                    cn(
+                      "border-b-2 border-transparent px-3 py-2 text-sm text-muted-foreground transition-colors hover:text-foreground",
+                      isActive && "border-primary font-medium text-foreground",
+                    )
+                  }
+                >
+                  {t.label(instance)}
+                </NavLink>
+              ))}
+            </div>
+          </nav>
+          <Outlet context={ctx} />
+        </>
+      )}
     </div>
   );
 }

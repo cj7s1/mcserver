@@ -121,3 +121,6 @@ export function generatePassword(length = 20): string {
 export function fullName(u: { first_name: string; last_name: string }): string {
   return [u.first_name, u.last_name].filter(Boolean).join(" ");
 }
+
+/** The inactive service user the panel records Discord starts and stops as (B3); it cannot sign in. */
+export const DISCORD_BOT_USER = "discord-bot";

@@ -11,6 +11,7 @@ import {
   UserCheck,
   UserPlus,
   UserX,
+  Send,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -34,8 +35,9 @@ import { formatDateTime, relativeTime } from "@/lib/format";
 import { qk } from "@/lib/queries";
 import type { Me, PanelUser, Role } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { InviteFriendDialog } from "./InviteFriendDialog";
 import { CreateUserDialog, EditUserDialog, ResetLinkDialog } from "./UserDialogs";
-import { canManageUser, fullName } from "./users-model";
+import { canManageUser, DISCORD_BOT_USER, fullName } from "./users-model";
 
 type DialogState = { kind: "edit" | "reset" | "delete" | "disable"; user: PanelUser } | null;
 
@@ -43,6 +45,7 @@ export function UsersTab({ users, roles, me }: { users: PanelUser[]; roles: Role
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
+  const [inviteOpen, setInviteOpen] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
 
   const filtered = useMemo(() => {
@@ -79,9 +82,14 @@ export function UsersTab({ users, roles, me }: { users: PanelUser[]; roles: Role
       title="Panel users"
       description={`${users.length} account${users.length === 1 ? "" : "s"} · ${active} enabled`}
       actions={
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          <UserPlus /> New user
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => setInviteOpen(true)}>
+            <Send /> Invite a friend
+          </Button>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            <UserPlus /> New user
+          </Button>
+        </div>
       }
     >
       <div className="grid grid-cols-1 gap-3">
@@ -136,6 +144,7 @@ export function UsersTab({ users, roles, me }: { users: PanelUser[]; roles: Role
       </div>
 
       <CreateUserDialog open={createOpen} onOpenChange={setCreateOpen} roles={roles} me={me} />
+      <InviteFriendDialog open={inviteOpen} onOpenChange={setInviteOpen} />
 
       {dialog?.kind === "edit" && (
         <EditUserDialog key={dialog.user.id} user={dialog.user} open onOpenChange={close} roles={roles} me={me} />
@@ -244,6 +253,11 @@ function UserRow({
               {isSelf && (
                 <Badge variant="outline" className="h-4 px-1.5 text-[10px]">
                   You
+                </Badge>
+              )}
+              {u.username === DISCORD_BOT_USER && !u.is_active && (
+                <Badge variant="outline" className="h-4 px-1.5 text-[10px]" title="Starts and stops made through Discord are recorded as this user; it cannot sign in">
+                  Discord bot (service user)
                 </Badge>
               )}
             </div>
