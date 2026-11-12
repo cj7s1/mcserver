@@ -489,7 +489,7 @@ def test_a_hanging_exec_times_out_and_frees_the_console(monkeypatch):
 
 # --- B-12 (security review 2026-11-11): the exec console's read is closed at the timeout and capped ---------
 class _StreamingApi:
-    """exec_start(stream=True) like docker-py: an iterator over the exec's output that blocks until the
+    """exec_start of a double that yields chunks (not a socket): an iterator over the exec's output that blocks until the
     program prints more, and ends when its connection is closed."""
 
     def __init__(self, chunks=(), hang=True):
@@ -502,7 +502,7 @@ class _StreamingApi:
         return {"Id": "e1"}
 
     def exec_start(self, exec_id, **kw):
-        assert kw.get("stream") is True
+        assert kw.get("socket") is True
         api = self
 
         class Stream:
@@ -541,3 +541,56 @@ def test_exec_output_is_capped_while_it_is_read(monkeypatch):
     monkeypatch.setattr(console_io, "_docker_api", lambda: api)
     out = console_io.exec_line(SimpleNamespace(id="c1"), ("inject", "{line}"), "say hi", user="1:1")
     assert len(out) == 1000 and out.endswith("END")
+
+
+# --- R-14: the exec is read through its socket, which the timeout shuts down -------------------------------
+class _SocketApi:
+    """exec_start(socket=True) as docker-py answers it: the connection's socket, carrying Docker's
+    multiplexed frames (adopted from audit-2026-11-09/fixes/review/agent-misc/test_b12_real_docker_stream.py)."""
+
+    def __init__(self, frames: bytes = b""):
+        import socket as _socket
+
+        self.a, self.b = _socket.socketpair()
+        if frames:
+            self.b.sendall(frames)
+
+    def exec_create(self, container, cmd, **kw):
+        return {"Id": "e1"}
+
+    def exec_start(self, exec_id, **kw):
+        assert kw.get("socket") is True and not kw.get("stream")
+        return self.a
+
+    def exec_inspect(self, exec_id):
+        return {"ExitCode": 0}
+
+
+def _frame(stream: int, data: bytes) -> bytes:
+    import struct
+
+    return struct.pack(">BxxxL", stream, len(data)) + data
+
+
+def test_a_timed_out_exec_on_a_real_socket_leaves_no_thread_behind(monkeypatch):
+    api = _SocketApi()  # the program holds its output open: the read blocks in recv
+    monkeypatch.setattr(console_io, "_docker_api", lambda: api)
+    monkeypatch.setattr(console_io, "EXEC_TIMEOUT", 0.3)
+    before = {t.ident for t in threading.enumerate()}
+    with pytest.raises(AgentError) as exc:
+        console_io.exec_line(SimpleNamespace(id="c1"), ("inject", "{line}"), "say hi", user="1:1")
+    assert exc.value.code == "console_timeout"
+    left = [t for t in threading.enumerate() if t.ident not in before and t.name == "console-exec"]
+    for t in left:
+        t.join(2)
+    assert not any(t.is_alive() for t in left), "the worker's read must end with the request"
+    api.b.close()
+
+
+def test_exec_output_is_demultiplexed_from_the_socket(monkeypatch):
+    api = _SocketApi(_frame(1, b"Saved the game\n") + _frame(2, b"warn\n"))
+    api.b.shutdown(__import__("socket").SHUT_WR)  # the program ended
+    monkeypatch.setattr(console_io, "_docker_api", lambda: api)
+    out = console_io.exec_line(SimpleNamespace(id="c1"), ("inject", "{line}"), "save", user="1:1")
+    assert out == "Saved the game\nwarn\n"
+    api.b.close()

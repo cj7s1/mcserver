@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import socket
 import threading
 import time
 import unicodedata
@@ -165,7 +166,38 @@ def _docker_api() -> Any:
 EXEC_CLOSE_WAIT = 1.0
 
 
+def _chunks(stream: Any) -> Any:
+    """The output of an exec: from its socket (Docker's multiplexed frames, demultiplexed by docker-py's
+    helper), or bytes / chunks as test doubles give them."""
+    if isinstance(stream, bytes | str):
+        return [stream]
+    if hasattr(stream, "recv") or hasattr(stream, "_sock") or hasattr(stream, "readinto"):
+        from docker.utils.socket import frames_iter
+
+        return (frame for _kind, frame in frames_iter(stream, False))
+    return stream
+
+
 def _close(stream: Any) -> None:
+    """End the exec's connection: a socket is shut down first (that ends a read blocked in it, also from
+    another thread), then closed."""
+    raw = getattr(stream, "_sock", stream)
+    shutdown = getattr(raw, "shutdown", None)
+    if callable(shutdown):
+        try:
+            shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    # docker-py keeps the HTTP response on the socket (``_response``): closing that closes the socket file
+    # and the connection in the right order (closing the socket file first leaves the response to fail at
+    # garbage collection)
+    response = getattr(stream, "_response", None)
+    if response is not None:
+        try:
+            response.close()
+        except Exception as exc:
+            log.debug("closing a console exec response failed: %s", exc)
+        return
     close = getattr(stream, "close", None)
     if callable(close):
         try:
@@ -202,17 +234,20 @@ def exec_line(
                 privileged=False,
                 user=user or "",
             )
-            stream = api.exec_start(created["Id"], detach=False, tty=False, stream=True)
+            # the raw socket (R-14): docker-py's stream=True generator cannot be closed from another thread
+            # while the worker reads in it ("generator already executing"); a socket can be shut down
+            stream = api.exec_start(created["Id"], detach=False, tty=False, socket=True)
             box["stream"] = stream
             if timed_out.is_set():  # the caller gave up while the exec started
                 _close(stream)
                 return
             data = bytearray()
-            for chunk in [stream] if isinstance(stream, bytes | str) else stream:
+            for chunk in _chunks(stream):
                 data += chunk.encode() if isinstance(chunk, str) else chunk
                 if len(data) > 2 * EXEC_OUTPUT_MAX:
                     del data[: len(data) - EXEC_OUTPUT_MAX]  # keep the end (B-12)
             box["output"] = bytes(data[-EXEC_OUTPUT_MAX:])
+            _close(stream)
             box["code"] = (api.exec_inspect(created["Id"]) or {}).get("ExitCode")
         except BaseException as exc:
             box["error"] = exc
