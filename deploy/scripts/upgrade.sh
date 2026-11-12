@@ -1696,6 +1696,30 @@ cmd_run() {
     fi
     say ""
     show_containers
+    say ""
+    sign_in_note
+}
+
+# The last words of a run (text only). Since the version of the security review a session belongs to
+# the browser tab that signed in: a session from an older version is refused once. Tabs left open run
+# the old version's code until they are reloaded.
+sign_in_note() {
+    if [ -z "$FROM_REV" ] || ! g cat-file -e "$FROM_REV:backend/apps/core/session_binding.py" 2>/dev/null; then
+        say "Everyone signs in once now: since this version a session belongs to the browser tab that signed in."
+    fi
+    say "Panel tabs that were open during the upgrade: reload them (they still run the old version's code)."
+}
+
+# After a rollback to a version without per-server networks (no agent/mcagent/pernet.py): text only.
+# Its agent is not attached to those networks; a server on one keeps running, but the agent cannot
+# reach its control port until the server was stopped and started once.
+network_rollback_note() { # network_rollback_note REVISION
+    g cat-file -e "$1:agent/mcagent/pernet.py" 2>/dev/null && return 0
+    say "Servers on a network of their own (zz_mcpanel_i_...): the agent of this version is not attached to"
+    say "those networks. Such a server keeps running and players can join it, but its console, its player list"
+    say "and the save before a stop do not work until it was stopped and started once (this version then makes"
+    say "its container on the shared network). A Minecraft server still saves by itself when it is stopped."
+    say ""
 }
 
 # `run --no-build`: bring the containers in line with .env and the compose files, nothing else.
@@ -2100,6 +2124,7 @@ $(dump_way_back)"
         say "puts them back on their node, still archived."
         say ""
     fi
+    network_rollback_note "$from"
     if [ "$from" != "$to" ] || [ -n "$SCRIPT_GONE" ]; then
         # Which checkout he is on, and which command is safe in which checkout.
         say "The source tree ($top) is now at the old version, $(short "$from"), as a detached HEAD. It fits"

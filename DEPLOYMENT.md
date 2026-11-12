@@ -306,7 +306,7 @@ variant with `AGENT_GAME_TERRARIA_<VARIANT>_IMAGES` (e.g. `AGENT_GAME_TERRARIA_T
 
 | Setting (`.env`, empty = default) | Default | What it does |
 |---|---|---|
-| `AGENT_PER_SERVER_NETWORKS` | `true` | Every server gets a bridge network of its own, `mcpanel_i_<12 hex>`; `false` puts every server on the shared `mcpanel_instances` network, where the servers reach each other |
+| `AGENT_PER_SERVER_NETWORKS` | `true` | Every server gets a bridge network of its own, `zz_mcpanel_i_<12 hex>`; `false` puts every server on the shared `mcpanel_instances` network, where the servers reach each other |
 | `AGENT_INSTANCE_POOL` | `10.213.0.0/16` | The private IPv4 range the agent cuts into /29s for those networks (at least a /28); the firewall script reads it too |
 | `AGENT_REFUSE_BRIDGE_GATEWAYS` | `true` | The agent refuses requests from the gateway of every bridge it is attached to (how a game container that goes through the host arrives). Off only when the agent is called from the host itself through a bridge address, or when Docker's userland proxy hands remote clients over from the gateway (rootless Docker, `"iptables": false`): a multi-node panel that suddenly gets 403 from a node agent is that case |
 | `AGENT_IMAGE_DIGEST_CHECK` | `true` | Palworld `v2.8.1`, Valheim `1.4.1`, HKMP `v2.4.3-2`, Project Zomboid `v1.2.0` (and Rust's image) are pinned to the digest checked when the release was made: a re-pushed tag fails with 409 `image_digest_mismatch`, naming both digests. Off only to run such a tag after checking that image yourself |
@@ -740,6 +740,13 @@ git reflog -n 20     # lines "pull: Fast-forward"; the entry below the first pul
    building (with the same care as step 6 of `run`: leftovers of an `up` that was cut off are
    removed first, and a service that was not started is a failure at once).
 
+**Going back to a version from before one network per server** (the security review's): the old
+agent is not attached to the servers' own networks (`zz_mcpanel_i_...`). A server that sits on one
+keeps running and players can join it, but its console, player list and the save before a stop do
+not work until that server was stopped and started once: the old agent then makes its container on
+the shared network. A Minecraft server still saves by itself when it is stopped. `rollback` says so
+at its end.
+
 From step 3 on a closed terminal does not stop the rollback; its log is
 `deploy/upgrade-log-<time>.log`.
 
@@ -862,7 +869,8 @@ It changes no database schema: `./scripts/upgrade.sh run` (the dry run ends with
   prints the command (on Unraid: `chmod -R go-w /mnt/user/appdata/mcpanel-src`); the hook installer
   and the nightly database dump, which run unattended as root, do it themselves and say so in the
   syslog. Pull with `(umask 022 && git pull)` from then on.
-* **Everyone signs in once** after the switch: sessions are bound to the browser tab now.
+* **Everyone signs in once** after the switch: sessions are bound to the browser tab now. Reload
+  panel tabs that were open during the upgrade. `run` ends with both reminders.
 * Behind an HTTPS proxy, delete a line `MCPANEL_SECURE_COOKIES=false` from `.env` (it would keep the
   cookies non-Secure).
 * Each server moves to a network of its own at its next start; Project Zomboid servers run as uid

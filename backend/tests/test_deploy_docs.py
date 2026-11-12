@@ -49,7 +49,7 @@ def test_a1_no_document_claims_the_game_servers_are_isolated_from_each_other():
     security = words("docs/SECURITY.md")
     assert "only the agent reaches them on the container network" not in security
     # round 2: one network per server; the shared network is named for what it still is
-    assert "### One network per server" in read("docs/SECURITY.md") and "`mcpanel_i_<first 12 hex digits" in security
+    assert "### One network per server" in read("docs/SECURITY.md") and "`zz_mcpanel_i_<first 12 hex digits" in security
     assert "A server stays on the shared `mcpanel_instances` network" in security
     assert "nothing on your network can take it over first" not in words("docs/UNRAID.md")
     assert "nothing outside the host can take it over first" in words("docs/UNRAID.md")
@@ -182,7 +182,15 @@ def test_unraid_md_games_md_and_deployment_md_follow_the_fixes():
 def test_development_status_and_roadmap_record_the_review_and_what_is_open():
     status = words("DEVELOPMENT_STATUS.md")
     assert "## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`" in read("DEVELOPMENT_STATUS.md")
-    for needle in ("E-7", "TOTP", "`Instance.env` stored in clear text", "the firewall script (not run on a real host"):
+    for needle in (
+        "E-7 / R-6: a first-start wait holds a job worker process",
+        "CS2's and Rust's readiness probes have not met a real server yet",
+        "Read-only root filesystems",
+        "TOTP / a second factor",
+        "`Instance.env` (custom variables) is stored in clear text",
+        "has not run on Unraid",
+        "Verify: a Docker-initiated stop of Project Zomboid",
+    ):
         assert needle in status, needle
     assert "Security and bug review of 2026-11-11" in read("ROADMAP.md")
 

@@ -26,10 +26,12 @@
 #   internal           panel, agent, postgres (and redis with the profile). Not marked
 #                      `internal: true` because the panel needs outbound HTTPS to
 #                      Mojang/Modrinth/CurseForge/FTB.
-#   mcpanel_i_<id12>   one bridge per game server, made by the agent (not by Compose) with
-#                      a /29 of AGENT_INSTANCE_POOL; the agent joins each to reach the
-#                      server's control ports (RCON, REST, WebRCON) without publishing
-#                      them. Docker isolates the bridges: servers do not see each other.
+#   zz_mcpanel_i_<id12> one bridge per game server, made by the agent (not by Compose) with
+#                      a /29 of AGENT_INSTANCE_POOL; the agent joins each (with gateway
+#                      priority -1000: its default route stays on these compose networks)
+#                      to reach the server's control ports (RCON, REST, WebRCON) without
+#                      publishing them. Docker isolates the bridges: servers do not see
+#                      each other.
 #   mcpanel_instances  the shared network of the servers made before per-server networks
 #                      (until their next start) and the fallback (AGENT_PER_SERVER_NETWORKS
 #                      off, pool exhausted): the servers on it reach each other's ports.

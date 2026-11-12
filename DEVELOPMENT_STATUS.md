@@ -48,18 +48,30 @@ server after an agent restart; the node compose's `gw_priority` (Docker 29.9, Co
 orders); the firewall rule set loaded into a real kernel (iptables-nft, a container's own network namespace:
 `fixes/firewall-run.md`).
 
-**Not verified:** anything on Unraid, in particular the firewall script (not run on a real host: check it
-as docs/UNRAID.md says), the at-boot User Script, the scripts' self-tightening as root on the share; a stop
-of Project Zomboid by Docker itself through the image's trap with the agent's `rcon.yml`; legacy iptables;
-the upgrade rehearsal with the session token (CI job "upgrade"); a browser pass over the new dialogs.
+**Not verified:** anything on Unraid (the at-boot User Script, the scripts' self-tightening as root on the
+share); legacy iptables; the upgrade rehearsal with the session token (CI job "upgrade"); a browser pass
+over the new dialogs.
 
-**Open (not fixed, by decision or size):** E-7 (a job that waits for a first start holds a worker process:
-advice in `.env.example`); TOTP / a second factor; `Instance.env` stored in clear text; read-only root
-filesystems and a default CPU limit for game containers, and no disk quota per server (A-7's other parts);
-B-11's per-server lock for top-level renames; D-13 for the catalog routes; HSTS is opt-in on purpose (it
-would break other plain-HTTP web UIs under the same host name). Found while fixing: the agent's default
-route moves to a server's network when it joins one (Docker picks the gateway by network name), so with
-the firewall installed its own new connections to the LAN need `--allow` (fixes/NOTES-deploy.md).
+**Open, left open on purpose or still to verify (one line each):**
+* E-7 / R-6: a first-start wait holds a job worker process for up to the game's first-start timeout (CS2
+  4 h, Rust 2 h, others 30 min); advice in `.env.example`. CS2's and Rust's readiness probes have not met a
+  real server yet: verify on the first real run.
+* Read-only root filesystems (and a default CPU limit, a disk quota per server) for game containers: not
+  done (A-7's other parts).
+* TOTP / a second factor: not done (D-3 has per-account limits only).
+* `Instance.env` (custom variables) is stored in clear text: not encrypted (D-10's second part).
+* The firewall script (`deploy/unraid/instance-firewall.sh`) has not run on Unraid: check it as
+  docs/UNRAID.md says before relying on it.
+* Verify: a Docker-initiated stop of Project Zomboid (`docker stop`, Unraid's Docker tab) through the
+  image's trap with the agent's `rcon.yml` (being tested; until the end-to-end result is in, treat it as
+  unverified).
+* Smaller: B-11's per-server lock for top-level renames; D-13 for the catalog routes; HSTS opt-in on
+  purpose (it would break other plain-HTTP web UIs under the same host name).
+
+Found and fixed during the work: the agent's default route moved to a server's network when it joined one;
+it now joins with gateway priority -1000 and the networks are named `zz_mcpanel_i_<12 hex>` (proven on
+Docker 29.9). After a rollback to an older version, servers on their own network need one stop and start
+before their console, player list and save-before-stop work again (DEPLOYMENT.md, "Rollback").
 
 **For the owner's server at the upgrade:** no database migration; `chmod -R go-w` on the checkout once
 (`run` refuses until then; the hook installer and the nightly dump do it themselves); everyone signs in

@@ -313,16 +313,16 @@ def test_refusals_change_nothing(host):
 def test_ipv6_is_named_as_not_restricted(host):
     (host.fw / "network").write_text(f"{SHARED} fd00:dead::/64 |true\n")
     (host.fw / "managed").mkdir()
-    (host.fw / "managed" / "abc123").write_text("mcpanel_i_0123456789ab|true\n")
-    (host.fw / "managed" / "def456").write_text("mcpanel_i_ba9876543210|false\n")
+    (host.fw / "managed" / "abc123").write_text("zz_mcpanel_i_0123456789ab|true\n")
+    (host.fw / "managed" / "def456").write_text("zz_mcpanel_i_ba9876543210|false\n")
     shown = host.run("dry-run")
     assert (
-        "IPv6 is enabled on mcpanel_instances mcpanel_i_0123456789ab: these rules are IPv4 only. "
+        "IPv6 is enabled on mcpanel_instances zz_mcpanel_i_0123456789ab: these rules are IPv4 only. "
         "IPv6 connections of those containers are NOT restricted." in shown.stdout
     )
     assert "fd00" not in shown.stdout.split("RULES")[1]
     (host.fw / "network").write_text(f"{SHARED} |false\n")
-    (host.fw / "managed" / "abc123").write_text("mcpanel_i_0123456789ab|false\n")
+    (host.fw / "managed" / "abc123").write_text("zz_mcpanel_i_0123456789ab|false\n")
     assert "IPv6: none of these networks has IPv6" in host.run("dry-run").stdout
 
 

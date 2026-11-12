@@ -229,7 +229,7 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
 
 ### One network per server
 
-Every server gets a bridge network of its own, `mcpanel_i_<first 12 hex digits of its id>`, with a
+Every server gets a bridge network of its own, `zz_mcpanel_i_<first 12 hex digits of its id>`, with a
 /29 of `AGENT_INSTANCE_POOL` (default `10.213.0.0/16`, a private IPv4 range, at least a /28). The agent
 attaches its own container to it to reach the control ports, and Docker isolates bridges from each
 other: a server reaches itself and the agent, no other server. Checked on real Docker (2026-11-12):
@@ -274,10 +274,9 @@ network's subnet to the host and to private ranges (10/8, 172.16/12, 192.168/16,
 the `--allow` entries the owner adds; the internet stays open. **It has not run on an Unraid host yet**
 (it was loaded into a real kernel in a container's own network namespace and is tested against
 stand-ins); check it after installing as UNRAID.md says. Unraid forgets the rules at every boot, so
-it runs at every array start. IPv4 only: it says so when a network has IPv6. When the agent's default
-route goes through a server network (Docker picks the gateway of a container by network name, and
-`mcpanel_i_...` sorts before `mcpanel_internal`), its own new connections to the LAN (a proxy, a
-restic server) are dropped as well: add them with `--allow`.
+it runs at every array start. IPv4 only: it says so when a network has IPv6. The agent's own traffic
+is not affected: it joins the server networks with gateway priority -1000 (and their names sort after
+the compose networks for older Docker versions), so its default route stays on its compose network.
 
 Not reachable from a game container: the agent's API (it refuses requests from the instance networks
 and the bridge gateways even with a valid token, above), Postgres, the panel's container address,
