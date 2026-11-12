@@ -738,3 +738,32 @@ def test_d4_the_refusal_offers_the_override_only_to_who_may_use_it(
     )
     owner = client_for(users["owner"]).post(url, {"action": "start"}, format="json").json()["error"]
     assert owner["code"] == "insufficient_memory" and "start it anyway (allow_overcommit)" in owner["message"]
+
+
+# --- A-6 (follow-up): the agent's own networks reach the instance pages ----------------------------------
+@pytest.mark.django_db
+def test_a6_the_instance_answer_names_the_agents_own_networks(make_instance: Any, fake_agent: Any, clients: Any) -> None:
+    from django.core.cache import cache
+
+    inst = make_instance()
+    # an agent that does not report them (older): null
+    assert clients["owner"].get(f"/api/instances/{inst.id}").json()["agent_networks"] is None
+    cache.clear()
+    fake_agent.info_extra = {
+        "policy": {"allowed_images": ["itzg/minecraft-server"], "instance_network": "mcpanel_instances"},
+        "per_server_networks": {"enabled": True, "reason": None, "prefix": "mcpanel_i_", "pool": "10.213.0.0/16"},
+    }
+    detail = clients["owner"].get(f"/api/instances/{inst.id}").json()
+    assert detail["agent_networks"] == {"shared": "mcpanel_instances", "per_server_prefix": "mcpanel_i_"}
+    # lists read the cache only (no request to every node's agent)
+    listed = {i["id"]: i for i in clients["owner"].get("/api/instances/").json()}
+    assert listed[str(inst.id)]["agent_networks"] == detail["agent_networks"]
+    cache.clear()
+    assert {i["id"]: i for i in clients["owner"].get("/api/instances/").json()}[str(inst.id)]["agent_networks"] is None
+    # an agent without per-server networks
+    fake_agent.info_extra = {"policy": {"instance_network": "mcpanel_instances"}}
+    cache.clear()
+    assert clients["owner"].get(f"/api/instances/{inst.id}").json()["agent_networks"] == {
+        "shared": "mcpanel_instances",
+        "per_server_prefix": None,
+    }

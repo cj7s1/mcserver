@@ -164,13 +164,24 @@ class AgentClient:
         if cached is not None:
             return frozenset(cached)
         try:
-            reported = self.info().get("features")
+            info = self.info()
         except ApiError as exc:
             log.debug("could not read the features of the agent at %s: %s", self.base, exc)
             return frozenset()
+        reported = info.get("features") if isinstance(info, dict) else None
         found = sorted(str(f) for f in reported) if isinstance(reported, list) else []
         cache.set(key, found, FEATURES_TTL if found else FEATURES_MISSING_TTL)
+        # (the same answer says which networks are the agent's own: kept for agent_networks())
+        cache.set(_networks_key(self.node), {"networks": networks_from_info(info)}, FEATURES_TTL)
         return frozenset(found)
+
+    def agent_networks(self, *, refresh: bool = False) -> dict[str, Any] | None:
+        """``{"shared": <the shared instance network>, "per_server_prefix": <prefix of the per-server networks>
+        or None}`` as the agent reports it in GET /v1/info (A-6, I-6); None when it does not (older agents)
+        or cannot be asked now. Read with ``features()`` and cached alike."""
+        if refresh:
+            self.features(refresh=True)
+        return cached_agent_networks(self.node, ask=True)
 
     def supports(self, feature: str) -> bool:
         return feature in self.features()
@@ -761,3 +772,35 @@ def _guarded_sleep(seconds: float, guard: Callable[[], None] | None) -> None:
         if left <= 0:
             return
         sleep(min(left, GUARD_SLICE))
+
+
+def _networks_key(node: Any) -> str:
+    return f"agent-networks:{node.pk}:{node.agent_url.rstrip('/')}"
+
+
+def networks_from_info(info: Any) -> dict[str, Any] | None:
+    """The agent's own networks from a GET /v1/info answer: ``policy.instance_network`` and the name prefix of
+    ``per_server_networks``; None when the agent reports no shared network (older agents)."""
+    if not isinstance(info, dict):
+        return None
+    policy = info.get("policy") if isinstance(info.get("policy"), dict) else {}
+    shared = policy.get("instance_network")
+    if not isinstance(shared, str) or not shared:
+        return None
+    per_server = info.get("per_server_networks") if isinstance(info.get("per_server_networks"), dict) else {}
+    prefix = per_server.get("prefix")
+    return {"shared": shared, "per_server_prefix": prefix if isinstance(prefix, str) and prefix else None}
+
+
+def cached_agent_networks(node: Any, *, ask: bool = False) -> dict[str, Any] | None:
+    """``AgentClient.agent_networks`` from the cache only (``ask``: read GET /v1/info when nothing is cached):
+    instance lists show it without asking every node's agent."""
+    from django.core.cache import cache
+
+    hit = cache.get(_networks_key(node))
+    if hit is None and ask:
+        AgentClient(node, timeout=3).features(refresh=True)  # (short: a page waits for it)
+        hit = cache.get(_networks_key(node))
+        if hit is None:  # the agent cannot be asked now: not again for a minute
+            cache.set(_networks_key(node), {"networks": None}, FEATURES_MISSING_TTL)
+    return hit.get("networks") if isinstance(hit, dict) else None

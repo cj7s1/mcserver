@@ -557,6 +557,7 @@ class FakeAgent:
         }
         if "games" in self.features:
             answer["games"] = copy.deepcopy(self.game_profiles)
+        answer.update(copy.deepcopy(getattr(self, "info_extra", {})))  # (tests: more of GET /v1/info)
         return answer
 
     def published_ports(self) -> list[dict[str, Any]]:

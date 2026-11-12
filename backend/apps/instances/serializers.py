@@ -109,6 +109,10 @@ class InstanceSerializer(serializers.ModelSerializer):
     container_memory_mb = serializers.IntegerField(read_only=True)
     loader = serializers.CharField(source="effective_loader", read_only=True)
     connection = serializers.SerializerMethodField()
+    agent_networks = serializers.SerializerMethodField(
+        help_text="The node agent's own networks (A-6): {shared, per_server_prefix} as GET /v1/info reports them; "
+        "null when the agent does not report them or was not asked yet"
+    )
     permissions = serializers.SerializerMethodField()
     active_job = serializers.SerializerMethodField()
     power_countdown = serializers.SerializerMethodField()
@@ -208,6 +212,7 @@ class InstanceSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "connection",
+            "agent_networks",
             "permissions",
         ]
         read_only_fields = [
@@ -268,6 +273,15 @@ class InstanceSerializer(serializers.ModelSerializer):
         if not addresses:
             addresses.update(public=SystemSetting.get("public_address"), lan=SystemSetting.get("lan_address"))
         return connection_info(obj, public=addresses["public"], lan=addresses["lan"])
+
+    def get_agent_networks(self, obj: Instance) -> dict[str, Any] | None:
+        from apps.nodes.client import cached_agent_networks
+
+        # (a single server's answer asks the agent when nothing is cached; lists read the cache only)
+        try:
+            return cached_agent_networks(obj.node, ask=bool(self.context.get("ask_agent")))
+        except Exception:  # an optional hint: never a reason for the answer to fail
+            return None
 
     def get_permissions(self, obj: Instance) -> list[str]:
         request = self.context.get("request")

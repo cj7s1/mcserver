@@ -53,7 +53,8 @@ log = logging.getLogger(__name__)
 
 
 def _ser(instance: Instance, request: Request) -> dict[str, Any]:
-    return InstanceSerializer(instance, context={"request": request}).data
+    # (one server: its agent_networks may be read from the agent when nothing is cached)
+    return InstanceSerializer(instance, context={"request": request, "ask_agent": True}).data
 
 
 class InstanceListView(APIView):
