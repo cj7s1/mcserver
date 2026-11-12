@@ -18,6 +18,7 @@ import { useState, type ReactNode } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import { CommandPalette, type PaletteNavGroup } from "@/components/command-palette/CommandPalette";
 import { MemoryOvercommitHost } from "@/components/MemoryOvercommitDialog";
+import { SecretRequiredHost } from "@/components/SecretRequiredDialog";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -236,6 +237,7 @@ export function AppLayout() {
         </main>
       </div>
       <MemoryOvercommitHost />
+      <SecretRequiredHost />
     </div>
   );
 }

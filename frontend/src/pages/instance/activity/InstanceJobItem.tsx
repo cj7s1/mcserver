@@ -4,6 +4,7 @@
  */
 import { ChevronRight } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
+import { SecretRequiredJobHint } from "@/components/SecretRequiredDialog";
 import { Progress } from "@/components/ui/progress";
 import { formatDateTime, relativeTime } from "@/lib/format";
 import type { Job } from "@/lib/types";
@@ -94,6 +95,7 @@ export function InstanceJobItem({
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
               {job.error}
               {job.error_code && <span className="ml-2 font-mono opacity-70">({job.error_code})</span>}
+              <SecretRequiredJobHint job={job} className="mt-1" />
             </div>
           )}
           {hasResult && (

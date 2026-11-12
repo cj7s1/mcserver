@@ -12,14 +12,63 @@
  *
  * `postAllowingOvercommit` / `postOrDecline` ask the same for the other requests that start a
  * server through a job (create, software and modpack updates with a start, recreate, migrate).
+ * "Start anyway" is honoured only for users with the global `system.settings` permission (403
+ * `overcommit_not_allowed` otherwise, D-4): the host offers it only to them (`mayOvercommit`).
+ *
+ * Missing secret: a start (or restart) of a server whose game needs a secret that is not set (Valheim's
+ * join password) is refused with 409 `secret_required` (`details.key`, `details.label`). `sendPower`
+ * then shows the notice mounted by `SecretRequiredHost` (components/SecretRequiredDialog.tsx), which links
+ * to Settings -> Game settings -> Secrets, and resolves `{status: "cancelled"}` (nothing was started and
+ * the notice said why). Without a mounted host the error reaches the caller as before.
  */
 import { api, ApiError } from "./api";
-import type { Instance } from "./types";
+import type { AuthState, Instance, PermissionCode } from "./types";
 
 export const INSUFFICIENT_MEMORY = "insufficient_memory";
+export const SECRET_REQUIRED = "secret_required";
+/** The global permission the panel requires for `allow_overcommit` (backend `capacity.OVERCOMMIT_PERMISSION`). */
+export const OVERCOMMIT_PERMISSION: PermissionCode = "system.settings";
 
 export function isInsufficientMemoryError(err: unknown): err is ApiError {
   return err instanceof ApiError && err.status === 409 && err.code === INSUFFICIENT_MEMORY;
+}
+
+export function isSecretRequiredError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 409 && err.code === SECRET_REQUIRED;
+}
+
+/** Whether the signed-in user may start a server past the memory admission; null while the user is unknown. */
+export function mayOvercommit(state: AuthState | undefined | null): boolean | null {
+  const user = state?.user;
+  if (!user) return null;
+  return user.permissions.includes(OVERCOMMIT_PERMISSION);
+}
+
+/** Where a server's secrets are set: Settings -> Game settings (its Secrets section). */
+export function secretsPath(instanceId: string): string {
+  return `/servers/${instanceId}/settings?tab=game-settings`;
+}
+
+export interface SecretRequiredNotice {
+  instance: Pick<Instance, "id" | "name">;
+  action: "start" | "restart";
+  /** The backend's message (names the secret). */
+  message: string;
+  /** The secret's label ("Join password") and key, when the answer names them. */
+  label?: string;
+  key?: string;
+}
+
+type SecretNotifier = (notice: SecretRequiredNotice) => void;
+
+let secretNotifier: SecretNotifier | null = null;
+
+/** Register the missing-secret notice (one per app); returns the unregister function. */
+export function setSecretRequiredNotifier(fn: SecretNotifier): () => void {
+  secretNotifier = fn;
+  return () => {
+    if (secretNotifier === fn) secretNotifier = null;
+  };
 }
 
 export interface OvercommitRequest {
@@ -60,7 +109,20 @@ export async function sendPower<T = unknown>(
   if (action !== "start" && action !== "restart") {
     return { status: "done", data: await api.post<T>(powerPath(instance.id), body), overcommitted: false };
   }
-  return postAllowingOvercommit<T>(powerPath(instance.id), instance, body, action);
+  try {
+    return await postAllowingOvercommit<T>(powerPath(instance.id), instance, body, action);
+  } catch (err) {
+    if (!isSecretRequiredError(err) || !secretNotifier) throw err;
+    const details = err.details ?? {};
+    secretNotifier({
+      instance,
+      action,
+      message: err.message,
+      label: typeof details.label === "string" && details.label ? details.label : undefined,
+      key: typeof details.key === "string" && details.key ? details.key : undefined,
+    });
+    return { status: "cancelled" };
+  }
 }
 
 /**

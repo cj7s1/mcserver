@@ -2,6 +2,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ban, CheckCircle2, ChevronRight, Clock, Loader2, XCircle } from "lucide-react";
 import { useEffect, useId, useState, type ReactNode } from "react";
+import { SecretRequiredJobHint } from "@/components/SecretRequiredDialog";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
 import { formatDateTime, formatDuration, relativeTime, toDate } from "@/lib/format";
@@ -127,6 +128,7 @@ export function JobItem({ job, now, defaultOpen = false }: { job: Job; now: numb
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
               {job.error}
               {job.error_code && <span className="ml-2 font-mono opacity-70">({job.error_code})</span>}
+              <SecretRequiredJobHint job={job} className="mt-1" />
             </div>
           )}
           {hasResult && (

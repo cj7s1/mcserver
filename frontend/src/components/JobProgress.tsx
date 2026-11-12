@@ -1,4 +1,5 @@
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { SecretRequiredJobHint } from "@/components/SecretRequiredDialog";
 import { Progress } from "@/components/ui/progress";
 import { useJob } from "@/lib/queries";
 import type { ActiveJob, Job } from "@/lib/types";
@@ -32,6 +33,7 @@ export function JobProgress({ job, jobId, className, showLog = false }: {
       {!done && !failed && <Progress value={(j.progress ?? 0) * 100} className="mt-2 h-1.5" />}
       {j.message && !failed && <p className="mt-1.5 truncate text-xs text-muted-foreground">{j.message}</p>}
       {failed && "error" in j && j.error && <p className="mt-1.5 text-xs text-destructive">{j.error}</p>}
+      {failed && "error_code" in j && <SecretRequiredJobHint job={j} className="mt-1 text-xs" />}
       {showLog && "log" in j && j.log?.length > 0 && (
         <pre className="mt-2 max-h-48 overflow-auto rounded bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-muted-foreground">
           {j.log.join("\n")}

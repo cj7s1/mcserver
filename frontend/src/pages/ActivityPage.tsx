@@ -2,6 +2,7 @@ import { Activity, ChevronRight, FilterX, RefreshCw } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import { PageHeader } from "@/components/PageHeader";
+import { SecretRequiredJobHint } from "@/components/SecretRequiredDialog";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -324,6 +325,7 @@ function JobDetails({ job, id, canAbandon }: { job: Job; id: string; canAbandon:
             )}
           </div>
           <p className="mt-1 whitespace-pre-wrap break-words">{job.error}</p>
+          <SecretRequiredJobHint job={job} className="mt-1 text-xs" />
         </div>
       )}
 
