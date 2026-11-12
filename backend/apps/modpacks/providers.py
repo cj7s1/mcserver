@@ -38,9 +38,13 @@ MODPACK_LOADERS = ("fabric", "forge", "neoforge", "quilt")
 
 
 def _request(method: str, url: str, *, headers: dict[str, str] | None = None, provider: str, **kwargs: Any) -> Any:
+    """A request to a provider's API: a redirect is followed only to the same host (the CurseForge key never goes
+    elsewhere) and at most ``MAX_UPSTREAM_BYTES`` of the answer are read (C-10)."""
+    from apps.core.upstream import fetch
+
     hdrs = {"User-Agent": settings.MCPANEL_USER_AGENT, "Accept": "application/json", **(headers or {})}
     try:
-        resp = httpx.request(method, url, headers=hdrs, timeout=20, follow_redirects=True, **kwargs)
+        resp = fetch(method, url, headers=hdrs, timeout=20, **kwargs)
     except httpx.HTTPError as exc:
         raise UpstreamError(f"Could not reach {provider}: {exc}", code="provider_unreachable") from exc
     if resp.status_code == 404:

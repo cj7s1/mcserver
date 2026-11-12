@@ -283,3 +283,77 @@ def test_c5_a_minecraft_nickname_is_never_taken_for_an_account() -> None:
     assert parsed["players"] == ["Alice"]
     assert parsed["other_names"] == ["~Notch", "~Bob", ".BedrockSteve"]
     assert "other_names" not in parse_list("There are 1 of a max of 20 players online: Alice")
+
+
+# --- C-7 ------------------------------------------------------------------------------------------------------
+def test_c7_chat_lines_make_no_diagnosis(make_instance: Any) -> None:
+    from apps.instances.diagnostics import analyze_logs
+
+    inst = make_instance(java_version=21)
+    chat = [
+        '[20:15:03] [Server thread/INFO]: Done (12.3s)! For help, type "help"',
+        "[20:16:10] [Server thread/INFO]: <mallory> class file version 52.0, this runtime only recognizes up to 51.0",
+        "[20:16:12] [Server thread/INFO]: <mallory> java.lang.OutOfMemoryError: Java heap space",
+        "[20:16:13] [Async Chat Thread - #0/INFO]: [Not Secure] <mallory> FAILED TO BIND TO PORT",
+        "[20:16:14 INFO]: * mallory Could not reserve enough space for object heap",
+    ]
+    assert analyze_logs(inst, chat) == []
+    # the server's own lines still are diagnosed
+    real = ["[20:16:12] [Server thread/ERROR]: java.lang.OutOfMemoryError: Java heap space"]
+    assert {i.code for i in analyze_logs(inst, chat + real)} == {"out_of_memory"}
+
+
+def test_c7_steam_games_chat_lines_make_no_diagnosis(
+    clients: Any, fake_agent: Any, django_capture_on_commit_callbacks: Any
+) -> None:
+    from .test_games_six import create
+    from .test_games_six import start as start_six
+
+    inst = create(clients, django_capture_on_commit_callbacks, "rust")
+    start_six(fake_agent, inst)
+    fake_agent.log_lines[str(inst.id)] = ["[CHAT] mallory : No space left on device", "<mallory> Out of memory"]
+    assert clients["owner"].get(f"/api/instances/{inst.id}/diagnostics").json()["issues"] == []
+    fake_agent.log_lines[str(inst.id)] = ["write failed: No space left on device"]
+    issues = {i["code"] for i in clients["owner"].get(f"/api/instances/{inst.id}/diagnostics").json()["issues"]}
+    assert "disk_full" in issues
+
+
+# --- C-10 -----------------------------------------------------------------------------------------------------
+def test_c10_catalog_requests_stay_with_the_upstream_hosts() -> None:
+    import respx
+
+    from apps.catalog import providers
+    from apps.core.errors import UpstreamError
+
+    with respx.mock(assert_all_called=False) as mock:
+        internal = mock.get("http://10.0.0.5/secret").respond(200, json={"x": 1})
+        mock.get("https://meta.fabricmc.net/v2/versions/game").respond(302, headers={"Location": "http://10.0.0.5/secret"})
+        mock.get("https://meta.quiltmc.org/v3/versions/game").respond(302, headers={"Location": "/v3/moved"})
+        mock.get("https://meta.quiltmc.org/v3/moved").respond(200, json=[{"version": "1.21"}])
+        mock.get("https://fill.papermc.io/v3/projects/paper/versions").respond(
+            200, content=b"[" + b"1," * (20 * 1024 * 1024) + b"1]"
+        )
+        with pytest.raises(UpstreamError):
+            providers._get("https://meta.fabricmc.net/v2/versions/game")  # redirected into the internal network
+        with pytest.raises(UpstreamError):
+            providers._get("http://10.0.0.5/secret")  # a URL from an answer (Mojang's manifest, Docker Hub's "next")
+        assert not internal.called
+        assert providers._get("https://meta.quiltmc.org/v3/versions/game") == [{"version": "1.21"}]  # same host: fine
+        with pytest.raises(UpstreamError):
+            providers._get("https://fill.papermc.io/v3/projects/paper/versions")  # 40 MB
+
+
+def test_c10_provider_requests_keep_the_api_key_on_its_host() -> None:
+    import respx
+
+    from apps.core.errors import UpstreamError
+    from apps.modpacks.providers import _request
+
+    with respx.mock(assert_all_called=False) as mock:
+        elsewhere = mock.get("https://collector.example/v1/mods").respond(200, json={})
+        mock.get("https://api.curseforge.com/v1/mods").respond(301, headers={"Location": "https://collector.example/v1/mods"})
+        with pytest.raises(UpstreamError):
+            _request("GET", "https://api.curseforge.com/v1/mods", headers={"x-api-key": "k"}, provider="CurseForge")
+        assert not elsewhere.called
+        mock.get("https://api.modrinth.com/v2/project/x").respond(200, json={"id": "x"})
+        assert _request("GET", "https://api.modrinth.com/v2/project/x", provider="Modrinth") == {"id": "x"}

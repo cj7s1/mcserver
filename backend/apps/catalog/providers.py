@@ -30,16 +30,41 @@ PAPER_FILL = "https://fill.papermc.io/v3/projects"
 PURPUR_API = "https://api.purpurmc.org/v2/purpur"
 
 JAVA_TAGS = (8, 11, 16, 17, 21, 25)
+# The hosts these lists come from (also Mojang's per-version files, Docker Hub's tag pages and factorio.com,
+# whose URLs partly come from the answers themselves): nothing else is ever requested, and a redirect is
+# followed only among them (C-10)
+UPSTREAM_HOSTS = frozenset(
+    {
+        "piston-meta.mojang.com",
+        "launchermeta.mojang.com",
+        "meta.fabricmc.net",
+        "meta.quiltmc.org",
+        "files.minecraftforge.net",
+        "maven.minecraftforge.net",
+        "maven.neoforged.net",
+        "fill.papermc.io",
+        "api.purpurmc.org",
+        "hub.docker.com",
+        "factorio.com",
+    }
+)
 
 
 def _get(url: str, *, params: dict[str, Any] | None = None, as_text: bool = False, timeout: float = 20) -> Any:
+    from apps.core.upstream import fetch
+
+    target = httpx.URL(url)
+    if target.scheme != "https" or (target.host or "").lower() not in UPSTREAM_HOSTS:
+        # a URL taken from an answer (Mojang's manifest, Docker Hub's "next") that points elsewhere
+        raise UpstreamError(f"Refused to fetch from {target.host or 'an unknown host'}", code="upstream_error")
     try:
-        resp = httpx.get(
+        resp = fetch(
+            "GET",
             url,
             params=params,
             headers={"User-Agent": settings.MCPANEL_USER_AGENT, "Accept": "application/json"},
             timeout=timeout,
-            follow_redirects=True,
+            allowed_hosts=UPSTREAM_HOSTS,
         )
     except httpx.HTTPError as exc:
         raise UpstreamError(f"Could not reach {httpx.URL(url).host}: {exc}", code="upstream_unreachable") from exc

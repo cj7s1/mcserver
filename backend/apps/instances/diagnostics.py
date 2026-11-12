@@ -37,6 +37,19 @@ class Issue:
 
 _JAVA_CLASS_VERSION = {52: 8, 55: 11, 60: 16, 61: 17, 65: 21, 69: 25}
 
+# What players typed (C-7: a chat line "<mallory> java.lang.OutOfMemoryError" must not become a diagnosis):
+# Minecraft "...]: <name> text" (also "[Not Secure] <name>", "/me" as "...]: * name text"), Factorio and Rust
+# "[CHAT]", Terraria "<name> text" at the start of a line
+CHAT_LINE = re.compile(
+    r"\]:\s*(?:\[Not Secure\]\s*)?<[^>\n]{1,64}>|\]:\s*\*\s|\[Not Secure\]|\[CHAT\]|^\s*(?::\s*)?<[^>\n]{1,64}>\s",
+    re.IGNORECASE,
+)
+
+
+def without_chat(lines: list[str]) -> list[str]:
+    """The console lines without the ones players typed: diagnoses are made from the server's own output only."""
+    return [ln for ln in lines if not CHAT_LINE.search(ln)]
+
 
 def _grep(lines: list[str], pattern: str, limit: int = 5) -> list[str]:
     rx = re.compile(pattern, re.I)
@@ -45,6 +58,7 @@ def _grep(lines: list[str], pattern: str, limit: int = 5) -> list[str]:
 
 def analyze_logs(instance: Instance, lines: list[str]) -> list[Issue]:
     issues: list[Issue] = []
+    lines = without_chat(lines)
     text = "\n".join(lines)
 
     if "Missing Mods Checker" in text and "HeadlessException" in text:
@@ -280,7 +294,8 @@ def diagnose(instance: Instance, tail: int = 1500) -> dict[str, Any]:
         if exc.error_code != "no_container":
             log.info("diagnostics of %s: no console lines (%s: %s)", instance.pk, exc.error_code, exc.detail)
         lines = []
-    issues = games.for_instance(instance).analyze_logs(instance, lines)  # Minecraft: analyze_logs
+    # (every game: never from what players typed, C-7)
+    issues = games.for_instance(instance).analyze_logs(instance, without_chat(lines))  # Minecraft: analyze_logs
     run = status if exists else (status.get("last_run") or {})
     restarts = int(run.get("restart_count") or 0)
     if restarts >= 3 and instance.ready_at is None:
