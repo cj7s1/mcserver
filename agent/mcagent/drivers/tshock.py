@@ -29,15 +29,14 @@ import json
 import logging
 import re
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from ..errors import AgentError, game_text
 from .base import ControlDriver, Report, Send, WaitLog
 from .console import ConsoleDriver
+from .http_api import GameApiError, http_request
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -50,7 +49,6 @@ CONFIG_MAX_BYTES = 2 * 1024 * 1024
 REST_TIMEOUT = 10.0
 REST_MAX_BYTES = 4 * 1024 * 1024
 # never through a proxy from the environment: the API is on the instance network
-_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 SAVE_TIMEOUT = 120.0
 _COLOUR_TAG = re.compile(r"\[c/[0-9A-Fa-f]{6}:([^\]]*)\]")
 _ACCOUNT = re.compile(r"^[^\s\"]{1,32}$")
@@ -180,20 +178,25 @@ class TShockDriver(ControlDriver):
                 raise RestUnavailable("TShock's REST API has no token for the panel (config.json)")
             query["token"] = secret
         host, port = self.address(settings, c)
-        url_host = f"[{host}]" if ":" in host else host
-        url = f"http://{url_host}:{port}{path}?{urllib.parse.urlencode(query)}"
         try:
-            # a plain HTTP GET on the instance network (TShock's REST API has no TLS); no proxy
-            with _OPENER.open(urllib.request.Request(url, method="GET"), timeout=timeout) as response:
-                code, body = response.status, response.read(REST_MAX_BYTES)
-        except urllib.error.HTTPError as exc:  # TShock answers errors as JSON too
-            code, body = exc.code, exc.read(REST_MAX_BYTES)
-        except TimeoutError as exc:
-            raise AgentError(f"TShock did not answer {path} in time", "rest_failed", 504) from exc
-        except (urllib.error.URLError, OSError) as exc:
-            if isinstance(getattr(exc, "reason", None), TimeoutError):
+            # a plain HTTP GET on the instance network (TShock's REST API has no TLS); no proxy. One
+            # deadline for the whole exchange (B-2: an answer trickled a byte at a time ends there too)
+            resp = http_request(
+                host,
+                port,
+                "GET",
+                f"{path}?{urllib.parse.urlencode(query)}",
+                scheme="http",
+                timeout=timeout,
+                max_response=REST_MAX_BYTES,
+            )
+        except GameApiError as exc:
+            if exc.code == "api_timeout":
                 raise AgentError(f"TShock did not answer {path} in time", "rest_failed", 504) from None
-            raise RestUnavailable(f"TShock's REST API is not reachable ({type(exc).__name__})") from None
+            if exc.code == "api_unavailable":
+                raise RestUnavailable("TShock's REST API is not reachable") from None
+            raise AgentError(f"TShock's answer to {path} was refused: {exc}", "rest_failed", 502) from None
+        code, body = resp.status, resp.body  # TShock answers errors as JSON too
         try:
             data = json.loads(body.decode("utf-8", errors="replace"))
         except (ValueError, RecursionError) as exc:

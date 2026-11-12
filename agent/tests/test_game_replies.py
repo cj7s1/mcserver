@@ -3,7 +3,7 @@ a stop always reaches ``docker stop``, and text of the game reaches errors and l
 one line.
 
 Adopted from the reviewers' tests (audit-2026-11-09/security-review/b-agent-fs/tests/test_b_game_replies.py;
-its B-2 test of a trickling answer belongs to round 2 and is not here yet).
+with its B-2 test of a trickling answer, round 2).
 
 A JSON text that is only opening brackets is valid input for ``json.loads`` up to the point where it
 raises RecursionError, which is not a ValueError.
@@ -178,19 +178,10 @@ def test_tshock_error_text_is_clipped(agent_settings, monkeypatch):
 
     driver = tshock.TShockDriver(port=7878, config_file="config.json", username="mcpanel")
 
-    class Response:
-        status = 200
+    from mcagent.drivers.http_api import ApiResponse
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_a):
-            return False
-
-        def read(self, _n):
-            return json.dumps({"status": "400", "error": "E" * 10_000 + "\nforged"}).encode()
-
-    monkeypatch.setattr(tshock._OPENER, "open", lambda *a, **k: Response())
+    answer = json.dumps({"status": "400", "error": "E" * 10_000 + "\nforged"}).encode()
+    monkeypatch.setattr(tshock, "http_request", lambda *a, **k: ApiResponse(200, {}, answer))
     monkeypatch.setattr(driver, "secret", lambda *_a: "t" * 20)
     monkeypatch.setattr(driver, "address", lambda *_a: ("10.0.0.2", 7878), raising=False)
     try:
@@ -199,3 +190,65 @@ def test_tshock_error_text_is_clipped(agent_settings, monkeypatch):
         assert len(str(exc)) <= 400 and "\n" not in str(exc)
     else:  # pragma: no cover
         pytest.fail("an error status must raise")
+
+
+# --- B-2 (round 2): one deadline for the whole request ---------------------------------------------
+def test_http_request_ends_at_its_deadline_when_the_answer_trickles():
+    """B-2: ``timeout`` bounds the whole request. Today it bounds each socket read, so an answer
+    that arrives a byte at a time keeps the calling thread for as long as the peer likes (here a
+    stub on 127.0.0.1 that needs 4.8 s for 12 bytes, against a deadline of 1 s)."""
+    import socket
+    import threading
+
+    from mcagent.drivers.http_api import GameApiError, http_request
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def serve() -> None:
+        conn, _addr = server.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n")
+            try:
+                for _ in range(12):
+                    time.sleep(0.4)
+                    conn.sendall(b" ")
+            except OSError:
+                pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(GameApiError) as err:
+            http_request("127.0.0.1", port, "GET", "/", scheme="http", timeout=1.0)
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+    assert err.value.code == "api_timeout"
+    assert elapsed < 2.5, f"the request took {elapsed:.1f} s with a deadline of 1 s"
+
+
+def test_tshock_rest_has_one_deadline_too(agent_settings, monkeypatch):
+    """B-2: TShock's REST calls go through the same bounded request (an answer that trickles ends)."""
+    from mcagent.drivers import tshock
+    from mcagent.drivers.http_api import GameApiError
+
+    seen = {}
+
+    def fake(host, port, method, path, **kw):
+        seen.update(kw, host=host, path=path)
+        raise GameApiError("slow", "api_timeout", 504)
+
+    monkeypatch.setattr(tshock, "http_request", fake)
+    driver = tshock.TShockDriver(port=7878, config_file="config.json", username="mcpanel")
+    monkeypatch.setattr(driver, "secret", lambda *_a: "t" * 20)
+    monkeypatch.setattr(driver, "address", lambda *_a: ("10.0.0.2", 7878), raising=False)
+    with pytest.raises(AgentError) as err:
+        driver.call(agent_settings, _running_container([]), "/v2/server/status", {}, timeout=2.0)
+    assert err.value.code == "rest_failed" and err.value.status == 504
+    assert (
+        seen["scheme"] == "http" and seen["timeout"] == 2.0 and seen["path"].startswith("/v2/server/status?")
+    )

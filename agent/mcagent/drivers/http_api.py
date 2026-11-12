@@ -36,6 +36,7 @@ import hashlib
 import http.client
 import json
 import logging
+import socket
 import ssl
 import threading
 import time
@@ -153,9 +154,14 @@ def http_request(
 ) -> ApiResponse:
     """One HTTP(S) request, bounded in time (``timeout`` for everything, the connect at most
     API_CONNECT_TIMEOUT) and size. ``body`` is bytes or an iterable of chunks (then ``length`` is
-    its total size). Raises GameApiError for transport problems; HTTP errors are returned."""
+    its total size). Raises GameApiError for transport problems; HTTP errors are returned.
+
+    The deadline holds for the whole exchange, not only per socket read (B-2): a timer shuts the
+    socket down when it passes, so an answer trickled a byte at a time ends there too."""
     timeout = max(0.1, min(float(timeout), API_MAX_TIMEOUT))
     deadline = time.monotonic() + timeout
+    expired = threading.Event()
+    timer: threading.Timer | None = None
 
     def remaining() -> float:
         left = deadline - time.monotonic()
@@ -172,9 +178,21 @@ def http_request(
         conn = http.client.HTTPConnection(host, port, timeout=min(API_CONNECT_TIMEOUT, timeout))
     else:
         raise ValueError(f"Unsupported scheme {scheme!r}")
+    def expire() -> None:
+        expired.set()
+        raw = conn.sock
+        if raw is not None:
+            try:
+                raw.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     try:
         conn.connect()
         sock = conn.sock
+        timer = threading.Timer(max(0.0, deadline - time.monotonic()), expire)
+        timer.daemon = True
+        timer.start()
         if scheme == "https" and isinstance(sock, ssl.SSLSocket):
             _check_pin(pin, sock.getpeercert(binary_form=True))
         sock.settimeout(remaining())
@@ -217,12 +235,18 @@ def http_request(
                 raise GameApiError(
                     f"The game's API answered with more than {max_response} bytes", "api_error", 502
                 )
+        if expired.is_set():  # cut off by the deadline: what was read is not the whole answer
+            raise TimeoutError("deadline")
         return ApiResponse(resp.status, {k.lower(): v for k, v in resp.getheaders()}, bytes(data))
     except GameApiError:
         raise
     except TimeoutError as exc:
         raise GameApiError(f"The game's API did not answer within {timeout:g} s", "api_timeout", 504) from exc
     except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
+        if expired.is_set():
+            raise GameApiError(
+                f"The game's API did not answer within {timeout:g} s", "api_timeout", 504
+            ) from exc
         raise GameApiError(
             "The game's API is not reachable (the server is probably still starting): "
             f"{type(exc).__name__}: {game_text(exc)}",
@@ -230,6 +254,8 @@ def http_request(
             409,
         ) from exc
     finally:
+        if timer is not None:
+            timer.cancel()
         conn.close()
 
 
