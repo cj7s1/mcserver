@@ -22,7 +22,7 @@ def _waiting(inst: Instance) -> Job:
         instance=inst,
         status=JobStatus.RUNNING,
         exclusive=True,
-        result={"waiting_first_start": True},
+        result={"waiting_first_start": True, "first_start": True},
     )
     Instance.objects.filter(pk=inst.pk).update(active_job=job, status="installing")
     inst.refresh_from_db()

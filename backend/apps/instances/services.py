@@ -353,6 +353,33 @@ def enqueue_power(
     return job
 
 
+def seen_ready_in_run(instance: Instance, started_at: Any = None) -> bool:
+    """Whether the panel has seen the server's current run ready: ``ready_at`` is set and not older than
+    the run's start (``started_at``: the container's start as the agent reports it, an ISO text or a
+    datetime; default the start the panel recorded). The reconciler keeps ``ready_at`` for a run that
+    was ready once, also while it reads "unresponsive" later."""
+    from .reconcile import _ts
+
+    ready = instance.ready_at
+    if ready is None:
+        return False
+    start = _ts(started_at) if isinstance(started_at, str) else started_at
+    start = start or instance.started_at
+    return start is None or ready >= start
+
+
+def never_ready_first_start(instance: Instance, job: Any) -> bool:
+    """``job`` (just ended by a Stop) waited for the server's first start (``game_handlers.FIRST_START``:
+    it had never been ready) and the panel has not seen this run ready: only then may the stop skip the
+    save (``not_ready``, E-1/I-1). A Start that only watched a server which had been ready before is not."""
+    from .game_handlers import FIRST_START
+
+    if not (getattr(job, "result", None) or {}).get(FIRST_START):
+        return False
+    fresh = Instance.objects.filter(pk=instance.pk).only("ready_at", "started_at").first()
+    return fresh is not None and not seen_ready_in_run(fresh)
+
+
 def end_first_start_wait(instance: Instance, user: Any) -> Any:
     """End the server's job when all it does is wait for a start that downloads the game (CS2, Rust, Project
     Zomboid: ``game_handlers.wait_first_start``, flagged in ``Job.result``), so that a Stop is not refused while
@@ -428,8 +455,9 @@ def power(
         warn_minutes=warn_minutes,
         warn_message=warn_message,
         allow_overcommit=allow_overcommit,
-        # the ended job still waited for the first start: the server has nothing to save yet (BUG-9)
-        not_ready=superseded is not None,
+        # the ended job still waited for the first start of a server the panel has never seen ready in
+        # this run: it has nothing to save yet (BUG-9). Any other ended wait gets the ordinary stop (E-1).
+        not_ready=superseded is not None and never_ready_first_start(instance, superseded),
     )
     details: dict[str, Any] = {"job": str(job.id)}
     if allow_overcommit:

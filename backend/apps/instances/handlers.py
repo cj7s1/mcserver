@@ -290,12 +290,15 @@ def start_server(
     if exists and not outdated:
         if apply_changes:
             ctx.progress(0.3, "Starting container")
-        if admit and not status.get("running"):
+        was_running = bool(status.get("running"))
+        if admit and not was_running:
             admit_memory(instance, ctx, client)
         try:
             client.start(instance.id)
             _started(instance)
-            if watch:
+            # a container that already ran before this call is no start to watch: the job would
+            # otherwise wait (and be ended by a Stop) as if the server had just been started (E-1)
+            if watch and not was_running:
                 watch_start(instance, ctx, client)
             return False
         except AgentError as exc:
@@ -325,13 +328,15 @@ def start_server(
 def watch_start(instance: Instance, ctx: JobContext, client: AgentClient) -> None:
     """After a start of a game whose image downloads the game at every start (``retryable_install_exits``;
     Satisfactory, restart policy "no"): wait until it is ready, start it again after SteamCMD's failures,
-    and handle the start wrapper's refusal (``game_handlers.wait_first_start``). Nothing for other games."""
+    and handle the start wrapper's refusal (``game_handlers.wait_first_start``). Nothing for other games.
+    A server that has never been ready (its first download was stopped, or it was created without a
+    start) is watched like a first start: as long as that may take, with its retries (E-8)."""
     if not games.for_instance(instance).retryable_install_exits:
         return
     from .game_handlers import wait_first_start
 
     instance.refresh_from_db()
-    wait_first_start(instance, ctx, client, span=(0.85, 0.1), first=False)
+    wait_first_start(instance, ctx, client, span=(0.85, 0.1), first=instance.installed_at is None, start_job=True)
 
 
 def _note_runtime_image(instance: Instance, ctx: JobContext, previous: dict[str, Any], applied: dict[str, Any]) -> None:
@@ -468,11 +473,17 @@ def stop(job: Job, ctx: JobContext) -> dict[str, Any]:
     ctx.progress(0.2, f"Stopping server gracefully (up to {instance.stop_timeout}s)", force=True)
     status = AgentClient(instance.node).status(instance.id)
     if status.get("exists"):
+        # not_ready: this stop ended a job that still waited for the server's first start, so the agent may
+        # stop it at once. Checked again against the container's own start: a run the panel has seen ready
+        # meanwhile gets the ordinary stop with its save (E-1).
+        not_ready = bool((job.params or {}).get("not_ready"))
+        if not_ready:
+            from .services import seen_ready_in_run
+
+            instance.refresh_from_db(fields=["ready_at", "started_at"])
+            not_ready = not seen_ready_in_run(instance, status.get("started_at"))
         try:
-            # (not_ready: this stop ended a job that still waited for the first start: the agent stops it at once)
-            answer = AgentClient(instance.node).stop(
-                instance.id, timeout=instance.stop_timeout, not_ready=bool((job.params or {}).get("not_ready"))
-            )
+            answer = AgentClient(instance.node).stop(instance.id, timeout=instance.stop_timeout, not_ready=not_ready)
             _log_stop(ctx, answer)
         except AgentError as exc:
             if exc.error_code != "no_container":
