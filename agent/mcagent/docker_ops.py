@@ -1389,9 +1389,10 @@ def fix_ownership(settings: Settings, instance_id: UUID, skip: tuple[str, ...] =
     instead of raising: a stop or a backup never fails because of it."""
     from .safefs import PathError, SafeRoot
 
+    too_deep: list[str] = []
     try:
         changed = SafeRoot(instance_dir(settings, instance_id)).chown_tree(
-            int(settings.runtime_uid), int(settings.runtime_gid), skip=skip
+            int(settings.runtime_uid), int(settings.runtime_gid), skip=skip, too_deep=too_deep
         )
     except (OSError, PathError) as exc:
         log.warning("Could not give the server folder of %s the runtime owner: %s", instance_id, exc)
@@ -1403,6 +1404,17 @@ def fix_ownership(settings: Settings, instance_id: UUID, skip: tuple[str, ...] =
             instance_id,
             settings.runtime_uid,
             settings.runtime_gid,
+        )
+    if too_deep:
+        log.warning(
+            "The owner of %d folders of %s deeper than 64 levels was left as it is (first: %r)",
+            len(too_deep),
+            instance_id,
+            too_deep[0],
+        )
+        return (
+            f"{len(too_deep)} folders of the server deeper than 64 levels were not given the owner "
+            f"{settings.runtime_uid}:{settings.runtime_gid}"
         )
     return None
 

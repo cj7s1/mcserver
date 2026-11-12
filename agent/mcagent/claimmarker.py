@@ -51,7 +51,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from .safefs import PathError, SafeRoot, split_path
+from .safefs import PathError, SafeRoot, folded, split_path, touches_protected
 
 if TYPE_CHECKING:
     from .config import Settings
@@ -284,9 +284,10 @@ def touches_claim(rel: str, saved_dir: str = "saved") -> bool:
 
 
 def is_managed(rel: str) -> bool:
-    """The marker and the wrapper: only the agent writes them."""
+    """The marker and the wrapper: only the agent writes them (case folded: one entry for both
+    spellings on a case-insensitive file system)."""
     parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p not in ("", ".")]
-    return "/".join(parts) in (MARKER, WRAPPER)
+    return "/".join(parts).casefold() in (MARKER.casefold(), WRAPPER.casefold())
 
 
 def files_changed(settings: Settings, instance_id: UUID, paths: list[str], why: str) -> None:
@@ -314,32 +315,32 @@ class GuardedRoot(SafeRoot):
         super().__init__(root, uid, gid)
         self._settings = settings
         self._instance_id = instance_id
-        # the game's own protected paths (runtime profile ``protected_paths``: CS2's start hooks)
-        self._protected = tuple(tuple(split_path(p)) for p in protected if split_path(p))
+        # the game's own protected paths (runtime profile ``protected_paths``: CS2's start hooks), case folded
+        self._protected = tuple(folded(split_path(p)) for p in protected if split_path(p))
 
-    def _refuse_managed(self, rel: str) -> None:
+    def _refuse_managed(self, rel: str, *, above: bool = False) -> None:
+        """403 ``managed_file`` for the marker, the wrapper, a protected path or what lies inside one;
+        with ``above`` also for a folder that holds a protected path (delete, rename, a file put in
+        its place)."""
         if is_managed(rel):
             raise PathError(
                 "This file belongs to the node agent (the claim check of the server); it cannot be written",
                 "managed_file",
                 403,
             )
-        if self._protected:
-            parts = tuple(split_path(rel))
-            for path in self._protected:
-                if parts[: len(path)] == path:
-                    raise PathError(
-                        f"{'/'.join(path)} is managed by the node agent for this game (it is run or "
-                        "rewritten at every start); it cannot be changed through the file manager",
-                        "managed_file",
-                        403,
-                    )
+        if self._protected and touches_protected(split_path(rel), self._protected, above=above):
+            raise PathError(
+                f"{rel} is or holds a file the node agent manages for this game (it is run or rewritten "
+                "at every start); it cannot be changed through the file manager",
+                "managed_file",
+                403,
+            )
 
     def _changed(self, *paths: str) -> None:
         files_changed(self._settings, self._instance_id, list(paths), "a file operation")
 
     def open_writer(self, rel: str, *, overwrite: bool = True, max_bytes: int | None = None) -> Any:
-        self._refuse_managed(rel)
+        self._refuse_managed(rel, above=True)
         self._changed(rel)
         return super().open_writer(rel, overwrite=overwrite, max_bytes=max_bytes)
 
@@ -350,9 +351,9 @@ class GuardedRoot(SafeRoot):
 
     def rename(self, src: str, dst: str, *, overwrite: bool = False) -> None:
         for rel in (src, dst):
-            self._refuse_managed(rel)
+            self._refuse_managed(rel, above=True)
             parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p not in ("", ".")]
-            if parts and parts[0] == FOLDER:
+            if parts and parts[0].casefold() == FOLDER.casefold():
                 raise PathError(
                     "The .mcpanel folder belongs to the panel and the node agent", "managed_file", 403
                 )
@@ -362,7 +363,7 @@ class GuardedRoot(SafeRoot):
     def delete(self, rel: str, *, recursive: bool = False) -> None:
         # deleting the marker (or .mcpanel/) only removes a verification: the start is refused then
         if self._protected:
-            self._refuse_managed(rel)
+            self._refuse_managed(rel, above=True)
         self._changed(rel)
         super().delete(rel, recursive=recursive)
 

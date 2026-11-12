@@ -8,16 +8,20 @@ root. Symlinks inside an instance are listed but never followed.
 
 from __future__ import annotations
 
+import ctypes
 import errno
+import logging
 import os
 import secrets
 import shutil
 import stat as statmod
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
+
+log = logging.getLogger(__name__)
 
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 MAX_PATH_LEN = 4096
@@ -77,6 +81,60 @@ def display_name(name: str) -> str:
     if name_is_utf8(name):
         return name
     return name.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+
+
+_RENAME_NOREPLACE = 1  # linux/fs.h
+
+
+def _libc_renameat2() -> Any:
+    try:
+        fn = ctypes.CDLL(None, use_errno=True).renameat2
+    except (OSError, AttributeError):  # not glibc >= 2.28 / musl >= 1.2.4: the stat check is used
+        return None
+    fn.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+    fn.restype = ctypes.c_int
+    return fn
+
+
+_renameat2 = _libc_renameat2()
+
+
+def _rename_noreplace(src: str, dst: str, src_dir_fd: int, dst_dir_fd: int) -> bool:
+    """Rename without replacing an existing destination in one step (``renameat2`` with
+    ``RENAME_NOREPLACE``: no window between a check and the rename; B-13). True when renamed;
+    False when the system or the file system cannot do it (the caller checks, then renames);
+    PathError 409 ``exists`` when the destination exists."""
+    if _renameat2 is None:
+        return False
+    if _renameat2(src_dir_fd, os.fsencode(src), dst_dir_fd, os.fsencode(dst), _RENAME_NOREPLACE) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err == errno.EEXIST:
+        raise PathError("Destination already exists", "exists", 409)
+    if err in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+        return False
+    raise OSError(err, os.strerror(err), src)
+
+
+def touches_protected(
+    parts: list[str] | tuple[str, ...], protected: Iterable[tuple[str, ...]], *, above: bool
+) -> bool:
+    """Whether a change of the entry ``parts`` reaches a protected path (``protected``: case-folded
+    parts, as :func:`folded` makes them). Case is folded (a case-insensitive file system has one entry
+    for both spellings). Always when the entry is a protected path or lies inside one; with ``above``
+    also when it is a folder that holds one (a delete or rename moves the protected path with it, a
+    file or a rename put in its place replaces it)."""
+    target = folded(parts)
+    for prot in protected:
+        if target[: len(prot)] == prot:
+            return True
+        if above and len(target) < len(prot) and prot[: len(target)] == target:
+            return True
+    return False
+
+
+def folded(parts: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(p.casefold() for p in parts)
 
 
 def split_path(rel: str) -> list[str]:
@@ -237,7 +295,9 @@ class SafeRoot:
         """
         with self._parent(rel) as (fd, name, _parts):
             try:
-                ffd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=fd)
+                ffd = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY, dir_fd=fd
+                )
             except FileNotFoundError as exc:
                 raise PathError("File does not exist", "not_found", 404) from exc
             except OSError as exc:
@@ -341,6 +401,8 @@ class SafeRoot:
             except FileNotFoundError as exc:
                 raise PathError("Source does not exist", "not_found", 404) from exc
             if not overwrite:
+                if _rename_noreplace(src_parts[-1], dst_parts[-1], sfd, dfd):
+                    return
                 try:
                     os.stat(dst_parts[-1], dir_fd=dfd, follow_symlinks=False)
                     raise PathError("Destination already exists", "exists", 409)
@@ -370,12 +432,18 @@ class SafeRoot:
                 os.unlink(name, dir_fd=fd)
 
     # -- search -------------------------------------------------------------------
-    def walk_files(self, rel: str = "", *, max_depth: int = 12) -> Iterator[tuple[str, os.stat_result]]:
-        """Yield (relative path, stat) for regular files, never following links."""
+    def walk_files(
+        self, rel: str = "", *, max_depth: int = 12, too_deep: list[str] | None = None
+    ) -> Iterator[tuple[str, os.stat_result]]:
+        """Yield (relative path, stat) for regular files, never following links. Folders below
+        ``max_depth`` are left out; ``too_deep`` (when given) gets the path of each of them, so the
+        caller can say so."""
         base = split_path(rel)
 
         def _walk(fd: int, prefix: list[str], depth: int) -> Iterator[tuple[str, os.stat_result]]:
             if depth > max_depth:
+                if too_deep is not None:
+                    too_deep.append("/".join(prefix))
                 return
             with os.scandir(fd) as it:
                 items = list(it)
@@ -399,7 +467,15 @@ class SafeRoot:
         with self._dir_fd(base) as fd:
             yield from _walk(fd, base, 0)
 
-    def chown_tree(self, uid: int, gid: int, *, skip: tuple[str, ...] = (), max_depth: int = 64) -> int:
+    def chown_tree(
+        self,
+        uid: int,
+        gid: int,
+        *,
+        skip: tuple[str, ...] = (),
+        max_depth: int = 64,
+        too_deep: list[str] | None = None,
+    ) -> int:
         """Give the root folder and everything below it the owner ``uid:gid`` (what ``chown -R``
         does), never following a symbolic link (a link itself is changed, not its target). Entries
         that already have it are not touched; ``skip``: paths relative to the root left out with
@@ -420,6 +496,8 @@ class SafeRoot:
 
         def walk(fd: int, prefix: list[str], depth: int) -> None:
             if depth > max_depth:
+                if too_deep is not None:  # left as it is: the caller says so
+                    too_deep.append("/".join(prefix))
                 return
             with os.scandir(fd) as it:
                 items = list(it)
@@ -500,8 +578,16 @@ class SafeRoot:
 
     def disk_usage(self) -> int:
         total = 0
-        for _path, st in self.walk_files("", max_depth=64):
+        too_deep: list[str] = []
+        for _path, st in self.walk_files("", max_depth=64, too_deep=too_deep):
             total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+        if too_deep:
+            log.warning(
+                "Disk usage of %s leaves out %d folders deeper than 64 levels (first: %r)",
+                self.root,
+                len(too_deep),
+                too_deep[0],
+            )
         return total
 
 

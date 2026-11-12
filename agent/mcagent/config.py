@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -163,9 +165,23 @@ class Settings(BaseSettings):
             return path.read_text().strip()
         path.parent.mkdir(parents=True, exist_ok=True)
         pw = secrets.token_urlsafe(32)
-        path.write_text(pw)
-        path.chmod(0o600)
+        write_private(path, pw)
         return pw
+
+
+def write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` with mode 0600 from the start (never readable by others in between):
+    a temporary file created 0600 without following links, then renamed over ``path`` (B-13)."""
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")  # one per writer: callers may race
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 @lru_cache

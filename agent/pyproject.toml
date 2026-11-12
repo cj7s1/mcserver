@@ -2,7 +2,7 @@
 name = "mcpanel-agent"
 version = "0.1.0"
 description = "Privileged node agent for MCPanel: narrow, authenticated Docker + instance-storage operations"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
@@ -37,7 +37,7 @@ asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 line-length = 110
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "S", "RUF"]

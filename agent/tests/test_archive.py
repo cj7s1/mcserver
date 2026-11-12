@@ -139,3 +139,20 @@ def test_stream_zip_roundtrip_skips_symlinks(root):
     (inst / "export.zip").write_bytes(data)
     extract(sr, "export.zip", "copy", strip="none")
     assert (inst / "copy" / "world" / "level.dat").read_bytes() == b"L" * 5000
+
+
+def test_tar_member_of_unknown_type_counts_towards_the_size_limit(tmp_path, monkeypatch):
+    """B-8 (security review 2026-11-11): tarfile decompresses the data of a member of an unknown type
+    (it skips it by its declared size), so that size counts towards MAX_TOTAL_BYTES."""
+    from mcagent import archive
+
+    monkeypatch.setattr(archive, "MAX_TOTAL_BYTES", 1024 * 1024)
+    data = bytes(8 * 1024 * 1024)
+    with tarfile.open(tmp_path / "import.tar.gz", "w:gz") as tf:
+        info = tarfile.TarInfo("blob")
+        info.type = b"Z"  # not a type tarfile knows: its data is skipped by size when it is read
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    with pytest.raises(AgentError) as err:
+        extract(SafeRoot(tmp_path), "import.tar.gz", "out")
+    assert err.value.code == "archive_too_large"

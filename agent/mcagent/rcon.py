@@ -152,11 +152,13 @@ class RconClient:
                 parts.append(TRUNCATED_NOTE)
                 break
             try:
-                _rid, _t, more = await self._read_packet(min(CONTINUATION_TIMEOUT, remaining))
+                more_id, _t, more = await self._read_packet(min(CONTINUATION_TIMEOUT, remaining))
             except RconError:
                 if time.monotonic() >= deadline:  # cut short by the deadline, not the end of output
                     parts.append(TRUNCATED_NOTE)
                 break
+            if more_id != req_id:  # a fragment of this command carries its id (B-13)
+                raise RconError("Unexpected RCON response id")
             last = len(more.encode("utf-8"))
             if received + last > MAX_RESPONSE_BYTES:
                 parts.append(TRUNCATED_NOTE)

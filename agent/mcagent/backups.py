@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from .config import Settings
+from .config import Settings, write_private
 from .docker_ops import AgentError
 
 log = logging.getLogger(__name__)
@@ -294,8 +294,7 @@ class Restic:
         path = self.settings.state_dir / "restic-password"
         if not path.exists() or path.read_text().strip() != pw:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(pw)
-            path.chmod(0o600)
+            write_private(path, pw)
         return path
 
     def _env(self) -> dict[str, str]:

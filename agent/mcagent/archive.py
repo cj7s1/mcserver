@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import IO
 
 from .docker_ops import AgentError
-from .safefs import PathError, SafeRoot, split_path
+from .safefs import PathError, SafeRoot, split_path, touches_protected
 
 MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024  # 64 GiB uncompressed
 MAX_FILES = 500_000
@@ -127,7 +127,9 @@ def _tar_members(tf: tarfile.TarFile) -> Iterator[Member]:
         elif info.isreg():
             yield Member(info.name, "file", info.size, None, lambda i=info: tf.extractfile(i))  # type: ignore[misc]
         else:
-            yield Member(info.name, "other", 0, None, None)
+            # not written, but tarfile decompresses its data (skipped by its declared size) all the
+            # same: the size counts towards the limit (B-8)
+            yield Member(info.name, "other", max(0, int(info.size or 0)), None, None)
 
 
 class _CommonRoot:
@@ -286,13 +288,7 @@ def protected_paths(items: list[str] | None) -> list[tuple[str, ...]]:
 def _protects(parts: list[str], kind: str, protected: list[tuple[str, ...]]) -> bool:
     """Whether an entry with this target must not be written: the target is a protected path or
     lies inside one, or (a file) it would take the place of a folder that holds one."""
-    folded = tuple(p.casefold() for p in parts)
-    for prot in protected:
-        if folded[: len(prot)] == prot:
-            return True
-        if kind != "dir" and len(folded) < len(prot) and prot[: len(folded)] == folded:
-            return True
-    return False
+    return touches_protected(parts, protected, above=kind != "dir")
 
 
 def extract(
@@ -359,7 +355,7 @@ def _extract_members(
     try:
         # First pass: limits and the common prefix, enforced while the entries are read
         # (nothing is collected; a tar keeps at most MAX_FILES headers in its member cache).
-        count = files = total = 0
+        count = files = total = expanded = 0
         common = _CommonRoot()
         for m in members():
             count += 1
@@ -368,8 +364,10 @@ def _extract_members(
             if m.kind == "file":
                 files += 1
                 total += m.size
-                if total > MAX_TOTAL_BYTES:
-                    raise AgentError("Archive expands to more than 64 GiB", "archive_too_large", 413)
+            # every member with data is decompressed when the archive is read, written or not
+            expanded += m.size
+            if expanded > MAX_TOTAL_BYTES:
+                raise AgentError("Archive expands to more than 64 GiB", "archive_too_large", 413)
             common.add(m.name, m.kind)
         if check is not None:
             check(files, total)  # before anything is written
@@ -546,11 +544,18 @@ def stream_zip(
             raise AgentError(f"Two folders are both named '{prefix}'", "invalid_path", 400)
         folders.append((parts, prefix))
     files: list[tuple[str, str, os.stat_result]] = []  # (path, name in the zip, stat)
+    too_deep: list[str] = []
     for parts, prefix in folders:
-        for path, st in root.walk_files("/".join(parts), max_depth=64):
+        for path, st in root.walk_files("/".join(parts), max_depth=64, too_deep=too_deep):
             if excluded and _is_excluded(split_path(path), excluded):
                 continue
             files.append((path, "/".join([prefix, *split_path(path)[len(parts) :]]), st))
+    if too_deep:  # a zip without them would look complete (B-13)
+        raise AgentError(
+            f"The folder holds folders deeper than 64 levels ({len(too_deep)}); it cannot be downloaded as a zip",
+            "archive_too_large",
+            413,
+        )
     if sum(st.st_size for _p, _a, st in files) > max_bytes:
         raise AgentError("Folder is too large to download as a zip", "archive_too_large", 413)
     return _zip_stream(root, files)
