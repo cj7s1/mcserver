@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ConfirmAction } from "../content/ConfirmAction";
+import { ConsoleOnlyNames } from "./ConsoleOnlyNames";
 import { PlayerAvatar } from "./PlayerAvatar";
 import { sameName, usePlayerAction, type McPlayers } from "./player-utils";
 
@@ -116,6 +117,8 @@ export function OnlinePlayers({
 }) {
   const online = data.online;
   const names = online?.players ?? [];
+  // names in the list that are no account name (nicknames, Bedrock players): shown with "use the console" (C-6)
+  const others = (online?.other_names ?? []).filter((n) => typeof n === "string" && n);
   const uuidOf = (n: string) => data.known_players.find((k) => sameName(k.name, n))?.uuid;
   const count =
     data.running && online && !online.error && online.online != null
@@ -138,22 +141,27 @@ export function OnlinePlayers({
           <p className="text-muted-foreground">The server's reply could not be read as a player list:</p>
           <pre className="overflow-x-auto rounded bg-muted p-2 font-mono text-xs">{online.raw}</pre>
         </div>
-      ) : names.length === 0 ? (
+      ) : names.length === 0 && others.length === 0 ? (
         <p className="text-sm text-muted-foreground">Nobody is online right now.</p>
       ) : (
-        <ul className="-my-2 divide-y">
-          {names.map((n) => (
-            <OnlineRow
-              key={n}
-              instanceId={instanceId}
-              name={n}
-              uuid={uuidOf(n)}
-              isOp={data.ops.some((o) => sameName(o.name, n))}
-              canManage={canManage}
-              showHeads={showHeads}
-            />
-          ))}
-        </ul>
+        <div className="grid gap-3">
+          {names.length > 0 && (
+            <ul className="-my-2 divide-y">
+              {names.map((n) => (
+                <OnlineRow
+                  key={n}
+                  instanceId={instanceId}
+                  name={n}
+                  uuid={uuidOf(n)}
+                  isOp={data.ops.some((o) => sameName(o.name, n))}
+                  canManage={canManage}
+                  showHeads={showHeads}
+                />
+              ))}
+            </ul>
+          )}
+          <ConsoleOnlyNames instanceId={instanceId} names={others} className={names.length > 0 ? "border-t pt-3" : undefined} />
+        </div>
       )}
     </Section>
   );

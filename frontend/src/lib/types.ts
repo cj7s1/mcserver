@@ -807,7 +807,15 @@ export interface PlayersResponse {
   bans: PlayerEntry[];
   ip_bans: PlayerEntry[];
   known_players: { name: string; uuid: string; expiresOn?: string }[];
-  online?: { online: number | null; max: number | null; players: string[]; error?: string; entries?: OnlinePlayerEntry[] };
+  online?: {
+    online: number | null;
+    max: number | null;
+    players: string[];
+    error?: string;
+    entries?: OnlinePlayerEntry[];
+    /** Names in the server's list the panel cannot act on: shown with "use the console" (C-6). */
+    other_names?: string[];
+  };
   /** Non-Minecraft games: what the lists are called ({ops: "Admins"}). */
   labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
   /** The game reports a player count only (Satisfactory): no names, no lists. */

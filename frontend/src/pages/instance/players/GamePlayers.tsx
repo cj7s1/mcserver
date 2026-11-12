@@ -13,7 +13,7 @@
  * A typed display name the game cannot resolve to one player without guessing (Rust, Palworld: 409
  * `ambiguous_player`) opens PlayerChoiceDialog, which sends the action again with the chosen id (C-5).
  */
-import { Ban, Loader2, Plus, Trash2, UserX } from "lucide-react";
+import { Ban, Loader2, Plus, Terminal, Trash2, UserX } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
 import { Section } from "@/components/PageHeader";
 import { ErrorState, LoadingState } from "@/components/States";
@@ -25,6 +25,7 @@ import type { Instance, OnlinePlayerEntry, PlayersResponse } from "@/lib/types";
 import { ConfirmAction } from "../content/ConfirmAction";
 import { useGameInfo } from "../game-api";
 import { ACTIONS, gamePlayerNameError, listEntries, listLabels, type GameListEntry, type ListKey } from "./game-players-model";
+import { ConsoleOnlyNames } from "./ConsoleOnlyNames";
 import { PlayerChoiceDialog } from "./PlayerChoiceDialog";
 import { ambiguousCandidates, usePlayerAction, usePlayers, type AmbiguousPlayer } from "./player-utils";
 
@@ -286,16 +287,26 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
             {online.players.map((p) => (
               <li key={p} className="flex items-center gap-2 px-3 py-2 text-sm">
                 <span className="font-medium">{p}</span>
-                {canManage && (
-                  <Button size="xs" variant="ghost" className="ml-auto" onClick={() => kick.mutate({ action: "kick", name: p })} disabled={kick.isPending} aria-label={`Kick ${p}`}>
-                    <UserX /> Kick
-                  </Button>
-                )}
+                {canManage &&
+                  // a name the game's commands cannot carry (CS2: quotes, ";"; Project Zomboid: other characters) is
+                  // refused by the panel: say where it can be dealt with instead of offering a Kick that fails (C-6)
+                  (pattern && gamePlayerNameError(p, pattern) ? (
+                    <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground" title="The panel cannot act on this name">
+                      <Terminal className="size-3.5" aria-hidden /> use the console
+                    </span>
+                  ) : (
+                    <Button size="xs" variant="ghost" className="ml-auto" onClick={() => kick.mutate({ action: "kick", name: p })} disabled={kick.isPending} aria-label={`Kick ${p}`}>
+                      <UserX /> Kick
+                    </Button>
+                  ))}
               </li>
             ))}
           </ul>
-        ) : (
+        ) : !online?.other_names?.length ? (
           <p className="text-sm text-muted-foreground">Nobody is online.</p>
+        ) : null}
+        {data.running && !data.no_online_list && (
+          <ConsoleOnlyNames instanceId={instance.id} names={online?.other_names ?? []} className="mt-3" />
         )}
         {kickChoice}
       </Section>

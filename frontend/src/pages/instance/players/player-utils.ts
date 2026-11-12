@@ -22,6 +22,12 @@ export interface McOnline {
   online?: number | null;
   max?: number | null;
   players?: string[];
+  /**
+   * Names in the server's list the panel cannot act on (EssentialsX nicknames "~Nick", Bedrock players
+   * through Floodgate ".Steve", other names that are no Java account names); only present when there are
+   * any. Shown with "use the console" (C-6).
+   */
+  other_names?: string[];
   raw?: string;
   error?: string;
 }
