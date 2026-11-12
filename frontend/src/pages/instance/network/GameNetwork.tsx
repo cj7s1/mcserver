@@ -25,6 +25,7 @@ import { usePorts } from "../backups/backup-utils";
 import { useGameInfo } from "../game-api";
 import { CopyButton } from "./ConnectionPanel";
 import { portsPatch, rowsFromPorts, validateNamedPorts, type NamedPortRow } from "./named-ports";
+import { NetworkExposureNotice } from "./NetworkExposureNotice";
 
 /** "only while … is on" with whether the server publishes the port now ("" for a port that always is). */
 function conditionNote(game: GameInfo | undefined, spec: GamePortSpec | undefined, instance: Pick<Instance, "game_options">): string {
@@ -214,6 +215,7 @@ export function GameNetwork({ instance, canEdit }: { instance: Instance; canEdit
   const valid = Object.keys(errors).length === 0;
   return (
     <div className="grid min-w-0 gap-4">
+      <NetworkExposureNotice instance={instance} />
       <Section title="How players connect" description={`Addresses of this ${gameLabel(instance)} server, per port`}>
         <ConnectionPorts instance={instance} />
       </Section>

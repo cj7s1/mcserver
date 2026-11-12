@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
 import type { ConnectionInfo, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { onAgentNetwork } from "./network-exposure";
 
 
 export function CopyButton({ value, label }: { value: string; label: string }) {
@@ -104,8 +105,10 @@ export function ConnectionFlow({
         <li className="flex gap-2">
           <ShieldOff className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           <span>
-            <strong className="text-foreground">RCON (25575) is never published.</strong> The panel talks to it over the internal
-            Docker network, so the console works without exposing it.
+            <strong className="text-foreground">RCON (25575) is never published.</strong>{" "}
+            {onAgentNetwork(network)
+              ? "The panel talks to it over the internal Docker network, so the console works without exposing it."
+              : "But this server is not on the panel's own network: there RCON is reachable directly (see the warning above)."}
           </span>
         </li>
         <li className="flex gap-2">

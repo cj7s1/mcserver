@@ -20,6 +20,7 @@ import { usePorts } from "./backups/backup-utils";
 import { AddressList, ConnectionFlow } from "./network/ConnectionPanel";
 import { ExtraPortsEditor } from "./network/ExtraPortsEditor";
 import { GameNetwork } from "./network/GameNetwork";
+import { NetworkExposureNotice } from "./network/NetworkExposureNotice";
 import { MAX_EXTRA_PORTS, type PortPreset, type PortRow } from "./network/port-presets";
 
 type BindMode = "all" | "localhost" | "custom";
@@ -246,6 +247,7 @@ function MinecraftNetwork() {
 
   return (
     <div className="grid min-w-0 gap-4">
+      <NetworkExposureNotice instance={instance} />
       <Section
         title="How players connect"
         description="Three layers sit between a player and the server. The panel manages the last two."
@@ -427,6 +429,7 @@ function MinecraftNetwork() {
               Allowed by the agent: {allowedNetworks.map((n) => <code key={n} className="mr-1.5 font-mono">{n}</code>)}
             </p>
           )}
+          {normalized.network !== saved.network && <NetworkExposureNotice instance={instance} network={normalized.network} />}
           {normalized.network === "host" && (
             <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-800 dark:text-amber-200">
               Host networking skips Docker port mapping: the server listens on the host's port 25565 directly, and the host port
