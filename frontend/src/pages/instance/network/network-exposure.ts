@@ -5,18 +5,27 @@
  * LAN address), is reachable on that network on every port it listens on, control port included.
  */
 import { gameId } from "@/lib/games";
-import type { Instance } from "@/lib/types";
+import type { AgentNetworks, Instance } from "@/lib/types";
 
-/** The agent's default instance network (agent setting AGENT_INSTANCE_NETWORK). */
+/** The agent's default instance network (agent setting AGENT_INSTANCE_NETWORK): the guess while the agent does not say. */
 export const DEFAULT_INSTANCE_NETWORK = "mcpanel_instances";
 
 /** A network of one server that the agent creates itself (`mcpanel_i_<first 12 hex of the id>`). */
 const PER_SERVER_NETWORK = /^mcpanel_i_[0-9a-f]{12}$/;
 
-/** Whether a server with this `network` setting runs on a network the agent manages (empty = its default). */
-export function onAgentNetwork(network: string | null | undefined): boolean {
+/**
+ * Whether a server with this `network` setting runs on a network the agent manages: empty (its default),
+ * the agent's shared network, or one of its per-server networks. The names come from the instance answer's
+ * `agent_networks`; only when the agent does not report them (null) are the default names assumed.
+ */
+export function onAgentNetwork(network: string | null | undefined, agent?: AgentNetworks | null): boolean {
   const name = (network ?? "").trim();
-  return !name || name === DEFAULT_INSTANCE_NETWORK || PER_SERVER_NETWORK.test(name);
+  if (!name) return true;
+  if (agent && typeof agent.shared === "string" && agent.shared) {
+    const prefix = typeof agent.per_server_prefix === "string" ? agent.per_server_prefix : "";
+    return name === agent.shared || (!!prefix && name.startsWith(prefix));
+  }
+  return name === DEFAULT_INSTANCE_NETWORK || PER_SERVER_NETWORK.test(name);
 }
 
 /** The control listeners of each game (and Terraria variant) that the panel keeps unpublished. */

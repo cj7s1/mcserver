@@ -9,12 +9,12 @@ export function NetworkExposureNotice({
   network = instance.network,
   className,
 }: {
-  instance: Pick<Instance, "game" | "server_type" | "network">;
+  instance: Pick<Instance, "game" | "server_type" | "network" | "agent_networks">;
   /** The network to judge (default: the saved one; the Network form passes its unsaved value). */
   network?: string;
   className?: string;
 }) {
-  if (onAgentNetwork(network)) return null;
+  if (onAgentNetwork(network, instance.agent_networks)) return null;
   const name = network.trim();
   const control = controlPorts(instance);
   const reach = control ? `every port the server listens on, ${control} included,` : "every port the server listens on";

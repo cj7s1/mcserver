@@ -258,6 +258,7 @@ function MinecraftNetwork() {
             bind={instance.connection.bind_address}
             extraPorts={instance.extra_ports ?? []}
             network={instance.network}
+            agentNetworks={instance.agent_networks}
           />
           <div className="grid content-start gap-2">
             <h3 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">Addresses</h3>

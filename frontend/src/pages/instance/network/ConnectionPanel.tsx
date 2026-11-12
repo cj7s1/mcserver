@@ -5,7 +5,7 @@ import { Link } from "react-router";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { copyText } from "@/lib/clipboard";
-import type { ConnectionInfo, PortMapping } from "@/lib/types";
+import type { AgentNetworks, ConnectionInfo, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { onAgentNetwork } from "./network-exposure";
 
@@ -57,11 +57,14 @@ export function ConnectionFlow({
   bind,
   extraPorts,
   network,
+  agentNetworks,
 }: {
   hostPort: number;
   bind: string;
   extraPorts: PortMapping[];
   network: string;
+  /** The agent's own networks (instance answer `agent_networks`); null/absent: the default names. */
+  agentNetworks?: AgentNetworks | null;
 }) {
   const allInterfaces = bind === "0.0.0.0" || bind === "::";
   const hostNet = network === "host";
@@ -106,7 +109,7 @@ export function ConnectionFlow({
           <ShieldOff className="mt-0.5 size-3.5 shrink-0" aria-hidden />
           <span>
             <strong className="text-foreground">RCON (25575) is never published.</strong>{" "}
-            {onAgentNetwork(network)
+            {onAgentNetwork(network, agentNetworks)
               ? "The panel talks to it over the internal Docker network, so the console works without exposing it."
               : "But this server is not on the panel's own network: there RCON is reachable directly (see the warning above)."}
           </span>

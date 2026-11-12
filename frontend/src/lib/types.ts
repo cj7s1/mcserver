@@ -513,6 +513,12 @@ export interface Instance {
   game_port: number;
   extra_ports: PortMapping[];
   network: string;
+  /**
+   * The agent's own networks as it reports them (A-6): the shared instance network and the prefix of the
+   * per-server networks it creates (null: none). null when the agent does not report them (older agent) or,
+   * in the server list, was not asked yet.
+   */
+  agent_networks?: AgentNetworks | null;
   desired_state: "running" | "stopped";
   status: InstanceStatus;
   status_detail: string;
@@ -577,6 +583,11 @@ export interface Job {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+}
+
+export interface AgentNetworks {
+  shared: string;
+  per_server_prefix: string | null;
 }
 
 export interface Stats {
