@@ -101,8 +101,8 @@ export function useJob(id: string | null | undefined) {
   });
 }
 
-export function useSystemInfo() {
-  return useQuery({ queryKey: qk.system, queryFn: () => api.get<SystemInfo>("/system/info"), refetchInterval: 30_000 });
+export function useSystemInfo(enabled = true) {
+  return useQuery({ queryKey: qk.system, queryFn: () => api.get<SystemInfo>("/system/info"), refetchInterval: 30_000, enabled });
 }
 
 /** Invalidate everything related to an instance (after an action). */

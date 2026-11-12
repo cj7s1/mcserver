@@ -189,6 +189,32 @@ describe("the Share card", () => {
     expect(patch).toHaveBeenCalledWith(`/instances/${mc.id}/properties`, { values: { "white-list": "true" } });
   });
 
+  it("Minecraft with online mode off: the checklist item, its fix link, and no whitelist offer", async () => {
+    answer = VALHEIM({
+      game: "minecraft",
+      game_label: "Minecraft",
+      protection: { kind: "whitelist", on: false, label: "the whitelist" },
+      open_warning: "With online mode off anyone can join under any name.",
+      password_set: false,
+      checklist: [
+        { id: "protection", ok: false, label: "Strangers are kept out by the whitelist", hint: "With online mode off anyone can join under any name." },
+        { id: "online_mode", ok: false, label: "Players need a Minecraft account (online mode)", hint: "online-mode is false in server.properties." },
+      ],
+    });
+    const mc = makeInstance({ id: "5ae0a5ae-0000-0000-0000-000000000003", name: "Lobby", permissions: ALL });
+    renderCard(mc);
+    const checklist = await screen.findByRole("list", { name: "Checklist" });
+    expect(within(checklist).getByText("Players need a Minecraft account (online mode)")).toBeInTheDocument();
+    expect(within(checklist).getAllByText("Missing:")).toHaveLength(2);
+    expect(within(checklist).getByRole("link", { name: "Turn online mode on in Properties" })).toHaveAttribute(
+      "href",
+      `/servers/${mc.id}/settings?tab=properties`,
+    );
+    expect(screen.getByText(/^Open:/)).toBeInTheDocument();
+    expect(screen.getByText(/Online mode is off: anyone can join under any name/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Turn the whitelist on" })).not.toBeInTheDocument();
+  });
+
   it("the header's Share button opens the same content and reads it only while open", async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     qc.setQueryData(qk.auth, auth([]));

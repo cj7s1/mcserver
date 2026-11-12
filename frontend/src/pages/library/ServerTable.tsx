@@ -1,4 +1,5 @@
 import { ChevronRight } from "lucide-react";
+import { activeJobLabel } from "@/lib/limited";
 import type { MouseEvent } from "react";
 import { Link, useNavigate } from "react-router";
 import { BackupWarningBadge } from "@/components/BackupNotice";
@@ -122,8 +123,8 @@ function ServerTableRow({ instance }: { instance: Instance }) {
           <StatusBadge status={instance.status} title={instance.status_detail || undefined} />
           <BackupWarningBadge instance={instance} />
           {job && (
-            <div className="flex items-center gap-1.5" title={job.message || job.title}>
-              <Progress value={(job.progress ?? 0) * 100} className="h-1 w-16" aria-label={`${job.title} progress`} />
+            <div className="flex items-center gap-1.5" title={job.message || activeJobLabel(job)}>
+              <Progress value={(job.progress ?? 0) * 100} className="h-1 w-16" aria-label={`${activeJobLabel(job)} progress`} />
               <span className="text-[11px] tabular-nums text-muted-foreground">{Math.round((job.progress ?? 0) * 100)}%</span>
             </div>
           )}

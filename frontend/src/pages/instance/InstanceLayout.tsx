@@ -186,7 +186,8 @@ export function InstanceLayout() {
         )}
         {instance.active_job && <JobProgress job={instance.active_job} className="mt-3" />}
         {!instance.archived_at && (
-          <PowerCountdownBanner instance={instance} canControl={can("instance.control")} className="mt-3" />
+          // a friend (B4) may not cancel the owner's countdown
+          <PowerCountdownBanner instance={instance} canControl={can("instance.control") && !instance.limited} className="mt-3" />
         )}
       </div>
       {instance.limited ? (

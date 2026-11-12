@@ -27,6 +27,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAuth } from "@/hooks/use-auth";
 import { useTheme } from "@/hooks/use-theme";
 import { ApiError, api, errorMessage, throttledMessage } from "@/lib/api";
+import { useGlobalAnswersAllowed } from "@/lib/limited";
 import { qk } from "@/lib/queries";
 import type { AuthState, Me, PermissionDef } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -425,10 +426,13 @@ function AppearanceSection() {
 }
 
 function PermissionsSection({ me }: { me: Me }) {
+  // the descriptions are a global answer a friend may not read (B4): asked for only when it is open to the user
+  const allowed = useGlobalAnswersAllowed();
   const defs = useQuery({
     queryKey: permissionDefsKey,
     queryFn: () => api.get<{ permissions: PermissionDef[] }>("/permissions"),
     staleTime: 5 * 60_000,
+    enabled: allowed,
   });
   const held = new Set<string>(me.permissions);
   const known = defs.data?.permissions ?? [];
@@ -452,7 +456,7 @@ function PermissionsSection({ me }: { me: Me }) {
             : "You have no global role. Access to individual servers can still be granted per server."
       }
     >
-      {defs.isLoading ? (
+      {defs.isLoading && allowed ? (
         <LoadingState className="py-6" />
       ) : me.permissions.length === 0 ? (
         <p className="text-sm text-muted-foreground">

@@ -31,7 +31,7 @@ import { jobStatusLabel } from "./activity/job-utils";
 import { softwareLabel } from "./instance/InstanceLayout";
 import { ServerQuickActions } from "./library/ServerActions";
 import { memoryCommitment, statusBucket, statusRank } from "./library/server-utils";
-import { friendOnly, playersOnlineText } from "@/lib/limited";
+import { activeJobLabel, friendOnly, globalAnswersAllowed, playersOnlineText } from "@/lib/limited";
 
 const MAX_STATS = 6;
 const MAX_ROWS = 8;
@@ -39,10 +39,13 @@ const MAX_ROWS = 8;
 export default function Dashboard() {
   const { user, can } = useAuth();
   const instances = useInstances();
-  const system = useSystemInfo();
+  // a friend (B4): their servers only, without the activity and host panels; the panel answers them 403 on
+  // the system info, so it is not asked (not even while the server list loads)
+  const broad = globalAnswersAllowed(user, instances.data);
+  const system = useSystemInfo(broad);
   const canCreate = can("instance.create");
-  // a friend (B4): their servers only, without the activity and host panels (they would answer 403 or nothing)
-  const friend = friendOnly(user, instances.data);
+  // the activity and host panels only once it is clear the user is more than a friend
+  const friend = !broad || friendOnly(user, instances.data);
 
   const list = instances.data ?? [];
   const sorted = [...list].sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name));
@@ -315,9 +318,9 @@ function DashboardServerRow({ instance, withStats: wanted }: { instance: Instanc
         </div>
         {job && (
           <div className="mt-1.5 flex items-center gap-2" aria-live="polite">
-            <Progress value={(job.progress ?? 0) * 100} className="h-1 max-w-48" aria-label={`${job.title} progress`} />
+            <Progress value={(job.progress ?? 0) * 100} className="h-1 max-w-48" aria-label={`${activeJobLabel(job)} progress`} />
             <span className="truncate text-xs text-muted-foreground">
-              {job.title} · {Math.round((job.progress ?? 0) * 100)}%
+              {activeJobLabel(job)} · {Math.round((job.progress ?? 0) * 100)}%
             </span>
           </div>
         )}

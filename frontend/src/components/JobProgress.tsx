@@ -1,6 +1,7 @@
 import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { SecretRequiredJobHint } from "@/components/SecretRequiredDialog";
 import { Progress } from "@/components/ui/progress";
+import { activeJobLabel } from "@/lib/limited";
 import { useJob } from "@/lib/queries";
 import type { ActiveJob, Job } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -27,7 +28,7 @@ export function JobProgress({ job, jobId, className, showLog = false }: {
         ) : (
           <Loader2 className="size-4 animate-spin text-primary" />
         )}
-        <span className="font-medium">{j.title}</span>
+        <span className="font-medium">{activeJobLabel(j)}</span>
         <span className="ml-auto text-xs tabular-nums text-muted-foreground">{Math.round((j.progress ?? 0) * 100)}%</span>
       </div>
       {!done && !failed && <Progress value={(j.progress ?? 0) * 100} className="mt-2 h-1.5" />}

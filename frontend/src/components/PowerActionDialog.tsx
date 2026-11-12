@@ -62,7 +62,8 @@ export function PowerActionDialog({
   description,
   onCloseAutoFocus,
 }: {
-  instance: Pick<Instance, "id" | "name">;
+  /** `limited` (a friend, B4): a plain start/stop, without the in-game warning the panel refuses them. */
+  instance: Pick<Instance, "id" | "name"> & { limited?: boolean };
   action: WarnableAction;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -72,10 +73,12 @@ export function PowerActionDialog({
 }) {
   const uid = useId();
   const invalidate = useInvalidateInstance();
-  const [minutes, setMinutes] = useStoredState<WarnMinutes>("mcpanel.power.warnMinutes", 0, isWarnMinutes);
+  const [storedMinutes, setMinutes] = useStoredState<WarnMinutes>("mcpanel.power.warnMinutes", 0, isWarnMinutes);
   const [message, setMessage] = useState("");
   const [serverError, setServerError] = useState<string | null>(null);
   const copy = COPY[action];
+  const plain = !!instance.limited;
+  const minutes = plain ? 0 : storedMinutes;
   const localError = minutes ? warnMessageError(message) : null;
   const messageError = localError ?? serverError;
 
@@ -93,7 +96,7 @@ export function PowerActionDialog({
       onConfirm={async () => {
         if (localError) throw new Error(localError);
         try {
-          const outcome = await sendPower<Job>(instance, powerBody(action, minutes, message));
+          const outcome = await sendPower<Job>({ id: instance.id, name: instance.name }, powerBody(action, minutes, message));
           if (outcome.status === "cancelled") return; // not enough memory and the user declined
           toast.success(powerToast(instance.name, copy.title, minutes, outcome.data));
           setMessage("");
@@ -105,50 +108,52 @@ export function PowerActionDialog({
         }
       }}
     >
-      <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${uid}-warn`}>Warn players in game</Label>
-          <Select value={String(minutes)} onValueChange={(v) => setMinutes(Number(v) as WarnMinutes)}>
-            <SelectTrigger id={`${uid}-warn`} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {WARN_MINUTES.map((m) => (
-                <SelectItem key={m} value={String(m)}>
-                  {warnOptionLabel(m)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">
-            {minutes
-              ? `${describeWarning(minutes)} Other operations keep working meanwhile; you can cancel until the last 10 seconds.`
-              : `The ${copy.verb} starts immediately.`}
-          </p>
-          <PlayersHint instanceId={instance.id} minutes={minutes} verb={copy.verb} />
-        </div>
-        {minutes > 0 && (
+      {!plain && (
+        <div className="grid gap-3 rounded-lg border bg-muted/30 p-3">
           <div className="grid gap-1.5">
-            <Label htmlFor={`${uid}-msg`}>Message (optional)</Label>
-            <Input
-              id={`${uid}-msg`}
-              value={message}
-              maxLength={WARN_MESSAGE_MAX}
-              placeholder="e.g. Installing the new modpack version"
-              onChange={(e) => {
-                setMessage(e.target.value.replace(/[\r\n]/g, " "));
-                setServerError(null);
-              }}
-              aria-invalid={!!messageError || undefined}
-              aria-describedby={`${uid}-msg-help`}
-              autoComplete="off"
-            />
-            <p id={`${uid}-msg-help`} className={messageError ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
-              {messageError ?? "Shown after each warning. Plain text, one line."}
+            <Label htmlFor={`${uid}-warn`}>Warn players in game</Label>
+            <Select value={String(minutes)} onValueChange={(v) => setMinutes(Number(v) as WarnMinutes)}>
+              <SelectTrigger id={`${uid}-warn`} className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {WARN_MINUTES.map((m) => (
+                  <SelectItem key={m} value={String(m)}>
+                    {warnOptionLabel(m)}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {minutes
+                ? `${describeWarning(minutes)} Other operations keep working meanwhile; you can cancel until the last 10 seconds.`
+                : `The ${copy.verb} starts immediately.`}
             </p>
+            <PlayersHint instanceId={instance.id} minutes={minutes} verb={copy.verb} />
           </div>
-        )}
-      </div>
+          {minutes > 0 && (
+            <div className="grid gap-1.5">
+              <Label htmlFor={`${uid}-msg`}>Message (optional)</Label>
+              <Input
+                id={`${uid}-msg`}
+                value={message}
+                maxLength={WARN_MESSAGE_MAX}
+                placeholder="e.g. Installing the new modpack version"
+                onChange={(e) => {
+                  setMessage(e.target.value.replace(/[\r\n]/g, " "));
+                  setServerError(null);
+                }}
+                aria-invalid={!!messageError || undefined}
+                aria-describedby={`${uid}-msg-help`}
+                autoComplete="off"
+              />
+              <p id={`${uid}-msg-help`} className={messageError ? "text-xs text-destructive" : "text-xs text-muted-foreground"}>
+                {messageError ?? "Shown after each warning. Plain text, one line."}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
     </ConfirmDialog>
   );
 }

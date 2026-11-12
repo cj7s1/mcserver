@@ -1,4 +1,5 @@
 import { AlertTriangle } from "lucide-react";
+import { activeJobLabel } from "@/lib/limited";
 import { Link } from "react-router";
 import { BackupWarningBadge } from "@/components/BackupNotice";
 import { ServerIcon } from "@/components/ServerIcon";
@@ -78,10 +79,10 @@ export function ServerCard({ instance }: { instance: Instance }) {
       {job ? (
         <div className="grid gap-1" aria-live="polite">
           <div className="flex justify-between gap-2 text-xs text-muted-foreground">
-            <span className="truncate">{job.message || job.title}</span>
+            <span className="truncate">{job.message || activeJobLabel(job)}</span>
             <span className="tabular-nums">{Math.round((job.progress ?? 0) * 100)}%</span>
           </div>
-          <Progress value={(job.progress ?? 0) * 100} className="h-1" aria-label={`${job.title} progress`} />
+          <Progress value={(job.progress ?? 0) * 100} className="h-1" aria-label={`${activeJobLabel(job)} progress`} />
         </div>
       ) : note?.tone === "warning" ? (
         <p className="flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-300">

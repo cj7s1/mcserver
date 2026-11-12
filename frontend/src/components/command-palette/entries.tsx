@@ -137,6 +137,8 @@ export function powerOptions(i: Instance): PowerOption[] {
   if (i.status === "stopping") return [];
   const disabledReason = i.active_job ? `Busy: ${i.active_job.title || i.active_job.kind}` : undefined;
   if (isRunningLike(i)) {
+    // a friend (B4) may only stop (no restart)
+    if (i.limited) return [{ action: "stop", verb: "Stop", icon: Square, needsConfirm: true, disabledReason, aliases: ["shutdown", "halt", "power"] }];
     return [
       { action: "restart", verb: "Restart", icon: RotateCw, needsConfirm: true, disabledReason, aliases: ["reboot", "power"] },
       { action: "stop", verb: "Stop", icon: Square, needsConfirm: true, disabledReason, aliases: ["shutdown", "halt", "power"] },

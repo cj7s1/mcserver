@@ -5,7 +5,7 @@
  * entries; nothing that would answer 403.
  */
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -24,16 +24,16 @@ import { ServerQuickActions } from "@/pages/library/ServerActions";
 import { makeInstance } from "@/test/fixtures";
 import { InviteFriendDialog } from "./InviteFriendDialog";
 
-/** The short answer a friend gets for a server (only these keys). */
+/** The short answer a friend gets for a server (only these keys; final shape: no connection). */
 function limitedServer(over: Partial<Instance> = {}): Instance {
   const full = makeInstance({ id: "f1f1f1f1-0000-0000-0000-000000000001", name: "Vikings", game: "valheim", game_label: "Valheim", status: "stopped" });
   const keys = [
     "id", "name", "description", "icon_url", "group", "game", "game_label", "edition", "server_type", "minecraft_version", "loader",
     "is_modpack", "modpack_name", "modpack_version_name", "capabilities", "desired_state", "status", "status_detail", "health",
-    "started_at", "ready_at", "status_updated_at", "active_job", "power_countdown", "archived_at", "connection",
+    "started_at", "ready_at", "status_updated_at", "active_job", "power_countdown", "archived_at",
   ] as const;
   const out = Object.fromEntries(keys.map((k) => [k, (full as unknown as Record<string, unknown>)[k]])) as unknown as Instance;
-  return { ...out, permissions: ["instance.control"], limited: true, ...over };
+  return { ...out, permissions: ["instance.control", "instance.overview"], limited: true, players_online: null, players_max: null, ...over };
 }
 
 const authFor = (permissions: PermissionCode[], over: Partial<NonNullable<AuthState["user"]>> = {}): AuthState => ({
@@ -219,5 +219,157 @@ describe("the app of a friend", () => {
     await waitFor(() => expect(within(nav).queryByRole("link", { name: "Modpacks" })).not.toBeInTheDocument());
     expect(within(nav).getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
     expect(within(nav).queryByRole("link", { name: "Activity" })).not.toBeInTheDocument();
+  });
+});
+
+describe("a friend against the tightened API (review of 2026-11-12)", () => {
+  const SHARE = {
+    game: "valheim",
+    game_label: "Valheim",
+    address: { host: "play.example.org", source: "panel", note: "" },
+    connect: "play.example.org:2456",
+    ports: [],
+    protection: { kind: "password", on: true, label: "a join password" },
+    steps: ["Start Valheim."],
+    requirements: [],
+    open_warning: "",
+    invite_text: "Join!",
+    invite_has_password: false,
+    checklist: [],
+    password_set: true,
+  };
+  function renderAt(path: string, routes: Parameters<typeof createMemoryRouter>[0], instances: Instance[]) {
+    gets["/instances/"] = instances;
+    for (const i of instances) gets[`/instances/${i.id}`] = i;
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
+    qc.setQueryData(qk.auth, authFor([]));
+    for (const i of instances) qc.setQueryData(qk.instance(i.id), i);
+    qc.setQueryData([...qk.instances, { archived: "false" }], instances);
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <TooltipProvider>
+            <RouterProvider router={createMemoryRouter(routes, { initialEntries: [path] })} />
+          </TooltipProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+  }
+  /** What a friend may call (everything else answers 403 for them or is not theirs). */
+  const allowed = (id: string) => new Set(["/auth/state", "/auth/me", "/instances/", `/instances/${id}`, `/instances/${id}/share`]);
+
+  class NoSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    readyState = 0;
+    onopen = null;
+    onclose = null;
+    onmessage = null;
+    onerror = null;
+    send() {}
+    close() {}
+  }
+
+  it("the whole app shell (dashboard, server list, server page, account) asks only for what a friend may read", async () => {
+    vi.stubGlobal("WebSocket", NoSocket);
+    const server = limitedServer({
+      status: "running",
+      players_online: 1,
+      players_max: 10,
+      active_job: { kind: "start", status: "running", progress: 0.5 } as unknown as Instance["active_job"],
+    });
+    gets["/instances/"] = [server];
+    gets[`/instances/${server.id}`] = server;
+    gets[`/instances/${server.id}/share`] = SHARE;
+    gets["/auth/me"] = authFor([]).user;
+    const [{ default: ServersPage }, { default: AccountPage }] = await Promise.all([import("@/pages/ServersPage"), import("@/pages/AccountPage")]);
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    qc.setQueryData(qk.auth, authFor([]));
+    const router = createMemoryRouter(
+      [
+        {
+          element: <AppLayout />,
+          children: [
+            { path: "/", element: <Dashboard /> },
+            { path: "/servers", element: <ServersPage /> },
+            { path: "/servers/:id", element: <InstanceLayout />, children: [{ index: true, element: <Overview /> }] },
+            { path: "/account", element: <AccountPage /> },
+          ],
+        },
+      ],
+      { initialEntries: ["/"] },
+    );
+    render(
+      <QueryClientProvider client={qc}>
+        <ThemeProvider>
+          <TooltipProvider>
+            <RouterProvider router={router} />
+          </TooltipProvider>
+        </ThemeProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText("1 of 10 players online")).toBeInTheDocument();
+    expect(screen.getByText(/Starting · 50%/)).toBeInTheDocument();
+    for (const path of ["/servers", `/servers/${server.id}`, "/account"]) {
+      await act(async () => {
+        await router.navigate(path);
+      });
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    expect(await screen.findByText("Global permissions")).toBeInTheDocument();
+    const outside = requested.filter((p) => !allowed(server.id).has(p));
+    expect(outside).toEqual([]);
+  });
+
+  it("a running server: Stop only (plain, no warning), no Restart, Kill or Cancel; the job by its kind", async () => {
+    const server = limitedServer({
+      status: "running",
+      active_job: null,
+      power_countdown: { action: "restart", phase: "warning", action_at: new Date(Date.now() + 60_000).toISOString() } as unknown as Instance["power_countdown"],
+    });
+    gets[`/instances/${server.id}/share`] = SHARE;
+    const post = vi.spyOn(api, "post").mockResolvedValue({ id: "j1", title: "Stop" } as never);
+    renderAt(`/servers/${server.id}`, [{ path: "/servers/:id", element: <InstanceLayout />, children: [{ index: true, element: <Overview /> }] }], [server]);
+    expect(await screen.findByText(/Restarting in/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Cancel/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Restart/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Kill/ })).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Stop$/ }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Stop Vikings?" });
+    expect(within(dialog).queryByText("Warn players in game")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Stop server" }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith(`/instances/${server.id}/power`, { action: "stop" }));
+    expect(requested.some((p) => p.endsWith("/stats"))).toBe(false);
+  });
+
+  it("the quick actions and the palette offer no restart", async () => {
+    const { powerOptions } = await import("@/components/command-palette/entries");
+    const running = limitedServer({ status: "running" });
+    expect(powerOptions(running).map((o) => o.action)).toEqual(["stop"]);
+    expect(powerOptions(limitedServer()).map((o) => o.action)).toEqual(["start"]);
+    const qc = new QueryClient();
+    render(
+      <QueryClientProvider client={qc}>
+        <MemoryRouter>
+          <ServerQuickActions instance={running} />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await userEvent.setup().click(screen.getByRole("button", { name: "More actions for Vikings" }));
+    expect(await screen.findByRole("menuitem", { name: /Stop/ })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /Restart/ })).not.toBeInTheDocument();
+  });
+
+  it("global answers are asked for only when they are open to the user", async () => {
+    const { globalAnswersAllowed } = await import("@/lib/limited");
+    const friend = authFor([]).user!;
+    expect(globalAnswersAllowed(friend, undefined)).toBe(false); // still loading: not asked
+    expect(globalAnswersAllowed(friend, [limitedServer()])).toBe(false);
+    expect(globalAnswersAllowed(friend, [])).toBe(false);
+    expect(globalAnswersAllowed(friend, [makeInstance()])).toBe(true);
+    expect(globalAnswersAllowed(authFor(["instance.create"]).user, undefined)).toBe(true);
+    expect(friendOnly(friend, [])).toBe(true);
+    expect(friendOnly(authFor(["instance.control", "instance.overview"]).user, [])).toBe(true);
   });
 });

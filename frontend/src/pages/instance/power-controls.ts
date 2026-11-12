@@ -22,8 +22,10 @@ export interface PowerButtons {
   kill: boolean;
 }
 
-export function powerButtons(instance: Pick<Instance, "status" | "container_state" | "desired_state">): PowerButtons {
+export function powerButtons(instance: Pick<Instance, "status" | "container_state" | "desired_state" | "limited">): PowerButtons {
   const running = RUNNING_LIKE.includes(instance.status);
+  // a friend (B4) may only start and stop (a plain stop: no restart, kill or in-game warning)
+  if (instance.limited) return { start: !running, restart: false, stop: running, dismiss: false, kill: false };
   return {
     start: !running,
     restart: running,

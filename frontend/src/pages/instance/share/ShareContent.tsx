@@ -77,6 +77,7 @@ function fixLink(item: ShareChecklistItem, data: ShareAnswer, instance: Instance
     if (data.protection.kind === "whitelist") return link(`/servers/${instance.id}/players`, "Open the Players page");
     return null;
   }
+  if (item.id === "online_mode") return link(`/servers/${instance.id}/settings?tab=properties`, "Turn online mode on in Properties");
   if (item.id === "ports") return link(`/servers/${instance.id}/network`, "See the Network page");
   return null;
 }
@@ -142,7 +143,10 @@ function AddFriend({ instance, data, mayConfigure }: { instance: Instance; data:
   const [name, setName] = useState("");
   const [touched, setTouched] = useState(false);
   const act = usePlayerAction(instance.id);
-  const whitelistOff = data.protection.kind === "whitelist" && data.protection.on === false;
+  // protection.on is false also when the whitelist is on but online mode is off (any name can be used): then the
+  // whitelist is not what is missing
+  const onlineModeOff = data.checklist.some((c) => c.id === "online_mode" && c.ok === false);
+  const whitelistOff = data.protection.kind === "whitelist" && data.protection.on === false && !onlineModeOff;
   const turnOn = useMutation({
     mutationFn: () => api.patch(`/instances/${instance.id}/properties`, { values: { "white-list": "true" } }),
     onSuccess: () => {
@@ -190,6 +194,11 @@ function AddFriend({ instance, data, mayConfigure }: { instance: Instance; data:
       {error && (
         <p className="text-xs text-destructive" role="alert">
           {error}
+        </p>
+      )}
+      {onlineModeOff && (
+        <p className="text-xs text-muted-foreground">
+          Online mode is off: anyone can join under any name, also a name on the whitelist.
         </p>
       )}
       {whitelistOff && (

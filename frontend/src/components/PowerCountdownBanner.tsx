@@ -45,7 +45,10 @@ export function PowerCountdownBanner({
   const left = countdownText(countdown.action_at, now);
   const headline =
     countdown.phase === "queued" || !left
-      ? `${countdown.action === "stop" ? "Stop" : "Restart"} queued with a ${countdown.warn_minutes} minute warning`
+      ? `${countdown.action === "stop" ? "Stop" : "Restart"} queued${
+          // a friend's short answer (B4) has no warning length
+          typeof countdown.warn_minutes === "number" ? ` with a ${countdown.warn_minutes} minute warning` : ""
+        }`
       : left === "0:00"
         ? `${verb} now…`
         : `${verb} in ${left}`;

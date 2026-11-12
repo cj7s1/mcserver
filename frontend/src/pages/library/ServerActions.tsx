@@ -98,9 +98,11 @@ export function ServerQuickActions({
               )}
               {running && (
                 <>
-                  <DropdownMenuItem disabled={busy} onSelect={() => setConfirm("restart")}>
-                    <RotateCw /> Restart…
-                  </DropdownMenuItem>
+                  {!instance.limited && (
+                    <DropdownMenuItem disabled={busy} onSelect={() => setConfirm("restart")}>
+                      <RotateCw /> Restart…
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuItem disabled={busy} onSelect={() => setConfirm("stop")}>
                     <Square /> Stop…
                   </DropdownMenuItem>

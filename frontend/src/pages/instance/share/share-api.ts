@@ -9,7 +9,8 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 
 export type ProtectionKind = "password" | "whitelist" | "accounts" | "none";
-export type ChecklistId = "running" | "public_address" | "protection" | "ports";
+/** `online_mode`: Minecraft only, whether players need a Minecraft account (`online-mode`). */
+export type ChecklistId = "running" | "public_address" | "protection" | "online_mode" | "ports";
 
 export interface ShareChecklistItem {
   id: ChecklistId | string;

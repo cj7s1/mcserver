@@ -16,17 +16,50 @@ export function isLimited(instance: Pick<Instance, "limited"> | null | undefined
   return instance?.limited === true;
 }
 
-/** Whether the signed-in user is only a friend: no global permission beyond the Friend role's, and every server limited. */
+/** The user holds a global permission beyond the Friend role's (or is the owner). */
+function beyondFriend(user: Pick<Me, "permissions" | "is_owner">): boolean {
+  return user.is_owner || user.permissions.some((c) => !FRIEND_CODES.has(c));
+}
+
+/**
+ * Whether the signed-in user is only a friend: no global permission beyond the Friend role's, and no server
+ * it may view (every listed server limited, or none). The panel answers such an account 403 on its global
+ * answers (system info, ports, nodes, roles, permissions, catalogs, notification events).
+ */
 export function friendOnly(user: Pick<Me, "permissions" | "is_owner"> | null | undefined, instances: readonly Pick<Instance, "limited">[] | undefined): boolean {
-  if (!user || user.is_owner) return false;
-  if (user.permissions.some((c) => !FRIEND_CODES.has(c))) return false;
-  return !!instances && instances.every((i) => isLimited(i)) && (instances.length > 0 || user.permissions.length === 0);
+  if (!user || beyondFriend(user)) return false;
+  return !!instances && instances.every((i) => isLimited(i));
+}
+
+/**
+ * Whether the panel's global answers (system info, permissions, catalogs, ...) are open to the user: a global
+ * permission beyond the Friend role's, or a server it may view. False while the server list is still loading
+ * for a user without such a permission, so nothing is asked that could answer 403.
+ */
+export function globalAnswersAllowed(user: Pick<Me, "permissions" | "is_owner"> | null | undefined, instances: readonly Pick<Instance, "limited">[] | undefined): boolean {
+  if (!user) return false;
+  if (beyondFriend(user)) return true;
+  return !!instances && instances.some((i) => !isLimited(i));
 }
 
 export function useFriendOnly(): boolean {
   const { user } = useAuth();
   const instances = useInstances();
   return friendOnly(user, instances.data);
+}
+
+export function useGlobalAnswersAllowed(): boolean {
+  const { user } = useAuth();
+  const instances = useInstances();
+  return globalAnswersAllowed(user, instances.data);
+}
+
+const JOB_KIND_LABELS: Record<string, string> = { start: "Starting", stop: "Stopping", restart: "Restarting", install: "Installing" };
+
+/** The title of a running job; a friend's short answer has only its kind ("start" -> "Starting"). */
+export function activeJobLabel(job: { title?: string; kind: string }): string {
+  if (job.title) return job.title;
+  return JOB_KIND_LABELS[job.kind] ?? job.kind.charAt(0).toUpperCase() + job.kind.slice(1).replace(/_/g, " ");
 }
 
 /** "3 of 10 players online" from a friend's short answer, or null while the count is unknown (or not in the answer). */
