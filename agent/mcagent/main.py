@@ -300,7 +300,10 @@ def _guard_loop(settings: Settings, stop: threading.Event) -> None:
             # once Docker answers: join every server network, create missing ones again, sweep leftovers
             networks_checked = True
             try:
-                pernet.startup(settings, lambda iid: docker_ops.instance_lock(iid, wait=LIFECYCLE_LOCK_WAIT))
+                pernet.startup(
+                    settings,
+                    lambda iid, wait=LIFECYCLE_LOCK_WAIT: docker_ops.instance_lock(iid, wait=wait),
+                )
             except Exception:
                 log.exception("Checking the server networks at start failed")
         stop.wait(GUARD_REFRESH_SECONDS if _blocked_networks is not None else GUARD_RETRY_SECONDS)

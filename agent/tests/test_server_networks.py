@@ -283,12 +283,12 @@ def test_startup_recreates_joins_and_sweeps(settings, docker):
     locks: list = []
 
     @contextlib.contextmanager
-    def lock_for(iid):
+    def lock_for(iid, wait=None):
         locks.append(iid)
         yield
 
     done = pernet.startup(settings, lock_for)
-    assert done["recreated"] == [a] and locks == [A]
+    assert done["recreated"] == [a] and locks == [A, B]  # A to create again, B to sweep
     assert _subnet(docker, a) == "10.213.0.0/29" and a in docker.ctrs[OWN].nets
     assert done["removed"] == [b] and b not in docker.nets
     assert "bystander" in docker.nets  # not a server network
@@ -391,3 +391,23 @@ def test_an_older_daemon_gets_a_plain_connect(settings, docker):
 )
 def test_the_prefix_sorts_after_compose_network_names(compose):
     assert pernet.network_name(A) > compose and pernet.NETWORK_PREFIX == "zz_mcpanel_i_"
+
+
+# --- R-7: the sweep takes the server's lock and never waits for it ---------------------------------------
+def test_the_sweep_leaves_a_network_whose_server_is_busy(settings, docker):
+    """A create holds the server's lock and has just made the network (pernet.prepare) but not the container
+    yet: the sweep must not remove it (adopted from the review's proof, turned around)."""
+    from mcagent.errors import AgentError
+
+    name = pernet.prepare(settings, A)
+    asked: list = []
+
+    @contextlib.contextmanager
+    def busy(iid, wait=None):
+        asked.append((iid, wait))
+        raise AgentError("busy", "instance_busy", 409)
+        yield  # pragma: no cover
+
+    done = pernet.startup(settings, busy)
+    assert done["removed"] == [] and name in docker.nets
+    assert asked == [(A, 0.0)]  # asked without waiting

@@ -473,7 +473,8 @@ def server_networks() -> list[Any]:
 def startup(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
     """At the agent's start (Docker answering): create the network again of every server that has a
     container on a missing server network, join every server network, and remove the ones no container
-    uses any more. ``lock_for(instance_id)``: the server's lock (a context manager). Never raises."""
+    uses any more. ``lock_for(instance_id, wait=None)``: the server's lock (a context manager; AgentError
+    ``instance_busy`` when not free within ``wait``). Never raises."""
     from . import docker_ops
 
     done: dict[str, list[str]] = {"recreated": [], "joined": [], "removed": []}
@@ -509,8 +510,18 @@ def startup(settings: Settings, lock_for: Any) -> dict[str, list[str]]:
             if not _users(net, own):
                 labels = (net.attrs or {}).get("Labels") or {}
                 iid = labels.get(LABEL_INSTANCE)
-                if iid and release(settings, UUID(iid)):
-                    done["removed"].append(net.name)
+                if not iid:
+                    continue
+                # under the server's lock, never waiting for it (R-7): a create that holds it may have just
+                # made this network for a container it is about to create; skipped then, swept next start
+                try:
+                    with lock_for(UUID(iid), 0.0):
+                        if release(settings, UUID(iid)):  # (looks at the containers again, locked)
+                            done["removed"].append(net.name)
+                except AgentError as exc:
+                    if exc.code != "instance_busy":
+                        raise
+                    log.info("Network %s left in place: its server is busy", net.name)
                 continue
             if own is not None:
                 attach_self(net.name)
