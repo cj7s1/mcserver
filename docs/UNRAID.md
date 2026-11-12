@@ -312,10 +312,13 @@ and the syslog, tag `mcpanel`; a step that cannot be done is reported and the ne
 2. waits for Docker (up to 5 minutes);
 3. installs the **shutdown hook** (`install-hook.sh install`, [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md));
 4. puts the **game servers' firewall** back, but only if you had installed it (section 5);
-5. checks the **stack**: it waits up to 2 minutes for `panel`, `agent` and `postgres`, and repairs a
-   container that lost its network at the start (Docker 29 can drop it after a failed start; the
-   panel then restarts for ever with "failed to resolve host postgres"): it stops it, connects it to
-   its network with its service name as alias, and starts it (section 9). The agent does this
+5. checks the **stack**: it waits up to 2 minutes for `panel`, `agent` and `postgres` (leftover
+   one-off containers of `docker compose run` do not count), and repairs a container that lost its
+   network at the start (Docker 29 can drop it after a failed start; the panel then restarts for ever
+   with "failed to resolve host postgres"): it looks again, stops it, connects it to the networks it
+   misses with its service name as alias (the project's internal network, found by Compose's labels;
+   the agent also the shared instance network; "already connected" counts as done) and starts it
+   again, also when the script is ended in between (section 9). The agent does this
    itself within about a minute when it runs (`AGENT_REPAIR_PLATFORM_NETWORKS`): the script's repair
    is the fallback for when the agent does not run.
 

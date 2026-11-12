@@ -177,225 +177,177 @@ def test_a_container_that_cannot_be_repaired_is_removed(settings, monkeypatch):
     assert c.events == ["remove"]
 
 
-# --- the platform's own containers -----------------------------------------------------------------------------
+# --- the platform's own containers (and lost compose aliases) -------------------------------------------------
 AGENT = "a" * 64
 PROJECT = {"com.docker.compose.project": "mcpanel"}
 
 
-def _platform(monkeypatch, *ctrs):
-    docker = Docker(ctrs)
-    monkeypatch.setattr(docker_ops, "client", lambda: docker)
-    monkeypatch.setattr(pernet, "_own", {"id": AGENT})
-    monkeypatch.setattr(platformnet, "_tries", {})
-    monkeypatch.setattr(platformnet, "_recent", platformnet.collections.deque(maxlen=20))
-    return docker
+def svc(service, project="mcpanel", **extra):
+    """The labels compose sets on a long-running service container."""
+    return {
+        "com.docker.compose.project": project,
+        "com.docker.compose.service": service,
+        "com.docker.compose.config-hash": "c0ffee",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.oneoff": "False",
+        **extra,
+    }
 
 
-def _agent(nets=("mcpanel_internal", "mcpanel_instances")):
-    return Ctr(
-        AGENT,
-        mode="mcpanel_internal",
-        nets=nets,
-        status="running",
-        labels={**PROJECT, "com.docker.compose.service": "agent"},
-        name="mcpanel-agent-1",
-    )
-
-
-def test_a_stack_container_without_its_network_is_repaired(settings, monkeypatch):
-    panel = Ctr(
-        "p1",
-        mode="mcpanel_internal",
-        status="restarting",
-        labels={**PROJECT, "com.docker.compose.service": "panel"},
-        name="mcpanel-panel-1",
-    )
-    other = Ctr("x1", mode="other_default", status="running", labels={"com.docker.compose.project": "other"})
-    fine = Ctr(
-        "p2", mode="mcpanel_internal", nets=["mcpanel_internal"], status="running", labels=dict(PROJECT)
-    )
-    docker = _platform(monkeypatch, _agent(), panel, other, fine)
-    done = platformnet.repair_once(settings, now=1000.0)
-    assert done == [{"container": "mcpanel-panel-1", "result": "repaired"}]
-    assert docker.connected == [("p1", "mcpanel_internal", ("panel", "mcpanel-panel-1"))]
-    assert panel.events == ["stop", "start"]
-    assert other.events == [] and fine.events == []  # another project, and one that has its network
-    status = platformnet.status(settings)
-    assert status["enabled"] and status["project"] == "mcpanel"
-    assert (
-        status["recent"][0]["container"] == "mcpanel-panel-1" and status["recent"][0]["result"] == "repaired"
-    )
-
-
-def test_the_agent_reconnects_itself_without_a_restart(settings, monkeypatch):
-    me = _agent(nets=())
-    docker = _platform(monkeypatch, me)
-    platformnet.repair_once(settings, now=1000.0)
-    assert docker.connected == [
-        (AGENT, "mcpanel_internal", ("agent", "mcpanel-agent-1")),
-        (AGENT, "mcpanel_instances", ("agent", "mcpanel-agent-1")),
-    ]
-    assert me.events == []  # never stopped
-
-
-def test_the_agent_on_a_server_network_only_still_gets_its_stack_networks_back(settings, monkeypatch):
-    """Its server networks do not count: disconnected by hand from the stack's networks while a server runs."""
-    me = _agent(nets=[pernet.network_name(IID)])
-    docker = _platform(monkeypatch, me)
-    platformnet.repair_once(settings, now=1000.0)
-    assert [net for _cid, net, _a in docker.connected] == ["mcpanel_internal", "mcpanel_instances"]
-
-
-def test_one_attempt_per_five_minutes_and_three_in_all(settings, monkeypatch, caplog):
-    panel = Ctr(
-        "p3",
-        mode="mcpanel_internal",
-        status="running",
-        labels={**PROJECT, "com.docker.compose.service": "panel"},
-    )
-    _platform(monkeypatch, _agent(), panel)
-
-    def undo():  # someone disconnects it again every time (a deliberate docker network disconnect)
-        panel.nets.clear()
-
-    attempts = 0
-    for t in (0, 60, 300, 400, 600, 900, 1200, 1500):
-        undo()
-        attempts += len(platformnet.repair_once(settings, now=1000.0 + t))
-    assert attempts == 3  # at 0, 300, 600; nothing in between; given up afterwards
-    assert any("not repairing it any more" in r.message for r in caplog.records)
-    assert platformnet.status(settings)["given_up"] == ["p3"]
-
-
-def test_nothing_happens_when_switched_off_or_without_a_project(settings, monkeypatch):
-    panel = Ctr("p4", mode="mcpanel_internal", status="running", labels=dict(PROJECT))
-    _platform(monkeypatch, _agent(), panel)
-    off = settings.model_copy(update={"repair_platform_networks": False})
-    assert platformnet.repair_once(off) == [] and panel.events == []
-    me = _agent()
-    me.labels = {}
-    _platform(monkeypatch, me, panel)
-    assert platformnet.repair_once(settings) == [] and panel.events == []
-    monkeypatch.setattr(pernet, "_own", {"id": None})  # not in a container
-    assert platformnet.repair_once(settings) == []
-
-
-def test_info_reports_the_repairs(api, auth, monkeypatch):
-    monkeypatch.setattr(docker_ops, "docker_info", lambda: {})
-    body = api.get("/v1/info", headers=auth).json()
-    assert body["platform_network_repair"] == {"enabled": True, "project": None, "recent": [], "given_up": []}
-
-
-def test_every_stack_network_seen_before_is_given_back(settings, monkeypatch):
-    """Docker keeps only the first network in NetworkMode; the agent remembers what each service was on."""
-    me = _agent()
-    me.mode = "mcpanel_instances"  # compose picks one of the two
-    docker = _platform(monkeypatch, me)
-    platformnet.repair_once(settings, now=1000.0)  # fine: remembered
-    me.nets.clear()
-    platformnet.repair_once(settings, now=2000.0)
-    assert sorted(net for _cid, net, _a in docker.connected) == ["mcpanel_instances", "mcpanel_internal"]
-    stored = (settings.state_dir / platformnet.STATE_FILE).read_text()
-    assert "mcpanel/agent" in stored
-
-
-# --- lost compose aliases (Unraid's Docker start script reconnects endpoints without them) -----------------------
 class Endpointed(Ctr):
     """A container whose endpoints carry aliases, IP and MAC."""
 
     def __init__(self, cid, endpoints, **kw):
         super().__init__(cid, nets=list(endpoints), **kw)
-        self.endpoints = endpoints
+        self.endpoints = {k: dict(v) for k, v in endpoints.items()}
 
     @property
     def attrs(self):
         base = super().attrs
-        base["NetworkSettings"]["Networks"] = {n: dict(self.endpoints[n]) for n in self.nets}
+        base["NetworkSettings"]["Networks"] = {n: dict(self.endpoints.get(n, {})) for n in self.nets}
         return base
 
 
-class AliasDocker(Docker):
-    def __init__(self, containers, projects, refuse_ip=False):
+class StackDocker(Docker):
+    """Docker with compose networks (labels) and endpoints; ``fail(cid, net, kwargs)`` may refuse a connect."""
+
+    def __init__(self, containers, networks=None, fail=None):
         super().__init__(containers)
-        self.projects = projects
-        self.refuse_ip = refuse_ip
+        self.nets = networks or {
+            "mcpanel_internal": ("mcpanel", "internal"),
+            "mcpanel_instances": ("mcpanel", "instances"),
+        }
+        self.fail = fail
         self.calls: list = []
         self.api = SimpleNamespace(
             connect_container_to_network=self._connect_ep, disconnect_container_from_network=self._disconnect
         )
-        self.networks = SimpleNamespace(get=self._net)
+        self.networks = SimpleNamespace(get=self._net, list=self._net_list)
+
+    def _labels(self, name):
+        project, key = self.nets.get(name, (None, None))
+        return {"com.docker.compose.project": project, "com.docker.compose.network": key} if project else {}
 
     def _net(self, name):
-        project = self.projects.get(name)
-        return SimpleNamespace(attrs={"Labels": {"com.docker.compose.project": project} if project else {}})
+        return SimpleNamespace(name=name, attrs={"Labels": self._labels(name)})
+
+    def _net_list(self, filters=None):
+        key, _, value = (filters or {}).get("label", "=").partition("=")
+        return [self._net(n) for n in self.nets if self._labels(n).get(key) == value]
 
     def _disconnect(self, cid, net, force=False):
-        self.calls.append(("disconnect", cid, net, force))
+        self.calls.append(("disconnect", cid, net))
         self.ctrs[cid].nets.remove(net)
 
     def _connect_ep(self, cid, net, ipv4_address=None, aliases=None, mac_address=None, **_kw):
-        if ipv4_address and self.refuse_ip:
-            raise APIError(
-                "user specified IP address is supported only when connecting to networks with user configured subnets"
-            )
+        if self.fail and self.fail(cid, net, {"ip": ipv4_address, "aliases": aliases, "mac": mac_address}):
+            raise APIError("refused")
         self.calls.append(("connect", cid, net, ipv4_address, tuple(aliases or ()), mac_address))
         c = self.ctrs[cid]
         c.endpoints[net] = {
-            **c.endpoints.get(net, {}),
             "Aliases": list(aliases or []),
             "IPAddress": ipv4_address or "172.30.0.9",
+            "MacAddress": mac_address or "02:00:00:00:00:99",
         }
         c.nets.append(net)
 
 
-def _db(aliases=()):
-    return Endpointed(
-        "d1",
-        {
-            "mcpanel_internal": {
-                "Aliases": list(aliases),
-                "DNSNames": ["mcpanel-postgres-1", "d1"],
-                "IPAddress": "172.30.0.5",
-                "MacAddress": "02:42:ac:1e:00:05",
-            }
-        },
-        mode="mcpanel_internal",
-        status="running",
-        labels={**PROJECT, "com.docker.compose.service": "postgres"},
-        name="mcpanel-postgres-1",
-    )
-
-
-def _alias_platform(monkeypatch, *ctrs, projects=None, refuse_ip=False):
-    docker = AliasDocker(
-        ctrs, projects or {"mcpanel_internal": "mcpanel", "mcpanel_instances": "mcpanel"}, refuse_ip
-    )
+def _stack(monkeypatch, *ctrs, networks=None, fail=None):
+    docker = StackDocker(ctrs, networks, fail)
     monkeypatch.setattr(docker_ops, "client", lambda: docker)
     monkeypatch.setattr(pernet, "_own", {"id": AGENT})
     monkeypatch.setattr(platformnet, "_tries", {})
     monkeypatch.setattr(platformnet, "_recent", platformnet.collections.deque(maxlen=20))
+    monkeypatch.setattr(platformnet, "_on_self_repaired", None)
     return docker
 
 
-def _named_agent():
-    names = {
-        "Aliases": ["mcpanel-agent-1", "agent"],
-        "IPAddress": "172.30.0.2",
-        "MacAddress": "02:42:ac:1e:00:02",
+def _ep(name, ip, mac, aliases=None):
+    return {
+        "Aliases": list(aliases) if aliases is not None else [name.split("-")[1], name],
+        "IPAddress": ip,
+        "MacAddress": mac,
     }
+
+
+def _named_agent(nets=("mcpanel_internal", "mcpanel_instances"), mode="mcpanel_instances"):
+    eps = {
+        n: _ep("mcpanel-agent-1", "172.30.0.2", "02:42:ac:1e:00:02", ["mcpanel-agent-1", "agent"])
+        for n in nets
+    }
+    return Endpointed(AGENT, eps, mode=mode, status="running", labels=svc("agent"), name="mcpanel-agent-1")
+
+
+def _db(aliases=("mcpanel-postgres-1", "postgres"), status="running", cid="d1"):
     return Endpointed(
-        AGENT, {"mcpanel_internal": dict(names), "mcpanel_instances": dict(names)}, mode="mcpanel_internal",
-        status="running", labels={**PROJECT, "com.docker.compose.service": "agent"}, name="mcpanel-agent-1",
-    )  # fmt: skip
+        cid,
+        {"mcpanel_internal": _ep("mcpanel-postgres-1", "172.30.0.5", "02:42:ac:1e:00:05", aliases)},
+        mode="mcpanel_internal",
+        status=status,
+        labels=svc("postgres"),
+        name="mcpanel-postgres-1",
+    )
+
+
+def test_a_member_without_its_network_is_stopped_connected_and_started(settings, monkeypatch):
+    panel = Endpointed(
+        "p1", {}, mode="mcpanel_internal", status="restarting", labels=svc("panel"), name="mcpanel-panel-1"
+    )
+    other = Endpointed("x1", {}, mode="other_default", status="running", labels=svc("web", project="other"))
+    docker = _stack(monkeypatch, _named_agent(), panel, other, _db())
+    done = platformnet.repair_once(settings, now=1000.0)
+    assert done == [{"container": "mcpanel-panel-1", "result": "repaired"}]
+    assert docker.calls == [("connect", "p1", "mcpanel_internal", None, ("panel", "mcpanel-panel-1"), None)]
+    assert panel.events == ["stop", "start"] and other.events == []
+    status = platformnet.status(settings)
+    assert (
+        status["enabled"] and status["project"] == "mcpanel" and status["recent"][0]["result"] == "repaired"
+    )
+
+
+def test_the_agent_reconnects_itself_live_to_its_stack_networks(settings, monkeypatch):
+    """Even when it never recorded them (a first boot of this version): the shared instance network and the
+    project's internal network are always the agent's (review: proof_agent_without_seen)."""
+    me = _named_agent(nets=(), mode="mcpanel_instances")
+    docker = _stack(monkeypatch, me)
+    refreshed: list = []
+    platformnet.on_self_repaired(lambda: refreshed.append(True))
+    platformnet.repair_once(settings, now=1000.0)
+    assert sorted(c[2] for c in docker.calls) == ["mcpanel_instances", "mcpanel_internal"]
+    assert me.events == [] and refreshed == [True]  # no restart; the source guard refreshed at once (F-19)
+
+
+def test_a_member_that_lost_one_of_two_networks_gets_it_back(settings, monkeypatch):
+    """F-5: the memory only grows (per container id): a partial loss is repaired, live."""
+    me = _named_agent()
+    docker = _stack(monkeypatch, me)
+    platformnet.repair_once(settings, now=1000.0)  # healthy: remembered
+    me.nets.remove("mcpanel_internal")  # e.g. docker network disconnect
+    platformnet.repair_once(settings, now=2000.0)
+    assert "mcpanel_internal" in me.nets and me.events == []
+    assert [c[2] for c in docker.calls] == ["mcpanel_internal"]
+
+
+def test_a_new_container_of_a_service_starts_its_memory_afresh(settings, monkeypatch):
+    old = _db(cid="d-old")
+    _stack(monkeypatch, _named_agent(), old)
+    platformnet.repair_once(settings, now=1000.0)
+    import json
+
+    assert "d-old" in json.loads((settings.state_dir / platformnet.STATE_FILE).read_text())
+    _stack(monkeypatch, _named_agent(), _db(cid="d-new"))
+    platformnet.repair_once(settings, now=1000.0)
+    seen = json.loads((settings.state_dir / platformnet.STATE_FILE).read_text())
+    assert "d-old" not in seen and seen["d-new"] == ["mcpanel_internal"]
 
 
 def test_lost_aliases_come_back_with_ip_and_mac_kept(settings, monkeypatch):
     db = _db(aliases=())  # Unraid's reconnect: MAC only, no aliases
-    docker = _alias_platform(monkeypatch, _named_agent(), db)
+    docker = _stack(monkeypatch, _named_agent(), db)
     done = platformnet.repair_once(settings, now=1000.0)
     assert done == [{"container": "mcpanel-postgres-1", "result": "restored"}]
     assert docker.calls == [
-        ("disconnect", "d1", "mcpanel_internal", True),
+        ("disconnect", "d1", "mcpanel_internal"),
         (
             "connect",
             "d1",
@@ -405,15 +357,15 @@ def test_lost_aliases_come_back_with_ip_and_mac_kept(settings, monkeypatch):
             "02:42:ac:1e:00:05",
         ),
     ]
-    assert db.events == []  # a running container is not stopped for this
-    recent = platformnet.status(settings)["recent"][0]
-    assert recent["action"] == "reconnect with aliases" and recent["result"] == "restored"
+    assert db.events == [] and platformnet.status(settings)["recent"][0]["action"] == "reconnect with aliases"
 
 
-def test_a_network_without_a_configured_subnet_lets_docker_pick_the_address(settings, monkeypatch):
-    db = _db()
-    docker = _alias_platform(monkeypatch, _named_agent(), db, refuse_ip=True)
+def test_a_failed_reconnect_falls_back_in_steps(settings, monkeypatch):
+    """F-6: the address was taken meanwhile: the member still ends up on its network, with its name."""
+    db = _db(aliases=())
+    docker = _stack(monkeypatch, _named_agent(), db, fail=lambda cid, net, kw: bool(kw["ip"]))
     assert platformnet.repair_once(settings, now=1000.0)[0]["result"] == "restored"
+    assert "mcpanel_internal" in db.nets
     assert docker.calls[-1] == (
         "connect",
         "d1",
@@ -424,36 +376,128 @@ def test_a_network_without_a_configured_subnet_lets_docker_pick_the_address(sett
     )
 
 
-def test_named_endpoints_and_other_projects_are_left_alone(settings, monkeypatch):
-    fine = _db(aliases=["mcpanel-postgres-1", "postgres"])
-    foreign_net = Endpointed(
-        "e1", {"elsewhere_default": {"Aliases": [], "IPAddress": "172.31.0.2"}}, mode="elsewhere_default",
-        status="running", labels={**PROJECT, "com.docker.compose.service": "postgres"}, name="mcpanel-x-1",
-    )  # fmt: skip
-    other_project = Endpointed(
-        "o1", {"other_default": {"Aliases": [], "IPAddress": "172.32.0.2"}}, mode="other_default",
-        status="running", labels={"com.docker.compose.project": "other", "com.docker.compose.service": "web"},
-    )  # fmt: skip
-    docker = _alias_platform(
-        monkeypatch, _named_agent(), fine, foreign_net, other_project,
-        projects={"mcpanel_internal": "mcpanel", "mcpanel_instances": "mcpanel", "elsewhere_default": "elsewhere", "other_default": "other"},
-    )  # fmt: skip
+def test_a_member_left_off_its_network_is_tried_again_past_the_limit(settings, monkeypatch, caplog):
+    db = _db(aliases=())
+    refuse = {"on": True}
+    _stack(monkeypatch, _named_agent(), db, fail=lambda cid, net, kw: refuse["on"] and cid == "d1")
+    platformnet.repair_once(settings, now=1000.0)
+    assert db.nets == [] and any("is OFF network" in r.message for r in caplog.records)
+    refuse["on"] = False
+    platformnet.repair_once(settings, now=1060.0)  # one minute later, not five
+    assert db.nets == ["mcpanel_internal"]
+
+
+def test_a_one_off_is_never_touched(settings, monkeypatch):
+    """F-3: upgrade.sh's `docker compose run panel manage migrate --check` has no service alias."""
+    oneoff = Endpointed(
+        "r1",
+        {
+            "mcpanel_internal": _ep(
+                "mcpanel-panel-run-3f2a1b", "172.30.0.9", "02:42:ac:1e:00:09", ["mcpanel-panel-run-3f2a1b"]
+            )
+        },
+        mode="mcpanel_internal",
+        status="running",
+        labels=svc("panel", **{"com.docker.compose.oneoff": "True"}),
+        name="mcpanel-panel-run-3f2a1b",
+    )
+    docker = _stack(monkeypatch, _named_agent(), oneoff)
     assert platformnet.repair_once(settings, now=1000.0) == [] and docker.calls == []
 
 
-def test_the_agents_own_aliases_come_back(settings, monkeypatch):
-    me = _named_agent()
-    me.endpoints["mcpanel_internal"]["Aliases"] = []
-    docker = _alias_platform(monkeypatch, me)
-    assert platformnet.repair_once(settings, now=1000.0)[0]["result"] == "restored"
-    assert [c[2] for c in docker.calls] == ["mcpanel_internal", "mcpanel_internal"]
-
-
-def test_aliases_removed_again_and_again_end_in_giving_up(settings, monkeypatch, caplog):
+def test_a_game_container_with_compose_labels_is_never_a_member(settings, monkeypatch):
+    """F-18: Docker copies an image's labels; a game image labelled project=mcpanel, service=postgres must not
+    get the alias, and the real postgres must never be put on the instance network because of it."""
+    game = Endpointed(
+        "g1",
+        {
+            "mcpanel_instances": {
+                "Aliases": None,
+                "IPAddress": "172.19.0.3",
+                "MacAddress": "02:42:ac:13:00:03",
+            }
+        },
+        mode="mcpanel_instances",
+        status="running",
+        labels=svc("postgres", **{"io.mcpanel.managed": "true", "io.mcpanel.instance": str(IID)}),
+        name="mcpanel-b0b0b0b00000",
+    )
     db = _db()
-    _alias_platform(monkeypatch, _named_agent(), db)
+    docker = _stack(monkeypatch, _named_agent(), db, game)
+    assert platformnet.repair_once(settings, now=1000.0) == [] and docker.calls == []
+    db.nets.clear()  # later the real one loses its network
+    platformnet.repair_once(settings, now=2000.0)
+    assert db.nets == ["mcpanel_internal"]  # back on its own network only
+
+
+def test_labels_without_what_compose_always_sets_are_not_a_member(settings, monkeypatch):
+    fake = Endpointed(
+        "f1",
+        {},
+        mode="mcpanel_internal",
+        status="running",
+        labels={**PROJECT, "com.docker.compose.service": "postgres"},
+    )
+    docker = _stack(monkeypatch, _named_agent(), fake)
+    assert platformnet.repair_once(settings, now=1000.0) == [] and docker.calls == []
+
+
+def test_one_attempt_per_five_minutes_and_three_in_all(settings, monkeypatch, caplog):
+    db = _db(aliases=())
+    _stack(monkeypatch, _named_agent(), db)
     tries = 0
     for t in (0, 100, 300, 600, 900, 1200):
         db.endpoints["mcpanel_internal"]["Aliases"] = []  # removed again (deliberately, or by the script)
         tries += len(platformnet.repair_once(settings, now=1000.0 + t))
     assert tries == 3 and any("not repairing it any more" in r.message for r in caplog.records)
+    assert platformnet.status(settings)["given_up"] == ["d1"]
+
+
+def test_nothing_happens_when_switched_off_or_without_a_project(settings, monkeypatch):
+    panel = Endpointed("p4", {}, mode="mcpanel_internal", status="running", labels=svc("panel"))
+    _stack(monkeypatch, _named_agent(), panel)
+    off = settings.model_copy(update={"repair_platform_networks": False})
+    assert platformnet.repair_once(off) == [] and panel.events == []
+    me = _named_agent()
+    me.labels = {}
+    _stack(monkeypatch, me, panel)
+    assert platformnet.repair_once(settings) == [] and panel.events == []
+    monkeypatch.setattr(pernet, "_own", {"id": None})
+    assert platformnet.repair_once(settings) == []
+
+
+def test_info_reports_the_repairs(api, auth, monkeypatch):
+    monkeypatch.setattr(docker_ops, "docker_info", lambda: {})
+    body = api.get("/v1/info", headers=auth).json()
+    assert body["platform_network_repair"] == {"enabled": True, "project": None, "recent": [], "given_up": []}
+
+
+# --- game containers Docker started itself without a network (F-19) ---------------------------------------
+def test_a_running_game_container_without_network_is_restarted_through_the_agent(settings, monkeypatch):
+    import contextlib
+
+    game = Ctr("g9", status="running", labels={"io.mcpanel.managed": "true", "io.mcpanel.instance": str(IID)})
+    docker = Docker([game])
+    docker.containers = SimpleNamespace(get=docker._get, list=lambda **kw: [game])
+    monkeypatch.setattr(docker_ops, "client", lambda: docker)
+    monkeypatch.setattr(platformnet, "_tries", {})
+    monkeypatch.setattr(platformnet, "_recent", platformnet.collections.deque(maxlen=20))
+    steps: list = []
+
+    @contextlib.contextmanager
+    def lock(iid, wait=None):
+        steps.append(("lock", iid, wait))
+        yield
+
+    monkeypatch.setattr(docker_ops, "instance_lock", lock)
+    monkeypatch.setattr(docker_ops, "graceful_stop", lambda s, c, t: steps.append("stop"))
+
+    def start(iid, s):
+        steps.append("start")
+        game.nets.append("mcpanel_instances")
+
+    monkeypatch.setattr(docker_ops, "start", start)
+    done = platformnet.repair_game_containers(settings, now=1000.0)
+    assert done == [{"container": "c-g9", "result": "repaired"}]
+    assert steps == [("lock", IID, 0.0), "stop", "start"]
+    assert platformnet.repair_game_containers(settings, now=1010.0) == []  # (on its network now)

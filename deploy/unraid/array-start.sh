@@ -29,15 +29,18 @@
 #   3. Installs the shutdown hook: install-hook.sh install (with --project when given or remembered).
 #   4. Puts the game servers' firewall back, but only where it was installed: instance-firewall.sh
 #      records INSTALLED=yes in deploy/instance-firewall.env at `install` (INSTALLED=no at `remove`).
-#   5. Checks the stack. When containers of the Compose project exist, it waits up to 2 minutes until
-#      panel, agent and postgres run with their networks. A container that has no network at all
-#      although its NetworkMode names one (Docker 29 can drop the attachment after a failed start at
-#      boot; the panel then restarts for ever with "failed to resolve host postgres") is stopped,
-#      connected to that network with its service name as alias, and started again; the agent also
-#      to the shared instance network. When the agent runs it repairs the containers of its project
-#      itself within about a minute (AGENT_REPAIR_PLATFORM_NETWORKS, agent/mcagent/platformnet.py;
-#      docs/SECURITY.md): this is the fallback for when the agent does not run (its own container broken,
-#      or an agent without that repair).
+#   5. Checks the stack. When containers of the Compose project exist (one-off `docker compose run`
+#      containers are not counted), it waits up to 2 minutes until panel, agent and postgres run with
+#      their networks: the project's internal network (by Compose's labels, else <project>_internal),
+#      for the agent also the shared instance network. A container that is not on one of them (Docker
+#      29 can drop the attachment after a failed start at boot; the panel then restarts for ever with
+#      "failed to resolve host postgres") is looked at again, stopped, connected to what it misses with
+#      its service name as alias ("already connected" counts as done), and started again: what this
+#      script stopped is started again in any case, also when the script is ended in between. When
+#      the agent runs it repairs the containers of its project itself within about a minute
+#      (AGENT_REPAIR_PLATFORM_NETWORKS, agent/mcagent/platformnet.py; docs/SECURITY.md): this is the
+#      fallback for when the agent does not run (its own container broken, or an agent without that
+#      repair).
 # Exit status: 0 when everything is in place, 1 when something needs you (the last lines say what).
 #
 # Root runs this script. When group or others can write it, its folder or its state file, `run` as
@@ -275,17 +278,18 @@ firewall_step() {
 }
 
 # --- 5. the stack ---------------------------------------------------------------------------------------
-named_network() { # the NetworkMode of a Compose container names a network (not a mode of Docker's own)
-    case "$1" in '' | default | bridge | host | none | container:*) return 1 ;; esac
-    return 0
-}
-
-# Lines "<id>|<service>|<running>|<network mode>|<number of networks>|<name>" of the platform containers
+# Lines "<id>|<service>|<running>|<network mode>|<number of networks>|<name>" of the platform containers.
+# One-off containers of the project (`docker compose run`, e.g. a migration check left behind) are not.
 platform_containers() {
-    local id line service
+    local id line service oneoff name
     for id in $(docker ps -a -q --filter "label=com.docker.compose.project=${PROJECT:-mcpanel}" 2>/dev/null); do
-        line="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}|{{len .NetworkSettings.Networks}}|{{.Name}}' "${id}" 2>/dev/null)" || continue
+        line="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}|{{.State.Running}}|{{.HostConfig.NetworkMode}}|{{len .NetworkSettings.Networks}}|{{.Name}}|{{index .Config.Labels "com.docker.compose.oneoff"}}' "${id}" 2>/dev/null)" || continue
+        oneoff="${line##*|}"
+        line="${line%|*}"
         service="${line%%|*}"
+        name="${line##*|}"
+        case "${oneoff}" in [Tt]rue) continue ;; esac
+        case "${name#/}" in "${PROJECT:-mcpanel}-${service}-run-"*) continue ;; esac
         case " ${PLATFORM} " in *" ${service} "*) printf '%s|%s\n' "${id}" "${line}" ;; esac
     done
 }
@@ -296,25 +300,88 @@ instance_network() { # the shared instance network's name (deploy/.env, else mcp
     printf '%s\n' "${value:-mcpanel_instances}"
 }
 
-repair() { # repair ID SERVICE MODE NAME
-    local id="$1" service="$2" mode="$3" name="${4#/}" shared
-    note "Stack: ${name} has no network although it belongs on ${mode} (Docker lost the attachment at a start): stop, connect it with the alias ${service}, start"
+# project_network KEY: the name of the project's network with that key of the compose file (internal,
+# instances), by Compose's own labels, else by its naming; nothing when Docker has no such network.
+project_network() {
+    local name candidate
+    name="$(docker network ls --filter "label=com.docker.compose.project=${PROJECT:-mcpanel}" \
+        --filter "label=com.docker.compose.network=$1" --format '{{.Name}}' 2>/dev/null | head -n 1)"
+    if [ -z "${name}" ]; then
+        candidate="${PROJECT:-mcpanel}_$1"
+        [ "$1" != instances ] || candidate="$(instance_network)"
+        ! docker network inspect "${candidate}" >/dev/null 2>&1 || name="${candidate}"
+    fi
+    [ -z "${name}" ] || printf '%s\n' "${name}"
+}
+
+# wanted_networks SERVICE: the networks the compose file puts it on (deploy/docker-compose.yml): every
+# service on internal, the agent also on the shared instance network. Not a container's NetworkMode: for
+# the agent that is the instance network, and the panel finds the agent on internal.
+wanted_networks() {
+    project_network internal
+    [ "$1" != agent ] || project_network instances
+}
+
+on_networks() { # on_networks ID: the networks the container is attached to, space separated
+    docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$1" 2>/dev/null
+}
+
+missing_networks() { # missing_networks ID SERVICE: the wanted networks it is not on, space separated
+    local net have missing=""
+    have=" $(on_networks "$1") "
+    while IFS= read -r net; do
+        [ -n "${net}" ] || continue
+        case "${have}" in *" ${net} "*) ;; *) missing="${missing}${net} " ;; esac
+    done <<<"$(wanted_networks "$2")"
+    printf '%s' "${missing% }"
+}
+
+# What this script stopped is started again whatever happens (also when it is ended in between).
+STOPPED=()
+start_stopped() {
+    local id
+    for id in "${STOPPED[@]}"; do
+        [ -n "${id}" ] || continue
+        docker start "${id}" >/dev/null 2>&1 || note "could not start ${id} again: 'docker logs ${id}' says why"
+    done
+    STOPPED=()
+}
+forget_stopped() { # forget_stopped ID: it was started (or tried) by repair itself
+    local i
+    for i in "${!STOPPED[@]}"; do [ "${STOPPED[$i]}" != "$1" ] || unset 'STOPPED[i]'; done
+}
+
+repair() { # repair ID SERVICE NAME
+    local id="$1" service="$2" name="${3#/}" missing net status=0
+    # look again right before acting: the agent may have repaired it meanwhile
+    missing="$(missing_networks "${id}" "${service}")"
+    if [ -z "${missing}" ]; then
+        note "Stack: ${name} is on its networks again (repaired meanwhile): nothing to do"
+        return 0
+    fi
+    note "Stack: ${name} is not on ${missing// /, } (Docker lost the attachment at a start): stop, connect it with the alias ${service}, start"
     act docker stop -t 30 "${id}" >/dev/null 2>&1
-    if ! act docker network connect --alias "${service}" "${mode}" "${id}"; then
-        problem "could not connect ${name} to ${mode}: in deploy/, 'docker compose up -d --force-recreate ${service}' makes the container again"
-        return 1
-    fi
-    if [ "${service}" = agent ]; then
-        shared="$(instance_network)"
-        if docker network inspect "${shared}" >/dev/null 2>&1; then
-            act docker network connect "${shared}" "${id}" || note "  could not connect ${name} to ${shared} as well"
-        fi
-    fi
+    [ "${DRY}" = 1 ] || STOPPED+=("${id}")
+    for net in ${missing}; do
+        act docker network connect --alias "${service}" "${net}" "${id}" 2>/dev/null && continue
+        # "endpoint ... already exists": connected meanwhile (by the agent): that is what we wanted
+        case " $(on_networks "${id}") " in *" ${net} "*)
+            note "Stack: ${name} is on ${net} already"
+            continue
+            ;;
+        esac
+        problem "could not connect ${name} to ${net}: in deploy/, 'docker compose up -d --force-recreate ${service}' makes the container again"
+        status=1
+    done
     if ! act docker start "${id}" >/dev/null; then
-        problem "connected ${name} to ${mode}, but it did not start: 'docker logs ${name}' says why"
+        [ "${DRY}" = 1 ] || forget_stopped "${id}"
+        problem "${name} did not start after the repair: 'docker logs ${name}' says why"
         return 1
     fi
-    [ "${DRY}" = 1 ] || note "Stack: ${name} repaired and started"
+    [ "${DRY}" = 1 ] && return 0
+    forget_stopped "${id}"
+    if [ "${status}" = 0 ]; then note "Stack: ${name} repaired and started"; else note "Stack: ${name} started, not fully repaired (above)"; fi
+    return "${status}"
 }
 
 stack_step() {
@@ -329,8 +396,8 @@ stack_step() {
         broken=""
         while IFS='|' read -r id service running mode nets name; do
             [ -n "${id}" ] || continue
-            if [ "${nets}" = 0 ] && named_network "${mode}"; then
-                broken="${broken}${id}|${service}|${running}|${mode}|${nets}|${name}"$'\n'
+            if [ -n "$(missing_networks "${id}" "${service}")" ]; then
+                broken="${broken}${id}|${service}|${name}"$'\n'
             elif [ "${running}" != true ]; then
                 pending=1
             fi
@@ -345,15 +412,20 @@ stack_step() {
         rows="$(platform_containers)"
     done
     local status=0
-    while IFS='|' read -r id service running mode nets name; do
+    if [ "${DRY}" = 0 ]; then
+        trap 'start_stopped' EXIT
+        trap 'exit 143' TERM HUP INT # (the EXIT trap runs then too)
+    fi
+    while IFS='|' read -r id service name; do
         [ -n "${id}" ] || continue
-        repair "${id}" "${service}" "${mode}" "${name}" || status=1
+        repair "${id}" "${service}" "${name}" || status=1
     done <<<"${broken}"
     [ "${DRY}" = 1 ] && return 0
+    start_stopped
     while IFS='|' read -r id service running mode nets name; do
         [ -n "${id}" ] || continue
-        [ "${running}" = true ] || [ "${nets}" = 0 ] ||
-            problem "${name#/} is not running after ${STACK_WAIT} s (with its network): 'docker logs ${name#/}' says why"
+        [ "${running}" = true ] || [ -n "$(missing_networks "${id}" "${service}")" ] ||
+            problem "${name#/} is not running after ${STACK_WAIT} s (with its networks): 'docker logs ${name#/}' says why"
     done <<<"$(platform_containers)"
     return "${status}"
 }
@@ -461,9 +533,9 @@ cmd_status() {
     fi
     while IFS='|' read -r id service running mode nets name; do
         [ -n "${id}" ] || continue
-        if [ "${nets}" = 0 ] && named_network "${mode}"; then
+        if [ -n "$(missing_networks "${id}" "${service}")" ]; then
             ok=0
-            say "  REPAIR ${name#/}: no network although it belongs on ${mode} ('run' repairs it)"
+            say "  REPAIR ${name#/}: not on $(missing_networks "${id}" "${service}") (network mode ${mode}; 'run' repairs it)"
         elif [ "${running}" != true ]; then
             ok=0
             say "  DOWN  ${name#/}: not running"
