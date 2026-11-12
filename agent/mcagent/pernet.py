@@ -1,7 +1,7 @@
 """One bridge network per server (A-1 of the security review of 2026-11-11, interface I-6).
 
 On the shared instance network every game container reached every other one on every port. Now a spec
-without a network (what the panel sends by default) gets its own bridge ``mcpanel_i_<first 12 hex of the
+without a network (what the panel sends by default) gets its own bridge ``zz_mcpanel_i_<first 12 hex of the
 instance id>`` with a /29 of ``AGENT_INSTANCE_POOL`` (default 10.213.0.0/16). The agent attaches its own
 container to it (it reaches RCON and the games' APIs there); Docker isolates bridges from each other, so a
 server no longer sees its neighbours.
@@ -48,8 +48,15 @@ log = logging.getLogger(__name__)
 LABEL_MANAGED = "io.mcpanel.managed"
 LABEL_INSTANCE = "io.mcpanel.instance"
 LABEL_NETWORK = "io.mcpanel.network"  # "server": a per-server network of this agent
-NETWORK_PREFIX = "mcpanel_i_"
-_NAME_RE = re.compile(r"^mcpanel_i_[0-9a-f]{12}$")
+# The agent's default route must stay on the networks compose gave it. Docker gives a container's default
+# route to the network with the highest gateway priority, then to the one whose name sorts first. The agent
+# joins every server network with the lowest priority (Engine API 1.48+), and for older daemons the prefix
+# sorts after every compose network name ("<project>_<network>"; "z" is the last character a network name
+# can start with).
+NETWORK_PREFIX = "zz_mcpanel_i_"
+_NAME_RE = re.compile(r"^zz_mcpanel_i_[0-9a-f]{12}$")
+GW_PRIORITY = -1000  # compose networks have 0: a server network never carries the agent's default route
+GW_PRIORITY_API = (1, 48)
 SUBNET_PREFIX = 29
 MIN_POOL_PREFIX = 28  # at least two server subnets
 STATE_FILE = "server-networks.json"
@@ -322,6 +329,28 @@ def _refused_overlap(exc: APIError) -> bool:
     return "overlap" in text or "address space" in text or "pool" in text
 
 
+def _api_version(api: Any) -> tuple[int, ...]:
+    try:
+        return tuple(int(p) for p in str(getattr(api, "api_version", "") or "").split("."))
+    except ValueError:
+        return ()
+
+
+def _connect_low_priority(own: str, name: str) -> None:
+    """Connect the agent's container to ``name`` with the lowest gateway priority (``GwPriority``, Engine
+    API 1.48+; docker-py has no argument for it), so that the agent's default route stays where it was;
+    a daemon without it gets a plain connect (the name order keeps the route then)."""
+    api = _client().api
+    if _api_version(api) >= GW_PRIORITY_API:
+        res = api._post_json(
+            api._url("/networks/{0}/connect", name),
+            data={"Container": own, "EndpointConfig": {"GwPriority": GW_PRIORITY}},
+        )
+        api._raise_for_status(res)
+        return
+    api.connect_container_to_network(own, name)
+
+
 def attach_self(name: str) -> None:
     """Connect the agent's own container to network ``name`` (nothing when it is attached already).
     Raises Unavailable when it cannot (the agent could not reach the server there)."""
@@ -329,7 +358,7 @@ def attach_self(name: str) -> None:
     if own is None:
         raise Unavailable("the agent could not find its own container")
     try:
-        _client().api.connect_container_to_network(own, name)
+        _connect_low_priority(own, name)
     except APIError as exc:
         text = str(exc.explanation or exc).lower()
         if "already exists" in text or "already attached" in text or "is already connected" in text:

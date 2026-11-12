@@ -156,7 +156,7 @@ def _subnet(docker, name):
 def test_each_server_gets_its_own_bridge_and_keeps_its_subnet(settings, docker):
     a = pernet.prepare(settings, A)
     b = pernet.prepare(settings, B)
-    assert (a, b) == ("mcpanel_i_111111111111", "mcpanel_i_222222222222")
+    assert (a, b) == ("zz_mcpanel_i_111111111111", "zz_mcpanel_i_222222222222")
     assert (_subnet(docker, a), _subnet(docker, b)) == ("10.213.0.0/29", "10.213.0.8/29")
     labels = docker.nets[a].attrs["Labels"]
     assert labels == {
@@ -187,7 +187,7 @@ def test_an_exhausted_pool_falls_back_to_the_shared_network(settings, docker):
     assert pernet.prepare(small, C) is None
     status = pernet.status(small)
     assert status["enabled"] is True and "no free /29" in status["reason"]
-    assert status["prefix"] == "mcpanel_i_" and status["pool"] == "10.213.0.0/28"
+    assert status["prefix"] == "zz_mcpanel_i_" and status["pool"] == "10.213.0.0/28"
 
 
 @pytest.mark.parametrize(
@@ -213,7 +213,7 @@ def test_switched_off_or_outside_a_container_means_the_shared_network(settings, 
     assert pernet.status(settings) == {
         "enabled": False,
         "reason": pernet.availability(settings),
-        "prefix": "mcpanel_i_",
+        "prefix": "zz_mcpanel_i_",
         "pool": "10.213.0.0/16",
         "subnet_prefix": 29,
     }
@@ -225,11 +225,11 @@ def test_a_network_the_agent_cannot_join_is_removed_again(settings, docker, monk
 
     monkeypatch.setattr(docker.api, "connect_container_to_network", refuse)
     assert pernet.prepare(settings, A) is None
-    assert docker.removed == ["mcpanel_i_111111111111"]
+    assert docker.removed == ["zz_mcpanel_i_111111111111"]
 
 
 def test_a_foreign_network_with_the_name_is_never_used(settings, docker):
-    docker.add("mcpanel_i_111111111111", "10.99.0.0/24", labels={})
+    docker.add("zz_mcpanel_i_111111111111", "10.99.0.0/24", labels={})
     with pytest.raises(Exception) as exc:
         pernet.ensure(settings, A)
     assert getattr(exc.value, "code", "") == "foreign_network"
@@ -268,8 +268,8 @@ def test_release_keeps_a_network_a_container_still_uses(settings, docker):
 
 
 def test_release_never_touches_a_network_without_the_agents_labels(settings, docker):
-    docker.add("mcpanel_i_111111111111", "10.213.0.0/29", labels={"io.mcpanel.managed": "true"})
-    assert pernet.release(settings, A) is False and "mcpanel_i_111111111111" in docker.nets
+    docker.add("zz_mcpanel_i_111111111111", "10.213.0.0/29", labels={"io.mcpanel.managed": "true"})
+    assert pernet.release(settings, A) is False and "zz_mcpanel_i_111111111111" in docker.nets
 
 
 def test_startup_recreates_joins_and_sweeps(settings, docker):
@@ -314,7 +314,7 @@ def test_create_container_puts_a_spec_without_network_on_its_own_bridge(settings
     monkeypatch.setattr(docker.containers, "get", lambda cid: SimpleNamespace(id=cid))
     monkeypatch.setattr(docker_ops, "ensure_network", lambda _s: created.append({"shared": True}))
     docker_ops.create_container(settings, A, _spec(), "h")
-    assert created[-1]["host_config"]["NetworkMode"] == "mcpanel_i_111111111111"
+    assert created[-1]["host_config"]["NetworkMode"] == "zz_mcpanel_i_111111111111"
     # a spec naming a network keeps it (today's behaviour), the shared one included
     docker_ops.create_container(settings, B, _spec(network="mcpanel_instances"), "h")
     assert created[-1]["host_config"]["NetworkMode"] == "mcpanel_instances" and {"shared": True} in created
@@ -363,5 +363,31 @@ def test_info_reports_the_network_names(api, auth, monkeypatch):
     r = api.get("/v1/info", headers=auth)
     body = r.json()
     assert body["policy"]["instance_network"] == "mcpanel_instances"
-    assert body["per_server_networks"]["prefix"] == "mcpanel_i_" and body["per_server_networks"]["pool"]
+    assert body["per_server_networks"]["prefix"] == "zz_mcpanel_i_" and body["per_server_networks"]["pool"]
     assert "per_server_networks" in body["features"]
+
+
+# --- the agent's default route stays on its compose networks (follow-up of A-1) ---------------------------
+def test_the_agent_joins_with_the_lowest_gateway_priority(settings, docker, monkeypatch):
+    posted: list = []
+    docker.api.api_version = "1.52"
+    docker.api._url = lambda fmt, *args: "/v1.52" + fmt.format(*args)
+    docker.api._post_json = lambda url, data: posted.append((url, data)) or SimpleNamespace(status_code=200)
+    docker.api._raise_for_status = lambda res: None
+    name = pernet.prepare(settings, A)
+    assert posted == [
+        (f"/v1.52/networks/{name}/connect", {"Container": OWN, "EndpointConfig": {"GwPriority": -1000}})
+    ]
+
+
+def test_an_older_daemon_gets_a_plain_connect(settings, docker):
+    docker.api.api_version = "1.47"
+    name = pernet.prepare(settings, A)
+    assert name in docker.ctrs[OWN].nets  # the fake's connect_container_to_network
+
+
+@pytest.mark.parametrize(
+    "compose", ["mcpanel_internal", "mcpanel_instances", "mcpanel-node_api", "deploy_internal", "z_internal"]
+)
+def test_the_prefix_sorts_after_compose_network_names(compose):
+    assert pernet.network_name(A) > compose and pernet.NETWORK_PREFIX == "zz_mcpanel_i_"

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     )
     instance_network: str = "mcpanel_instances"
     # One bridge network per server (A-1, pernet.py): a spec without a network gets its own bridge
-    # mcpanel_i_<id12> with a /29 of this pool (AGENT_PER_SERVER_NETWORKS, AGENT_INSTANCE_POOL). Off,
+    # zz_mcpanel_i_<id12> with a /29 of this pool (AGENT_PER_SERVER_NETWORKS, AGENT_INSTANCE_POOL). Off,
     # or when the agent cannot use it, every server is on the shared instance network as before.
     per_server_networks: bool = True
     instance_pool: str = "10.213.0.0/16"
