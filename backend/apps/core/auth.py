@@ -17,12 +17,13 @@ class CsrfEnforcedSessionAuthentication(SessionAuthentication):
     D-1/I-7) a session bound to the tab that signed in: a signed-in session must send its token in
     ``X-MCPanel-Session-Token`` on every request, safe methods included, or present a download ticket on a GET
     of a download route; else 401 ``session_token_required``. The cookie alone is not a credential.
-    Exempt: ``session_binding.EXEMPT_PATHS`` (state, login, setup, logout, reset, health).
+    Exempt: ``session_binding.EXEMPT_PATHS`` (state, login, setup, reset, health) and the logout of a session
+    without a token.
     """
 
     def authenticate(self, request: Any) -> Any:
         result = super().authenticate(request)  # (user, None) or None; CSRF for unsafe methods
-        if result is None or not session_binding.enabled() or session_binding.exempt(request.path):
+        if result is None or not session_binding.enabled() or session_binding.exempt(request.path, request.session):
             return result
         if session_binding.header_ok(request):
             return result

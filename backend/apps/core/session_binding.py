@@ -35,10 +35,11 @@ SESSION_DIGEST_KEY = "mcpanel_session_token_sha256"
 TICKET_PARAM = "ticket"
 TICKET_SECONDS = 60
 _TICKET_SALT = "mcpanel.core.download-ticket"
-# routes a session without its token may still call (signing in and out, the state, the health probe)
-EXEMPT_PATHS = frozenset(
-    {"/api/auth/state", "/api/auth/login", "/api/auth/setup", "/api/auth/logout", "/api/auth/reset", "/api/health"}
-)
+# routes a session without its token may still call (signing in, the state, the health probe)
+EXEMPT_PATHS = frozenset({"/api/auth/state", "/api/auth/login", "/api/auth/setup", "/api/auth/reset", "/api/health"})
+# the logout needs the token too when the session has one (R-13: a stolen cookie must not sign the owner out);
+# a session without one (from before this release) may sign out without it
+LOGOUT_PATH = "/api/auth/logout"
 
 
 def enabled() -> bool:
@@ -68,8 +69,11 @@ def header_ok(request: Any) -> bool:
     return token_matches(getattr(request, "session", None), request.META.get(META_KEY, ""))
 
 
-def exempt(path: str) -> bool:
-    return path.rstrip("/") in EXEMPT_PATHS
+def exempt(path: str, session: Any = None) -> bool:
+    clean = path.rstrip("/")
+    if clean == LOGOUT_PATH:
+        return session is None or not session.get(SESSION_DIGEST_KEY)
+    return clean in EXEMPT_PATHS
 
 
 def session_token_ok(session_key: str | None, token: Any) -> bool:

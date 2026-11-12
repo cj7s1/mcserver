@@ -113,7 +113,11 @@ def test_the_exempt_routes_need_no_header(users: Any) -> None:
     state = client.get("/api/auth/state", **{TOKEN: token}).json()
     assert state["authenticated"] is True and state["user"]["username"] == "owner"
     assert client.get("/api/health").status_code in (200, 503)
-    assert client.post("/api/auth/logout").status_code == 204
+    # R-13: the logout of a session with a token needs it (a stolen cookie must not sign the owner out)
+    refused = _cookie_only(client).post("/api/auth/logout")
+    assert refused.status_code == 401 and code(refused) == "session_token_required"
+    assert client.get("/api/auth/me", **{TOKEN: token}).status_code == 200  # still signed in
+    assert client.post("/api/auth/logout", **{TOKEN: token}).status_code == 204
     # a new sign-in from the same browser is a new token; the old one is gone with the old session
     _again, new = _signed_in()
     assert new != token
@@ -306,3 +310,17 @@ async def test_a_cookie_alone_does_not_open_the_large_upload_gate(
         assert status == 201, body  # past the gate: the upload is stored
     else:
         assert status == 413 and b"request_too_large" in body, (status, body)
+
+
+def test_r13_a_session_from_before_the_upgrade_may_sign_out_without_a_token(users: Any) -> None:
+    from django.contrib.sessions.backends.db import SessionStore
+
+    client = APIClient()
+    client.force_login(users["owner"])
+    key = client.cookies[settings.SESSION_COOKIE_NAME].value
+    session = SessionStore(key)
+    session.pop(session_binding.SESSION_DIGEST_KEY)
+    session.save()
+    client.mcpanel_no_token = True
+    assert client.post("/api/auth/logout").status_code == 204
+    assert not SessionStore(key).exists(key)
