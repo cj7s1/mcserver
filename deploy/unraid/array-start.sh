@@ -11,8 +11,12 @@
 # plugin runs `array-start.sh run` at every Docker start. Two runs at the same time wait for each other.
 #
 # ***************************************************************************************************
-# NOT RUN ON A REAL UNRAID HOST YET. It is tested against stand-ins for docker, id and logger. Before
-# you rely on it: run `bash array-start.sh dry-run` in the Unraid terminal and read what it would do,
+# RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12, through the MCPanel plugin (its boot tasks, started by
+# hand): `run` (Compose answering already, the shutdown hook installed, no firewall to put back, a healthy
+# stack), `dry-run` and `status`. NOT SEEN THERE YET: a run at a real boot (as a User Script or at the plugin's
+# Docker start), linking Compose, putting the firewall back, repairing a container. It is also tested against
+# stand-ins for docker, id and logger. Before you rely on it as a User Script: run `bash array-start.sh
+# dry-run` in the Unraid terminal and read what it would do,
 # then `bash array-start.sh run` once (it is safe to run at any time), and after the next reboot
 # `bash array-start.sh status`: every line should say "ok". The User Scripts log and the syslog (tag
 # mcpanel) show what each boot's run did.

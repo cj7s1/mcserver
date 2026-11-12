@@ -47,6 +47,25 @@ columns of the servers table with database defaults; a rollback loses only their
   when empty; System → Discord and each server's Settings → General → Discord; Users → Invite a friend, and a
   friend's app with only their servers' status, Start/Stop and Share card.
 
+## First run on one Unraid 7.3.4 server (2026-11-12)
+
+With plugin 2026.11.12a and `first-run.sh` (status, dry-run, run, firewall, firewall test). **Ran there:** the
+plugin's install through the plugin manager (no file writable by others); the runner's `save` and the tasks
+`status`, `check-updates`, `boot-dry-run`, `boot-run` (which made `/usr/local/lib/docker{,/cli-plugins}` 755 and
+ran `array-start.sh run`: Compose ok, the shutdown hook installed, no firewall to put back, the stack healthy),
+`firewall-status`, `firewall-dry-run` and `firewall-install`; then the self-test from a container on the shared
+instance network: the server's web UI and the router blocked, the internet reachable by address and by name; the
+stack stayed healthy. **Not seen there yet:** the plugin's page, the Docker events at a real boot and at Docker
+off/on, the firewall put back at a boot, the shutdown hook at a real shutdown, Update and Roll back through the
+page, Install Compose, the self-test from a server's own network, `first-run.sh after-reboot`.
+
+What changed after it (plugin 2026.11.12b): `instance-firewall.sh status` exits 3 for "not installed" (a normal
+state), and the plugin's `firewall-status` task ends ok then instead of "Finished: failed (exit 1)" (`first-run.sh`
+reads it as normal with both plugin versions); `first-run.sh firewall` and `firewall test` also probe from one
+game server's own network when one exists, and say to start a server and test again when none does. The other
+read-only tasks (`status`, `boot-status`) end "failed" only for things that need doing (a missing hook, a stack
+container down), not for a normal state.
+
 ## The plugin's first-run checklist as a script (branch `feature/first-run-script`, 2026-11-12)
 
 The owner installed the plugin (2026.11.12a) on his server and asked for a script that does the checklist.
@@ -59,11 +78,13 @@ before each change; stops with the runner's repair; a second run changes nothing
 network; removed again when the internet does not work or the owner says no). Every change goes through the
 installed runner (`facts`, `save`, `describe`, `start`); waiting reads the task's log ("Finished:") and `facts`:
 **no plugin update needed**. Tests: `tests/test_deploy_first_run.py` (the real runner, stand-ins for docker, id,
-logger, curl, ip, iptables; status and dry-run write nothing). **Not run on a real Unraid server yet.**
+logger, curl, ip, iptables; status and dry-run write nothing). **Ran on one Unraid 7.3.4 server on 2026-11-12**
+(`status`, `dry-run`, `run`, `firewall`, `firewall test`); `after-reboot` and `firewall remove` not seen there yet.
 
 ## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section A)
 
-**Not run on Unraid yet.** Built from the conventions of the plugins on the owner's server (Unraid 7.3.4,
+**Ran on one Unraid 7.3.4 server on 2026-11-12, not yet in every part** (see "First run on one Unraid 7.3.4
+server" above). Built from the conventions of the plugins on the owner's server (Unraid 7.3.4,
 read-only research: the plugin manager's script, `emhttp_event`, `rc.docker`, `local_prepend.php`,
 `StartCommand.php`; notes in `audit-2026-11-09/features/plugin-research/NOTES.md`, outside the repo).
 
@@ -108,8 +129,8 @@ empty; "failed to resolve host postgres"), and the shutdown hook was not install
   configured Compose binary (`--compose-bin` once, remembered on the flash), waits for Docker, installs the
   hook, puts the firewall back where it was installed (`instance-firewall.sh` records `INSTALLED=yes/no`),
   and repairs a platform container without network (stop, connect with the service alias, start). Tested
-  against stand-ins only (`tests/test_deploy_array_start.py`); **not run on Unraid yet**: the owner's first
-  run should be `dry-run`, then `run`, then `status` after a reboot.
+  against stand-ins (`tests/test_deploy_array_start.py`); on one Unraid 7.3.4 server (2026-11-12) `run`,
+  `dry-run` and `status` ran through the plugin's tasks; **not seen at a real boot yet**.
 * The panel's row in Unraid's Docker tab: WebUI entry and icon (labels on the panel service; the icon is
   `frontend/public/unraid-icon.png`, served by the panel). Not seen in a real Docker tab yet.
 * `upgrade.sh`'s "the docker compose plugin is missing" names the script.
@@ -174,8 +195,9 @@ over the new dialogs.
   done (A-7's other parts).
 * TOTP / a second factor: not done (D-3 has per-account limits only).
 * `Instance.env` (custom variables) is stored in clear text: not encrypted (D-10's second part).
-* The firewall script (`deploy/unraid/instance-firewall.sh`) has not run on Unraid: check it as
-  docs/UNRAID.md says before relying on it.
+* The firewall script (`deploy/unraid/instance-firewall.sh`) ran on one Unraid 7.3.4 server on 2026-11-12
+  (install, and the self-test from the shared instance network); not yet from a server's own network or at a
+  boot: check it as docs/UNRAID.md says before relying on it.
 * Verified on a real container (2026-11-11, branch `legacy41`): a Docker-initiated stop of Project Zomboid
   (`docker stop -t 120`, as Unraid's Docker tab does) saves and quits through the image's trap with the
   agent's `rcon.yml` (exit 143 in 9.4 s). Not run on Build 42.

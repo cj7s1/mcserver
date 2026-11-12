@@ -1,5 +1,5 @@
 /* MCPanel plugin page. Every request is a POST to include/action.php ($.post of the Unraid web UI adds the
- * CSRF token). Text from the server is put in with textContent only. NOT RUN ON A REAL UNRAID HOST YET. */
+ * CSRF token). Text from the server is put in with textContent only. Not seen on a real Unraid server yet. */
 (function () {
   'use strict';
   var URL = '/plugins/mcpanel/include/action.php';

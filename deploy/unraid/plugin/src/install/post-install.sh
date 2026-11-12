@@ -13,5 +13,6 @@ echo ""
 echo "MCPanel plugin installed. Its page: Settings > User Utilities > MCPanel."
 echo "At every Docker start it runs the boot tasks of the MCPanel checkout (Compose link, shutdown hook,"
 echo "firewall where it was installed, stack check); no User Script is needed for them any more."
-echo "NOT RUN ON A REAL UNRAID HOST YET: docs/UNRAID.md has the first-run checklist."
+echo "Seen on one Unraid 7.3.4 server, not yet in every part: docs/UNRAID.md has the first-run checklist"
+echo "(or: bash <your mcpanel-src>/deploy/unraid/first-run.sh)."
 exit 0

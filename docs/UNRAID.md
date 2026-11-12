@@ -212,9 +212,14 @@ The Minecraft servers keep running in all of these cases.
 
 ### The Unraid plugin (recommended)
 
-> **The plugin has not been run on Unraid yet.** It is built and tested against stand-ins only (its
-> PHP with PHP 8.4, the PHP of Unraid 7.3; its shell scripts with stand-ins for Docker, git and curl).
-> Go through the first-run checklist below before you trust its buttons.
+> **The plugin has run on one Unraid 7.3.4 server (2026-11-12), not yet in every part.** Seen there:
+> the install through the plugin manager; the runner's `save` and its tasks `status`, `check-updates`,
+> `boot-dry-run`, `boot-run` (with `array-start.sh run`), `firewall-status`, `firewall-dry-run` and
+> `firewall-install`, all started by `first-run.sh`. **Not seen there yet:** this page itself, the Docker
+> events at a real boot and at Docker off/on, the firewall being put back at a boot, the shutdown hook at
+> a real shutdown, Update and Roll back through the page, and Install Compose. It is also tested against
+> stand-ins (its PHP with PHP 8.4, the PHP of Unraid 7.3; its shell scripts with stand-ins for Docker, git
+> and curl). Go through the first-run checklist below before you trust its buttons.
 
 The plugin `mcpanel` puts MCPanel into Unraid's web UI and replaces the User Script below. Install it
 once: **Plugins → Install Plugin**, and paste the raw address of `deploy/unraid/plugin/mcpanel.plg` of
@@ -267,10 +272,13 @@ and the command to run next; `... first-run.sh dry-run` the plugin's exact comma
 steps 1 to 4 (it asks before each change; `--yes` answers yes; safe to run again); `... first-run.sh
 after-reboot` step 5; `... first-run.sh firewall` (optional) the firewall with a self-test from a throw-away
 container, removed again when the internet stops working (`firewall test`, `firewall remove`). It changes
-nothing itself: every change goes through the plugin. Not run on a real Unraid server yet either.
+nothing itself: every change goes through the plugin. Its `status`, `dry-run`, `run`, `firewall` and
+`firewall test` ran on one Unraid 7.3.4 server on 2026-11-12; `after-reboot`, `firewall remove` and the
+self-test from a server's own network were not seen there yet.
 
 1. After the install, the plugin manager's window shows "MCPanel plugin installed. Its page: Settings >
-   User Utilities > MCPanel." and three more lines (the last: "NOT RUN ON A REAL UNRAID HOST YET ...").
+   User Utilities > MCPanel." and four more lines (the last two: "Seen on one Unraid 7.3.4 server, not yet
+   in every part: ..." and the `first-run.sh` line).
    In the terminal, `find /usr/local/emhttp/plugins/mcpanel -perm /022` prints nothing.
 2. Open Settings → User Utilities → MCPanel **and read before you press anything**: the plugin version;
    *Checkout* is your folder ("found from the running stack"); *Compose project* `mcpanel`; *Docker
@@ -306,7 +314,9 @@ up the User Script of the next section again.
 
 ### Without the plugin: the User Script `array-start.sh`
 
-> **Not run on a real Unraid host yet** (it is tested against stand-ins). Run `bash
+> **Not seen at a real boot yet.** On one Unraid 7.3.4 server (2026-11-12) its `run`, `dry-run` and
+> `status` ran through the plugin's tasks, started by hand on a running system; not as a User Script at an
+> array start, and not linking Compose, putting the firewall back or repairing a container there. Run `bash
 > /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh dry-run` once in the terminal and read
 > what it would do; after the next reboot, `... array-start.sh status` should say `ok` on every line.
 
@@ -403,10 +413,15 @@ Sharing a server with friends (the Share card, the Discord bot, a Friend account
 
 ### The game servers' firewall (`instance-firewall.sh`)
 
-> **Not run on a real Unraid host yet.** The rule set was loaded into a real kernel (iptables-nft, in a
-> container's own network namespace: install, status, a second install, remove) and the script is
-> tested against stand-ins, but it has never run against Unraid's own firewall. Check it on your
-> server as described below before you rely on it.
+> **Ran on one Unraid 7.3.4 server (2026-11-12), not yet in every part.** There `status`, `dry-run`
+> and `install` ran through the plugin, and the self-test of `first-run.sh firewall`, from a container
+> on the shared instance network, found the server's web UI and the router blocked and the internet
+> reachable by address and by name; the stack stayed healthy. **Not seen there yet:** a container on a
+> server's own network (the pool range: run `first-run.sh firewall test` while a server runs), the rules
+> put back at a boot, `remove`, `--allow`, and players joining with the rules in place. The rule set was
+> also loaded into a real kernel elsewhere (iptables-nft, in a container's own network namespace) and the
+> script is tested against stand-ins. Check it on your server as described below before you rely on it.
+> `status` says "not installed" (exit 3) when you never installed it or removed it: a normal state.
 
 A game server runs code you do not control. If it is compromised (a bad mod, a bug in the game
 reached through its forwarded port), Docker lets it open connections to the Unraid host on every

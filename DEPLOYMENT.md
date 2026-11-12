@@ -399,7 +399,8 @@ reserve already; that bar compares with the whole RAM, not with RAM minus the re
 
 On Unraid, install the shutdown hook so that servers are saved and stopped through the panel
 before Docker stops: [docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md). The MCPanel plugin for
-Unraid (`deploy/unraid/plugin`, docs/UNRAID.md "The Unraid plugin"; not run on Unraid yet) installs
+Unraid (`deploy/unraid/plugin`, docs/UNRAID.md "The Unraid plugin"; it installed the hook on one Unraid 7.3.4
+server, not yet seen at a real boot or shutdown) installs
 it at every Docker start.
 
 ### Backups are not automatic unless a schedule exists

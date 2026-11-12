@@ -560,7 +560,8 @@ would stop that server itself at array stop and count it as stopped by hand.
 
 ## The Unraid plugin
 
-`deploy/unraid/plugin` (docs/UNRAID.md, "The Unraid plugin"; not run on Unraid yet). Its page runs
+`deploy/unraid/plugin` (docs/UNRAID.md, "The Unraid plugin"; on one Unraid 7.3.4 server its install, boot
+tasks and firewall tasks ran, its page was not seen there yet). Its page runs
 commands as root: Unraid's PHP runs as root, and so does `bin/mcpanel`, which the page's endpoint
 starts. Whoever can use Unraid's web UI can already do anything as root (its terminal); what the plugin
 must not become is a way to run something else, from a forged request or from a file someone else can

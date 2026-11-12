@@ -45,6 +45,9 @@ FIREWALL = r"""state="$(dirname "$0")/../instance-firewall.env"
 case "$1" in
     install) printf 'INSTALLED=yes\n' >"$state"; : >"$FAKE/firewall_on"; echo "Installed: chains (stand-in)" ;;
     remove) printf 'INSTALLED=no\n' >"$state"; rm -f "$FAKE/firewall_on"; echo "Removed (stand-in)" ;;
+    status)
+        if [ -e "$FAKE/firewall_on" ]; then echo "Instance firewall: installed and up to date (stand-in)"; exit 0; fi
+        echo "Instance firewall: not installed (a normal state; to install it: bash x install)"; exit 3 ;;
     *) echo "Instance firewall: $1 (stand-in)" ;;
 esac
 """
@@ -65,19 +68,32 @@ case "$1" in
         IFS='|' read -r _ service running nets name oneoff <<<"$line"
         printf '%s|%s|%s|/%s|%s\n' "$service" "$running" "$nets" "$name" "$oneoff" ;;
     port) echo 0.0.0.0:8080 ;;
-    network) case "$2" in ls) echo mcpanel_instances ;; inspect) exit 0 ;; *) exit 1 ;; esac ;;
+    network)
+        case "$2" in
+            ls) if [[ "$*" == *io.mcpanel.network=server* ]]; then cat "$F/server_networks" 2>/dev/null; else echo mcpanel_instances; fi ;;
+            inspect) exit 0 ;;
+            *) exit 1 ;;
+        esac ;;
     image) cat "$F/images" 2>/dev/null ;;
     pull) echo "$3" >>"$F/images"; echo "docker.io/library/$3" ;;
     run)
         name=""
+        net=""
         args=("$@")
-        for i in "${!args[@]}"; do [ "${args[$i]}" != --name ] || name=${args[$((i + 1))]}; done
-        echo "$name" >>"$F/selftests"
+        for i in "${!args[@]}"; do
+            [ "${args[$i]}" != --name ] || name=${args[$((i + 1))]}
+            [ "${args[$i]}" != --network ] || net=${args[$((i + 1))]}
+        done
+        echo "$name $net" >>"$F/selftests"
+        blocked=""
+        [ -e "$F/firewall_on" ] && blocked=1
+        # a firewall that does not cover the per-server pool
+        [[ "$net" == zz_mcpanel_i_* ]] && [ -e "$F/pool_not_covered" ] && blocked=""
         for t in "$@"; do
             [[ "$t" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]] || continue
             host=${t%:*}
             case "$host" in
-                192.168.* | 10.*) [ -e "$F/firewall_on" ] && echo "$t closed" || echo "$t open" ;;
+                192.168.* | 10.*) [ -n "$blocked" ] && echo "$t closed" || echo "$t open" ;;
                 *) [ -e "$F/firewall_on" ] && [ -e "$F/firewall_blocks_internet" ] && echo "$t closed" || echo "$t open" ;;
             esac
         done ;;
@@ -361,7 +377,7 @@ def test_firewall_install_self_test_passes_and_is_kept(server):
     done = server.run("firewall", "--yes")
     assert done.returncode == 0, done.stdout + done.stderr
     out = done.stdout
-    assert "NOT RUN ON A REAL UNRAID SERVER YET" in out
+    assert "Seen on one Unraid 7.3.4 server (installed, the self-test from the shared network)" in out
     for said in (
         "PASS        must fail              192.168.1.10:80 (this server's web UI): blocked",
         "PASS        must fail              192.168.1.1:80 (a private address on your LAN): blocked",
@@ -371,7 +387,8 @@ def test_firewall_install_self_test_passes_and_is_kept(server):
     ):
         assert said in out, said
     assert (server.checkout / "deploy/instance-firewall.env").read_text() == "INSTALLED=yes\n"
-    assert (server.fake / "selftests").read_text().split() == ["mcpanel-firstrun-selftest"] * 2
+    assert (server.fake / "selftests").read_text().splitlines() == ["mcpanel-firstrun-selftest mcpanel_instances"] * 2
+    assert "no server network exists right now: start a server and run this test again to check that range too" in out
     assert "mcpanel-firstrun-selftest" in (server.fake / "removed").read_text()  # removed afterwards
     assert state_of(server.run().stdout, "Firewall") == "OK"
 
@@ -426,7 +443,8 @@ def test_root_the_plugin_and_the_arguments(server):
 def test_the_script_says_what_has_run_where_and_holds_no_personal_details():
     text = SCRIPT.read_text()
     head = text.split("set -u", 1)[0]
-    assert "NOT RUN ON A REAL UNRAID SERVER YET" in head
+    assert "RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12" in head and "NOT SEEN THERE YET" in head
+    assert "`after-reboot`, `firewall remove`, the self-test from a server's own network" in " ".join(head.split())
     assert "It does nothing of its own" in head
     for forbidden in ("192.168.", "cj7s1", "/mnt/cache/appdata", "eval "):
         assert forbidden not in text, forbidden
@@ -447,3 +465,47 @@ def test_the_docs_and_ci_name_the_script():
         assert needle in unraid, needle
     assert "shellcheck deploy/unraid/first-run.sh" in (REPO / ".github/workflows/ci.yml").read_text()
     assert "first-run.sh" in (REPO / "CLAUDE.md").read_text() and "first-run.sh" in (REPO / "DEVELOPMENT_STATUS.md").read_text()
+
+
+def test_the_self_test_also_runs_on_a_servers_own_network(server):
+    assert server.run("run", "--yes").returncode == 0
+    (server.fake / "server_networks").write_text("zz_mcpanel_i_0123456789ab\nnot_ours\n")
+    done = server.run("firewall", "--yes")
+    assert done.returncode == 0, done.stdout
+    out = done.stdout
+    assert "Self-test from a container on mcpanel_instances (the shared instance network" in out
+    assert "Self-test from a container on zz_mcpanel_i_0123456789ab (a game server's own network" in out
+    assert out.count("PASS        must fail              192.168.1.10:80 (this server's web UI): blocked") == 2
+    assert out.count("PASS        must work              github.com:443") == 2
+    assert "no server network exists right now" not in out
+    nets = sorted({line.split()[1] for line in (server.fake / "selftests").read_text().splitlines()})
+    assert nets == ["mcpanel_instances", "zz_mcpanel_i_0123456789ab"]
+
+
+def test_a_firewall_that_misses_the_server_networks_says_so(server):
+    assert server.run("run", "--yes").returncode == 0
+    (server.fake / "server_networks").write_text("zz_mcpanel_i_0123456789ab\n")
+    (server.fake / "pool_not_covered").touch()
+    done = server.run("firewall", "--yes")
+    assert "FAIL        must fail              192.168.1.10:80: still reachable from a game server" in done.stdout
+    assert "it does no harm, but it does not protect" in done.stdout
+
+
+def test_the_firewalls_not_installed_is_ok_also_with_the_installed_plugin_2026_11_12a(server):
+    # the owner's installed runner (2026.11.12a) reports the status task "failed" when the firewall is missing
+    old = subprocess.run(
+        ["git", "show", "d8b3c11:deploy/unraid/plugin/src/bin/mcpanel"], cwd=REPO, capture_output=True, text=True
+    )
+    if old.returncode != 0:
+        pytest.skip("the commit with plugin 2026.11.12a is not in this checkout")
+    (server.plugin / "bin/mcpanel").write_text(old.stdout)
+    done = server.run("run", "--yes")
+    assert done.returncode == 0, done.stdout
+    assert "Finished: failed (exit 3)" in done.stdout  # what that runner says
+    assert "firewall-status        not installed: a normal state, the firewall is optional" in done.stdout
+    assert "TO DO" not in server.run().stdout
+    # and the new one says ok itself
+    (server.plugin / "bin/mcpanel").write_text((SRC / "bin/mcpanel").read_text())
+    shutil.rmtree(server.root / "run/mcpanel")
+    again = server.run("run", "--yes")
+    assert "(not installed: a normal state, nothing failed)" in again.stdout and "Finished: ok" in again.stdout

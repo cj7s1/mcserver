@@ -115,7 +115,9 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
       Settings → User Utilities (status, check for updates, update and roll back through `upgrade.sh` with the
       dry run first, boot tasks, firewall, pinned Docker Compose v5.7.0, settings) and the boot tasks at every
       Docker start; replaces the array-start User Script. Tested against stand-ins and PHP 8.4 only.
-      [ ] Run on Unraid (first-run checklist in docs/UNRAID.md, "The Unraid plugin")
+      [x] Ran on one Unraid 7.3.4 server (2026-11-12, with `first-run.sh`): install, the boot tasks, the firewall
+      and its self-test from the shared network. [ ] The page, the Docker events at a real boot, Update and Roll back
+      through the page, Install Compose, the self-test from a server's own network
 - [ ] Unraid Community Applications template (XML)
 
 ## Multi-node

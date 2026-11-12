@@ -4,6 +4,15 @@ Newest first. The first heading is the plugin's version: build.sh writes it into
 Plugins page offers an update when the version of the pluginURL's file is greater (compared as text). Any
 change of src/ gets a new entry: the date, with a letter for a second one on the same day (2026.11.12a).
 
+## 2026.11.12b
+
+- The firewall's status "not installed" is a normal answer: the task firewall-status ends ok with "(not
+  installed: a normal state, nothing failed)" (instance-firewall.sh status exits 3 for it); a real failure stays
+  one. Seen on one Unraid 7.3.4 server on 2026-11-12, where it read "Finished: failed (exit 1)".
+- The texts say what ran on that server (the install, facts, save, the status, check-updates, boot dry run, boot
+  run and firewall tasks) and what was not seen there yet (this page, the boot tasks at a real Docker start,
+  Update and Roll back, Install Compose).
+
 ## 2026.11.12a
 
 - The run folder (lock, task state, plans, logs) is /run/mcpanel instead of /tmp/mcpanel: under a folder only

@@ -10,7 +10,8 @@
 #                                       changes something (--yes: yes to all); safe to run again
 #   bash first-run.sh after-reboot      step 5: did the boot tasks run at this boot, the syslog, the hook, the stack
 #   bash first-run.sh firewall [--yes]  the game servers' firewall: status, dry run, install, then a self-test from
-#                                       a short-lived container; removed again when the internet does not work
+#                                       a short-lived container on the shared instance network and on one server's
+#                                       own network (when one exists); removed again when the internet does not work
 #   bash first-run.sh firewall test     the self-test only
 #   bash first-run.sh firewall remove   take the firewall out again
 #
@@ -20,10 +21,12 @@
 # throw-away container of its own (named mcpanel-firstrun-selftest, removed afterwards).
 #
 # ***************************************************************************************************
-# NOT RUN ON A REAL UNRAID SERVER YET. It was tested against the plugin's real runner with stand-ins for
-# docker, id, logger, curl, ip and iptables. The plugin itself (2026.11.12a) was installed on Unraid 7.3.4,
-# but neither the checklist nor this script nor the firewall have run there. Read what `status` and
-# `dry-run` say before you use `run`.
+# RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12 (plugin 2026.11.12a): `status`, `dry-run`, `run`,
+# `firewall` (installed, and the self-test from the shared instance network: the server's web UI and the
+# router blocked, the internet reachable by address and by name) and `firewall test`. NOT SEEN THERE YET:
+# `after-reboot`, `firewall remove`, the self-test from a server's own network, Install Compose. It is also
+# tested against the plugin's real runner with stand-ins for docker, id, logger, curl, ip and iptables.
+# Read what `status` and `dry-run` say before you use `run`.
 # ***************************************************************************************************
 #
 # MCPANEL_PLUGIN_ROOT (a folder that stands for /) is for tests only, as for the plugin's runner.
@@ -279,7 +282,7 @@ firewall_state() { # "OK|..." or "TO DO|..." or "CANNOT TELL|..."
             printf 'OK|installed (put back at every boot by the boot tasks)'
         fi
     else
-        printf 'OK|not installed (optional: %s firewall; not run on Unraid yet)' "${SELF}"
+        printf 'OK|not installed (optional: %s firewall)' "${SELF}"
     fi
 }
 
@@ -470,11 +473,21 @@ run_step3() {
         if grep -q '^REFUSED: ' "${log}" 2>/dev/null; then
             fail "$(grep -m 1 '^REFUSED: ' "${log}" | sed 's/^REFUSED: //')"
         fi
+        if [ "${task}" = firewall-status ] && firewall_not_installed "${log}"; then
+            item OK "${task}" "not installed: a normal state, the firewall is optional (log ${log})"
+            continue
+        fi
         case "$(fact TASK_RESULT)" in
             ok) item OK "${task}" "done (log ${log})" ;;
             *) item "TO DO" "${task}" "it reported something to look at (above; log ${log}); this does not stop the walk" ;;
         esac
     done
+}
+
+# firewall_not_installed LOG: the firewall's status said "not installed", a normal state (the plugin's runner
+# from 2026.11.12b on reports it as ok; an older one as failed with exit 1 or 3)
+firewall_not_installed() {
+    grep -q -E '^Instance firewall: (not installed|missing \(not installed\))' "$1" 2>/dev/null
 }
 
 run_step4() {
@@ -551,7 +564,7 @@ cmd_after_reboot() {
     say "Step 6 (when it suits you): Settings > Docker > Enable Docker: No, Apply; then Yes, Apply. Then run this"
     say "again: if 'Boot tasks' does not say 'this boot', Unraid does not fire the Docker events then (press the page's"
     say "Boot tasks > Run now after such a restart). Step 7: the first update through the plugin's page."
-    say "Next: $([ "${ISSUES}" = 0 ] && printf '%s firewall   (optional; not run on Unraid yet)' "${SELF}" || printf 'what the lines above name, then %s after-reboot' "${SELF}")"
+    say "Next: $([ "${ISSUES}" = 0 ] && printf '%s firewall   (optional)' "${SELF}" || printf 'what the lines above name, then %s after-reboot' "${SELF}")"
 }
 
 # --- the firewall ---------------------------------------------------------------------------------------
@@ -564,17 +577,23 @@ instance_network() {
         --filter label=com.docker.compose.network=instances --format '{{.Name}}' 2>/dev/null | head -n 1)"
     printf '%s' "${name:-mcpanel_instances}"
 }
+server_network() { # one network of a game server of its own (the agent's labels and name), if one exists now
+    docker network ls --filter label=io.mcpanel.managed=true --filter label=io.mcpanel.network=server \
+        --format '{{.Name}}' 2>/dev/null | grep -E '^zz_mcpanel_i_[0-9a-f]{12}$' | sort | head -n 1
+}
 cleanup_selftest() { docker rm -f "${SELFTEST}" >/dev/null 2>&1 || true; }
 
-# probe TARGET...: "host:port open|closed" lines, from a container on the instance network (the targets go in
-# as arguments, never into the script text)
+# probe NETWORK TARGET...: "host:port open|closed" lines, from a container on NETWORK (the targets go in as
+# arguments, never into the script text)
 probe() {
+    local net="$1"
+    shift
     cleanup_selftest
     trap 'cleanup_selftest; on_interrupt' INT
     trap 'cleanup_selftest; exit 143' TERM
     trap cleanup_selftest EXIT
     # shellcheck disable=SC2016 # the script runs in the container; the targets are its arguments
-    timeout 120 docker run --rm --name "${SELFTEST}" --network "${NET}" --entrypoint sh "${IMAGE}" -c \
+    timeout 120 docker run --rm --name "${SELFTEST}" --network "${net}" --entrypoint sh "${IMAGE}" -c \
         'for t in "$@"; do if nc -z -w 4 "${t%:*}" "${t##*:}" 2>/dev/null; then echo "$t open"; else echo "$t closed"; fi; done' \
         sh "$@" 2>/dev/null
     cleanup_selftest
@@ -605,32 +624,43 @@ selftest_targets() {
     INET_NAME="github.com:443"
 }
 
-declare -A BEFORE=() AFTER=()
-probe_into() { # probe_into ARRAY-NAME
+# the results per network: shared (S) and a server's own (P), before and after the install
+# shellcheck disable=SC2034 # used through name references (probe_into, judge)
+declare -A BEFORE_S=() AFTER_S=() BEFORE_P=() AFTER_P=()
+probe_into() { # probe_into ARRAY-NAME NETWORK
     local line target state
     local -n into="$1"
     into=()
     while IFS= read -r line; do
         target="${line% *}"
         state="${line##* }"
-        # shellcheck disable=SC2034 # a name reference: it fills BEFORE or AFTER
+        # shellcheck disable=SC2034 # a name reference: it fills one of the arrays above
         [ -n "${target}" ] && into["${target}"]="${state}"
-    done <<<"$(probe ${HOST_UI:+"${HOST_UI}"} ${LAN:+"${LAN}"} "${INET_IP}" "${INET_NAME}")"
+    done <<<"$(probe "$2" ${HOST_UI:+"${HOST_UI}"} ${LAN:+"${LAN}"} "${INET_IP}" "${INET_NAME}")"
+}
+probe_all() { # probe_all before|after
+    if [ "$1" = before ]; then
+        probe_into BEFORE_S "${NET}"
+        [ -z "${SNET}" ] || probe_into BEFORE_P "${SNET}"
+    else
+        probe_into AFTER_S "${NET}"
+        [ -z "${SNET}" ] || probe_into AFTER_P "${SNET}"
+    fi
 }
 
-# judge: PASS/FAIL per check; MUST_WORK_FAILED=1 when the internet does not work with the firewall
+# judge NETWORK WHAT BEFORE AFTER: PASS/FAIL per check of one network; MUST_WORK_FAILED=1 when the internet does
+# not work with the firewall, PROTECTS=0 when something is still reachable
 judge() {
-    local t
-    MUST_WORK_FAILED=0
-    PROTECTS=1
+    local t net="$1" what="$2"
+    local -n before="$3" after="$4"
     say ""
-    say "Self-test from a container on ${NET} (what a game server sees):"
+    say "Self-test from a container on ${net} (${what}: what a game server there sees):"
     for t in ${HOST_UI:+"${HOST_UI}"} ${LAN:+"${LAN}"}; do
-        if [ "${#BEFORE[@]}" -gt 0 ] && [ "${BEFORE[${t}]:-}" = closed ]; then
+        if [ "${#before[@]}" -gt 0 ] && [ "${before[${t}]:-}" = closed ]; then
             item "CANNOT TELL" "must fail" "${t}: not reachable from a container before the firewall either"
-        elif [ "${AFTER[${t}]:-}" = closed ]; then
+        elif [ "${after[${t}]:-}" = closed ]; then
             item PASS "must fail" "${t}$([ "${t}" = "${HOST_UI}" ] && printf ' (this server'"'"'s web UI)' || printf ' (a private address on your LAN)'): blocked"
-        elif [ -z "${AFTER[${t}]:-}" ]; then
+        elif [ -z "${after[${t}]:-}" ]; then
             item "CANNOT TELL" "must fail" "${t}: the test container did not answer"
         else
             item FAIL "must fail" "${t}: still reachable from a game server"
@@ -640,15 +670,26 @@ judge() {
     [ -n "${LAN}" ] || item "CANNOT TELL" "must fail" "no private address that answers this host was found (the router's web page): not tested"
     [ -n "${HOST_UI}" ] || item "CANNOT TELL" "must fail" "this server's address was not found: not tested"
     for t in "${INET_IP}" "${INET_NAME}"; do
-        if [ "${AFTER[${t}]:-}" = open ]; then
+        if [ "${after[${t}]:-}" = open ]; then
             item PASS "must work" "${t} (the internet$([ "${t}" = "${INET_NAME}" ] && printf ', by name: DNS works')): reachable"
-        elif [ "${#BEFORE[@]}" -gt 0 ] && [ "${BEFORE[${t}]:-}" != open ]; then
+        elif [ "${#before[@]}" -gt 0 ] && [ "${before[${t}]:-}" != open ]; then
             item "CANNOT TELL" "must work" "${t}: not reachable before the firewall either (no internet?)"
         else
             item FAIL "must work" "${t}: NOT reachable: game servers could not download or check accounts"
             MUST_WORK_FAILED=1
         fi
     done
+}
+judge_all() {
+    MUST_WORK_FAILED=0
+    PROTECTS=1
+    judge "${NET}" "the shared instance network" BEFORE_S AFTER_S
+    if [ -n "${SNET}" ]; then
+        judge "${SNET}" "a game server's own network" BEFORE_P AFTER_P
+    else
+        say ""
+        item "CANNOT TELL" "server network" "no server network exists right now: start a server and run this test again to check that range too"
+    fi
 }
 
 firewall_prepare() {
@@ -657,6 +698,7 @@ firewall_prepare() {
     docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || fail "Docker does not answer: start it (Settings > Docker), then run this again"
     NET="$(instance_network)"
     docker network inspect "${NET}" >/dev/null 2>&1 || fail "the instance network ${NET} does not exist: start the stack (docker compose up -d in deploy/), then run this again"
+    SNET="$(server_network)"
     IMAGE="$(selftest_image)"
     if [ -z "${IMAGE}" ]; then
         say "The self-test needs a tiny image with 'nc' (alpine or busybox); none is on this host."
@@ -678,8 +720,9 @@ firewall_remove() {
 cmd_firewall() {
     local sub="${1:-install}"
     facts_or_fail
-    say "The game servers' firewall (deploy/unraid/instance-firewall.sh). NOT RUN ON A REAL UNRAID SERVER YET:"
-    say "it keeps game containers away from this server and your LAN; the self-test shows whether it does."
+    say "The game servers' firewall (deploy/unraid/instance-firewall.sh): it keeps game containers away from this"
+    say "server and your LAN. Seen on one Unraid 7.3.4 server (installed, the self-test from the shared network);"
+    say "not seen there yet: from a server's own network, and the rules put back at a boot. The self-test shows it."
     case "${sub}" in
         remove)
             ask "Remove the firewall?" || fail "nothing was changed"
@@ -689,9 +732,9 @@ cmd_firewall() {
             ;;
         test)
             firewall_prepare
-            say "Testing with ${IMAGE} on ${NET} (container ${SELFTEST}, removed afterwards)..."
-            probe_into AFTER
-            judge
+            say "Testing with ${IMAGE} on ${NET}${SNET:+ and ${SNET}} (container ${SELFTEST}, removed afterwards)..."
+            probe_all after
+            judge_all
             say ""
             say "Next: $([ "${MUST_WORK_FAILED}" = 1 ] && printf '%s firewall remove   (game servers cannot reach the internet)' "${SELF}" || printf '%s status' "${SELF}")"
             return 0
@@ -704,12 +747,12 @@ cmd_firewall() {
     run_task firewall-status 5 "the firewall's status" || true
     run_task firewall-dry-run 5 "the firewall's dry run" || fail "the dry run did not finish (above)"
     say ""
-    say "Testing before (with ${IMAGE} on ${NET}, container ${SELFTEST}, removed afterwards)..."
-    probe_into BEFORE
+    say "Testing before (with ${IMAGE} on ${NET}${SNET:+ and ${SNET}}, container ${SELFTEST}, removed afterwards)..."
+    probe_all before
     ask "Install the firewall now (the commands of the dry run above)?" || fail "nothing was changed. Next: ${SELF} status"
     run_task firewall-install 5 "the firewall's installation" || fail "the installation did not finish (its log above); nothing else was changed. Next: ${SELF} firewall remove, then look at the log"
-    probe_into AFTER
-    judge
+    probe_all after
+    judge_all
     say ""
     if [ "${MUST_WORK_FAILED}" = 1 ]; then
         say "The internet does not work from a game server with the firewall: taking it out again."

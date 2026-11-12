@@ -172,7 +172,8 @@ def last(result: subprocess.CompletedProcess[str]) -> str:
 
 def test_install_status_install_again_remove(host):
     missing = host.run("status")
-    assert missing.returncode == 1 and last(missing).startswith("Instance firewall: missing (not installed)")
+    # not installed: a normal state, its own exit status (3), not a failure
+    assert missing.returncode == 3 and last(missing).startswith("Instance firewall: not installed (a normal state")
 
     done = host.run("install")
     assert done.returncode == 0, done.stderr
@@ -213,7 +214,7 @@ def test_install_status_install_again_remove(host):
     assert host.chains() == ["DOCKER-USER", "FORWARD", "INPUT"]
     assert host.chain("DOCKER-USER") == ["-A DOCKER-USER -j RETURN"]
     assert host.chain("INPUT") == ["-A INPUT -p tcp -m tcp --dport 22 -j ACCEPT"]
-    assert last(host.run("status")).startswith("Instance firewall: missing")
+    assert last(host.run("status")).startswith("Instance firewall: not installed")
     assert "Nothing to remove" in host.run("remove").stdout
 
 
@@ -358,7 +359,8 @@ def test_as_root_a_loose_checkout_is_tightened_status_only_warns(host):
 def test_the_script_says_it_is_untested_on_unraid_and_how_to_check():
     text = SCRIPT.read_text()
     head = text.split("set -u", 1)[0]
-    assert "NOT RUN ON A REAL UNRAID HOST YET" in head
+    assert "RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12" in head and "NOT SEEN THERE YET" in head
+    assert "a container on a per-server network (the pool range)" in " ".join(head.replace("#", " ").split())
     assert "curl -m 5 https://example.com/" in head and "must FAIL" in head and "must WORK" in head
     assert os.access(SCRIPT, os.X_OK)
     assert subprocess.run(["bash", "-n", str(SCRIPT)], check=False).returncode == 0

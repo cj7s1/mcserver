@@ -2,7 +2,10 @@
 # Host firewall rules for the game server containers (security review 2026-11-11, A-2).
 #
 #   bash instance-firewall.sh install [OPTIONS]   put the rules in place (as root); again at every array start
-#   bash instance-firewall.sh status  [OPTIONS]   installed / missing / differs, and what the rules cover
+#   bash instance-firewall.sh status  [OPTIONS]   installed / missing / differs, and what the rules cover; exit 0
+#                                                 installed and up to date, 3 not installed (a normal state: you
+#                                                 never installed it or removed it), 1 differs or missing although
+#                                                 installed
 #   bash instance-firewall.sh dry-run [OPTIONS]   print the exact commands `install` would run; changes nothing
 #   bash instance-firewall.sh remove              take the rules out again (as root)
 #
@@ -20,10 +23,14 @@
 #                        network to appear (at array start Docker may not be up yet)
 #
 # ***************************************************************************************************
-# NOT RUN ON A REAL UNRAID HOST YET. The rule set was loaded with iptables-restore in a container's own
-# network namespace (install, status, a second install, remove), and the script runs in tests against
-# stand-ins; nothing of it was tried on Unraid's firewall. After `install`, check it from inside a game
-# container (Docker tab -> the server's container -> Console, or `docker exec -it <container> sh`):
+# RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12 (through the MCPanel plugin and first-run.sh): `status`
+# (not installed), `dry-run` and `install`; then, from a container on the shared instance network, the
+# server's web UI and the router were blocked and the internet worked by address and by name, and the stack
+# stayed healthy. NOT SEEN THERE YET: the rules put back at a boot, `remove`, `--allow`/`--allow-dns`, a
+# container on a per-server network (the pool range), players joining with the rules in place. Elsewhere the
+# rule set was loaded with iptables-restore in a container's own network namespace, and the script runs in
+# tests against stand-ins. After `install`, check it from inside a game container (first-run.sh firewall
+# test does it; or Docker tab -> the server's container -> Console, or `docker exec -it <container> sh`):
 #   * the host's web UI and a LAN address must FAIL:  curl -m 5 http://<unraid LAN IP>/   and any LAN device
 #   * the internet must WORK:                          curl -m 5 https://example.com/
 #   * players must still join the game, from the LAN and from the internet
@@ -497,8 +504,12 @@ cmd_status() {
     describe
     if ! chain_exists "${FWD}" && ! chain_exists "${IN}" && [ "$(jumps DOCKER-USER "${FWD}")" = 0 ] &&
         [ "$(jumps INPUT "${IN}")" = 0 ] && [ -z "$(markers C)$(markers A)" ]; then
-        say "Instance firewall: missing (not installed). Install it with: bash ${SELF} install"
-        return 1
+        if [ -f "${STATE_FILE}" ] && grep -qx 'INSTALLED=yes' "${STATE_FILE}"; then
+            say "Instance firewall: missing, although it was installed (INSTALLED=yes): the boot tasks put it back, or now: bash ${SELF} install"
+            return 1
+        fi
+        say "Instance firewall: not installed (a normal state; to install it: bash ${SELF} install)"
+        return 3
     fi
     chain_exists "${FWD}" || problems+=("the chain ${FWD} is missing")
     chain_exists "${IN}" || problems+=("the chain ${IN} is missing")

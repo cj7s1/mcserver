@@ -575,7 +575,8 @@ def test_root_and_the_rule_of_the_other_root_scripts(box):
 def test_the_script_says_it_is_untested_on_unraid_and_how_to_check():
     text = (UNRAID / "array-start.sh").read_text()
     head = text.split("set -u", 1)[0]
-    assert "NOT RUN ON A REAL UNRAID HOST YET" in head and "bash array-start.sh dry-run" in head
+    assert "RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12" in head and "NOT SEEN THERE YET" in head
+    assert "bash array-start.sh dry-run" in head
     assert "bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh" in head
     assert os.access(UNRAID / "array-start.sh", os.X_OK)
     assert subprocess.run(["bash", "-n", str(UNRAID / "array-start.sh")], check=False).returncode == 0
@@ -606,7 +607,7 @@ def test_the_docs_describe_the_one_line_user_script_and_the_repair():
     unraid = words("docs/UNRAID.md")
     for needle in (
         "### Without the plugin: the User Script `array-start.sh`",
-        "**Not run on a real Unraid host yet**",
+        "**Not seen at a real boot yet.**",
         "array-start.sh --compose-bin /mnt/cache/system/docker-compose",
         '"failed to resolve host postgres"',
         "docker network connect --alias panel mcpanel_internal mcpanel-panel-1",

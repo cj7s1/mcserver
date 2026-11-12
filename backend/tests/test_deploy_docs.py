@@ -98,7 +98,9 @@ def test_a9_who_can_join_and_what_a_compromised_server_reaches_are_documented():
 def test_a2_the_firewall_script_is_documented_as_untested_with_its_checks_and_boot_line():
     unraid = words("docs/UNRAID.md")
     assert "### The game servers' firewall (`instance-firewall.sh`)" in read("docs/UNRAID.md")
-    assert "**Not run on a real Unraid host yet.**" in unraid
+    assert "**Ran on one Unraid 7.3.4 server (2026-11-12), not yet in every part.**" in unraid
+    assert "a container on a > server's own network (the pool range" in unraid
+    assert '`status` says "not installed" (exit 3) when you never installed it or removed it: a normal state.' in unraid
     # put back at every array start by array-start.sh, only where the owner installed it
     assert "deploy/unraid/array-start.sh" in unraid and "only where you had" in unraid
     for needle in (
@@ -278,7 +280,8 @@ def test_the_plugin_is_the_recommended_way_on_unraid_and_says_it_is_untested():
     assert "### The Unraid plugin (recommended)" in read("docs/UNRAID.md")
     assert "### Without the plugin: the User Script `array-start.sh`" in read("docs/UNRAID.md")
     for needle in (
-        "**The plugin has not been run on Unraid yet.**",
+        "**The plugin has run on one Unraid 7.3.4 server (2026-11-12), not yet in every part.**",
+        "**Not seen there yet:** this page itself, the Docker",
         f"Plugins → Install Plugin**, and paste the raw address of `deploy/unraid/plugin/mcpanel.plg` of the repository you cloned, `{PLUGIN_URL_FORM}`",
         "**Every button that changes something first shows the exact commands it will run** and asks",
         "**First-run checklist** (what only a real Unraid server can show)",
@@ -296,7 +299,7 @@ def test_the_plugin_is_the_recommended_way_on_unraid_and_says_it_is_untested():
     assert "### Install the plugin (recommended)" in read("docs/QUICKSTART-UNRAID.md")
     for needle in (
         PLUGIN_URL_FORM,
-        "**It has not been run on Unraid yet.**",
+        "**It has run on one Unraid 7.3.4 server, not yet in every part**",
         "**read it before you press anything**",
         "`plugin: boot tasks finished: ok`",
         "**Plugins → Installed Plugins → MCPanel → Remove**",
@@ -325,8 +328,8 @@ def test_the_plugin_is_in_security_deployment_status_roadmap_and_the_map():
     assert "the MCPanel plugin's **Install Compose**" in deployment
     status = words("DEVELOPMENT_STATUS.md")
     assert "## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`" in read("DEVELOPMENT_STATUS.md")
-    assert "**Not run on Unraid yet.**" in status
-    assert "Unraid plugin `mcpanel`" in words("ROADMAP.md") and "[ ] Run on Unraid" in words("ROADMAP.md")
+    assert "**Ran on one Unraid 7.3.4 server on 2026-11-12, not yet in every part**" in status
+    assert "Unraid plugin `mcpanel`" in words("ROADMAP.md") and "[x] Ran on one Unraid 7.3.4 server" in words("ROADMAP.md")
     claude = read("CLAUDE.md")
     assert "deploy/unraid/plugin/src/" in claude and "tests/test_deploy_unraid_plugin.py" in claude
     assert "The MCPanel plugin (recommended)" in words("docs/UNRAID-SHUTDOWN.md")
@@ -445,7 +448,7 @@ def test_the_docs_follow_the_review_of_the_friends_features_and_the_plugin():
         assert needle in security, needle
     unraid = words("docs/UNRAID.md")
     for needle in (
-        '"MCPanel plugin installed. Its page: Settings > User Utilities > MCPanel." and three more lines',
+        '"MCPanel plugin installed. Its page: Settings > User Utilities > MCPanel." and four more lines',
         "the shutdown hook in the plugin's folder and the action logs (`/run/mcpanel`) go at once",
         "`chown -R root:root <checkout> && chmod -R go-w <checkout>`",
         "A checkout without `.git` (the ZIP download) works for the boot tasks",
@@ -455,3 +458,24 @@ def test_the_docs_follow_the_review_of_the_friends_features_and_the_plugin():
     assert "/tmp/mcpanel/" not in read("docs/UNRAID.md") + read("docs/SECURITY.md") + read("CLAUDE.md")
     assert "A rollback's dry run (and the rollback) says what it loses" in words("DEPLOYMENT.md")
     assert "never makes the container unhealthy" in words("DEPLOYMENT.md")
+
+
+# --- the first run on one Unraid 7.3.4 server (2026-11-12) ------------------------------------------------------
+def test_the_docs_say_what_ran_on_one_unraid_server_and_what_not():
+    status = words("DEVELOPMENT_STATUS.md")
+    assert "## First run on one Unraid 7.3.4 server (2026-11-12)" in read("DEVELOPMENT_STATUS.md")
+    for needle in (
+        "**Not seen there yet:** the plugin's page, the Docker events at a real boot and at Docker off/on",
+        '`instance-firewall.sh status` exits 3 for "not installed" (a normal state)',
+        "also probe from one game server's own network when one exists",
+    ):
+        assert needle in status, needle
+    unraid = words("docs/UNRAID.md")
+    assert "`after-reboot`, `firewall remove` and the self-test from a server's own network were not seen there yet" in unraid
+    assert "and four more lines" in unraid
+    for path in ("docs/UNRAID.md", "docs/QUICKSTART-UNRAID.md", "docs/SECURITY.md", "DEPLOYMENT.md", "CLAUDE.md"):
+        text = words(path)
+        assert "The plugin has not been run on Unraid yet" not in text and 'plugin" (not run on' not in text, path
+    # nothing of the owner's machine in the repository
+    for path in ("docs/UNRAID.md", "DEVELOPMENT_STATUS.md", "deploy/unraid/first-run.sh", "deploy/unraid/instance-firewall.sh"):
+        assert "192.168.1.114" not in read(path) and "mcpanel-ops" not in read(path), path

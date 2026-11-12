@@ -36,8 +36,11 @@
 # folder of root's that only root can write; new files are made with noclobber.
 #
 # ***************************************************************************************************
-# NOT RUN ON A REAL UNRAID HOST YET. Tested against stand-ins (docs/UNRAID.md, "The Unraid plugin", has
-# the first-run checklist).
+# RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12 (2026.11.12a, through first-run.sh): facts, save, and the
+# tasks status, check-updates, boot-dry-run, boot-run, firewall-status, firewall-dry-run and firewall-install.
+# NOT SEEN THERE YET: boot at a real Docker start (the event), update-prepare/update-run, rollback-*,
+# compose-install, firewall-remove, boot-status. Otherwise tested against stand-ins (docs/UNRAID.md, "The
+# Unraid plugin", has the first-run checklist).
 # ***************************************************************************************************
 #
 # MCPANEL_PLUGIN_ROOT (a folder that stands for /) is for tests only; leave it unset on Unraid.
@@ -656,8 +659,16 @@ task_boot_run() {
 }
 
 task_firewall() { # task_firewall status|dry-run|install|remove
+    local rc
     if [ "$1" = install ] || [ "$1" = remove ]; then need_checkout strict || return 1; else need_checkout || return 1; fi
     x - bash "${UNRAID}/instance-firewall.sh" "$1"
+    rc=$?
+    # status: 3 = not installed, a normal state (the owner never installed it, or removed it): not a failure
+    if [ "$1" = status ] && [ "${rc}" = 3 ] && [ "${DESCRIBE}" = 0 ]; then
+        say "(not installed: a normal state, nothing failed)"
+        return 0
+    fi
+    return "${rc}"
 }
 
 task_compose_install() {

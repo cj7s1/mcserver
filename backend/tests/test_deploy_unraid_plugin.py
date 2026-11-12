@@ -142,7 +142,7 @@ class Host:
             "scripts/upgrade.sh": UPGRADE_BODY,
             "unraid/array-start.sh": ARRAY_START_BODY,
             "unraid/install-hook.sh": "",
-            "unraid/instance-firewall.sh": 'echo "Instance firewall: $1 (stand-in)"\n',
+            "unraid/instance-firewall.sh": 'echo "Instance firewall: $1 (stand-in)"\nexit "$(cat "$FAKE/fw_rc" 2>/dev/null || echo 0)"\n',
             "unraid/stopping_docker": "",
         }
         for rel, body in stand_ins.items():
@@ -476,7 +476,8 @@ def test_check_updates_fetches_and_never_pulls(host):
     assert result["RESULT"] == "ok", log
     assert host.head() == before
     assert "1 commit(s) behind, 0 ahead" in log and "Fix the thing" in log
-    assert "plugin version 2026.12.01 (installed: 2026.11.12a): Unraid's Plugins page updates the plugin itself" in log
+    installed = re.search(r"^## (\S+)$", (PLUGIN / "CHANGES.md").read_text(), re.M).group(1)
+    assert f"plugin version 2026.12.01 (installed: {installed}): Unraid's Plugins page updates the plugin itself" in log
     facts = host.facts()
     assert facts["BEHIND"] == "1" and facts["AHEAD"] == "0" and facts["UPSTREAM"] == "origin/main"
     assert [c.split(" ", 1)[1] for c in facts["UPDATE_COMMIT"]] == ["Fix the thing"]
@@ -957,7 +958,7 @@ def test_after_the_files_nothing_of_the_plugin_is_writable_by_group_or_others(ho
     page.chmod(0o666)
     done = run_script(host, "post-install.sh")
     assert done.returncode == 0, done.stdout + done.stderr
-    assert "NOT RUN ON A REAL UNRAID HOST YET" in done.stdout
+    assert "Seen on one Unraid 7.3.4 server, not yet in every part" in done.stdout
     loose = subprocess.run(["find", str(host.plugin), "-perm", "/022"], capture_output=True, text=True).stdout
     assert loose == ""
     assert stat.S_IMODE(host.runner.stat().st_mode) == 0o755 and stat.S_IMODE(page.stat().st_mode) == 0o644
@@ -980,8 +981,30 @@ def test_removal_waits_for_a_running_action_and_keeps_the_settings(host):
     assert "plugin removed" in (host.fake / "syslog").read_text()
 
 
-def test_the_runner_and_the_scripts_say_they_are_untested_on_unraid():
-    for rel in ("bin/mcpanel", "include/common.php", "MCPanel.page", "install/post-install.sh"):
-        text = (SRC / rel).read_text()
-        assert "NOT RUN ON A REAL UNRAID HOST YET" in text or "has not been run on a real Unraid server yet" in text, rel
-    assert "NOT RUN ON A REAL UNRAID HOST YET" in (PLUGIN / "mcpanel.plg").read_text()
+def test_the_runner_and_the_scripts_say_what_has_run_on_unraid_and_what_not():
+    """The first run on one Unraid 7.3.4 server (2026-11-12): what ran there, and what was not seen yet."""
+    runner = " ".join((SRC / "bin/mcpanel").read_text().split())
+    assert "RAN ON ONE REAL UNRAID 7.3.4 SERVER ON 2026-11-12" in runner
+    assert "status, check-updates, boot-dry-run, boot-run, firewall-status, firewall-dry-run and firewall-install" in runner
+    assert "NOT SEEN THERE YET: boot at a real Docker start (the event), update-prepare/update-run" in runner
+    page = " ".join((SRC / "MCPanel.page").read_text().split())
+    assert "This plugin has run on one Unraid 7.3.4 server (2026-11-12" in page
+    assert "this page itself, Update and Roll back, Install Compose and the boot tasks at a real Docker start" in page
+    assert "has not been seen on a real Unraid server yet" in (SRC / "include/common.php").read_text()
+    assert "Seen on one Unraid 7.3.4 server, not yet in every part" in (SRC / "install/post-install.sh").read_text()
+    assert "Ran on one Unraid 7.3.4 server on 2026-11-12" in (PLUGIN / "mcpanel.plg").read_text()
+    for path in [*SRC.rglob("*"), PLUGIN / "build.sh"]:
+        if path.is_file():
+            assert "NOT RUN ON A REAL UNRAID HOST YET" not in path.read_text(), path
+
+
+@pytest.mark.parametrize(("rc", "result"), [("3", "ok"), ("0", "ok"), ("1", "failed"), ("2", "failed")])
+def test_a_firewall_that_is_not_installed_is_a_normal_status(host, rc, result):
+    # the first run on Unraid: "missing (not installed)" ended "Finished: failed (exit 1)" on the page
+    host.use_checkout()
+    (host.fake / "fw_rc").write_text(rc + "\n")
+    task, log = host.start_and_wait("firewall-status")
+    assert task["RESULT"] == result, log
+    assert ("(not installed: a normal state, nothing failed)" in log) == (rc == "3")
+    # what it describes stays the one command
+    assert described(host, "firewall-status") == [f"bash {host.unraid}/instance-firewall.sh status"]

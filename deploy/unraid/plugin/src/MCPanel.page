@@ -6,16 +6,18 @@ Markdown="false"
 ---
 <?php
 /* MCPanel plugin: its page (Settings > User Utilities > MCPanel). The page itself only reads; every button
- * posts to include/action.php, which runs bin/mcpanel. NOT RUN ON A REAL UNRAID HOST YET. */
+ * posts to include/action.php, which runs bin/mcpanel. This page has not been seen on a real Unraid server yet. */
 $mcpanel_root = '/plugins/mcpanel';
 $mcpanel_dir = ($docroot ?? ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp')) . $mcpanel_root;
 $mcpanel_v = @filemtime("$mcpanel_dir/mcpanel.js") ?: 0;
 ?>
 <link type="text/css" rel="stylesheet" href="<?=$mcpanel_root?>/mcpanel.css?v=<?=$mcpanel_v?>">
 <div id="mcp" class="mcp">
-  <p class="mcp-warn">This plugin has not been run on a real Unraid server yet. Before you press a button that changes
-    something, read the status below and the first-run checklist in docs/UNRAID.md ("The Unraid plugin"). Every button
-    that changes something first shows the exact commands it will run and asks you.</p>
+  <p class="mcp-warn">This plugin has run on one Unraid 7.3.4 server (2026-11-12: its install, the status, the boot tasks
+    and the firewall, through first-run.sh), but this page itself, Update and Roll back, Install Compose and the boot
+    tasks at a real Docker start have not been seen there yet. Before you press a button that changes something, read
+    the status below and the first-run checklist in docs/UNRAID.md ("The Unraid plugin"). Every button that changes
+    something first shows the exact commands it will run and asks you.</p>
 
   <h2>Status</h2>
   <table class="mcp-facts"><tbody id="mcp-facts"><tr><td>Loading...</td></tr></tbody></table>

@@ -384,7 +384,8 @@ Docker start: the shutdown hook, the Compose link, the firewall (if you installe
 of a platform container that lost its network. Every button that changes something shows its
 commands first and asks.
 
-**It has not been run on Unraid yet.** The first time:
+**It has run on one Unraid 7.3.4 server, not yet in every part** (its page, the boot tasks at a real
+Docker start and Update through the page were not seen there yet). The first time:
 
 1. Open the page and **read it before you press anything**: *Checkout* must be your
    `mcpanel-src` folder, *Docker Compose* must name a version (when it warns that nothing links it

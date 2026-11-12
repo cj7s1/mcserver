@@ -3,7 +3,7 @@
  * started without a shell (proc_open with an argument list); the runner checks everything again. Unraid's
  * local_prepend.php has already refused a POST without the right CSRF token before this file runs.
  *
- * NOT RUN ON A REAL UNRAID HOST YET (docs/UNRAID.md, "The Unraid plugin").
+ * The page itself has not been seen on a real Unraid server yet (docs/UNRAID.md, "The Unraid plugin").
  */
 
 const MCPANEL_TASKS = [
