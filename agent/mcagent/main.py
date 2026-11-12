@@ -465,6 +465,8 @@ async def _startup() -> None:
     _spawn("saving-recovery", _saving_recovery_loop, settings, _background_stop)
     _spawn("claim-guard", claimguard.run, settings, _background_stop)
     # the platform's own containers get their network back when Docker dropped it (boot-network repair)
+    # after the agent reconnected itself, the source guard reads the networks again at once (F-19)
+    platformnet.on_self_repaired(lambda: _load_blocked_networks(settings))
     _spawn("platform-networks", platformnet.run, settings, _background_stop)
     # the agent is on a server's network only while that server runs (FX-1)
     _spawn(
