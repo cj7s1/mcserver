@@ -207,6 +207,7 @@ def parse_ids(text: str) -> list[str]:
 
 
 class ValheimDefinition(SteamGameDefinition):
+    world_option_keys = ("world_name",)  # (E-5: a restore sets the backup's world back)
     id = GAME
     label = "Valheim"
     profile = GAME

@@ -259,16 +259,61 @@ class SteamGameDefinition(GameDefinition):
         return steam_issues(self, instance, lines)
 
     # -- software (no update: the server follows its branch) -----------------------------------------
-    software_keys = ("game",)  # nothing a restore could set back
+    # E-5: what names the world the server loads (Valheim's world name, Rust's identity, seed and size, Project
+    # Zomboid's server name) is recorded with every backup and set back by a restore, so a backup from before a
+    # world reset brings that world back into play (a new name or seed would load a new empty world next to it).
+    # Keys of ``game_options`` and of its ``server`` settings.
+    world_option_keys: tuple[str, ...] = ()
+    world_server_keys: tuple[str, ...] = ()
+    software_keys = ("game", "world")
+
+    def world_state(self, instance: Instance) -> dict[str, Any]:
+        options = instance.game_options or {}
+        server = options.get("server") if isinstance(options.get("server"), dict) else {}
+        state = {k: options.get(k) for k in self.world_option_keys if options.get(k) is not None}
+        state.update({k: server.get(k) for k in self.world_server_keys if server.get(k) is not None})
+        return state
 
     def software_state(self, instance: Instance) -> dict[str, Any]:
-        return {"game": self.id, "branch": instance.minecraft_version or self.branch, "image": instance.image}
+        state = {"game": self.id, "branch": instance.minecraft_version or self.branch, "image": instance.image}
+        if world := self.world_state(instance):
+            state["world"] = world
+        return state
 
     def describe_software(self, state: dict[str, Any]) -> str:
-        return f"{self.label} ({state.get('branch') or self.branch} branch)"
+        world = state.get("world") if isinstance(state.get("world"), dict) else {}
+        named = ", ".join(f"{k.replace('_', ' ')} {v}" for k, v in sorted(world.items()))
+        return f"{self.label} ({state.get('branch') or self.branch} branch{f'; {named}' if named else ''})"
 
     def set_software(self, instance: Instance, state: dict[str, Any]) -> dict[str, tuple[Any, Any]]:
-        return {}
+        """Set the recorded world options back (E-5); returns {key: (old, new)} of what changed. A change is a new
+        configuration (``bump_revision``): the container is made again with it."""
+        from apps.instances.models import Instance as InstanceModel
+        from apps.instances.services import bump_revision
+
+        wanted = state.get("world")
+        if not isinstance(wanted, dict) or not wanted:
+            return {}
+        instance.refresh_from_db(fields=["game_options"])
+        options = dict(instance.game_options or {})
+        server = dict(options.get("server") or {}) if isinstance(options.get("server"), dict) else {}
+        changes: dict[str, tuple[Any, Any]] = {}
+        for key in self.world_option_keys:
+            if key in wanted and options.get(key) != wanted[key]:
+                changes[key] = (options.get(key), wanted[key])
+                options[key] = wanted[key]
+        for key in self.world_server_keys:
+            if key in wanted and server.get(key) != wanted[key]:
+                changes[key] = (server.get(key), wanted[key])
+                server[key] = wanted[key]
+        if not changes:
+            return {}
+        if self.world_server_keys:
+            options["server"] = server
+        instance.game_options = options
+        InstanceModel.objects.filter(pk=instance.pk).update(game_options=options)
+        bump_revision(instance)
+        return changes
 
 
 # --- diagnostics -------------------------------------------------------------------------------------

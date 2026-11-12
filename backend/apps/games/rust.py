@@ -164,6 +164,8 @@ def random_seed() -> int:
 
 
 class RustDefinition(SteamGameDefinition):
+    world_option_keys = ("identity",)  # (E-5: a restore sets the backup's map back)
+    world_server_keys = ("seed", "world_size")
     id = GAME
     label = "Rust"
     profile = GAME

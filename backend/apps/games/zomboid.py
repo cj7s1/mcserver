@@ -160,6 +160,7 @@ def parse_players(out: str) -> dict[str, Any]:
 
 
 class ZomboidDefinition(SteamGameDefinition):
+    world_option_keys = ("server_name",)  # (E-5: the save folder is named after it)
     id = GAME
     label = "Project Zomboid"
     profile = GAME
