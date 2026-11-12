@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # or when the agent cannot use it, every server is on the shared instance network as before.
     per_server_networks: bool = True
     instance_pool: str = "10.213.0.0/16"
+    # Repair the network of the platform's own containers (the agent's compose project) when Docker dropped
+    # it after a start that failed on a published port (AGENT_REPAIR_PLATFORM_NETWORKS; platformnet.py).
+    repair_platform_networks: bool = True
     allowed_networks: Annotated[list[str], NoDecode] = Field(default_factory=list)
     allow_host_network: bool = False
     # Refuse API requests from the gateway address of every bridge network the agent is attached to

@@ -49,6 +49,7 @@ from . import (
     maintenance,
     netguard,
     pernet,
+    platformnet,
     profiles,
     slp,
     storage,
@@ -463,6 +464,8 @@ async def _startup() -> None:
     _spawn("leftover-sweep", maintenance.sweep_leftovers, settings, started_at, _busy)
     _spawn("saving-recovery", _saving_recovery_loop, settings, _background_stop)
     _spawn("claim-guard", claimguard.run, settings, _background_stop)
+    # the platform's own containers get their network back when Docker dropped it (boot-network repair)
+    _spawn("platform-networks", platformnet.run, settings, _background_stop)
     # the agent is on a server's network only while that server runs (FX-1)
     _spawn(
         "server-networks",
@@ -565,6 +568,8 @@ async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "storage": caps,
         # {enabled, reason, pool, subnet_prefix}: whether new servers get their own network (A-1)
         "per_server_networks": await run_in_threadpool(pernet.status, settings),
+        # {enabled, project, recent: [{container, service, network, action, result, at}], given_up}
+        "platform_network_repair": await run_in_threadpool(platformnet.status, settings),
         "tls": {"mode": settings.tls, "fingerprint": await run_in_threadpool(_tls_fingerprint, settings)},
         "policy": {
             "allowed_images": settings.allowed_images,
