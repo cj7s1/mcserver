@@ -259,3 +259,50 @@ async def test_websockets_send_nothing_before_the_auth_frame(path: str, ws_env: 
         await get_channel_layer().group_send(EVENTS_GROUP, event)
         assert (await comm.receive_json_from(timeout=2))["instance_id"] == str(inst.id)
     await comm.disconnect()
+
+
+# --- R-10 of the branch review: the upload-size gate in front of Django ----------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("with_token", [False, True])
+async def test_a_cookie_alone_does_not_open_the_large_upload_gate(
+    with_token: bool, make_instance: Any, make_user: Any, fake_agent: Any
+) -> None:
+    """Adopted from fixes/review/session/test_review_session.py: a stolen cookie (no token) made the panel spool
+    an upload body of up to 2 GiB before DRF answered 401; now the gate answers 413 at once."""
+    from asgiref.sync import sync_to_async
+    from django.test.utils import override_settings
+
+    from .test_web_audit_2026_11_09 import CSRF, _asgi_app, _login, _response, _scope
+
+    inst = await sync_to_async(make_instance)()
+    await sync_to_async(fake_agent.prepare)(inst.id)
+    session = await sync_to_async(lambda: _login(make_user("size-gate", owner=True)))()
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
+
+    payload = encode_multipart(BOUNDARY, {"file": SimpleUploadedFile("big.bin", b"x" * (2 * 1024 * 1024))})
+    headers = [
+        (b"cookie", f"{settings.CSRF_COOKIE_NAME}={CSRF}; {settings.SESSION_COOKIE_NAME}={session}".encode()),
+        (b"x-csrftoken", CSRF.encode()),
+        (b"content-type", MULTIPART_CONTENT.encode()),
+        (b"content-length", str(len(payload)).encode()),
+    ]
+    if with_token:
+        headers.append((b"x-mcpanel-session-token", SESSION_TOKENS[session].encode()))
+    with override_settings(MCPANEL_MAX_REQUEST_BYTES=1024 * 1024):
+        from asgiref.testing import ApplicationCommunicator
+
+        comm = ApplicationCommunicator(_asgi_app(), _scope("POST", f"/api/instances/{inst.id}/files/upload", headers=headers))
+        if with_token:
+            for i in range(0, len(payload), 256 * 1024):
+                part = payload[i : i + 256 * 1024]
+                await comm.send_input({"type": "http.request", "body": part, "more_body": i + len(part) < len(payload)})
+        status, _h, body = await _response(comm, timeout=20)
+    from django.db import connections
+
+    await sync_to_async(connections.close_all)()
+    if with_token:
+        assert status == 201, body  # past the gate: the upload is stored
+    else:
+        assert status == 413 and b"request_too_large" in body, (status, body)

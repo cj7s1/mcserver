@@ -72,7 +72,7 @@ def _session_key(scope: dict[str, Any]) -> str | None:
     return value if value is not None and _SESSION_KEY.match(value) else None
 
 
-def _signed_in(session_key: str) -> bool:
+def _signed_in(session_key: str, token: str | None = None) -> bool:
     """Whether ``session_key`` is a live session of a signed-in user, as Django's ``get_user``
     decides it: a known authentication backend, an active user, and a session made with the
     user's current password (the session auth hash; a password change ends other sessions).
@@ -94,7 +94,12 @@ def _signed_in(session_key: str) -> bool:
         if not session_hash:
             return False
         hashes = [user.get_session_auth_hash(), *getattr(user, "get_session_auth_fallback_hash", lambda: [])()]
-        return any(constant_time_compare(session_hash, h) for h in hashes)
+        if not any(constant_time_compare(session_hash, h) for h in hashes):
+            return False
+        from . import session_binding
+
+        # D-1 (R-10): with the binding on, the cookie alone does not make the panel take a large body
+        return not session_binding.enabled() or session_binding.token_matches(data, token or "")
     except Exception:
         return False
     finally:
@@ -153,7 +158,9 @@ class RequestBodyLimit:
                 )
             if length > small:
                 key = _session_key(scope)
-                if key is None or not await sync_to_async(_signed_in, thread_sensitive=False)(key):
+                tokens = _header(scope, b"x-mcpanel-session-token")
+                token = tokens[0] if len(tokens) == 1 else None
+                if key is None or not await sync_to_async(_signed_in, thread_sensitive=False)(key, token):
                     return await _reject(
                         send,
                         413,

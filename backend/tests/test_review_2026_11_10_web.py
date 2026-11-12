@@ -169,15 +169,18 @@ async def test_a_json_cookie_of_another_app_does_not_hide_the_session(make_insta
 def test_the_size_gate_needs_an_active_user_and_a_session_of_the_current_password(make_user):
     from apps.core.asgi import _session_key, _signed_in
 
+    from tests.conftest import SESSION_TOKENS
+
     user = make_user("gate-user", owner=True)
     key = _login(user)
-    assert _signed_in(key) is True
+    assert _signed_in(key, SESSION_TOKENS[key]) is True
+    assert _signed_in(key) is False  # (D-1: the cookie alone is not enough, R-10 of the branch review)
     assert _session_key({"headers": [(b"cookie", f'a={{"x":1}}; mcpanel_session={key}'.encode())]}) == key
     user.set_password("another-long-password-1")
     user.save()
-    assert _signed_in(key) is False  # the password changed: Django ends the session on its next request
+    assert _signed_in(key, SESSION_TOKENS[key]) is False  # the password changed: Django ends the session
     fresh = _login(user)
-    assert _signed_in(fresh) is True
+    assert _signed_in(fresh, SESSION_TOKENS[fresh]) is True
     type(user).objects.filter(pk=user.pk).update(is_active=False)
     assert _signed_in(fresh) is False
     assert _signed_in("x" * 32) is False
