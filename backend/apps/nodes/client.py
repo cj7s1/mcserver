@@ -62,10 +62,7 @@ class AgentError(ApiError):
         api_status = status_code if 400 <= status_code < 500 else 502
         busy = _AGENT_BUSY.match(message or "") if code == "instance_busy" else None
         if busy:  # (I-2: also a file write while a restore, import ... runs: say it in the user's words)
-            message = (
-                f"The server is busy with another operation on its node ({busy.group(1)}); try again when it has "
-                "finished"
-            )
+            message = f"The server is busy with another operation on its node ({busy.group(1)}); try again when it has finished"
         super().__init__(message, code=code, status_code=api_status)
         self.agent_status = status_code
 
