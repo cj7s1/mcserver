@@ -8,6 +8,7 @@ from apps.backups import views as backups
 from apps.catalog import views as catalog
 from apps.content import views as content
 from apps.core import views as core
+from apps.discordbot import views as discordbot
 from apps.games import views as games
 from apps.instances import game_views
 from apps.instances import views as instances
@@ -128,6 +129,7 @@ api_patterns = [
     path("nodes/tls-probe", nodes.NodeTlsProbeView.as_view()),
     path("nodes/<int:pk>", nodes.NodeDetailView.as_view()),
     path("nodes/<int:pk>/check", nodes.NodeCheckView.as_view()),
+    path("system/discord", discordbot.DiscordSettingsView.as_view()),
     path("notifications/events", notifications.EventsView.as_view()),
     path("notifications/channels", notifications.ChannelListView.as_view()),
     path("notifications/channels/<int:pk>", notifications.ChannelDetailView.as_view()),

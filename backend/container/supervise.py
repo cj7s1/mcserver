@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Process supervisor of the mcpanel/panel image in ``all`` mode (standard library only).
 
-One container, one supervisor, up to five children: Redis (unless MCPANEL_REDIS_URL points to a
-server elsewhere), the web server, the job worker, the periodic worker and the scheduler. It runs
+One container, one supervisor, up to six children: Redis (unless MCPANEL_REDIS_URL points to a
+server elsewhere), the web server, the job worker, the periodic worker, the scheduler and the Discord bot
+(idle while it is off: exit 78, see ``ChildSpec.idle_exit``). It runs
 as the image's unprivileged user under the container's init and needs no capability: it only
 starts and signals its own children.
 
@@ -77,6 +78,10 @@ REDIS_DATA_FILES = ("dump.rdb", "appendonly.aof", "appendonlydir")
 EX_CONFIG = 78
 
 WAITING, STARTING, RUNNING, BACKOFF, STOPPING, STOPPED = "waiting", "starting", "running", "backoff", "stopping", "stopped"
+# A child that has nothing to do now (the Discord bot while it is off): it exited with its ``idle_exit`` code and
+# is started again after ``idle_retry`` seconds, or at once when its ``wake_file`` is touched. Healthy.
+IDLE = "idle"
+HEALTHY_STATES = (RUNNING, IDLE)
 
 
 @dataclass(frozen=True)
@@ -94,6 +99,11 @@ class ChildSpec:
     # A restart the supervisor decides on (Redis came back) sends SIGTERM and then waits for the
     # child to exit by itself, without a kill after ``grace``: the job worker finishes its job.
     finish_before_restart: bool = False
+    # An exit with this code means "nothing to do now" (state IDLE, no backoff, no log line after the first):
+    # started again after ``idle_retry`` seconds, or at once when ``wake_file`` gets a newer modification time.
+    idle_exit: int | None = None
+    idle_retry: float = 300.0
+    wake_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +131,8 @@ class Child:
         self.starts = 0
         self.failures = 0
         self.last_exit: int | None = None
+        self.quiet = False  # started from IDLE: its start and an idle exit are not logged
+        self.started_wall = 0.0
 
 
 def describe_exit(code: int | None) -> str:
@@ -487,6 +499,15 @@ class Supervisor:
             child.next_start = now
             self._set(child, BACKOFF)
             self.log(f"{name} stopped for its restart ({describe_exit(code)})")
+        elif child.spec.idle_exit is not None and code == child.spec.idle_exit:
+            child.failures = 0
+            child.next_start = now + child.spec.idle_retry
+            if not child.quiet:
+                self.log(
+                    f"{name} has nothing to do now; it is started again in {child.spec.idle_retry:.0f} s or when its "
+                    "settings change"
+                )
+            self._set(child, IDLE)
         else:
             delay = self._backoff(child, now, ran)
             self.log(f"{name} exited ({describe_exit(code)}) after {ran:.0f} s; starting it again in {delay:.0f} s")
@@ -507,6 +528,7 @@ class Supervisor:
                 return
             if note:
                 self.log(f"before the start of {name}: {note}")
+        quiet = child.state == IDLE
         try:
             child.pid = self.procs.spawn(name, child.spec.argv, env)
         except OSError as exc:
@@ -514,9 +536,12 @@ class Supervisor:
             self.log(f"{name} could not be started ({exc}); trying again in {delay:.0f} s")
             return
         child.started = now
+        child.started_wall = self.procs.time()
         child.starts += 1
+        child.quiet = quiet
         self._set(child, STARTING if child.spec.ready else RUNNING)
-        self.log(f"started {name} (pid {child.pid})")
+        if not quiet:
+            self.log(f"started {name} (pid {child.pid})")
 
     def _restart(self, child: Child, now: float, why: str) -> None:
         child.restart_wanted = True
@@ -531,6 +556,16 @@ class Supervisor:
         self._set(child, STOPPING)
         self.procs.signal(child.pid, signal.SIGTERM)
 
+    def _woken(self, child: Child) -> bool:
+        """The child's wake file was touched after its last start."""
+        path = child.spec.wake_file
+        if not path:
+            return False
+        try:
+            return os.stat(path).st_mtime > child.started_wall
+        except OSError:
+            return False
+
     def _kill(self, child: Child, why: str) -> None:
         self.log(f"{child.spec.name} {why}: killing its process group")
         child.killed = True
@@ -541,6 +576,9 @@ class Supervisor:
             name = child.spec.name
             if child.state in (WAITING, BACKOFF):
                 if now >= child.next_start and all(self._ready(dep) for dep in child.spec.after):
+                    self._start(child, now)
+            elif child.state == IDLE:
+                if (now >= child.next_start or self._woken(child)) and all(self._ready(dep) for dep in child.spec.after):
                     self._start(child, now)
             elif child.state == STARTING and not child.killed:
                 try:
@@ -557,7 +595,7 @@ class Supervisor:
                     self._kill(child, f"is not ready after {READY_TIMEOUT:.0f} s")
             elif child.state == STOPPING and not child.killed and child.kill_at is not None and now >= child.kill_at:
                 self._kill(child, f"did not stop within {child.spec.grace:.0f} s")
-        if self.phase == "starting" and all(c.state == RUNNING for c in self.children.values()):
+        if self.phase == "starting" and all(c.state in HEALTHY_STATES for c in self.children.values()):
             self.phase = "running"
             self._dirty = True
             self.log("all children are running")
@@ -831,10 +869,26 @@ def panel_plan(environ: Mapping[str, str], run_dir: str) -> tuple[list[ChildSpec
         ),
         # in-memory schedule: no pickle file that the web process could write
         ChildSpec("beat", (entrypoint, "beat", "-S", "celery.beat:Scheduler", "-l", "warning"), grace=10, stage=0, after=after),
+        # the Discord bot (B3): exits 78 at once while it is off; idle then, tried again every 5 minutes or as soon
+        # as the settings page touches the wake file (the web process gets its path in MCPANEL_DISCORD_WAKE)
+        ChildSpec(
+            "discord",
+            (entrypoint, "manage", "run_discord_bot"),
+            grace=10,
+            stage=0,
+            after=after,
+            idle_exit=EX_CONFIG,
+            idle_retry=300.0,
+            wake_file=discord_wake_path(run_dir),
+        ),
     ]
     nodes = {f"celery@{host}": "worker", f"periodic@{host}": "periodic"}
     ping = ("celery", "-A", "mcpanel", "inspect", "ping", "-d", ",".join(nodes), "-t", "10", "--json")
     return specs, Probe(ping, nodes)
+
+
+def discord_wake_path(run_dir: str) -> str:
+    return os.path.join(run_dir, "discord.wake")
 
 
 def private_directory(path: str) -> str | None:
@@ -858,6 +912,7 @@ def run(environ: Mapping[str, str]) -> int:
     specs, probe = panel_plan(environ, run_dir)
     child_env = dict(environ)
     child_env["MCPANEL_SUPERVISOR_STATUS"] = status_path or ""
+    child_env["MCPANEL_DISCORD_WAKE"] = discord_wake_path(run_dir) if status_path else ""
     child_env["MCPANEL_QUIET_TICKS"] = "1"
     procs = Processes()
     supervisor = Supervisor(specs, procs, status_path=status_path, probe=probe, environ=child_env)
@@ -906,7 +961,7 @@ def status(environ: Mapping[str, str]) -> int:
         print(f"phase {data['phase']}, supervisor pid {data['pid']}, status written {_ago(age)} ago")
         ok = data["phase"] == "running" and age < 30
         for name, child in data["children"].items():
-            ok = ok and child["state"] == RUNNING
+            ok = ok and child["state"] in HEALTHY_STATES
             line = f"  {name:<9} {child['state']:<9} for {_ago(now - float(child['since']))}"
             line += f", pid {child['pid']}" if child.get("pid") else f", {describe_exit(child.get('last_exit'))}"
             print(f"{line}, restarts {child['restarts']}")

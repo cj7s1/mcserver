@@ -443,17 +443,20 @@ def power(
     warn_minutes: int = 0,
     warn_message: str = "",
     allow_overcommit: bool = False,
+    audit_details: dict[str, Any] | None = None,
 ) -> Job | dict[str, Any]:
     """A power action a user asked for. A start or restart that does not fit into the node's
     memory is refused (409 ``insufficient_memory``, with the numbers in ``details``) unless
-    ``allow_overcommit``; a stop or kill never is."""
+    ``allow_overcommit``; a stop or kill never is. ``audit_details`` go into the audit entry as well (the
+    Discord bot: who asked in Discord)."""
     if instance.archived_at:
         raise ConflictError("Unarchive this server before starting it", code="archived")
+    actor = user if request is None else None  # (without a request, e.g. the Discord bot's service user)
     if action == "kill":
         # a kill also settles a pending "start again after the host restart" mark (host_shutdown)
         Instance.objects.filter(pk=instance.pk).update(desired_state="stopped", resume_after_boot=False, resume_flagged_at=None)
         status = AgentClient(instance.node).kill(instance.id)
-        audit.record("instance.kill", request=request, instance=instance, target=instance)
+        audit.record("instance.kill", actor=actor, request=request, instance=instance, target=instance)
         from .reconcile import reconcile_instance
 
         reconcile_instance(instance.id)
@@ -475,6 +478,7 @@ def power(
     if superseded is not None:
         audit.record(
             "job.superseded",
+            actor=actor,
             request=request,
             instance=instance,
             target_type="job",
@@ -499,7 +503,8 @@ def power(
         details["warn_minutes"] = job.params["warn_minutes"]
         if job.params.get("warn_message"):
             details["warn_message"] = job.params["warn_message"]
-    audit.record(f"instance.{action}", request=request, instance=instance, target=instance, details=details)
+    details.update(audit_details or {})
+    audit.record(f"instance.{action}", actor=actor, request=request, instance=instance, target=instance, details=details)
     return job
 
 

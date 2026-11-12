@@ -222,6 +222,9 @@ class InstanceSerializer(serializers.ModelSerializer):
             "connection",
             "idle_stop_minutes",
             "idle_stop_unavailable",
+            "discord_available",
+            "discord_roles",
+            "discord_share_password",
             "custom_network",
             "agent_networks",
             "permissions",
@@ -249,6 +252,9 @@ class InstanceSerializer(serializers.ModelSerializer):
                 "ports",
                 "network",
                 "idle_stop_minutes",
+                "discord_available",
+                "discord_roles",
+                "discord_share_password",
                 "minecraft_version",
                 "loader_version",
                 "java_version",
@@ -299,6 +305,16 @@ class InstanceSerializer(serializers.ModelSerializer):
         if value and self.instance is not None and (why := unavailable_reason(self.instance)) is not None:
             raise serializers.ValidationError(f"Not available for this server: {why}")
         return value
+
+    def validate_discord_roles(self, value: Any) -> list[str]:
+        import re
+
+        if not isinstance(value, list) or len(value) > 25:
+            raise serializers.ValidationError("A list of at most 25 Discord role ids")
+        roles = [str(v) for v in value]
+        if any(not re.fullmatch(r"[0-9]{15,22}", r) for r in roles):
+            raise serializers.ValidationError("Discord role ids are 15 to 22 digits")
+        return sorted(set(roles))
 
     def get_custom_network(self, obj: Instance) -> bool:
         definition = games.get_or_none(obj.game or games.DEFAULT_GAME)

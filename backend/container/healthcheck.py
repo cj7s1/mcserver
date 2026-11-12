@@ -117,7 +117,7 @@ def problems_all(
             problems.append("supervisor: no children in its status")
         for name, child in children.items():
             state = child.get("state") if isinstance(child, dict) else None
-            if state != "running":
+            if state not in ("running", "idle"):  # (idle: the Discord bot while it is off)
                 detail = ""
                 if isinstance(child, dict) and child.get("last_exit") is not None:
                     detail = f" (last exit {child['last_exit']}, {child.get('restarts', 0)} restarts)"

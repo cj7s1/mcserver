@@ -84,6 +84,7 @@ INSTALLED_APPS = [
     "apps.players",
     "apps.console",
     "apps.notifications",
+    "apps.discordbot",
     "apps.metrics",
 ]
 

@@ -414,7 +414,11 @@ def test_5_6_7_the_panel_children():
     }
     specs, probe = sup.panel_plan(env, "/run/mcpanel")
     by_name = {spec.name: spec for spec in specs}
-    assert list(by_name) == ["redis", "web", "worker", "periodic", "beat"]
+    assert list(by_name) == ["redis", "web", "worker", "periodic", "beat", "discord"]
+    # the Discord bot (B3): idle (exit 78) while it is off, woken by the settings page
+    discord = by_name["discord"]
+    assert discord.argv == ("mcpanel-entrypoint", "manage", "run_discord_bot") and discord.idle_exit == sup.EX_CONFIG
+    assert discord.wake_file == "/run/mcpanel/discord.wake" and discord.idle_retry == 300
     # 5. the periodic worker always has 2 slots (and the entrypoint must not add another value)
     periodic = by_name["periodic"].argv
     assert periodic[periodic.index("-c") + 1] == "2" and periodic[periodic.index("-Q") + 1] == "periodic"
@@ -521,7 +525,7 @@ def test_the_preparation_runs_before_every_start_and_a_failure_keeps_the_child_d
 def test_an_external_redis_url_means_no_redis_child():
     for url in ("redis://redis:6379/0", "rediss://example.com:6380/1"):
         specs, _probe = sup.panel_plan({"PATH": "/usr/bin", "MCPANEL_REDIS_URL": url}, "/run/mcpanel")
-        assert [spec.name for spec in specs] == ["web", "worker", "periodic", "beat"]
+        assert [spec.name for spec in specs] == ["web", "worker", "periodic", "beat", "discord"]
         assert all(spec.after == () for spec in specs)
     assert sup.embedded_redis_socket({"MCPANEL_REDIS_URL": "unix:///a/b.sock?db=0"}) == "/a/b.sock"
     assert sup.embedded_redis_socket({}) is None
@@ -997,7 +1001,7 @@ def test_7_entrypoint_all_runs_the_four_commands_under_the_supervisor(tmp_path):
     assert lines.index("[migrate] stub: applying migrations") < next(i for i, line in enumerate(lines) if "started web" in line)
     assert "redis" not in calls and not any(line.startswith("[redis]") for line in lines)
     # 3. every line names who wrote it
-    names = ("[migrate] ", "[supervisor] ", "[web] ", "[worker] ", "[periodic] ", "[beat] ")
+    names = ("[migrate] ", "[supervisor] ", "[web] ", "[worker] ", "[periodic] ", "[beat] ", "[discord] ")
     assert all(line.startswith(names) for line in lines), out
     assert any("stop requested" in line for line in lines) and lines[-1].endswith("all children are gone; exiting")
 
@@ -1069,3 +1073,55 @@ def test_status_command_prints_the_children(tmp_path, monkeypatch, capsys):
     (tmp_path / "supervisor.json").write_text(json.dumps(status))
     assert sup.status({"MCPANEL_RUN_DIR": str(tmp_path)}) == 1
     assert sup.status({"MCPANEL_RUN_DIR": str(tmp_path / "nope")}) == 1
+
+
+# --- the Discord bot: idle while it is off (B3 of the feature plan of 2026-11-12) ---------------------------
+def _idle_supervisor(tmp_path):
+    procs = FakeProcs()
+    specs, _ready = plan(redis=False)
+    wake = tmp_path / "discord.wake"
+    specs.append(sup.ChildSpec("discord", ("bot",), grace=10, stage=0, idle_exit=78, idle_retry=300.0, wake_file=str(wake)))
+    lines: list[str] = []
+    supervisor = sup.Supervisor(specs, procs, status_path=str(tmp_path / "supervisor.json"), environ={}, log=lines.append)
+    return supervisor, procs, lines, wake
+
+
+def test_a_child_with_nothing_to_do_is_idle_healthy_and_quiet(tmp_path):
+    supervisor, procs, lines, _wake = _idle_supervisor(tmp_path)
+    drive(supervisor, procs, 2)
+    procs.die("discord", 78)
+    drive(supervisor, procs, 2)
+    assert states(supervisor)["discord"] == "idle" and supervisor.phase == "running"
+    assert sum("has nothing to do now" in line for line in lines) == 1
+    # not a restart storm: the next try only after idle_retry, without log lines, and idle again
+    drive(supervisor, procs, 290)
+    assert procs.started("discord") == 1
+    before = len(lines)
+    drive(supervisor, procs, 15)
+    assert procs.started("discord") == 2
+    procs.die("discord", 78)
+    drive(supervisor, procs, 2)
+    assert states(supervisor)["discord"] == "idle" and len(lines) == before
+    # healthy in the status file and for the health check
+    supervisor.write_status()
+    status, error = healthcheck.read_status(str(tmp_path / "supervisor.json"))
+    assert error is None and status["children"]["discord"]["state"] == "idle"
+    assert not [p for p in healthcheck.problems_all(status, None, good_health(), None, procs.time()) if p.startswith("discord")]
+
+
+def test_the_wake_file_starts_an_idle_child_at_once(tmp_path):
+    import os
+
+    supervisor, procs, lines, wake = _idle_supervisor(tmp_path)
+    drive(supervisor, procs, 2)
+    procs.die("discord", 78)
+    drive(supervisor, procs, 5)
+    assert procs.started("discord") == 1
+    wake.touch()
+    os.utime(wake, (procs.time() + 1, procs.time() + 1))  # touched now (the fake clock)
+    drive(supervisor, procs, 1)
+    assert procs.started("discord") == 2 and states(supervisor)["discord"] == "running"
+    # another exit than 78 is an ordinary failure with its backoff and log line
+    procs.die("discord", 1)
+    drive(supervisor, procs, 0.5)
+    assert states(supervisor)["discord"] == "backoff" and any("discord exited (exit code 1)" in line for line in lines)
