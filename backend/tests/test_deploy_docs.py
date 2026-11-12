@@ -267,3 +267,66 @@ def test_the_agents_network_repair_is_documented_with_its_scope_and_limits():
     assert "`docker compose up -d --force-recreate agent`" in unraid
     assert "platformnet.py" in read("CLAUDE.md") and "AGENT_REPAIR_PLATFORM_NETWORKS" in words("DEVELOPMENT_STATUS.md")
     assert "AGENT_REPAIR_PLATFORM_NETWORKS" in read("deploy/unraid/array-start.sh")
+
+
+# --- the Unraid plugin (feature plan 2026-11-12, section A) ---------------------------------------------------
+PLUGIN_URL_FORM = "https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/unraid/plugin/mcpanel.plg"
+
+
+def test_the_plugin_is_the_recommended_way_on_unraid_and_says_it_is_untested():
+    unraid = words("docs/UNRAID.md")
+    assert "### The Unraid plugin (recommended)" in read("docs/UNRAID.md")
+    assert "### Without the plugin: the User Script `array-start.sh`" in read("docs/UNRAID.md")
+    for needle in (
+        "**The plugin has not been run on Unraid yet.**",
+        f"Plugins → Install Plugin**, and paste the raw address of `deploy/unraid/plugin/mcpanel.plg` of the repository you cloned, `{PLUGIN_URL_FORM}`",
+        "**Every button that changes something first shows the exact commands it will run** and asks",
+        "**First-run checklist** (what only a real Unraid server can show)",
+        "**and read before you press anything**",
+        "**After the next reboot:**",
+        "`plugin: boot tasks finished: ok`",
+        "whether Unraid fires the Docker events when Docker is switched off and on",
+        "**Removing it:** Plugins → Installed Plugins → MCPanel → Remove",
+        "**Plugins → Check for updates**",
+        "never reads `deploy/.env`",
+        "**v5.7.0**",
+    ):
+        assert needle in unraid, needle
+    quick = words("docs/QUICKSTART-UNRAID.md")
+    assert "### Install the plugin (recommended)" in read("docs/QUICKSTART-UNRAID.md")
+    for needle in (
+        PLUGIN_URL_FORM,
+        "**It has not been run on Unraid yet.**",
+        "**read it before you press anything**",
+        "`plugin: boot tasks finished: ok`",
+        "**Plugins → Installed Plugins → MCPanel → Remove**",
+        '[UNRAID.md](UNRAID.md), "The Unraid plugin"',
+    ):
+        assert needle in quick, needle
+    # the repository's own address is only in the build script and the built file
+    for path in ("docs/UNRAID.md", "docs/QUICKSTART-UNRAID.md", "DEPLOYMENT.md", "docs/SECURITY.md"):
+        assert "raw.githubusercontent.com/cj7s1" not in read(path), path
+
+
+def test_the_plugin_is_in_security_deployment_status_roadmap_and_the_map():
+    security = words("docs/SECURITY.md")
+    assert "## The Unraid plugin" in read("docs/SECURITY.md")
+    for needle in (
+        "Unraid's `local_prepend.php` ends every POST without the session's CSRF token",
+        "never through a shell",
+        "Unraid's `StartCommand.php` runs any file there with the arguments of a POST",
+        "within 12 hours, once",
+        "checked against the pin again before every use",
+        "every file of the plugin has a `Mode`",
+    ):
+        assert needle in security, needle
+    deployment = words("DEPLOYMENT.md")
+    assert "On Unraid the MCPanel plugin's page does the same" in deployment
+    assert "the MCPanel plugin's **Install Compose**" in deployment
+    status = words("DEVELOPMENT_STATUS.md")
+    assert "## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`" in read("DEVELOPMENT_STATUS.md")
+    assert "**Not run on Unraid yet.**" in status
+    assert "Unraid plugin `mcpanel`" in words("ROADMAP.md") and "[ ] Run on Unraid" in words("ROADMAP.md")
+    claude = read("CLAUDE.md")
+    assert "deploy/unraid/plugin/src/" in claude and "tests/test_deploy_unraid_plugin.py" in claude
+    assert "The MCPanel plugin (recommended)" in words("docs/UNRAID-SHUTDOWN.md")

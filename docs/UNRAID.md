@@ -27,8 +27,13 @@ docker buildx version
 
 Both must print a version. A server that has built the MCPanel images before has both.
 
-Unraid ships no Docker Compose. Two ways to get it:
+Unraid ships no Docker Compose. Three ways to get it:
 
+* **The MCPanel plugin** (recommended; section 4, "The Unraid plugin"): **Install Compose** on its page
+  downloads the official release **v5.7.0** from GitHub, checks it against the SHA-256 pinned in the
+  plugin, keeps it on the flash drive and links it into Docker's CLI plugin folder at every boot. A
+  binary you already have (below) keeps working: enter its path in the plugin's settings and it is
+  preferred while it exists.
 * **A standalone binary** (what the owner's server uses): download `docker-compose-linux-x86_64` from
   <https://github.com/docker/compose/releases>, keep it on a pool or the flash drive in a folder only
   root can write (for example `/mnt/cache/system/docker-compose`), `chmod 755` it, and run once:
@@ -38,8 +43,8 @@ Unraid ships no Docker Compose. Two ways to get it:
   ```
 
   That links it into `/usr/local/lib/docker/cli-plugins/` (in RAM, gone at every boot) and remembers
-  the path in `/boot/config/plugins/mcpanel/array-start.env`, so the array-start User Script (section
-  4) links it again at every boot. `upgrade.sh` names this command when Compose is missing.
+  the path in `/boot/config/plugins/mcpanel/array-start.env`, so the plugin's boot tasks or the
+  array-start User Script (section 4) link it again at every boot. `upgrade.sh` names this command when Compose is missing.
 * **A Compose plugin** from Community Applications. The current one is **Compose Manager Plus**. The
   older **Docker Compose Manager** is deprecated and hidden in Community Applications by default. No
   Compose plugin has been tested with MCPanel.
@@ -204,7 +209,86 @@ Unraid's Docker tab gives a container 10 seconds to stop (Settings → Docker).
 
 The Minecraft servers keep running in all of these cases.
 
-### At every array start: `array-start.sh`
+### The Unraid plugin (recommended)
+
+> **The plugin has not been run on Unraid yet.** It is built and tested against stand-ins only (its
+> PHP with PHP 8.4, the PHP of Unraid 7.3; its shell scripts with stand-ins for Docker, git and curl).
+> Go through the first-run checklist below before you trust its buttons.
+
+The plugin `mcpanel` puts MCPanel into Unraid's web UI and replaces the User Script below. Install it
+once: **Plugins → Install Plugin**, and paste the raw address of `deploy/unraid/plugin/mcpanel.plg` of
+the repository you cloned, `https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/unraid/plugin/mcpanel.plg`
+(the `pluginURL` in the first lines of that file is that address). Unraid installs it again from the
+flash drive at every boot.
+
+What it does:
+
+* **A page**, Settings → User Utilities → **MCPanel**: the state of the stack and of the plugin, the
+  panel's address with an Open link, and buttons for: Full status (`upgrade.sh status`); Check for
+  updates (a `git fetch` of the checkout's upstream branch, never a pull: commits behind with their
+  subject lines); **Update** (`git pull --ff-only` of a checkout without local changes, then the dry run
+  of `upgrade.sh`; after you read it, **Run the upgrade** runs `upgrade.sh run`, with
+  `--with-migrations` only when the dry run asked for it and you ticked the box; the log ends with the
+  script's closing notes); **Roll back** (the dry run of `upgrade.sh rollback` first, then the
+  rollback); the boot tasks (status, dry run, run now); the game servers' firewall (status, dry run,
+  install, remove); Install Compose; the settings.
+* **Every button that changes something first shows the exact commands it will run** and asks. The page
+  only runs what a dry run proposed, for the same checkout revision: anything else the script proposes
+  (a permission repair, `--from`, `--resume`) is for the terminal, and the page says so. One action at
+  a time; it runs in the background with its log in `/tmp/mcpanel/logs` (the newest 20 are kept), so
+  you can leave the page and come back. A killed or interrupted action never blocks the page: its lock
+  goes with its processes, and its log stays readable. The page works while the stack is down.
+* **At every Docker start** (Unraid's `docker_started` event) the boot tasks, in the background: the
+  plugin's Compose when no binary of your own is set, then `array-start.sh run` of the checkout (the
+  Compose link, the shutdown hook, the firewall where you installed it, the stack check and repair;
+  the next section lists the steps). The shutdown hook is the file `install-hook.sh` writes into the
+  plugin's own folder; a plugin update keeps it.
+* **Settings** (`/boot/config/plugins/mcpanel/mcpanel.cfg`, set on the page): the checkout folder and
+  the Compose project, found from the running stack's Compose labels when you leave them empty, and an
+  optional Compose binary. The plugin stores no secret and never reads `deploy/.env`.
+* Everything runs as root with `umask 022`; the plugin makes `/usr/local/lib/docker` and its
+  `cli-plugins` folder 755 when they are writable by others (on a server where root's umask is 000 a
+  hand-made folder is 777, and root runs every `docker-*` program in it).
+
+The plugin itself is updated like every plugin: **Plugins → Check for updates**. The page says when the
+checkout (after an update of MCPanel) or the upstream branch has a newer plugin version.
+
+**First-run checklist** (what only a real Unraid server can show):
+
+1. After the install, the plugin manager's window ends with "MCPanel plugin installed". In the terminal,
+   `find /usr/local/emhttp/plugins/mcpanel -perm /022` prints nothing.
+2. Open Settings → User Utilities → MCPanel **and read before you press anything**: the plugin version;
+   *Checkout* is your folder ("found from the running stack"); *Compose project* `mcpanel`; *Docker
+   Compose* names its version and what it is linked to. **If you linked your Compose binary by hand,
+   enter its path under Settings on the page** (or press Install Compose): the page warns when
+   nothing would link it again after the next reboot. *Shutdown hook* (not installed until the boot
+   tasks ran); *Also at boot* names a User Script or `/boot/config/go` line that does the same (take it
+   out when the plugin works; both at once do no harm, they wait for each other); the panel's address.
+3. Then the buttons that change nothing: **Full status**, **Check for updates**, Boot tasks → **Dry
+   run**, Firewall → **Status**. Each log starts with the commands it ran.
+4. Boot tasks → **Run now...** (the dialog shows the one command). Afterwards *Shutdown hook* says
+   installed, and `ls -l /usr/local/emhttp/plugins/mcpanel/event/` lists `docker_started` and
+   `stopping_docker`.
+5. **After the next reboot:** the page's *Boot tasks* line says "Last run: ok" with the time of the boot;
+   `grep mcpanel /var/log/syslog` shows the `array-start:` lines and `plugin: boot tasks finished: ok`;
+   your servers came back ([UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md), "How the servers come back"; the
+   hook's own lines are in the syslog of the shutdown, which survives a reboot only with Settings →
+   Syslog Server, "Mirror syslog to flash").
+6. Not known yet: whether Unraid fires the Docker events when Docker is switched off and on under
+   Settings → Docker (they fire at array start and stop). When it suits you: Docker off → Apply, on →
+   Apply, then look for the same syslog lines. If they are missing, press Boot tasks → Run now after
+   such a restart.
+7. The first update through the page: Check for updates, **Update...**, read the dry run, **Run the
+   upgrade...**. The terminal way (section 8) stays.
+8. Optional: **Install Compose...** when you want the plugin's copy instead of your own binary.
+
+**Removing it:** Plugins → Installed Plugins → MCPanel → Remove (refused while an action runs). The page,
+the programs, the Docker event script and the shutdown hook in the plugin's folder go at once. Kept:
+`/boot/config/plugins/mcpanel` (the settings, `array-start.env`, the Compose copy if you installed it:
+delete the folder to remove them), and until the next boot the Compose link. Without the plugin, set
+up the User Script of the next section again.
+
+### Without the plugin: the User Script `array-start.sh`
 
 > **Not run on a real Unraid host yet** (it is tested against stand-ins). Run `bash
 > /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh dry-run` once in the terminal and read
@@ -236,14 +320,16 @@ and the syslog, tag `mcpanel`; a step that cannot be done is reported and the ne
    is the fallback for when the agent does not run.
 
 `bash .../array-start.sh status` shows what is in place now, `dry-run` what `run` would do; both
-change nothing. Another Compose project name: `--project <name>` once (remembered).
+change nothing. Another Compose project name: `--project <name>` once (remembered). Two runs at the
+same time (the plugin's and a User Script left in place) wait for each other.
 
 ### Array stop, reboot and shutdown
 
 Unraid does not stop the Minecraft containers itself. Docker stops them on its way down, with
 up to 20 seconds each and no save first. The shutdown hook makes the panel save and stop them
 before Docker stops, and start them again after boot: [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md).
-`array-start.sh` (above) installs it at every array start.
+The plugin (above) installs it at every Docker start; without the plugin, `array-start.sh` does at
+every array start.
 
 ## 5. Ports and players
 
@@ -510,6 +596,9 @@ managed from this panel over HTTPS with a pinned certificate. See DEPLOYMENT.md,
 
 ## 8. Updating
 
+With the plugin: its page, **Check for updates**, then **Update...** (section 4, "The Unraid plugin"):
+the same commands as below, with the dry run shown before anything is switched. In the terminal:
+
 ```bash
 cd /mnt/user/appdata/mcpanel-src && (umask 022 && git pull)
 cd deploy
@@ -608,8 +697,15 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
   network is `<project>_internal`. When the agent itself does not start:
   `docker compose up -d --force-recreate agent`.
 * **`upgrade.sh` says "the docker compose plugin is missing" after a reboot:** the link of your
-  standalone Compose binary is gone (it is in RAM). Section 1: `array-start.sh --compose-bin <path>`
-  once; the array-start User Script links it at every boot.
+  standalone Compose binary is gone (it is in RAM). With the plugin: Install Compose on its page, or
+  your binary's path in its settings (the boot tasks link it). Without: `array-start.sh --compose-bin
+  <path>` once (section 1); the array-start User Script links it at every boot.
+* **The plugin's page says "Checkout: not found":** no running stack to take it from (the stack is
+  down, or another Compose project name). Enter the folder of the clone under Settings on the page.
+  "Docker knows several MCPanel stacks": enter the one to use.
+* **The plugin's page says an action was "interrupted":** its process is gone (a reboot, or it was
+  killed). Its log shows how far it got; for an update or rollback, `./scripts/upgrade.sh status` in
+  `deploy/` says what is left to do. The page takes new actions at once.
 * **The `agent` container does not start, with "network ... not found":** it was killed hard while
   servers ran (the agent leaves the servers' networks when they stop and when it stops), and one of
   those networks was removed while Docker was down (check "Preserve user defined networks", section 1).

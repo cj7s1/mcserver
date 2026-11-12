@@ -63,7 +63,9 @@ You need:
 
    Both should print a version number. The second one is BuildKit, which step 5 needs to build
    the images. Run every command in this guide in that terminal.
-2. Only if `docker compose` is missing (Unraid ships none): either keep the standalone binary
+2. Only if `docker compose` is missing (Unraid ships none): the easiest way is the MCPanel plugin
+   (step 11 installs it; its **Install Compose** button gets the official release and checks it),
+   so for now: either keep the standalone binary
    (`docker-compose-linux-x86_64` from <https://github.com/docker/compose/releases>) on a pool and,
    after step 3, run `bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh --compose-bin
    <its path>` (it links it now and at every boot, step 11), or open **Apps** (Community
@@ -369,19 +371,50 @@ server cannot be started from the Docker tab.
 **Before you stop the array or reboot.** Without help, Unraid's Docker gives running servers at
 most 20 seconds and does not tell them to save first. The shutdown hook stops the servers through
 the panel, and the panel starts them again after boot ([UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md)). It
-lives in RAM, so install it at every boot with one User Script (**Settings → User Scripts**, schedule
-**At Startup of Array**):
+lives in RAM, so something has to install it at every boot.
+
+### Install the plugin (recommended)
+
+**Plugins → Install Plugin**, paste the raw address of the plugin file of the repository you cloned
+in step 3, `https://raw.githubusercontent.com/<owner>/<repo>/main/deploy/unraid/plugin/mcpanel.plg`
+(the `pluginURL` in the first lines of `deploy/unraid/plugin/mcpanel.plg`), and press **Install**.
+It adds the page **Settings → User Utilities → MCPanel** (status, check for updates, update and roll
+back with the dry run shown first, the firewall, Docker Compose) and runs the boot tasks at every
+Docker start: the shutdown hook, the Compose link, the firewall (if you installed it) and the repair
+of a platform container that lost its network. Every button that changes something shows its
+commands first and asks.
+
+**It has not been run on Unraid yet.** The first time:
+
+1. Open the page and **read it before you press anything**: *Checkout* must be your
+   `mcpanel-src` folder, *Docker Compose* must name a version (when it warns that nothing links it
+   again after a reboot, enter your Compose binary's path under Settings, or press Install Compose),
+   *Also at boot* names a User Script that does the same job (delete it once the plugin works).
+2. Press the buttons that change nothing: **Full status**, **Check for updates**, Boot tasks →
+   **Dry run**. Then Boot tasks → **Run now...**: *Shutdown hook* says installed.
+3. After the next reboot the page says "Boot tasks: Last run: ok" with the time of the boot, and
+   `grep mcpanel /var/log/syslog` shows `plugin: boot tasks finished: ok`.
+4. To remove it: **Plugins → Installed Plugins → MCPanel → Remove**. The hook goes with it; then use
+   the User Script below instead.
+
+The full checklist: [UNRAID.md](UNRAID.md), "The Unraid plugin".
+
+**Or one User Script** (**Settings → User Scripts**, schedule **At Startup of Array**), when you do
+not want the plugin:
 
 ```bash
 #!/bin/bash
 bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh
 ```
 
-That script also links your Compose binary, puts the firewall back (if you installed it) and repairs
-a platform container that lost its network at the boot (docs/UNRAID.md, "At every array start").
-Until the hook is installed, press Stop in the panel before you stop the array.
+That script does the same boot tasks (docs/UNRAID.md, "Without the plugin: the User Script
+`array-start.sh`"). Until the hook is installed, press Stop in the panel before you stop the array.
 
 ## 12. Updating MCPanel
+
+With the plugin: **Settings → User Utilities → MCPanel**, **Check for updates**, then **Update...**.
+It pulls the new version (only into a checkout without local changes), shows the dry run below and
+runs the upgrade after you confirm it; the log stays on the page. In the terminal it is:
 
 ```bash
 cd /mnt/user/appdata/mcpanel-src && (umask 022 && git pull)

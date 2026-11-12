@@ -111,6 +111,11 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
       image); the image channel reaches existing servers — unit-tested only. [ ] An explicit "update images" action
 - [x] Request size limits before Django, uploads of any number of files with per-file results, streamed downloads,
       no leaked database connections — unit-tested only
+- [~] Unraid plugin `mcpanel` (`deploy/unraid/plugin`, branch `feature/unraid-and-friends`): a page under
+      Settings → User Utilities (status, check for updates, update and roll back through `upgrade.sh` with the
+      dry run first, boot tasks, firewall, pinned Docker Compose v5.7.0, settings) and the boot tasks at every
+      Docker start; replaces the array-start User Script. Tested against stand-ins and PHP 8.4 only.
+      [ ] Run on Unraid (first-run checklist in docs/UNRAID.md, "The Unraid plugin")
 - [ ] Unraid Community Applications template (XML)
 
 ## Multi-node

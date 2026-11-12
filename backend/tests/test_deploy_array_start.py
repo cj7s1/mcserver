@@ -406,7 +406,7 @@ def test_the_docs_describe_the_one_line_user_script_and_the_repair():
         assert "instance-firewall.sh install --wait 300" not in text, path
     unraid = words("docs/UNRAID.md")
     for needle in (
-        "### At every array start: `array-start.sh`",
+        "### Without the plugin: the User Script `array-start.sh`",
         "**Not run on a real Unraid host yet**",
         "array-start.sh --compose-bin /mnt/cache/system/docker-compose",
         '"failed to resolve host postgres"',

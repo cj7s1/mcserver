@@ -13,6 +13,38 @@ of session 1)._
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
 
+## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section A)
+
+**Not run on Unraid yet.** Built from the conventions of the plugins on the owner's server (Unraid 7.3.4,
+read-only research: the plugin manager's script, `emhttp_event`, `rc.docker`, `local_prepend.php`,
+`StartCommand.php`; notes in `audit-2026-11-09/features/plugin-research/NOTES.md`, outside the repo).
+
+* Layout: readable sources in `deploy/unraid/plugin/src/` (the page `MCPanel.page` with `mcpanel.js` and
+  `mcpanel.css`, the endpoint `include/{action,common}.php`, the runner `bin/mcpanel`, `event/docker_started`,
+  the install/remove scripts); `build.sh` assembles the self-contained `mcpanel.plg` (every file inline,
+  version = the first heading of `CHANGES.md`, reproducible; the repository address is one variable there).
+* The page: status first (facts the runner reads without changing anything), Full status, Check for updates
+  (`git fetch`, never a pull), Update (`git pull --ff-only` of a clean checkout, `upgrade.sh dry-run`, then
+  `upgrade.sh run` only as the dry run proposed it, `--with-migrations` only when it asked and the box is
+  ticked), Roll back (dry run first), boot tasks, firewall, Install Compose (v5.7.0, SHA-256 pinned, kept on
+  the flash drive and checked before every use; a binary in the settings is preferred while it exists),
+  settings (checkout and project found from the stack's Compose labels when empty). Every changing action
+  shows its exact commands first; one at a time (flock: a killed action frees it); logs in /tmp/mcpanel/logs.
+* At every Docker start: the boot tasks in the background (`array-start.sh run` of the checkout with the
+  plugin's settings); a plugin update keeps the shutdown hook; removal takes it out. `array-start.sh` now
+  waits for another run, writes the flash drive only when a setting changed, and its `status` takes
+  `--project`/`--compose-bin` and names the plugin. The plugin makes `/usr/local/lib/docker{,/cli-plugins}`
+  755 when others can write them (777 on the owner's server).
+* Tests: `tests/test_deploy_unraid_plugin.py` (build reproducible and committed file fresh, `.plg` well-formed
+  and equal to the sources, every task's fixed command line, refusals of unknown tasks and options, the lock,
+  the update/rollback plans, Compose pin and fallback, the event script, settings, install/remove scripts),
+  `tests/test_deploy_unraid_plugin_php.py` (php -l with PHP 8.4 and the endpoint against a stand-in runner,
+  `tests/unraid_plugin_php/endpoint_test.php`); CI: shellcheck, the build check, the PHP step.
+* Open, only a real server shows: the plugin manager's install and update, the page in Unraid's themes, that
+  PHP-FPM's detached children outlive the request, `docker_started` at boot (and whether Docker off/on under
+  Settings fires the events: unknown), the hook kept across an update, the download from GitHub. The owner's
+  checklist: docs/UNRAID.md, "The Unraid plugin".
+
 ## Unraid boot: Compose, hook, firewall, network repair (branch `fix/boot-network-repair`, 2026-11-12)
 
 What the owner's live server showed after a reboot: `upgrade.sh` found no Compose (Unraid ships none; his

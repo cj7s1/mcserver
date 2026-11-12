@@ -542,6 +542,50 @@ The server name a container carries in its `io.mcpanel.name` label has every `=`
 text `net.unraid.docker.managed=`; a server name must not be able to produce that text, or Unraid
 would stop that server itself at array stop and count it as stopped by hand.
 
+## The Unraid plugin
+
+`deploy/unraid/plugin` (docs/UNRAID.md, "The Unraid plugin"; not run on Unraid yet). Its page runs
+commands as root: Unraid's PHP runs as root, and so does `bin/mcpanel`, which the page's endpoint
+starts. Whoever can use Unraid's web UI can already do anything as root (its terminal); what the plugin
+must not become is a way to run something else, from a forged request or from a file someone else can
+change.
+
+* **Requests.** POST only, and Unraid's `local_prepend.php` ends every POST without the session's CSRF
+  token before the endpoint runs. A task is one name of a fixed list with at most one fixed option
+  (`with-migrations`, `archive-other-games`), checked in PHP and again in the runner. The runner is
+  started with an argument list (`proc_open`), never through a shell, and every task runs a fixed
+  command line in which only checked paths and names appear (the page shows it first). Log names must
+  match `<time>-<task>.log`. No file of the plugin is in a `scripts/` folder: Unraid's
+  `StartCommand.php` runs any file there with the arguments of a POST.
+* **Only what a dry run showed.** Update and Roll back run `upgrade.sh run` / `rollback` only with the
+  options its dry run proposed, for the same checkout revision and the same `upgrade-state.env`,
+  within 12 hours, once. `git pull --ff-only` only in a checkout without local changes.
+* **The checkout.** The tasks that run git or change something refuse while the checkout, `.git`,
+  `.git/config`, `.git/hooks`, `deploy/`, `deploy/scripts`, `deploy/unraid` or the scripts root runs
+  are writable by group or others (the repair is named: `chmod -R go-w <checkout>`), and the page runs
+  no git then. git runs with `-c core.fsmonitor= -c core.hooksPath=/dev/null` and never asks for a
+  password. The boot tasks leave this check to `array-start.sh`, which tightens the checkout itself as
+  root (section "The source folder"). What that section says about the folder that holds the checkout
+  applies to the plugin's settings as well.
+* **Settings.** `/boot/config/plugins/mcpanel/mcpanel.cfg` holds two paths and a project name, each
+  checked before it is kept (absolute, no quotes, `$`, backticks or backslashes; Compose's name
+  pattern) and read back line by line with a pattern, never sourced. The plugin keeps no secret and
+  never reads `deploy/.env`.
+* **Docker Compose.** Install Compose downloads one pinned release (v5.7.0) over HTTPS and keeps it
+  only when its SHA-256 is the pinned one. The copy on the flash drive is checked against the pin
+  again before every use (the flash drive is a FAT file system, often exported over SMB): a changed
+  file is refused and reported. The copy root runs is in RAM, mode 755. The plugin makes
+  `/usr/local/lib/docker`, its `cli-plugins` folder and `/usr/local/lib/mcpanel` 755 when group or
+  others can write them: `docker` runs every `docker-*` program in that folder as root.
+* **Its own files.** The plugin manager writes files with the umask of whoever runs it (000 on the
+  owner's server) and makes folders 0770: every file of the plugin has a `Mode`, and the last install
+  step removes group and other write from the plugin's folder. `/tmp/mcpanel` (lock, task state, logs)
+  must be a folder of root's that only root can write, not a symbolic link; the runner refuses
+  otherwise. Everything it starts runs with `umask 022`.
+* **Updates of the plugin** come from its `pluginURL`, the repository's `main` branch, like any Unraid
+  plugin: whoever can change that branch changes what root runs here at the next plugin update. That
+  is the trust you already give the branch you `git pull`.
+
 ## The agent treats the Minecraft process as hostile input
 
 * The instance-network source check also covers WebSocket handshakes (the console log stream),

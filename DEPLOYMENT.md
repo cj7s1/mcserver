@@ -8,7 +8,8 @@ stop, reboot and shutdown.
 ## Requirements
 
 * Docker Engine 24+ with the Compose v2 plugin (`docker compose version`). Unraid ships no Compose:
-  use a Compose plugin of Community Applications, or a standalone binary that
+  the MCPanel plugin's **Install Compose** (the official release v5.7.0, SHA-256 pinned), a Compose
+  plugin of Community Applications, or a standalone binary that
   `deploy/unraid/array-start.sh --compose-bin <path>` links into
   `/usr/local/lib/docker/cli-plugins/` now and at every boot (docs/UNRAID.md, section 1).
 * BuildKit (`docker buildx version` must print a version). The panel and agent images are built on
@@ -395,7 +396,9 @@ reserve already; that bar compares with the whole RAM, not with RAM minus the re
   the container. World data is not touched.
 
 On Unraid, install the shutdown hook so that servers are saved and stopped through the panel
-before Docker stops: [docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md).
+before Docker stops: [docs/UNRAID-SHUTDOWN.md](docs/UNRAID-SHUTDOWN.md). The MCPanel plugin for
+Unraid (`deploy/unraid/plugin`, docs/UNRAID.md "The Unraid plugin"; not run on Unraid yet) installs
+it at every Docker start.
 
 ### Backups are not automatic unless a schedule exists
 
@@ -573,6 +576,13 @@ Notes:
   `MCPANEL_AGENT_TLS_FINGERPRINT` in `.env`.
 
 ## Upgrading
+
+On Unraid the MCPanel plugin's page does the same (docs/UNRAID.md, "The Unraid plugin"): **Check for
+updates** is a `git fetch` of the upstream branch; **Update** is `git pull --ff-only` of a checkout
+without local changes, then `upgrade.sh dry-run`; after you confirm, it runs exactly the command the
+dry run ended with when that is `run` or `run --with-migrations` (the latter only when you tick the
+box), else it offers nothing and the terminal is the way. **Roll back** works the same way with
+`upgrade.sh rollback --dry-run`. Anywhere else:
 
 ```bash
 cd mcserver && (umask 022 && git pull)
