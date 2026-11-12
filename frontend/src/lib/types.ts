@@ -940,6 +940,11 @@ export interface SystemSettings {
     timezone: string;
     /** RAM in MB kept free for the host when servers are started (memory admission); 0-65536 */
     memory_reserve_mb: number;
+    /**
+     * Notify (event `node.low_disk_space`) when a node's server or backup storage has less free space than
+     * this many GB; 0 = off; 0-100000 (A-7). Absent from panels before it.
+     */
+    low_disk_space_gb?: number;
     /** Per-game runtime image repository (non-Minecraft games): {game: {repository}}. */
     runtime_images?: Record<string, { repository?: string }> | null;
   };

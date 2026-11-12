@@ -26,6 +26,8 @@ interface FormState {
   pinned: string;
   default_memory_mb: string;
   memory_reserve_mb: string;
+  /** null: the panel has no such setting (older panel), so the field is not shown or sent */
+  low_disk_space_gb: string | null;
   port_range_start: string;
   port_range_end: string;
   default_bind_ip: string;
@@ -61,6 +63,7 @@ function toForm(v: Values): FormState {
     pinned: channel === "pinned" ? ch.slice("pinned:".length) : "",
     default_memory_mb: String(v.default_memory_mb ?? 4096),
     memory_reserve_mb: String(v.memory_reserve_mb ?? DEFAULT_RESERVE_MB),
+    low_disk_space_gb: v.low_disk_space_gb == null ? null : String(v.low_disk_space_gb),
     port_range_start: v.port_range_start == null ? "" : String(v.port_range_start),
     port_range_end: v.port_range_end == null ? "" : String(v.port_range_end),
     default_bind_ip: v.default_bind_ip ?? "0.0.0.0",
@@ -80,6 +83,9 @@ const isIp = isIpAddress;
 /** backend apps/instances/capacity.py DEFAULT_RESERVE_MB and the allowed range of the setting */
 const DEFAULT_RESERVE_MB = 4096;
 const MAX_RESERVE_MB = 65536;
+/** backend: system setting low_disk_space_gb (default 20, 0 = off) and its allowed range */
+const DEFAULT_LOW_DISK_GB = 20;
+const MAX_LOW_DISK_GB = 100000;
 const HOST_RE = /^[A-Za-z0-9.-]+$/;
 const TAG_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,100}$/;
 
@@ -123,6 +129,13 @@ function buildValues(f: FormState, envRange: [number, number], policy?: AgentPol
   if (reserve === null) errors.memory_reserve_mb = "Enter a whole number of MB (0 for none)";
   else if (reserve > MAX_RESERVE_MB) errors.memory_reserve_mb = `At most ${formatMemoryMb(MAX_RESERVE_MB)}`;
   else values.memory_reserve_mb = reserve;
+
+  if (f.low_disk_space_gb !== null) {
+    const low = parseIntStrict(f.low_disk_space_gb);
+    if (low === null) errors.low_disk_space_gb = "Enter a whole number of GB (0 = off)";
+    else if (low > MAX_LOW_DISK_GB) errors.low_disk_space_gb = `At most ${MAX_LOW_DISK_GB.toLocaleString()} GB`;
+    else values.low_disk_space_gb = low;
+  }
 
   const port = (key: "port_range_start" | "port_range_end") => {
     if (!f[key].trim()) return null;
@@ -347,6 +360,26 @@ export function SettingsForm({ settings, policy }: { settings: SystemSettings; p
               </AdminHint>
               <AdminFieldError id="set-reserve-err" message={err("memory_reserve_mb")} />
             </div>
+            {form.low_disk_space_gb !== null && (
+              <div className="grid content-start gap-1.5">
+                <Label htmlFor="set-low-disk">Warn when a node has less free disk space than (GB)</Label>
+                <Input
+                  id="set-low-disk"
+                  inputMode="numeric"
+                  value={form.low_disk_space_gb}
+                  onChange={(e) => set("low_disk_space_gb", e.target.value)}
+                  aria-invalid={!!err("low_disk_space_gb")}
+                  aria-describedby="set-low-disk-hint set-low-disk-err"
+                />
+                <AdminHint>
+                  <span id="set-low-disk-hint">
+                    Checked every 15 minutes for each node's server and backup storage; the notification channels that
+                    include “Low disk space on a node” are told. 0 turns it off. Default {DEFAULT_LOW_DISK_GB} GB.
+                  </span>
+                </AdminHint>
+                <AdminFieldError id="set-low-disk-err" message={err("low_disk_space_gb")} />
+              </div>
+            )}
             <div className="grid content-start gap-1.5">
               <Label htmlFor="set-tz">Time zone</Label>
               <Input

@@ -306,7 +306,9 @@ function ChannelDialogBody({
           error={err("instance")}
           hint={
             form.instance
-              ? "Only events from this server are sent."
+              ? form.events.some((e) => e.startsWith("node."))
+                ? "Only events from this server are sent. Node events (low disk space) belong to no server: only channels for all servers get them."
+                : "Only events from this server are sent."
               : "Events from every server are sent, including servers added later."
           }
         >
