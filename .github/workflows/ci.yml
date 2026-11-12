@@ -129,6 +129,20 @@ jobs:
             .github/scripts/panel-acceptance.sh .github/scripts/upgrade-rehearsal.sh deploy/unraid/stopping_docker \
             deploy/unraid/instance-firewall.sh deploy/unraid/array-start.sh
           shellcheck --exclude=SC2016 deploy/unraid/install-hook.sh
+          shellcheck deploy/unraid/plugin/build.sh deploy/unraid/plugin/src/bin/mcpanel \
+            deploy/unraid/plugin/src/event/docker_started deploy/unraid/plugin/src/install/*.sh
+      - name: Unraid plugin (mcpanel.plg is a fresh build; PHP 8.4 lint and the page's endpoint)
+        # PHP 8.4: what Unraid 7.3 runs. The same as backend/tests/test_deploy_unraid_plugin_php.py.
+        run: |
+          bash deploy/unraid/plugin/build.sh --check
+          python3 -c 'import sys, xml.etree.ElementTree as e; e.parse(sys.argv[1])' deploy/unraid/plugin/mcpanel.plg
+          docker run --rm --network none -v "$PWD":/repo:ro -w /repo php:8.4-cli-alpine sh -c '
+            set -e
+            S=deploy/unraid/plugin/src
+            for f in $S/include/common.php $S/include/action.php backend/tests/unraid_plugin_php/*.php; do php -l "$f"; done
+            sed "1,/^---$/d" $S/MCPanel.page >/tmp/MCPanel.page.php && php -l /tmp/MCPanel.page.php
+            php backend/tests/unraid_plugin_php/endpoint_test.php $S
+            php backend/tests/unraid_plugin_php/plg_test.php deploy/unraid/plugin'
       - name: Generate throw-away env files
         run: |
           deploy/scripts/generate-secrets.sh "$RUNNER_TEMP/ci.env"

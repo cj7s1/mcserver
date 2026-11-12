@@ -7,6 +7,8 @@
 #
 # In User Scripts (Settings -> User Scripts): one script with this one line, scheduled "At Startup of Array":
 #   bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh
+# With the MCPanel plugin installed (deploy/unraid/plugin, docs/UNRAID.md) no User Script is needed: the
+# plugin runs `array-start.sh run` at every Docker start. Two runs at the same time wait for each other.
 #
 # ***************************************************************************************************
 # NOT RUN ON A REAL UNRAID HOST YET. It is tested against stand-ins for docker, id and logger. Before
@@ -42,8 +44,9 @@
 # root in the MCPanel checkout tightens the checkout (chmod -R go-w) and says so; otherwise it refuses
 # and prints the repair. `status` and `dry-run` only warn.
 #
-# MCPANEL_BOOT_STATE, MCPANEL_CLI_PLUGINS, MCPANEL_STACK_WAIT (and MCPANEL_HOOK_ROOT, MCPANEL_DISK_CFG
-# for install-hook.sh) are for trying this script out somewhere else; leave them unset on Unraid.
+# MCPANEL_BOOT_STATE, MCPANEL_CLI_PLUGINS, MCPANEL_STACK_WAIT, MCPANEL_RUN_LOCK (and MCPANEL_HOOK_ROOT,
+# MCPANEL_DISK_CFG for install-hook.sh) are for trying this script out somewhere else; leave them unset on
+# Unraid.
 set -u
 umask 022
 exec 3>&1 # the dry run's "would run" lines, also from commands whose output is discarded
@@ -54,6 +57,9 @@ DEPLOY="$(cd "${HERE}/.." && pwd)"
 STATE_DIR="${MCPANEL_BOOT_STATE:-/boot/config/plugins/mcpanel}"
 STATE_FILE="${STATE_DIR}/array-start.env"
 CLI_DIR="${MCPANEL_CLI_PLUGINS:-/usr/local/lib/docker/cli-plugins}"
+# one `run` at a time (a User Script and the plugin may both start one at boot); /run is root's, in RAM
+RUN_LOCK="${MCPANEL_RUN_LOCK:-/run/mcpanel-array-start.lock}"
+PLUGIN_EVENT="${MCPANEL_HOOK_ROOT:-/usr/local/emhttp/plugins}/mcpanel/event/docker_started"
 STACK_WAIT="${MCPANEL_STACK_WAIT:-120}"
 FIREWALL_STATE="${DEPLOY}/instance-firewall.env"
 PLATFORM="panel agent postgres"
@@ -142,15 +148,28 @@ read_state() {
 }
 
 save_state() {
+    local text
+    text="$(
+        say "# deploy/unraid/array-start.sh: what every boot's run uses (--compose-bin / --project change it)"
+        [ -z "${COMPOSE_BIN}" ] || say "COMPOSE_BIN=${COMPOSE_BIN}"
+        [ -z "${PROJECT}" ] || say "PROJECT=${PROJECT}"
+    )"
+    # the same as before: no write (the plugin passes its settings at every boot; the flash drive is written rarely)
+    [ "$(cat "${STATE_FILE}" 2>/dev/null)" != "${text}" ] || return 0
     (
         umask 077
         mkdir -p "${STATE_DIR}" || exit 1
-        {
-            say "# deploy/unraid/array-start.sh: what every boot's run uses (--compose-bin / --project change it)"
-            [ -z "${COMPOSE_BIN}" ] || say "COMPOSE_BIN=${COMPOSE_BIN}"
-            [ -z "${PROJECT}" ] || say "PROJECT=${PROJECT}"
-        } >"${STATE_FILE}.new" && mv -f "${STATE_FILE}.new" "${STATE_FILE}"
+        say "${text}" >"${STATE_FILE}.new" && mv -f "${STATE_FILE}.new" "${STATE_FILE}"
     ) || problem "could not write ${STATE_FILE}: --compose-bin/--project are not remembered for the next boot"
+}
+
+# one_at_a_time: wait (up to 15 minutes) while another `run` is at work; without flock, go on
+one_at_a_time() {
+    command -v flock >/dev/null 2>&1 || return 0
+    { exec 8>>"${RUN_LOCK}"; } 2>/dev/null || return 0
+    flock -n 8 && return 0
+    note "another array-start.sh run is at work: waiting for it (up to 15 minutes)"
+    flock -w 900 8 || fail "another array-start.sh run did not end within 15 minutes: nothing was done"
 }
 
 # --- 1. Docker Compose --------------------------------------------------------------------------------
@@ -355,6 +374,7 @@ summary() {
 cmd_run() {
     [ "$(id -u)" -eq 0 ] || fail "run this as root (the Unraid terminal and User Scripts are root)"
     check_modes refuse
+    one_at_a_time
     read_state
     if [ -n "${NEW_COMPOSE_BIN}" ]; then
         if [ -f "${NEW_COMPOSE_BIN}" ] && [ -x "${NEW_COMPOSE_BIN}" ]; then
@@ -396,12 +416,17 @@ cmd_dry_run() {
 }
 
 cmd_status() {
-    local out ok=1 rows id service running mode nets name
+    local out ok=1 rows id service running mode nets name given_bin="${NEW_COMPOSE_BIN}" given_project="${NEW_PROJECT}"
     DRY=1
     check_modes warn
+    NEW_COMPOSE_BIN="" NEW_PROJECT=""
     read_state
     say "array-start.sh status (changes nothing)"
     say "  remembered (${STATE_FILE}): ${COMPOSE_BIN:+COMPOSE_BIN=${COMPOSE_BIN} }${PROJECT:+PROJECT=${PROJECT}}$([ -n "${COMPOSE_BIN}${PROJECT}" ] || printf 'nothing')"
+    # what a `run` with the same arguments would use (the plugin passes its settings)
+    [ -z "${given_bin}" ] || COMPOSE_BIN="${given_bin}"
+    [ -z "${given_project}" ] || PROJECT="${given_project}"
+    [ -z "${given_bin}${given_project}" ] || say "  given: ${given_bin:+--compose-bin ${given_bin} }${given_project:+--project ${given_project}}"
     if compose_answers; then
         say "  ok    Compose: $(docker compose version 2>/dev/null | head -n 1)"
     else
@@ -446,7 +471,11 @@ cmd_status() {
             say "  ok    ${name#/}: running, ${nets} network(s)"
         fi
     done <<<"${rows}"
-    say "  User Scripts line (At Startup of Array): bash ${SELF}"
+    if [ -x "${PLUGIN_EVENT}" ]; then
+        say "  The MCPanel plugin runs 'array-start.sh run' at every Docker start: no User Script is needed for it."
+    else
+        say "  User Scripts line (At Startup of Array): bash ${SELF}"
+    fi
     [ "${ok}" = 1 ]
 }
 

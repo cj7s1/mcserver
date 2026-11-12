@@ -13,6 +13,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,7 @@ class Box:
             "MCPANEL_BOOT_STATE": str(self.boot),
             "MCPANEL_CLI_PLUGINS": str(self.cli),
             "MCPANEL_STACK_WAIT": str(wait_stack),
+            "MCPANEL_RUN_LOCK": str(self.fake / "array-start.lock"),
             "MCPANEL_HOOK_ROOT": str(self.plugins),
             "MCPANEL_DISK_CFG": str(self.plugins / "no-disk.cfg"),
         }
@@ -312,6 +314,46 @@ def test_status_after_a_good_run_says_ok_everywhere(box):
     assert status.returncode == 0, status.stdout
     lines = [line.strip() for line in status.stdout.splitlines() if line.startswith("  ") and "User Scripts" not in line]
     assert lines and all(line.startswith(("ok", "remembered")) for line in lines), lines
+
+
+def test_two_runs_wait_for_each_other(box):
+    # the plugin's run at Docker start and a User Script left in place: one at a time
+    lock = box.fake / "array-start.lock"
+    holder = subprocess.Popen(["flock", str(lock), "sleep", "2"])
+    try:
+        time.sleep(0.3)
+        began = time.monotonic()
+        done = box.run("--compose-bin", str(box.compose_bin))
+        assert done.returncode == 0, done.stdout + done.stderr
+        assert time.monotonic() - began >= 1
+        assert "another array-start.sh run is at work: waiting for it" in done.stdout
+    finally:
+        holder.wait(timeout=10)
+
+
+def test_the_flash_drive_is_written_only_when_a_setting_changes(box):
+    assert box.run("--compose-bin", str(box.compose_bin), "--project", "mcpanel").returncode == 0
+    state = box.boot / "array-start.env"
+    os.utime(state, (1_000_000_000, 1_000_000_000))
+    shutil.rmtree(box.cli)
+    assert box.run("--compose-bin", str(box.compose_bin), "--project", "mcpanel").returncode == 0
+    assert state.stat().st_mtime == 1_000_000_000
+    assert box.run("--project", "other").returncode == 0
+    assert "PROJECT=other" in state.read_text() and state.stat().st_mtime != 1_000_000_000
+
+
+def test_status_takes_the_settings_it_is_given_and_names_the_plugin(box):
+    assert box.run("--compose-bin", str(box.compose_bin)).returncode == 0
+    status = box.run("status", "--project", "mcpanel", "--compose-bin", str(box.compose_bin))
+    assert f"remembered ({box.boot}/array-start.env): COMPOSE_BIN={box.compose_bin}" in status.stdout
+    assert f"given: --compose-bin {box.compose_bin} --project mcpanel" in status.stdout
+    assert "User Scripts line" in status.stdout
+    event = box.plugins / "mcpanel" / "event" / "docker_started"
+    event.write_text("#!/bin/bash\n")
+    event.chmod(0o755)
+    status = box.run("status")
+    assert "The MCPanel plugin runs 'array-start.sh run' at every Docker start" in status.stdout
+    assert "User Scripts line" not in status.stdout
 
 
 def test_root_and_the_rule_of_the_other_root_scripts(box):

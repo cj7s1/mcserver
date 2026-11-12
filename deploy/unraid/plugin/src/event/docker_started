@@ -1,0 +1,9 @@
+#!/bin/bash
+# MCPanel plugin: Unraid runs this right after it started Docker (Settings > Docker, or the array start) and
+# waits until it ends (emhttp_event). So it only starts the boot tasks in a session of their own and returns:
+# the Compose link, the shutdown hook, the firewall where it was installed and the stack check
+# (bin/mcpanel boot -> deploy/unraid/array-start.sh run of the checkout). Their log: Settings > User
+# Utilities > MCPanel, and the syslog (tag mcpanel).
+umask 022
+setsid "$(cd "$(dirname "$0")/.." && pwd)/bin/mcpanel" boot </dev/null >/dev/null 2>&1 &
+exit 0

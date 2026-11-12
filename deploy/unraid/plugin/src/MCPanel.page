@@ -1,0 +1,104 @@
+Menu="Utilities"
+Title="MCPanel"
+Icon="gamepad"
+Tag="gamepad"
+Markdown="false"
+---
+<?php
+/* MCPanel plugin: its page (Settings > User Utilities > MCPanel). The page itself only reads; every button
+ * posts to include/action.php, which runs bin/mcpanel. NOT RUN ON A REAL UNRAID HOST YET. */
+$mcpanel_root = '/plugins/mcpanel';
+$mcpanel_dir = ($docroot ?? ($_SERVER['DOCUMENT_ROOT'] ?: '/usr/local/emhttp')) . $mcpanel_root;
+$mcpanel_v = @filemtime("$mcpanel_dir/mcpanel.js") ?: 0;
+?>
+<link type="text/css" rel="stylesheet" href="<?=$mcpanel_root?>/mcpanel.css?v=<?=$mcpanel_v?>">
+<div id="mcp" class="mcp">
+  <p class="mcp-warn">This plugin has not been run on a real Unraid server yet. Before you press a button that changes
+    something, read the status below and the first-run checklist in docs/UNRAID.md ("The Unraid plugin"). Every button
+    that changes something first shows the exact commands it will run and asks you.</p>
+
+  <h2>Status</h2>
+  <table class="mcp-facts"><tbody id="mcp-facts"><tr><td>Loading...</td></tr></tbody></table>
+  <p>
+    <input type="button" data-task="status" value="Full status">
+    <a id="mcp-open" class="mcp-hidden" target="_blank" rel="noopener">Open the panel</a>
+  </p>
+
+  <h2>Update</h2>
+  <div id="mcp-update-info"></div>
+  <ul id="mcp-commits" class="mcp-commits"></ul>
+  <p>
+    <input type="button" data-task="check-updates" value="Check for updates">
+    <input type="button" data-confirm="update-prepare" value="Update..." title="git pull --ff-only, then the dry run of upgrade.sh">
+  </p>
+  <div id="mcp-update-run" class="mcp-hidden mcp-box">
+    <p>The dry run of upgrade.sh is in the log below. This is what <b>Run the upgrade</b> does.</p>
+    <p id="mcp-migrations-row" class="mcp-hidden"><label><input type="checkbox" id="mcp-migrations">
+      Allow the database migrations of this version (the dry run lists them; a rollback undoes them again, data written
+      into new columns is lost then)</label></p>
+    <p><input type="button" id="mcp-run-upgrade" value="Run the upgrade..."></p>
+  </div>
+
+  <h2>Roll back</h2>
+  <p>Back to the version and images from before the last upgrade (<code>upgrade.sh rollback</code>). Its dry run comes first.</p>
+  <p><input type="button" data-task="rollback-prepare" value="Roll back... (dry run)"></p>
+  <div id="mcp-rollback-run" class="mcp-hidden mcp-box">
+    <p>The dry run of the rollback is in the log below. This is what <b>Roll back now</b> does.</p>
+    <p id="mcp-archive-row" class="mcp-hidden"><label><input type="checkbox" id="mcp-archive">
+      Stop, archive and record the servers of other games first (--archive-other-games; the dry run says why)</label></p>
+    <p><input type="button" id="mcp-run-rollback" value="Roll back now..."></p>
+  </div>
+
+  <h2>Boot tasks</h2>
+  <p>At every Docker start: Docker Compose, the shutdown hook, the game servers' firewall where it was installed, and
+    the check of the stack (<code>deploy/unraid/array-start.sh run</code> of the checkout).</p>
+  <p>
+    <input type="button" data-task="boot-status" value="Status">
+    <input type="button" data-task="boot-dry-run" value="Dry run">
+    <input type="button" data-confirm="boot-run" value="Run now...">
+  </p>
+
+  <h2>Game servers' firewall</h2>
+  <p>Rules that keep the game containers away from this server and the LAN (<code>deploy/unraid/instance-firewall.sh</code>;
+    docs/UNRAID.md says what to check after installing them).</p>
+  <p>
+    <input type="button" data-task="firewall-status" value="Status">
+    <input type="button" data-task="firewall-dry-run" value="Dry run">
+    <input type="button" data-confirm="firewall-install" value="Install...">
+    <input type="button" data-confirm="firewall-remove" value="Remove...">
+  </p>
+
+  <h2>Docker Compose</h2>
+  <div id="mcp-compose-info"></div>
+  <p><input type="button" data-confirm="compose-install" value="Install Compose..."></p>
+
+  <h2>Settings</h2>
+  <p>Kept in /boot/config/plugins/mcpanel/mcpanel.cfg. Leave a field empty to have it found from the running stack.</p>
+  <form id="mcp-settings" class="mcp-settings" autocomplete="off">
+    <label>MCPanel checkout (the folder of the git clone)<input type="text" id="mcp-checkout" placeholder="/mnt/user/appdata/mcpanel-src"></label>
+    <label>Compose project<input type="text" id="mcp-project" placeholder="mcpanel"></label>
+    <label>Compose binary (optional; preferred over the plugin's copy while it exists)<input type="text" id="mcp-compose-bin" placeholder="empty: the plugin's copy, if installed"></label>
+    <p>
+      <input type="button" id="mcp-detect" value="Find from the running stack">
+      <input type="submit" value="Save">
+      <span id="mcp-settings-msg"></span>
+    </p>
+  </form>
+
+  <div id="mcp-confirm" class="mcp-hidden mcp-box">
+    <h2 id="mcp-confirm-title"></h2>
+    <pre id="mcp-confirm-text" class="mcp-pre"></pre>
+    <p>
+      <input type="button" id="mcp-confirm-run" value="Run">
+      <input type="button" id="mcp-confirm-cancel" value="Cancel">
+    </p>
+  </div>
+
+  <h2>Log</h2>
+  <p>
+    <select id="mcp-logs"></select>
+    <span id="mcp-log-state"></span>
+  </p>
+  <pre id="mcp-log" class="mcp-pre mcp-log"></pre>
+</div>
+<script src="<?=$mcpanel_root?>/mcpanel.js?v=<?=$mcpanel_v?>"></script>
