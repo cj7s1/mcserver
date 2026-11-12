@@ -133,6 +133,8 @@ LIMITED_FIELDS = (
     "permissions",
     "limited",
 )
+# and, after them, from the newest metrics sample (no agent call): None when unknown
+LIMITED_PLAYER_FIELDS = ("players_online", "players_max")
 
 
 class InstanceSerializer(serializers.ModelSerializer):
@@ -398,6 +400,9 @@ class InstanceSerializer(serializers.ModelSerializer):
                 field = self.fields[name]
                 attribute = field.get_attribute(instance)
                 short[name] = None if attribute is None else field.to_representation(attribute)
+            from apps.metrics.players import current_players
+
+            short["players_online"], short["players_max"] = current_players(instance)
             return short
         data = super().to_representation(instance)
         if data.get("ports"):

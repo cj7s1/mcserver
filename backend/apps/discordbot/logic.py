@@ -17,11 +17,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
 from typing import Any
 
 from django.core.cache import cache
-from django.utils import timezone
 
 from apps.core.errors import ApiError
 
@@ -33,7 +31,7 @@ SERVICE_USERNAME = "discord-bot"
 # per Discord member: starts and stops, and everything else
 CONTROL_LIMIT = (4, 600)  # 4 per 10 minutes
 QUERY_LIMIT = (20, 60)  # 20 a minute
-COUNT_FRESH_SECONDS = 180  # a player count older than this is not shown
+COUNT_FRESH_SECONDS = 180  # a player count older than this is not shown (apps.metrics.players.FRESH_SECONDS)
 FOLLOW_SECONDS = 14 * 60  # how long a start is followed (an interaction's follow-ups end after 15 minutes)
 STATE_WORDS = {
     "running": "running",
@@ -99,16 +97,9 @@ def complete(text: str, limit: int = 25) -> list[str]:
 
 def players(instance: Any) -> int | None:
     """The newest player count of a running server, if it is fresh."""
-    from apps.metrics.models import MetricSample
+    from apps.metrics.players import current_players
 
-    if instance.status not in ("running", "unhealthy", "backing_up"):
-        return None
-    sample = MetricSample.objects.filter(instance=instance).order_by("-taken_at").values("taken_at", "players_online").first()
-    if not sample or sample["players_online"] is None:
-        return None
-    if (timezone.now() - sample["taken_at"]) > timedelta(seconds=COUNT_FRESH_SECONDS):
-        return None
-    return int(sample["players_online"])
+    return current_players(instance)[0]
 
 
 def _line(instance: Any) -> str:

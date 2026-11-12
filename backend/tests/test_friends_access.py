@@ -11,7 +11,7 @@ from apps.accounts.models import InstanceAccess, Role, User
 from apps.accounts.views import ensure_system_roles
 from apps.audit.models import AuditEvent
 from apps.instances.models import Instance
-from apps.instances.serializers import LIMITED_FIELDS
+from apps.instances.serializers import LIMITED_FIELDS, LIMITED_PLAYER_FIELDS
 from apps.jobs.models import Job
 
 from .test_security_audit_authz import ws_env  # noqa: F401  (fixture)
@@ -45,13 +45,14 @@ def test_a_friend_sees_status_starts_and_stops_and_nothing_else(
     client = client_for(friend)
     rows = client.get("/api/instances/").json()
     assert [r["id"] for r in rows] == [str(shared.id)]
-    assert tuple(rows[0]) == LIMITED_FIELDS and rows[0]["limited"] is True
+    assert tuple(rows[0]) == LIMITED_FIELDS + LIMITED_PLAYER_FIELDS and rows[0]["limited"] is True
+    assert rows[0]["players_online"] is None and rows[0]["players_max"] is None  # (not running)
     assert rows[0]["permissions"] == ["instance.control", "instance.overview"]
     detail = client.get(f"/api/instances/{shared.id}").json()
     assert detail["limited"] is True and "env" not in detail and "memory_mb" not in detail and "ports" not in detail
     assert client.get(f"/api/instances/{other.id}").status_code == 404
     share = client.get(f"/api/instances/{shared.id}/share")
-    assert share.status_code == 200 and "password" not in share.json()
+    assert share.status_code == 200 and "password" not in share.json() and "password_set" in share.json()
     assert client.get(f"/api/instances/{shared.id}/share", {"with_password": "true"}).status_code == 403
     base = f"/api/instances/{shared.id}"
     for path in (
@@ -84,11 +85,36 @@ def test_a_friend_sees_status_starts_and_stops_and_nothing_else(
     assert jobs.status_code == 200 and str(shared.id) not in jobs.content.decode()
 
 
+def test_a_friend_sees_how_many_play(friend_setup: Any, client_for: Any) -> None:
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.metrics.models import MetricSample
+
+    friend, shared, _other = friend_setup
+    Instance.objects.filter(pk=shared.pk).update(status="running")
+    now = timezone.now()
+    MetricSample.objects.create(instance=shared, taken_at=now - timedelta(minutes=5), players_online=1, players_max=20)
+    MetricSample.objects.create(instance=shared, taken_at=now - timedelta(seconds=30), players_online=2, players_max=20)
+    client = client_for(friend)
+    detail = client.get(f"/api/instances/{shared.id}").json()
+    assert (detail["players_online"], detail["players_max"]) == (2, 20)
+    assert client.get("/api/instances/").json()[0]["players_online"] == 2
+    # an old sample, or a count the sample could not read: unknown
+    MetricSample.objects.filter(players_online=2).update(taken_at=now - timedelta(minutes=4))
+    assert client.get(f"/api/instances/{shared.id}").json()["players_online"] is None
+    MetricSample.objects.create(instance=shared, taken_at=now, players_online=None, players_max=20)
+    detail = client.get(f"/api/instances/{shared.id}").json()
+    assert detail["players_online"] is None and detail["players_max"] == 20
+
+
 def test_viewers_and_owners_keep_the_full_answer(friend_setup: Any, clients: Any) -> None:
     _friend, shared, _other = friend_setup
     for who in ("owner", "viewer", "operator"):
         data = clients[who].get(f"/api/instances/{shared.id}").json()
         assert data["limited"] is False and "env" in data and "instance.overview" not in data["permissions"]
+        assert "players_online" not in data  # (the full answer is unchanged)
 
 
 def test_invite_creates_the_account_and_the_one_time_link(
