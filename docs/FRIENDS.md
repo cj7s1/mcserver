@@ -181,8 +181,11 @@ console, files, settings, backups, players or other servers.
 
 **Invite a friend:** **Users → Invite a friend**: a user name, optionally an e-mail address, and the servers.
 The panel shows a link: send it privately. It works **once, for 24 hours**; the friend chooses a password
-there. A new link later: the user's **Reset link** on the Users page. More servers later: the server's
-Access page, with the role Friend.
+there. A new link later: **Create reset link** in the user's menu on the Users page. More servers later: the
+server's Access page, with the role Friend.
+
+What a friend sees: a dashboard of their servers; each server's page shows its status, Start and Stop and the
+Share card, and nothing else. The bot's service user is listed as "Discord bot (service user)".
 
 ### How a friend reaches the panel without making it public
 

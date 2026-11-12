@@ -155,8 +155,8 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [~] Discord bot (outbound only, one guild, `/servers` `/status` `/join` `/start` `/stop`, roles, rate limits,
       service user `discord-bot`; System → Discord and each server's Settings → General): tested against fakes
       of discord.py only. [ ] A live Discord server
-- [~] Friend role and invite links (API done and unit-tested). [ ] The pages; a friend through Tailscale or
-      Cloudflare Access
+- [~] Friend role and invite links (Users → Invite a friend; a friend's app shows only their servers):
+      unit-tested. [ ] A friend through Tailscale or Cloudflare Access
 
 ## Multi-game (docs/design/GAME-DEFINITIONS.md, section 10)
 - [x] Phase 1: game definitions and runtime profiles, Minecraft as the first game, no behaviour change (pin tests)

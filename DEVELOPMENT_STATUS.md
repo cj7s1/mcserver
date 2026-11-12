@@ -37,8 +37,8 @@ columns of the servers table with database defaults; a rollback loses only their
 * **Friend role and invite links** (role `friend` with `instance.control` + `instance.overview`, short answers
   `limited: true`; `POST /api/users/invite`, a 24-hour one-time link): unit-tested (`tests/test_friends_access.py`).
 * Pages (frontend): the Share card on the Overview and the header's Share button; Settings → Resources → Stop
-  when empty; System → Discord and each server's Settings → General → Discord. The Friend's pages and "Invite a
-  friend": the frontend's next part.
+  when empty; System → Discord and each server's Settings → General → Discord; Users → Invite a friend, and a
+  friend's app with only their servers' status, Start/Stop and Share card.
 
 ## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section A)
 
