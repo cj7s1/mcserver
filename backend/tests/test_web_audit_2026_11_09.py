@@ -82,10 +82,15 @@ def _login(user: Any) -> str:
 def _cookies(session: str | None) -> list[tuple[bytes, bytes]]:
     from django.conf import settings
 
+    from tests.conftest import SESSION_TOKENS
+
     parts = [f"{settings.CSRF_COOKIE_NAME}={CSRF}"]
     if session:
         parts.append(f"{settings.SESSION_COOKIE_NAME}={session}")
-    return [(b"cookie", "; ".join(parts).encode()), (b"x-csrftoken", CSRF.encode())]
+    headers = [(b"cookie", "; ".join(parts).encode()), (b"x-csrftoken", CSRF.encode())]
+    if session and session in SESSION_TOKENS:  # (D-1: the session's token, as the frontend sends it)
+        headers.append((b"x-mcpanel-session-token", SESSION_TOKENS[session].encode()))
+    return headers
 
 
 async def _response(comm: ApplicationCommunicator, timeout: float = 10) -> tuple[int, dict[bytes, bytes], bytes]:

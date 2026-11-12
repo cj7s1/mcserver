@@ -142,9 +142,12 @@ async def test_a_json_cookie_of_another_app_does_not_hide_the_session(make_insta
     cookie = (
         f'prefs={{"theme":"dark","list":[1,2]}}; {settings.CSRF_COOKIE_NAME}={CSRF}; {settings.SESSION_COOKIE_NAME}={session}'
     )
+    from tests.conftest import SESSION_TOKENS
+
     headers = [
         (b"cookie", cookie.encode()),
         (b"x-csrftoken", CSRF.encode()),
+        (b"x-mcpanel-session-token", SESSION_TOKENS[session].encode()),  # (D-1)
         (b"content-type", MULTIPART_CONTENT.encode()),
         (b"content-length", str(len(payload)).encode()),
     ]

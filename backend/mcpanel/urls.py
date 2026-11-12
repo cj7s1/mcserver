@@ -26,6 +26,7 @@ auth_patterns = [
     path("me", accounts.MeView.as_view()),
     path("password", accounts.PasswordChangeView.as_view()),
     path("reset", accounts.PasswordResetView.as_view()),
+    path("download-ticket", accounts.DownloadTicketView.as_view()),
 ]
 
 instance_patterns = [

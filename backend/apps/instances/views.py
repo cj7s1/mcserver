@@ -864,6 +864,9 @@ class FilesTextView(APIView):
 
 
 class FilesDownloadView(APIView):
+    # a link download (no header) may carry a ticket instead (D-1, apps.core.session_binding)
+    download_ticket = True
+
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:
         instance = get_instance_for(request.user, pk, "instance.files.read")
@@ -1782,6 +1785,9 @@ class FilesArchiveView(APIView):
     running server to write all chunks to disk first (``save-all flush``, best effort; only for users
     with ``instance.command`` or ``instance.backup``, since it is a console command).
     """
+
+    # a link download (no header) may carry a ticket instead (D-1, apps.core.session_binding)
+    download_ticket = True
 
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> StreamingHttpResponse:

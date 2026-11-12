@@ -41,6 +41,15 @@ log = logging.getLogger(__name__)
 REVALIDATE_SECONDS = 30.0
 CLOSE_UNAUTHENTICATED = 4401
 CLOSE_FORBIDDEN = 4403
+# D-1 (I-7): the first frame of the client must be {"type": "auth", "token": <the session token>} within this
+AUTH_TIMEOUT_SECONDS = 10.0
+
+
+@database_sync_to_async
+def _token_ok(session_key: str | None, token: Any) -> bool:
+    from apps.core import session_binding
+
+    return session_binding.session_token_ok(session_key, token)
 
 
 def _session_key(scope: dict[str, Any]) -> str | None:
@@ -168,26 +177,70 @@ class _GuardedConsumer(AsyncJsonWebsocketConsumer):
     would leave its background tasks running for as long as the session lives.
     """
 
+    _authed = False
+    _auth_task: asyncio.Task | None = None
+
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
+            with contextlib.suppress(Exception):
+                await _cancel(self._auth_task)
             with contextlib.suppress(Exception):
                 await self._cleanup()
 
     async def _cleanup(self) -> None:
         raise NotImplementedError
 
+    async def authenticated(self) -> None:
+        """The socket may be used: start sending (after the auth frame, D-1)."""
+        raise NotImplementedError
+
+    async def _accept_and_authenticate(self) -> None:
+        """Accept the socket, then wait for the client's auth frame (``MCPANEL_SESSION_BINDING``): nothing is sent
+        and no other frame is taken before it; no valid frame within AUTH_TIMEOUT_SECONDS closes with 4401.
+        Without the binding the socket is used at once (an auth frame is then ignored)."""
+        from apps.core import session_binding
+
+        await self.accept()
+        if not session_binding.enabled():
+            self._authed = True
+            await self.authenticated()
+            return
+        self._auth_task = asyncio.create_task(self._auth_deadline())
+
+    async def _auth_deadline(self) -> None:
+        await asyncio.sleep(AUTH_TIMEOUT_SECONDS)
+        if not self._authed:
+            await self._refuse_auth()
+
+    async def _refuse_auth(self) -> None:
+        self._closing = True
+        with contextlib.suppress(Exception):  # the browser may be gone already
+            await self.close(code=CLOSE_UNAUTHENTICATED)
+
     async def receive(self, text_data: str | None = None, bytes_data: bytes | None = None, **kwargs: Any) -> None:
         """Ignore frames that are no JSON object (binary, invalid JSON, a list): they used to end
-        the consumer with an exception."""
-        if text_data is None:
+        the consumer with an exception. Before the auth frame (D-1) any other frame closes the socket."""
+        content: Any = None
+        if text_data is not None:
+            try:
+                content = await self.decode_json(text_data)
+            except ValueError:
+                content = None
+        if not self._authed:
+            if getattr(self, "_closing", False):
+                return
+            token = content.get("token") if isinstance(content, dict) and content.get("type") == "auth" else None
+            if token is None or not await _token_ok(getattr(self, "session_key", None), token):
+                await _cancel(self._auth_task)
+                await self._refuse_auth()
+                return
+            self._authed = True
+            await _cancel(self._auth_task)
+            await self.authenticated()
             return
-        try:
-            content = await self.decode_json(text_data)
-        except ValueError:
-            return
-        if isinstance(content, dict):
+        if isinstance(content, dict) and content.get("type") != "auth":
             await self.receive_json(content, **kwargs)
 
     async def _send(self, content: dict[str, Any]) -> bool:
@@ -232,7 +285,9 @@ class ConsoleConsumer(_GuardedConsumer):
         self.user = user
         self.user_id = user.pk
         self.session_key = _session_key(self.scope)
-        await self.accept()
+        await self._accept_and_authenticate()
+
+    async def authenticated(self) -> None:
         await self.send_json({"type": "hello", "can_command": "instance.command" in self.perms})
         self.relay_task = asyncio.create_task(self._relay())
         self.watch_task = asyncio.create_task(self._watch())
@@ -448,9 +503,12 @@ class EventsConsumer(_GuardedConsumer):
         self.user_id = user.pk
         self.session_key = _session_key(self.scope)
         self._cache: dict[str, tuple[float, bool]] = {}
+        await self._accept_and_authenticate()
+
+    async def authenticated(self) -> None:
+        # (events only after the auth frame, D-1)
         await self.channel_layer.group_add(EVENTS_GROUP, self.channel_name)
         self._joined = time.monotonic()
-        await self.accept()
         self.watch_task = asyncio.create_task(self._watch())
 
     async def disconnect(self, code: int) -> None:
@@ -495,7 +553,7 @@ class EventsConsumer(_GuardedConsumer):
                 log.exception("events access re-check failed")
 
     async def panel_event(self, message: dict[str, Any]) -> None:
-        if self._closing:
+        if self._closing or not self._authed:
             return
         instance_id = message.get("instance_id")
         if instance_id:

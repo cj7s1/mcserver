@@ -255,6 +255,10 @@ REST_FRAMEWORK = {
     "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }
 
+# D-1 (I-7): a signed-in session must send the token it got at sign-in (X-MCPanel-Session-Token) on every API
+# request, and its first WebSocket frame; the session cookie alone is no credential (apps.core.session_binding)
+MCPANEL_SESSION_BINDING = env_bool("MCPANEL_SESSION_BINDING", True)
+
 # GET /api/schema (the OpenAPI document) for signed-in users; off by default (D-7, D-13). The Swagger page
 # (/api/docs), which ran a script from a CDN in the panel's origin, is gone.
 MCPANEL_API_DOCS = env_bool("MCPANEL_API_DOCS", False)

@@ -361,6 +361,9 @@ class BackupBrowseView(APIView):
 
 
 class BackupFileDownloadView(APIView):
+    # a link download (no header) may carry a ticket instead (D-1, apps.core.session_binding)
+    download_ticket = True
+
     @extend_schema(responses={(200, "application/octet-stream"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str, bid: str):  # type: ignore[no-untyped-def]
         from apps.core.streaming import AgentStreamingResponse

@@ -116,10 +116,19 @@ class WsClient:
         cookie = f"{settings.SESSION_COOKIE_NAME}={session_key}".encode()
         scope = {"type": "websocket", "path": path, "query_string": b"", "headers": [(b"cookie", cookie)], "subprotocols": []}
         self.comm = ApplicationCommunicator(_ws_app(), scope)
+        self.session_key = session_key
 
-    async def connect(self) -> tuple[bool, Any]:
+    async def connect(self, *, auth: bool = True) -> tuple[bool, Any]:
+        """Open the socket and, like the frontend, send the session's auth frame first (D-1; ``auth=False``:
+        the test sends its own)."""
+        from tests.conftest import SESSION_TOKENS
+
         await self.comm.send_input({"type": "websocket.connect"})
         out = await self.comm.receive_output(2)
+        token = SESSION_TOKENS.get(self.session_key)
+        if out["type"] == "websocket.accept" and auth and token:
+            await self.send_json_to({"type": "auth", "token": token})
+            await asyncio.sleep(0.15)  # (the consumer checks it and joins its groups before it sends anything)
         return out["type"] == "websocket.accept", out
 
     async def send_json_to(self, data: dict[str, Any]) -> None:

@@ -22,6 +22,7 @@ from rest_framework.views import APIView
 
 from apps.accounts import throttle as account_throttle
 from apps.audit import service as audit
+from apps.core import session_binding
 from apps.core.errors import ApiError
 from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
 
@@ -98,7 +99,12 @@ class AuthStateView(APIView):
             else:
                 _warn_open_setup()
         if request.user.is_authenticated:
-            data["user"] = MeSerializer(request.user).data
+            if session_binding.enabled() and not session_binding.header_ok(request):
+                # a signed-in cookie without this tab's token is no sign-in (D-1): show the login page
+                data["authenticated"] = False
+                data["session_token_required"] = True
+            else:
+                data["user"] = MeSerializer(request.user).data
         return Response(data)
 
 
@@ -147,8 +153,9 @@ class SetupView(APIView):
             user.set_password(ser.validated_data["password"])
             user.save()
         login(request, user)
+        token = session_binding.issue(request.session)  # shown once: the tab sends it with every request (D-1)
         audit.record("auth.setup", request=request, actor=user, target=user)
-        return Response(MeSerializer(user).data, status=status.HTTP_201_CREATED)
+        return Response({**MeSerializer(user).data, "session_token": token}, status=status.HTTP_201_CREATED)
 
 
 @method_decorator(csrf_protect, name="dispatch")
@@ -173,8 +180,9 @@ class LoginView(APIView):
             audit.record("auth.login_failed", request=request, success=False, details={"username": name[:150]})
             raise ApiError("Invalid username or password", code="invalid_credentials", status_code=401)
         login(request, user)
+        token = session_binding.issue(request.session)  # shown once: the tab sends it with every request (D-1)
         audit.record("auth.login", request=request, actor=user, target=user)
-        response = Response(MeSerializer(user).data)
+        response = Response({**MeSerializer(user).data, "session_token": token})
         account_throttle.set_known_browser(response, user)
         return response
 
@@ -452,3 +460,42 @@ class PermissionDefsView(APIView):
 
 class _Empty(serializers.Serializer):
     pass
+
+
+class DownloadTicketSerializer(serializers.Serializer):
+    url = serializers.CharField(max_length=4000)
+
+
+class DownloadTicketView(APIView):
+    """``POST /api/auth/download-ticket {"url": "/api/..."}``: the same URL with a ``ticket`` that lets a link (which
+    sends no header) download it for ``session_binding.TICKET_SECONDS``, for this session, exactly that path and
+    query (D-1/I-7). Only for the download routes (views with ``download_ticket``)."""
+
+    @extend_schema(request=DownloadTicketSerializer, responses={200: dict})
+    def post(self, request):  # type: ignore[no-untyped-def]
+        from urllib.parse import quote, urlsplit
+
+        from django.urls import Resolver404, resolve
+
+        ser = DownloadTicketSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        url = ser.validated_data["url"]
+        parts = urlsplit(url)
+        invalid = ApiError("Only the panel's download links can get a ticket", code="invalid_url")
+        if parts.scheme or parts.netloc or parts.fragment or not parts.path.startswith("/api/"):
+            raise invalid
+        try:
+            match = resolve(parts.path)
+        except Resolver404:
+            raise invalid from None
+        view_class = getattr(match.func, "view_class", None) or getattr(match.func, "cls", None)
+        if not getattr(view_class, "download_ticket", False):
+            raise invalid
+        ticket = session_binding.make_ticket(request.session, parts.path, parts.query)
+        joined = f"{parts.path}?{parts.query}&" if parts.query else f"{parts.path}?"
+        return Response(
+            {
+                "url": f"{joined}{session_binding.TICKET_PARAM}={quote(ticket, safe='')}",
+                "expires_in": session_binding.TICKET_SECONDS,
+            }
+        )

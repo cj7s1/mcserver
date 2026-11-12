@@ -36,6 +36,65 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 PASSWORD = "Correct-Horse-Battery-42"
+
+
+# --------------------------------------------------------------------------------------
+# D-1 (I-7): the session token of the suite's test clients
+# --------------------------------------------------------------------------------------
+# A signed-in session must send the token it got at sign-in (X-MCPanel-Session-Token) on every API request. The
+# test clients do what the frontend does, so the suite's thousands of requests need no change:
+# * a client signed in with force_login()/login() gets a token in its session (as a login answer would give);
+# * a client that signed in through POST /api/auth/login or /setup keeps the session_token of the answer;
+# * every request of such a client carries the header, unless the test passes HTTP_X_MCPANEL_SESSION_TOKEN
+#   itself or sets ``client.mcpanel_no_token = True`` (the binding tests).
+# SESSION_TOKENS maps a session key to its token for the WebSocket and raw ASGI helpers.
+SESSION_TOKENS: dict[str, str] = {}
+SESSION_TOKEN_META = "HTTP_X_MCPANEL_SESSION_TOKEN"
+
+
+def _install_session_token_helpers() -> None:
+    from django.test.client import Client
+
+    if getattr(Client, "_mcpanel_session_token_helpers", False):
+        return
+    original_login = Client._login
+    original_request = Client.request
+
+    def _login(self: Any, user: Any, backend: Any = None) -> None:
+        from apps.core import session_binding
+
+        original_login(self, user, backend)
+        session = self.session
+        token = session_binding.issue(session)
+        session.save()
+        self._mcpanel_session_token = token
+        SESSION_TOKENS[session.session_key] = token
+
+    def request(self: Any, **request: Any) -> Any:
+        from django.conf import settings
+
+        token = getattr(self, "_mcpanel_session_token", None)
+        if token and SESSION_TOKEN_META not in request and not getattr(self, "mcpanel_no_token", False):
+            request[SESSION_TOKEN_META] = token
+        response = original_request(self, **request)
+        if str(response.get("Content-Type", "")).startswith("application/json") and not getattr(response, "streaming", False):
+            try:
+                data = json.loads(response.content or b"null")
+            except ValueError:
+                data = None
+            if isinstance(data, dict) and isinstance(data.get("session_token"), str):
+                self._mcpanel_session_token = data["session_token"]
+                cookie = self.cookies.get(settings.SESSION_COOKIE_NAME)
+                if cookie is not None and cookie.value:
+                    SESSION_TOKENS[cookie.value] = data["session_token"]
+        return response
+
+    Client._login = _login
+    Client.request = request
+    Client._mcpanel_session_token_helpers = True
+
+
+_install_session_token_helpers()
 ALLOWED_FETCH_HOSTS = {
     "cdn.modrinth.com",
     "cdn-raw.modrinth.com",

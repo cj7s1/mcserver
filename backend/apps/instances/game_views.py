@@ -599,6 +599,9 @@ class SavesExportView(APIView):
     asked to save first (users who may send commands or take backups), and the download waits until
     the file was written."""
 
+    # a link download (no header) may carry a ticket instead (D-1, apps.core.session_binding)
+    download_ticket = True
+
     @extend_schema(responses={(200, "application/zip"): OpenApiTypes.BINARY})
     def get(self, request: Request, pk: str) -> Any:
         from . import world
