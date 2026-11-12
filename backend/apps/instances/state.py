@@ -116,6 +116,9 @@ def compute(
             clean = (0, None) if exit_code in (0, None) else _clean_exit_codes(instance)
             unclean = "" if exit_code in clean else f" (exit code {exit_code}: not a clean stop)"
             return Status.STOPPED, f"Stopped because the host was shutting down{unclean}; it is started again automatically"
+        if state == "created" and instance.desired_state == "running" and exit_code not in (0, None):
+            # the container never ran: Docker refused the start (a port in use, ...), the server did not exit (FX2-3)
+            return Status.FAILED, start_failed_detail(instance)
         if instance.desired_state == "running" and exit_code not in (0, None) and exit_code not in _clean_exit_codes(instance):
             return Status.FAILED, f"Server exited unexpectedly (exit code {exit_code}). Check the console log."
         if instance.desired_state == "running" and exit_code is not None and state == "exited":
@@ -126,6 +129,20 @@ def compute(
     if state == "paused":
         return Status.STOPPED, "Container paused"
     return Status.UNKNOWN, f"Unexpected container state '{state}'"
+
+
+START_JOBS = ("start", "restart", "install", "recreate", "software_update", "modpack_update")
+
+
+def start_failed_detail(instance: Instance) -> str:
+    """The status detail of a container that was created but never ran: the error of the last failed start."""
+    from apps.jobs.models import Job, JobStatus
+
+    job = Job.objects.filter(instance_id=instance.pk, kind__in=START_JOBS).order_by("-created_at").only("status", "error").first()
+    if job is not None and job.status == JobStatus.FAILED and job.error:
+        error = " ".join(str(job.error).split())
+        return f"The start failed before the server ran: {error[:300]}"
+    return "The start failed before the server ran (Docker could not start the container). See the last job's error."
 
 
 def _clean_exit_codes(instance: Instance) -> frozenset[int]:

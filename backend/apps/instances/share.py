@@ -62,18 +62,33 @@ def _ports(instance: Instance) -> list[dict[str, Any]]:
     return out
 
 
-def _whitelist_on(instance: Instance, client: Any) -> bool | None:
+OFFLINE_HINT = (
+    "online-mode=false: anyone can join under any name without a Minecraft account, also under the name of a "
+    "whitelisted player or an operator, so the whitelist does not keep strangers out. Turn online mode on "
+    "(Settings, server.properties) unless a proxy such as Velocity or BungeeCord in front of it checks the accounts."
+)
+
+
+def _minecraft_properties(instance: Instance, client: Any) -> dict[str, str] | None:
+    """server.properties of a Minecraft server ({} before it was written; None: not Minecraft, or unreadable)."""
     if (instance.game or "minecraft") != "minecraft":
-        return None  # (HKMP keeps it in a file the server writes itself: not read here)
+        return None  # (HKMP keeps its whitelist in a file the server writes itself: not read here)
     from . import properties
 
     try:
         raw = properties.read_file(client, instance.id)
     except Exception:
         return None
-    if raw is None:
-        return False
-    return str(properties.parse(raw).get("white-list", "false")).strip().lower() == "true"
+    return {} if raw is None else {str(k): str(v) for k, v in properties.parse(raw).items()}
+
+
+def _whitelist_on(props: dict[str, str] | None) -> bool | None:
+    return None if props is None else props.get("white-list", "false").strip().lower() == "true"
+
+
+def _offline_mode(props: dict[str, str] | None) -> bool | None:
+    """True when the server lets players in without a Minecraft account (FX2-5); None: unknown."""
+    return None if props is None else props.get("online-mode", "true").strip().lower() == "false"
 
 
 def _accounts_only(instance: Instance, client: Any) -> bool | None:
@@ -94,6 +109,8 @@ def share_card(instance: Instance, user: Any, *, with_password: bool = False) ->
     game_port = ports[0]["port"] if ports else int(instance.game_port or 0)
     guide = joining.guide(instance, host, game_port)
 
+    props = _minecraft_properties(instance, client) if (instance.game or "minecraft") == "minecraft" else None
+    offline = _offline_mode(props)
     password: str | None = None
     if guide.protection == "password":
         try:
@@ -103,11 +120,13 @@ def share_card(instance: Instance, user: Any, *, with_password: bool = False) ->
             password = None
         protected: bool | None = None if password is None else bool(password)
     elif guide.protection == "whitelist":
-        protected = _whitelist_on(instance, client)
+        protected = _whitelist_on(props)
     elif guide.protection == "accounts":
         protected = _accounts_only(instance, client)
     else:
         protected = False
+    if offline:
+        protected = False  # (any name can be used without an account: the whitelist protects nothing then)
 
     show_password = with_password and may_read_password and bool(password)
     connect = f"{host}:{game_port}" if game_port else host
@@ -142,8 +161,20 @@ def share_card(instance: Instance, user: Any, *, with_password: bool = False) ->
             "label": f"Strangers are kept out by {PROTECTION_LABELS[guide.protection]}"
             if guide.protection != "none"
             else "This game has no way to keep strangers out",
-            "hint": guide.open_warning if protected is not True else "",
+            "hint": OFFLINE_HINT if offline else (guide.open_warning if protected is not True else ""),
         },
+        *(
+            [
+                {
+                    "id": "online_mode",
+                    "ok": None if offline is None else not offline,
+                    "label": "Players need a Minecraft account (online mode)",
+                    "hint": OFFLINE_HINT if offline else "",
+                }
+            ]
+            if (instance.game or "minecraft") == "minecraft"
+            else []
+        ),
         {
             "id": "ports",
             "ok": None,
