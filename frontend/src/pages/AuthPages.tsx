@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { Boxes, Loader2 } from "lucide-react";
+import { Boxes, Loader2, RefreshCw } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { z } from "zod";
@@ -9,7 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage, throttledMessage } from "@/lib/api";
-import { qk } from "@/lib/queries";
+import { fetchAuthState, qk } from "@/lib/queries";
 import { setSessionToken } from "@/lib/session-token";
 import type { AuthState, SignInAnswer } from "@/lib/types";
 
@@ -43,6 +43,9 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // R-12: the sign-in worked but the panel still wants a session token this page cannot give (this tab runs
+  // another version of the panel than the server, e.g. during an upgrade): say so instead of looping
+  const [updated, setUpdated] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -51,7 +54,8 @@ export function LoginPage() {
     try {
       const answer = await api.post<SignInAnswer>("/auth/login", { username, password });
       setSessionToken(answer?.session_token); // every later request carries it (lib/session-token.ts)
-      await qc.invalidateQueries({ queryKey: qk.auth });
+      const state = await qc.fetchQuery({ queryKey: qk.auth, queryFn: fetchAuthState, staleTime: 0 });
+      if (state?.session_token_required) setUpdated(true);
     } catch (err) {
       // 429 throttled (too many failed sign-ins for this account or from this address): with the wait
       setError(throttledMessage(err) ?? errorMessage(err));
@@ -63,10 +67,22 @@ export function LoginPage() {
   return (
     <AuthCard title="Sign in to MCPanel" subtitle="Manage your Minecraft servers">
       <form className="grid gap-4" onSubmit={submit}>
-        {again && !error && (
+        {updated ? (
           <Alert>
-            <AlertDescription>Your session needs a new sign-in. Please sign in again.</AlertDescription>
+            <AlertDescription className="grid gap-2">
+              <span>The panel was updated: reload this page.</span>
+              <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => window.location.reload()}>
+                <RefreshCw /> Reload
+              </Button>
+            </AlertDescription>
           </Alert>
+        ) : (
+          again &&
+          !error && (
+            <Alert>
+              <AlertDescription>Your session needs a new sign-in. Please sign in again.</AlertDescription>
+            </Alert>
+          )
         )}
         {error && (
           <Alert variant="destructive">

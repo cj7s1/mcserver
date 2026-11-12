@@ -224,6 +224,20 @@ describe("signing in", () => {
     expect(headerOf(state)).toBe(TOKEN);
   });
 
+  it("R-12: a sign-in whose answer has no usable token while the state still wants one says the panel was updated", async () => {
+    stubFetch({
+      "/auth/login": () => ({ status: 200, body: { ...ME } }), // no session_token: another version answered
+      "/auth/state": () => ({ status: 200, body: NEEDS_TOKEN }),
+    });
+    const user = renderPage(<LoginPage />, NEEDS_TOKEN);
+    await user.type(screen.getByLabelText("Username"), "alice");
+    await user.type(screen.getByLabelText("Password"), "correct horse");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText("The panel was updated: reload this page.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reload" })).toBeInTheDocument();
+    expect(screen.queryByText(/Please sign in again/)).not.toBeInTheDocument();
+  });
+
   it("no note after an ordinary sign-out", () => {
     renderPage(<LoginPage />, { setup_required: false, authenticated: false, user: null });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
