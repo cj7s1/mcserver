@@ -46,14 +46,19 @@ def test_the_password_only_for_configure_and_in_the_invite_only_when_asked(
     SystemSetting.set("public_address", "203.0.113.5")
     vh = create(clients, django_capture_on_commit_callbacks, "valheim", secrets={"server_password": "sesame-42"})
     owner = _share(clients["owner"], vh)
-    assert owner.status_code == 200 and owner["Cache-Control"] == "no-store"
+    # the plain answer: only whether a password is set, also for the owner (and it may be cached)
+    assert owner.status_code == 200 and "no-store" not in owner.get("Cache-Control", "")
     card = owner.json()
-    assert card["password"] == "sesame-42" and "sesame-42" not in card["invite_text"]
+    assert "password" not in card and card["password_set"] is True and "sesame-42" not in owner.content.decode()
     assert card["protection"]["on"] is True and "Password: ask me for it" in card["invite_text"]
-    asked = _share(clients["owner"], vh, with_password="true").json()
-    assert "Password: sesame-42" in asked["invite_text"] and asked["invite_has_password"] is True
+    asked_resp = _share(clients["owner"], vh, with_password="true")
+    assert asked_resp["Cache-Control"] == "no-store"
+    asked = asked_resp.json()
+    assert asked["password"] == "sesame-42" and "Password: sesame-42" in asked["invite_text"]
+    assert asked["invite_has_password"] is True and asked["password_set"] is True
     viewer = _share(clients["viewer"], vh)
     assert viewer.status_code == 200 and "password" not in viewer.json() and "sesame-42" not in viewer.content.decode()
+    assert viewer.json()["password_set"] is True
     assert _share(clients["viewer"], vh, with_password="true").status_code == 403
 
 
@@ -75,16 +80,17 @@ def test_passwords_read_from_the_games_files(
     factorio: Any,  # noqa: F811
 ) -> None:
     fake_agent.put_file(factorio.id, "config/server-settings.json", json.dumps({"game_password": "fact-pw", "name": "n"}))
-    card = _share(clients["owner"], factorio).json()
+    assert _share(clients["owner"], factorio).json()["password_set"] is True
+    card = _share(clients["owner"], factorio, with_password="true").json()
     assert card["password"] == "fact-pw" and card["protection"]["on"] is True
     vanilla = make_tr(make_instance, "vanilla", game_port=7781)
     fake_agent.put_file(vanilla.id, "serverconfig.txt", "maxplayers=8\npassword=\n")
-    card = _share(clients["owner"], vanilla).json()
-    assert card["password"] == "" and card["protection"]["on"] is False
+    card = _share(clients["owner"], vanilla, with_password="true").json()
+    assert card["password"] == "" and card["password_set"] is False and card["protection"]["on"] is False
     assert "Anyone who knows the address" in {c["id"]: c for c in card["checklist"]}["protection"]["hint"]
     tshock = make_tr(make_instance, "tshock", game_port=7782)
     fake_agent.put_file(tshock.id, "config.json", json.dumps({"Settings": {"ServerPassword": "ts-pw"}}))
-    card = _share(clients["owner"], tshock).json()
+    card = _share(clients["owner"], tshock, with_password="true").json()
     assert card["password"] == "ts-pw" and any("/register" in s for s in card["steps"])
 
 
@@ -101,6 +107,7 @@ def test_every_game_has_steps_and_the_invite_never_holds_a_secret(
     assert "198.51.100.7" in card["invite_text"]
     for value in [*inst.secret_values.values()]:
         assert value not in card["invite_text"], game
+    assert card["password_set"] is (game in ("valheim", "palworld", "cs2")) and "password" not in card
     if game == "rust":
         assert card["protection"] == {"kind": "none", "on": False, "label": "nothing"}
     if game == "hkmp":

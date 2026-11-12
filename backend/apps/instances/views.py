@@ -1901,8 +1901,9 @@ class MigrateView(APIView):
 
 class ShareView(APIView):
     """``GET /api/instances/<id>/share``: the Share card (B1): address, ports, join steps, invite text, checklist.
-    ``instance.view``; the join password (``password``) only with ``instance.configure``, and in the invite text
-    only when asked for (``?with_password=true``)."""
+    ``instance.view`` (or a Friend's ``instance.overview``). Every answer says ``password_set``; the join password
+    itself (``password``, also in the invite text) only when asked for (``?with_password=true``), which needs
+    ``instance.configure``."""
 
     @extend_schema(responses={200: dict})
     def get(self, request: Request, pk: str) -> Response:

@@ -1,7 +1,8 @@
 """The Share card (B1 of the feature plan of 2026-11-12): what to tell a friend so they can join a server.
 
 ``share_card(instance, user, with_password=...)`` is the answer of ``GET /api/instances/<id>/share`` (permission
-``instance.view``; the join password only for users with ``instance.configure``). The steps and requirements per
+``instance.view``; ``password_set`` for everyone, the join password only when asked for by users with
+``instance.configure``; ``user`` None: the Discord bot, which may read it). The steps and requirements per
 game are in ``apps.games.joining``. Nothing here changes the server; the agent is only asked for the files that
 hold a join password or the whitelist switch (a node that does not answer leaves those "unknown").
 """
@@ -166,7 +167,10 @@ def share_card(instance: Instance, user: Any, *, with_password: bool = False) ->
         "invite_has_password": show_password,
         "checklist": checklist,
     }
-    if may_read_password:
+    # whether a join password is set (None: it cannot be read now); the password itself only when asked for
+    # (``with_password``) by a caller who may read it
+    answer["password_set"] = (None if password is None else bool(password)) if guide.protection == "password" else False
+    if with_password and may_read_password:
         answer["password"] = password if guide.protection == "password" else None
     return answer
 
