@@ -80,10 +80,11 @@ def test_fix_ownership_never_raises(agent_settings, folder, monkeypatch):
     assert warning is not None and "could not be given the owner" in warning
 
 
-def test_only_satisfactory_and_project_zomboid_ask_for_it():
-    # PZ's image runs the game as root (no privilege drop): files written during a run are 0:0
+def test_only_satisfactory_asks_for_it():
+    # Project Zomboid ran its game as root until A-3 (security review 2026-11-11); it now runs as its
+    # literal owner 1000:1000, which the agent gives the folder before every start instead
     assert satisfactory.PROFILE.fix_ownership is True
-    assert [p.game for p in profiles.all_profiles() if p.fix_ownership] == ["satisfactory", "project-zomboid"]
+    assert [p.game for p in profiles.all_profiles() if p.fix_ownership] == ["satisfactory"]
 
 
 class _Stopping:

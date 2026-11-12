@@ -180,6 +180,11 @@ class RuntimeProfile:
     # Run before every create and every start the agent makes (Satisfactory: writes the start
     # wrapper, the container's entrypoint, into the server folder).
     prepare_start: Callable[[Settings, Any], None] | None = None
+    # Files the agent writes for the container and mounts read-only into it, from the agent's state
+    # folder (out of reach of the game and the file API): ``(profile, settings, spec) -> {container path:
+    # content}``. Project Zomboid: the image's rcon.yml, which its own scripts cannot write as uid 1000
+    # (its SIGTERM trap saves and quits through it).
+    agent_files: Callable[[RuntimeProfile, Settings, InstanceSpec], Mapping[str, str]] | None = None
     # Docker's init process (tini) as PID 1, for images whose shell entrypoint ignores SIGTERM
     # (CS2: bash as PID 1 does not forward it, so every stop would wait for the timeout).
     init: bool = False

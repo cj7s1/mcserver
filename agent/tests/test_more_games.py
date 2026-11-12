@@ -199,6 +199,9 @@ def test_agent_ids_and_fixed_values_always_win(settings, game):
     profile = profiles.get(game)
     if profile.user.kind == "drop_privileges_env":
         assert (env["PUID"], env["PGID"]) == ("99", "100")
+    elif game == "project-zomboid":
+        # its init.sh requires them; they name the literal owner the container runs as (A-3)
+        assert (env["PUID"], env["PGID"]) == ("1000", "1000")
     else:
         assert "PUID" not in env
     for key, value in getattr(MODULES[game], "FIXED_ENV", {}).items():
@@ -498,7 +501,10 @@ def test_caps_per_game(settings):
         "SETGID",
         "KILL",
     ]
-    assert kwargs(settings, make_spec("project-zomboid"))["cap_add"] == ["CHOWN", "DAC_OVERRIDE", "FOWNER"]
+    # A-3 (security review 2026-11-11): the game runs as the image's steam user without capabilities, like CS2
+    pz = kwargs(settings, make_spec("project-zomboid"))
+    assert pz["cap_add"] == [] and pz["user"] == "1000:1000" and pz["cap_drop"] == ["ALL"]
+    assert zomboid.PROFILE.literal_owner == (1000, 1000) and not zomboid.PROFILE.fix_ownership
     assert kwargs(settings, make_spec("hkmp"))["cap_add"] == [
         "CHOWN",
         "DAC_OVERRIDE",
@@ -1160,3 +1166,34 @@ def test_valheim_needs_its_join_password(settings):
     assert kwargs(settings, make_spec("valheim"))["environment"]["SERVER_PASS"] == "skal-2026"
     for game in ("palworld", "cs2", "project-zomboid", "rust", "hkmp"):
         assert profiles.get(game).required_env == (), game
+
+
+def test_zomboid_gets_its_rcon_yml_from_the_agent(settings):
+    """A-3: as uid 1000 the image's start.sh cannot write /home/steam/server/rcon.yml, which its SIGTERM trap
+    (save + quit) reads. The agent writes it into its own state folder (out of reach of the game and the file
+    API) and mounts it read-only; a real run showed rcon-cli reading it as uid 1000."""
+    spec = make_spec("project-zomboid")
+    kw = kwargs(settings, spec)
+    source = str(docker_ops.agent_file_path(settings, IID, zomboid.RCON_YML, host=True))
+    assert kw["volumes"][source] == {"bind": "/home/steam/server/rcon.yml", "mode": "ro"}
+    assert source.startswith("/mnt/cache/appdata/mcpanel/agent/container-files/")
+    docker_ops.write_agent_files(settings, IID, zomboid.PROFILE, spec)
+    path = docker_ops.agent_file_path(settings, IID, zomboid.RCON_YML)
+    assert path.read_text() == f'default:\n  address: "127.0.0.1:27015"\n  password: "{PASSWORD}"\n'
+    assert oct(path.stat().st_mode & 0o777) == "0o400"
+    # written again for the next container (a new spec may carry a new password)
+    docker_ops.write_agent_files(
+        settings, IID, zomboid.PROFILE, make_spec("project-zomboid", rcon_password="B" * 32)
+    )
+    assert '"' + "B" * 32 + '"' in path.read_text()
+    assert docker_ops.agent_files(profiles.get("cs2"), settings, make_spec("cs2")) == {}
+    docker_ops.forget_server_game(settings, IID)  # the server is deleted: its rcon.yml goes too
+    assert not path.exists() and not path.parent.exists()
+
+
+def test_an_agent_file_path_must_be_plain():
+    import dataclasses
+
+    bad = dataclasses.replace(zomboid.PROFILE, agent_files=lambda *_a: {"/home/steam/../etc/passwd": "x"})
+    with pytest.raises(AgentError):
+        docker_ops.agent_files(bad, None, None)

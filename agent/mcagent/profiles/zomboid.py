@@ -2,10 +2,14 @@
 
 What the probe of 2026-11-10 observed (``v1.2.0``, game 42.22.2; design/probe-6games.md section 4):
 
-* ``init.sh`` (root) requires ``PUID``/``PGID``, changes ``steam`` to them, ``chown -R`` both folders
-  and runs the game **as root** (no privilege drop): CHOWN DAC_OVERRIDE FOWNER suffice, and files
-  written during a run are 0:0, so the agent gives the server folder the runtime owner after every
-  stop and before every backup (``fix_ownership``).
+* ``init.sh`` requires ``PUID``/``PGID``, changes ``steam`` to them, ``chown -R`` both folders and
+  runs the game as the user it was started as: as root there is no privilege drop. So the container
+  runs as the image's ``steam`` user, a literal ``1000:1000`` without capabilities, like CS2 (A-3 of
+  the review of 2026-11-11; the probe and an agent-level run showed the server, update-on-start, RCON
+  and the save working so; ``groupmod`` and one ``chown`` of init.sh fail harmlessly). The agent gives
+  the server folder 1000:1000 before every create and start (``literal_owner``). As uid 1000 the
+  image's start.sh cannot write ``/home/steam/server/rcon.yml``, which its SIGTERM trap (save +
+  quit) needs: the agent writes that file and mounts it read-only (``agent_files``).
 * Two mounts: ``game/`` -> /project-zomboid (7 GB, DepotDownloader validates it at every start with
   ``UPDATE_ON_START``; left out of backups) and ``data/`` -> /project-zomboid-config (``Server/<name>.ini``,
   ``Saves/Multiplayer/<name>/``, the SQLite user database, the game's own backups and logs).
@@ -34,6 +38,7 @@ if TYPE_CHECKING:
     from ..schemas import InstanceSpec
 
 GAME = "project-zomboid"
+OWNER = (1000, 1000)  # the image's steam user: the game runs as it, without capabilities (A-3)
 GAME_PORT = 16261
 UDP_PORT = 16262
 RCON_PORT = 27015
@@ -90,8 +95,9 @@ def injected_env(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec
             f"(at most {max(1, gb - 1)})"
         )
     return {
-        "PUID": str(settings.runtime_uid),
-        "PGID": str(settings.runtime_gid),
+        # init.sh requires them; the container's user is the literal owner, whatever the runtime ids
+        "PUID": str(OWNER[0]),
+        "PGID": str(OWNER[1]),
         **FIXED_ENV,
         # the RCON password is always the panel's control secret (the agent's RCON driver uses it)
         "RCON_PASSWORD": spec.rcon_password,
@@ -105,6 +111,18 @@ def injected_env(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec
         ),
         # the image's default admin password is "admin": the control secret unless the panel sets one
         **steam.control_secret(spec, "ADMIN_PASSWORD"),
+    }
+
+
+RCON_YML = "/home/steam/server/rcon.yml"
+
+
+def agent_files(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec) -> dict[str, str]:
+    """The image's rcon.yml (what its start.sh writes): its SIGTERM trap saves and quits through it,
+    and as uid 1000 start.sh cannot write it into the image's root-owned /home/steam/server (A-3: a
+    stop from Docker itself, such as a host shutdown, would otherwise not save)."""
+    return {
+        RCON_YML: f'default:\n  address: "127.0.0.1:{RCON_PORT}"\n  password: "{spec.rcon_password}"\n',
     }
 
 
@@ -127,8 +145,9 @@ PROFILE = RuntimeProfile(
     label="Project Zomboid",
     variants=(),
     images=DEFAULT_IMAGES,
-    user=UserModel("drop_privileges_env", uid_env="PUID", gid_env="PGID"),
-    cap_add=("CHOWN", "DAC_OVERRIDE", "FOWNER"),
+    user=UserModel("fixed", uid=OWNER[0], gid=OWNER[1]),
+    cap_add=(),
+    agent_files=agent_files,
     mounts=(Mount("game", "/project-zomboid"), Mount("data", "/project-zomboid-config")),
     injected_env=injected_env,
     reserved_env=RESERVED_ENV,
@@ -169,7 +188,6 @@ PROFILE = RuntimeProfile(
     install_retry_exits=(1,),
     clean_exit_codes=(0, 143),
     env_ports=MappingProxyType({"DEFAULT_PORT": "udp", "UDP_PORT": "udp"}),
-    fix_ownership=True,
     restart_policy="no",
     # a stop before the server was ever ready (still downloading the game): nothing to save, no waiting
     not_ready_stop_timeout=steam.NOT_READY_STOP_TIMEOUT,

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 from collections.abc import Iterator
@@ -497,6 +498,56 @@ def image_volume_plan(
 HOST_NETWORK_CONTROLS = frozenset({"none", "console"})
 
 
+AGENT_FILES_DIR = "container-files"
+_AGENT_FILE_TARGET_RE = re.compile(r"^(?:/[A-Za-z0-9._-]+)+$")
+
+
+def agent_files(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec) -> dict[str, str]:
+    """The profile's ``agent_files``: {absolute container path: content}."""
+    if profile.agent_files is None:
+        return {}
+    files = dict(profile.agent_files(profile, settings, spec))
+    for target in files:
+        if not _AGENT_FILE_TARGET_RE.match(target) or "/../" in f"{target}/" or "/./" in f"{target}/":
+            raise AgentError(f"Invalid container path {target!r} of an agent file", "internal", 500)
+    return files
+
+
+def agent_file_path(settings: Settings, instance_id: UUID, target: str, *, host: bool = False) -> Path:
+    """Where the agent keeps the file it mounts at ``target`` (in its state folder; ``host``: as the
+    Docker daemon sees it)."""
+    base = settings.host_state_dir if host else settings.state_dir
+    return base / AGENT_FILES_DIR / str(instance_id) / target.strip("/").replace("/", "_")
+
+
+def write_agent_files(
+    settings: Settings, instance_id: UUID, profile: RuntimeProfile, spec: InstanceSpec
+) -> None:
+    """Write the profile's ``agent_files`` before the container is created: owned by the container's
+    user (the literal owner, else the runtime ids), mode 0400, never through a link."""
+    files = agent_files(profile, settings, spec)
+    if not files:
+        return
+    uid, gid = profile.literal_owner or (int(settings.runtime_uid), int(settings.runtime_gid))
+    for target, content in files.items():
+        path = agent_file_path(settings, instance_id, target)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o400)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(content)
+                with contextlib.suppress(PermissionError):  # a dev agent that is not root
+                    os.fchown(fh.fileno(), uid, gid)
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+
+
 def _binds_below_the_folder(profile: RuntimeProfile, volume_binds: dict[str, str]) -> bool:
     """Whether the container mounts a folder below the server folder (not only the folder itself):
     a profile mount of a sub-folder, or a VOLUME of the image that goes to ``.volumes/`` or below a mount."""
@@ -584,6 +635,11 @@ def build_create_kwargs(
     volume_binds, volume_tmpfs = image_volume_plan(profile, image_volumes)
     for target, rel in volume_binds.items():
         volumes[_mount_source(settings, instance_id, rel)] = {"bind": target, "mode": "rw"}
+    for target in agent_files(profile, settings, spec):
+        volumes[str(agent_file_path(settings, instance_id, target, host=True))] = {
+            "bind": target,
+            "mode": "ro",
+        }
 
     ports: dict[str, Any] = {}
     if network != "host":
@@ -782,8 +838,12 @@ def remember_server_game(settings: Settings, instance_id: UUID, spec: InstanceSp
 
 
 def forget_server_game(settings: Settings, instance_id: UUID) -> None:
+    """Drop what the agent keeps for a deleted server: its game record and its agent files."""
     with contextlib.suppress(FileNotFoundError):
         _server_game_file(settings, instance_id).unlink()
+    files = settings.state_dir / AGENT_FILES_DIR / str(instance_id)
+    if files.is_dir() and not files.is_symlink():
+        shutil.rmtree(files, ignore_errors=True)
 
 
 def server_profile(settings: Settings, instance_id: UUID) -> RuntimeProfile | None:
@@ -853,6 +913,7 @@ def create_container(
         remember_server_game(settings, instance_id, spec)
     if profile.prepare_start is not None or profile.literal_owner is not None:
         prepare_start(settings, instance_id, profile)
+    write_agent_files(settings, instance_id, profile, spec)
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
     # docker-py's high-level containers.create() cannot set Config.StopTimeout: it rejects a

@@ -130,6 +130,11 @@ class Settings(BaseSettings):
         return (self.host_data_root or self.data_root) / "instances"
 
     @property
+    def host_state_dir(self) -> Path:
+        """:attr:`state_dir` as the Docker daemon sees it (bind sources of agent-written files)."""
+        return (self.host_data_root or self.data_root) / "agent"
+
+    @property
     def backups_dir(self) -> Path:
         return self.backup_root or (self.data_root / "backups")
 

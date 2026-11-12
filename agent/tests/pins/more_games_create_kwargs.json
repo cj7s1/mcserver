@@ -291,8 +291,8 @@
     "MAX_PLAYERS": "12",
     "MEMORY_XMX_GB": "6",
     "ADMIN_PASSWORD": "zombie-Admin-1",
-    "PUID": "99",
-    "PGID": "100",
+    "PUID": "1000",
+    "PGID": "1000",
     "ADMIN_USERNAME": "admin",
     "RCON_PORT": "27015",
     "CONFIG_DIR": "/project-zomboid-config",
@@ -319,6 +319,10 @@
     "/mnt/cache/appdata/mcpanel/instances/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/data": {
      "bind": "/project-zomboid-config",
      "mode": "rw"
+    },
+    "/mnt/cache/appdata/mcpanel/agent/container-files/6a1d2c3b-4e5f-4a7b-8c9d-0e1f2a3b4c5d/home_steam_server_rcon.yml": {
+     "bind": "/home/steam/server/rcon.yml",
+     "mode": "ro"
     }
    },
    "ports": {
@@ -353,11 +357,7 @@
    "cap_drop": [
     "ALL"
    ],
-   "cap_add": [
-    "CHOWN",
-    "DAC_OVERRIDE",
-    "FOWNER"
-   ],
+   "cap_add": [],
    "log_config": {
     "Type": "json-file",
     "Config": {
@@ -365,6 +365,7 @@
      "max-file": "5"
     }
    },
+   "user": "1000:1000",
    "healthcheck": {
     "test": [
      "NONE"
