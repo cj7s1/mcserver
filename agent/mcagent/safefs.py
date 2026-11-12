@@ -8,6 +8,7 @@ root. Symlinks inside an instance are listed but never followed.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import errno
 import logging
@@ -15,7 +16,7 @@ import os
 import secrets
 import shutil
 import stat as statmod
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -644,3 +645,139 @@ class AtomicWriter:
         if not self.closed:
             self.closed = True
             os.close(self.dir_fd)
+
+
+# --- descriptor walks for whole-folder operations (B-4) ---------------------------------------------
+def open_dir_chain(
+    base: str | os.PathLike[str], parts: list[str] | tuple[str, ...], *, create: bool = False
+) -> int | None:
+    """A descriptor of ``base/parts``, every component opened as a real folder below the previous one
+    (never through a symbolic link). Missing folders are made with ``create`` (mode as ``os.mkdir``);
+    None when one is missing (without ``create``), a link or not a folder. The caller closes it."""
+    fd = os.open(base, DIR_FLAGS)
+    try:
+        for part in parts:
+            try:
+                nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    os.close(fd)
+                    return None
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, dir_fd=fd)
+                try:
+                    nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+                except OSError:
+                    os.close(fd)
+                    return None
+            except OSError:  # a link (ELOOP), not a folder (ENOTDIR)
+                os.close(fd)
+                return None
+            os.close(fd)
+            fd = nfd
+        return fd
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        raise
+
+
+def copy_tree_fd(
+    src: str | os.PathLike[str],
+    dst: str | os.PathLike[str],
+    ignore: Callable[[str, list[str]], set[str]] | None = None,
+    *,
+    max_depth: int = 256,
+) -> None:
+    """What ``shutil.copytree(src, dst, symlinks=True, ignore=ignore, dirs_exist_ok=True)`` does, through
+    descriptors (B-4): every folder is opened below its parent without following a link, every file is
+    opened with ``O_NOFOLLOW | O_NONBLOCK`` and copied only when ``fstat`` says it is a regular file
+    (a FIFO, socket or device put in its place is skipped, never read), links are copied as links.
+    Modes and times are copied (``copy2``/``copystat``). ``ignore(directory path, names)`` as copytree's."""
+    os.makedirs(dst, exist_ok=True)
+    src_text = os.fspath(src)
+
+    def times(st: os.stat_result) -> tuple[int, int]:
+        return (st.st_atime_ns, st.st_mtime_ns)
+
+    def copy_dir(sfd: int, dfd: int, rel: str, depth: int) -> None:
+        names = sorted(os.listdir(sfd))
+        skipped = ignore(os.path.join(src_text, rel) if rel else src_text, names) if ignore else set()
+        for name in names:
+            if name in skipped:
+                continue
+            try:
+                st = os.stat(name, dir_fd=sfd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if statmod.S_ISLNK(st.st_mode):
+                target = os.readlink(name, dir_fd=sfd)
+                os.symlink(target, name, dir_fd=dfd)
+                with contextlib.suppress(OSError, NotImplementedError):
+                    os.utime(name, ns=times(st), dir_fd=dfd, follow_symlinks=False)
+            elif statmod.S_ISDIR(st.st_mode):
+                if depth >= max_depth:
+                    continue
+                try:
+                    child = os.open(name, DIR_FLAGS, dir_fd=sfd)
+                except OSError:
+                    continue  # replaced by a link or removed meanwhile
+                try:
+                    with contextlib.suppress(FileExistsError):
+                        os.mkdir(name, dir_fd=dfd)
+                    dchild = os.open(name, DIR_FLAGS, dir_fd=dfd)
+                    try:
+                        copy_dir(child, dchild, f"{rel}/{name}" if rel else name, depth + 1)
+                        cst = os.fstat(child)
+                        os.chmod(dchild, statmod.S_IMODE(cst.st_mode))
+                        os.utime(dchild, ns=times(cst))
+                    finally:
+                        os.close(dchild)
+                finally:
+                    os.close(child)
+            elif statmod.S_ISREG(st.st_mode):
+                try:
+                    sf = os.open(
+                        name,
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
+                        dir_fd=sfd,
+                    )
+                except OSError:
+                    continue  # replaced by a link or removed meanwhile
+                try:
+                    fst = os.fstat(sf)
+                    if not statmod.S_ISREG(fst.st_mode):
+                        continue  # a FIFO, socket or device put in its place: never read
+                    os.set_blocking(sf, True)
+                    df = os.open(
+                        name,
+                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                        0o600,
+                        dir_fd=dfd,
+                    )
+                    try:
+                        with (
+                            os.fdopen(sf, "rb", closefd=False) as fin,
+                            os.fdopen(df, "wb", closefd=False) as fout,
+                        ):
+                            shutil.copyfileobj(fin, fout, 1024 * 1024)
+                        os.chmod(df, statmod.S_IMODE(fst.st_mode))
+                        os.utime(df, ns=times(fst))
+                    finally:
+                        os.close(df)
+                finally:
+                    os.close(sf)
+            # FIFOs, sockets and devices are never copied
+
+    sfd = os.open(src, DIR_FLAGS)
+    try:
+        dfd = os.open(dst, DIR_FLAGS)
+        try:
+            copy_dir(sfd, dfd, "", 0)
+            rst = os.fstat(sfd)
+            os.chmod(dfd, statmod.S_IMODE(rst.st_mode))
+            os.utime(dfd, ns=times(rst))
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(sfd)

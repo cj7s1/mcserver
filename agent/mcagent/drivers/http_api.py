@@ -178,6 +178,7 @@ def http_request(
         conn = http.client.HTTPConnection(host, port, timeout=min(API_CONNECT_TIMEOUT, timeout))
     else:
         raise ValueError(f"Unsupported scheme {scheme!r}")
+
     def expire() -> None:
         expired.set()
         raw = conn.sock

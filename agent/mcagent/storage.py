@@ -138,24 +138,48 @@ def capabilities(settings: Settings) -> dict[str, Any]:
 
 
 def dir_size(path: Path) -> int:
-    total = 0
-    stack = [str(path)]
-    while stack:
-        current = stack.pop()
+    """Bytes the folder takes (blocks, else the size), walked through descriptors: a folder replaced by a
+    link during the walk is not followed (B-4)."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+    def walk(fd: int, depth: int) -> int:
+        total = 0
         try:
-            with os.scandir(current) as it:
-                for de in it:
-                    try:
-                        st = de.stat(follow_symlinks=False)
-                    except FileNotFoundError:
-                        continue
-                    if statmod.S_ISDIR(st.st_mode):
-                        stack.append(de.path)
-                    else:
-                        total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+            with os.scandir(fd) as it:
+                entries = list(it)
         except (FileNotFoundError, PermissionError, NotADirectoryError):
-            continue
-    return total
+            return 0
+        for de in entries:
+            try:
+                st = de.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            if statmod.S_ISDIR(st.st_mode):
+                if depth >= MAX_SIZE_DEPTH:
+                    continue
+                try:
+                    child = os.open(de.name, flags, dir_fd=fd)
+                except OSError:
+                    continue  # replaced by a link or removed meanwhile
+                try:
+                    total += walk(child, depth + 1)
+                finally:
+                    os.close(child)
+            else:
+                total += getattr(st, "st_blocks", 0) * 512 or st.st_size
+        return total
+
+    try:
+        root = os.open(path, flags)
+    except (FileNotFoundError, PermissionError, NotADirectoryError, OSError):
+        return 0
+    try:
+        return walk(root, 0)
+    finally:
+        os.close(root)
+
+
+MAX_SIZE_DEPTH = 256
 
 
 def instance_usage(settings: Settings, instance_id: UUID, *, max_age: float = USAGE_TTL) -> dict[str, Any]:

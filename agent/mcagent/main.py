@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import functools
 import hashlib
 import ipaddress
@@ -868,6 +869,9 @@ async def start(instance_id: UUID, settings: Settings = Depends(get_settings)) -
 
     def _start() -> None:
         with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            # again under the lock: an operation that needs the server stopped may have registered
+            # while this request waited (B-4)
+            registry.assert_lifecycle_allowed(instance_id)
             docker_ops.start(instance_id)
 
     await run_in_threadpool(_start)
@@ -910,6 +914,7 @@ async def restart(
     def _restart() -> docker_ops.StopResult:
         # stop and start of the same container: a retire must not remove it in between
         with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+            registry.assert_lifecycle_allowed(instance_id)  # again under the lock (B-4)
             # refused before the stop when the start would be (server folder only: a hung server's
             # API must not keep it from being restarted), so a refused restart leaves it running
             docker_ops.start_guard(
@@ -1175,6 +1180,7 @@ async def clone(
         raise AgentError("Stop the source server before cloning it", "source_running", 409)
 
     def _clone(op: Operation) -> dict[str, Any]:
+        from .safefs import copy_tree_fd
         from .snapshots import create_empty_dir, prepare_replacement, remove_tree
 
         skipped_worlds: list[str] = []
@@ -1215,7 +1221,7 @@ async def clone(
             with _staging_inside(dst, "clone") as (root_fd, stage_fd, stage_name):
                 # through the descriptor: renaming the staging folder cannot redirect the copy
                 copy = f"/proc/self/fd/{stage_fd}/c"
-                shutil.copytree(src, copy, symlinks=True, ignore=ignore)
+                copy_tree_fd(src, copy, ignore)  # descriptors, never a path resolved again (B-4)
                 op.update(0.9, "Setting the owner of the copied files")
                 _chown_tree(Path(copy), settings.runtime_uid, settings.runtime_gid)
                 _swap_in_staged(root_fd, stage_fd, "c", stage_name)
@@ -1232,7 +1238,7 @@ async def clone(
                     "Could not create a btrfs subvolume; the clone is a plain directory "
                     "(convert it to enable snapshots)"
                 )
-            shutil.copytree(src, staging, symlinks=True, ignore=ignore, dirs_exist_ok=True)
+            copy_tree_fd(src, staging, ignore)  # descriptors, never a path resolved again (B-4)
             op.update(0.9, "Setting the owner of the copied files")
             _chown_tree(staging, settings.runtime_uid, settings.runtime_gid)
             if dst.exists():
@@ -1246,6 +1252,7 @@ async def clone(
         return result({"warnings": warnings} if warnings else {})
 
     def _clone_unverified(op: Operation) -> dict[str, Any]:
+        _still_stopped(instance_id, "Stop the source server before cloning it", "source_running")  # B-4
         try:
             return _clone(op)
         finally:
@@ -1993,6 +2000,7 @@ async def files_extract(
         raise AgentError("The archive must be a regular file", "not_a_file", 400)
 
     def _do(op: Operation) -> dict[str, Any]:
+        _still_stopped(instance_id, "Stop the server before extracting archives into it")  # B-4
         op.update(0.01, f"Extracting {body.path}")
         try:
             return extract(
@@ -2078,6 +2086,17 @@ async def world_replace(
 
     op = registry.start("world_replace", [instance_id], _do)
     return {"operation": op.as_dict()}
+
+
+def _still_stopped(instance_id: UUID, message: str, code: str = "must_stop") -> None:
+    """For an operation that needs the server stopped, called first inside it (B-4). The operation is
+    registered by now, so every later start or restart is refused (``assert_lifecycle_allowed`` under
+    the per-server lock); taking the lock waits for one that was already under way, and the state is
+    read again: 409 ``must_stop`` when the server runs after all."""
+    with docker_ops.instance_lock(instance_id, wait=LIFECYCLE_LOCK_WAIT):
+        live = _container_live(docker_ops.status(instance_id))
+    if live:
+        raise AgentError(message, code, 409)
 
 
 def _container_live(status: dict[str, Any]) -> bool:
@@ -2197,18 +2216,56 @@ def _carry_over_excluded(
         if pattern.startswith("..") or os.path.isabs(pattern):
             continue
         for rel in _excluded_matches(current, pattern):
-            src, dst = current / rel, restored / rel
-            if os.path.lexists(dst) or not _real_parents(current, rel, include_last=True):
-                continue
-            try:
-                if not _make_real_parents(restored, rel):
-                    continue
-                os.rename(src, dst)
-            except OSError as exc:
-                warnings.append(
-                    f"{rel} (not in backups) could not be kept and is downloaded again at the next start: {exc}"
-                )
+            # both parents opened as real folders and the entry renamed by name between them: nothing is
+            # resolved by path again after the checks (B-4)
+            if (warning := _carry_one(current, restored, rel)) is not None:
+                warnings.append(warning)
     return warnings
+
+
+def _carry_one(current: Path, restored: Path, rel: str) -> str | None:
+    """Move ``rel`` from ``current`` into ``restored`` (see :func:`_carry_over_excluded`); a warning when
+    the move failed, None when it was done or skipped (missing, a link, a link in the way, already there)."""
+    from .safefs import open_dir_chain
+
+    parts = [p for p in rel.split("/") if p]
+    if not parts:
+        return None
+    name = parts[-1]
+    sfd = open_dir_chain(current, parts[:-1])
+    if sfd is None:
+        return None
+    try:
+        try:
+            st = os.stat(name, dir_fd=sfd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+            return None  # a link (never carried) or something that is neither file nor folder
+        try:
+            dfd = open_dir_chain(restored, parts[:-1], create=True)
+        except OSError as exc:
+            return (
+                f"{rel} (not in backups) could not be kept and is downloaded again at the next start: {exc}"
+            )
+        if dfd is None:
+            return None  # a link or a file in the way in the restored tree
+        try:
+            try:
+                os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                return None  # the restored tree has it
+            except FileNotFoundError:
+                pass
+            os.rename(name, name, src_dir_fd=sfd, dst_dir_fd=dfd)
+        except OSError as exc:
+            return (
+                f"{rel} (not in backups) could not be kept and is downloaded again at the next start: {exc}"
+            )
+        finally:
+            os.close(dfd)
+    finally:
+        os.close(sfd)
+    return None
 
 
 def _excluded_matches(current: Path, pattern: str) -> list[str]:
@@ -2218,47 +2275,66 @@ def _excluded_matches(current: Path, pattern: str) -> list[str]:
         return (
             [pattern] if os.path.lexists(current / pattern) and not (current / pattern).is_symlink() else []
         )
+    pats = [p for p in pattern.split("/") if p not in ("", ".")]
+    out: set[str] = set()
+
+    def walk(fd: int, prefix: list[str], depth: int) -> None:
+        with os.scandir(fd) as it:
+            entries = list(it)
+        for de in entries:
+            parts = [*prefix, de.name]
+            try:
+                st = de.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                continue  # never returned, never followed
+            if _glob_match(parts, pats):
+                out.add("/".join(parts))
+            if stat.S_ISDIR(st.st_mode) and depth < 64 and _glob_prefix(parts, pats):
+                try:
+                    child = os.open(
+                        de.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd
+                    )
+                except OSError:
+                    continue
+                try:
+                    walk(child, parts, depth + 1)
+                finally:
+                    os.close(child)
+
     try:
-        found = current.glob(pattern, recurse_symlinks=False)
-        out = sorted({str(p.relative_to(current)) for p in found if not p.is_symlink()})
-    except (OSError, ValueError):
+        root_fd = os.open(current, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
         return []
-    return out
+    try:
+        walk(root_fd, [], 0)
+    except OSError:
+        return []
+    finally:
+        os.close(root_fd)
+    return sorted(out)
 
 
-def _real_parents(base: Path, rel: str, *, include_last: bool = False) -> bool:
-    """Whether every folder on the way from ``base`` to ``rel`` (and ``rel`` itself with
-    ``include_last``) exists as a real directory or file, never a symbolic link."""
-    parts = Path(rel).parts
-    path = base
-    for i, part in enumerate(parts):
-        path = path / part
-        last = i == len(parts) - 1
-        if last and not include_last:
-            break
-        try:
-            st = os.lstat(path)
-        except OSError:
-            return False
-        if stat.S_ISLNK(st.st_mode) or (not last and not stat.S_ISDIR(st.st_mode)):
-            return False
-    return True
+def _glob_match(parts: list[str], pats: list[str]) -> bool:
+    """Whether path ``parts`` match pattern ``pats`` (``*``/``?``/``[...]`` within a part, ``**`` any
+    number of parts, as ``Path.glob`` matched them)."""
+    if not pats:
+        return not parts
+    if pats[0] == "**":
+        return any(_glob_match(parts[i:], pats[1:]) for i in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], pats[0]) and _glob_match(parts[1:], pats[1:])
 
 
-def _make_real_parents(base: Path, rel: str) -> bool:
-    """Create the missing folders of ``rel``'s parent below ``base``; False when one of them is a link or
-    not a folder (the restored tree comes from a backup of the server folder: a link there is the game's)."""
-    path = base
-    for part in Path(rel).parts[:-1]:
-        path = path / part
-        try:
-            st = os.lstat(path)
-        except FileNotFoundError:
-            os.mkdir(path)
-            continue
-        if not stat.S_ISDIR(st.st_mode):
-            return False
-    return True
+def _glob_prefix(parts: list[str], pats: list[str]) -> bool:
+    """Whether something below ``parts`` can still match ``pats`` (the walk goes deeper only then)."""
+    if not parts:
+        return True
+    if not pats:
+        return False
+    if pats[0] == "**":
+        return True
+    return fnmatch.fnmatchcase(parts[0], pats[0]) and _glob_prefix(parts[1:], pats[1:])
 
 
 @app.post("/v1/instances/{instance_id}/backups", dependencies=[Depends(require_token)])
@@ -2384,6 +2460,7 @@ async def restore_backup(
         return result
 
     def _restore_unverified(op: Operation) -> dict[str, Any]:
+        _still_stopped(target_id, "Stop the target server before restoring", "target_running")  # B-4
         claimmarker.remove(settings, target_id, "a restore of the server folder began")
         try:
             return _restore(op)
@@ -2499,6 +2576,7 @@ async def backup_restore_path(
     restic = Restic(settings, instance_id)
 
     def _do(op: Operation) -> dict[str, Any]:
+        _still_stopped(instance_id, "Stop the server before restoring files into it")  # B-4
         try:
             return _restore_path(op)
         finally:
@@ -2959,6 +3037,7 @@ async def restore_snapshot(
     snaps = snapshot_provider(settings, instance_id)
 
     def _do(_op: Operation) -> Any:
+        _still_stopped(instance_id, "Stop the server before rolling back to a snapshot")  # B-4
         claimmarker.remove(settings, instance_id, "a snapshot rollback began")
         try:
             return snaps.restore(name)
@@ -2979,7 +3058,12 @@ async def convert_for_snapshots(
     if (await run_in_threadpool(docker_ops.status, instance_id)).get("running"):
         raise AgentError("Stop the server before enabling snapshots", "must_stop", 409)
     snaps = snapshot_provider(settings, instance_id)
-    op = registry.start("import", [instance_id], lambda _op: snaps.convert())
+
+    def _convert(_op: Operation) -> Any:
+        _still_stopped(instance_id, "Stop the server before enabling snapshots")  # B-4
+        return snaps.convert()
+
+    op = registry.start("import", [instance_id], _convert)
     return {"operation": op.as_dict()}
 
 
