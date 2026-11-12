@@ -28,3 +28,11 @@ export function useFriendOnly(): boolean {
   const instances = useInstances();
   return friendOnly(user, instances.data);
 }
+
+/** "3 of 10 players online" from a friend's short answer, or null while the count is unknown (or not in the answer). */
+export function playersOnlineText(i: Pick<Instance, "players_online" | "players_max">): string | null {
+  const n = i.players_online;
+  if (typeof n !== "number") return null;
+  const max = typeof i.players_max === "number" && i.players_max > 0 ? ` of ${i.players_max}` : "";
+  return `${n}${max} player${n === 1 && !max ? "" : "s"} online`;
+}

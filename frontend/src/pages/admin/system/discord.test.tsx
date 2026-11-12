@@ -13,7 +13,7 @@ import { qk } from "@/lib/queries";
 import type { AuthState, Instance, PermissionCode } from "@/lib/types";
 import { DiscordServerSection } from "@/pages/instance/settings/discord-section";
 import { makeInstance } from "@/test/fixtures";
-import { describeState, idsError, parseIds, type DiscordSettings } from "./discord-model";
+import { describeState, idsError, nextTryText, parseIds, type DiscordSettings } from "./discord-model";
 import { DiscordSection } from "./DiscordSection";
 
 const ROLE = "123456789012345678";
@@ -92,6 +92,21 @@ describe("discord model", () => {
       tone: "error",
     });
     expect(describeState(settings({}, { state: "no_token" }).status).label).toBe("Needs the bot token");
+  });
+});
+
+describe("a bot in error", () => {
+  it("says when it tries again, and that the panel is not affected", async () => {
+    const at = new Date(2026, 10, 12, 14, 32).getTime() / 1000;
+    const hhmm = new Date(at * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    expect(nextTryText(settings({}, { state: "error", retry_at: at }).status)).toBe(`next try at ${hhmm}`);
+    expect(nextTryText(settings({}, { state: "connected", retry_at: at }).status)).toBeNull();
+    expect(nextTryText(settings({}, { state: "error", retry_at: null }).status)).toBeNull();
+    current = settings({ enabled: true, guild_id: GUILD, token_set: true }, { state: "error", last_error: "Discord refused the bot token", retry_at: at });
+    wrap(<DiscordSection />);
+    expect(await screen.findByRole("status", { name: "Bot state" })).toHaveTextContent("Error: Discord refused the bot token");
+    expect(screen.getByText(`next try at ${hhmm}`)).toBeInTheDocument();
+    expect(screen.getByText(/the panel, its servers and their schedules keep working as usual/)).toBeInTheDocument();
   });
 });
 

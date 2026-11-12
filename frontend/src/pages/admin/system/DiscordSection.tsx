@@ -24,6 +24,7 @@ import {
   DISCORD_DOCS_URL,
   discordKey,
   idsError,
+  nextTryText,
   parseIds,
   SNOWFLAKE,
   useDiscordSettings,
@@ -46,6 +47,7 @@ function StateLine({ data }: { data: DiscordSettings }) {
       <span className={cn("rounded-full px-2.5 py-0.5 text-xs font-medium", TONES[tone])} role="status" aria-label="Bot state">
         {label}
       </span>
+      {nextTryText(data.status) && <span className="text-xs text-muted-foreground">{nextTryText(data.status)}</span>}
       {data.status.updated_at ? <span className="text-xs text-muted-foreground">reported {relativeTime(data.status.updated_at * 1000)}</span> : null}
       {data.status.invite_url && (
         <a href={data.status.invite_url} target="_blank" rel="noopener noreferrer" className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline">
@@ -284,6 +286,10 @@ export function DiscordSection() {
       ) : query.data ? (
         <div className="grid gap-4">
           <StateLine data={query.data} />
+          <p className="text-xs text-muted-foreground">
+            The bot runs on its own: when it is off, cannot connect or fails, the panel, its servers and their schedules keep working
+            as usual. Only the slash commands in Discord are unavailable meanwhile.
+          </p>
           <SetupSteps />
           <DiscordForm key={`${query.data.enabled}|${query.data.guild_id}|${query.data.roles.join()}|${query.data.channel_id}`} data={query.data} />
         </div>

@@ -31,7 +31,7 @@ import { jobStatusLabel } from "./activity/job-utils";
 import { softwareLabel } from "./instance/InstanceLayout";
 import { ServerQuickActions } from "./library/ServerActions";
 import { memoryCommitment, statusBucket, statusRank } from "./library/server-utils";
-import { friendOnly } from "@/lib/limited";
+import { friendOnly, playersOnlineText } from "@/lib/limited";
 
 const MAX_STATS = 6;
 const MAX_ROWS = 8;
@@ -268,8 +268,20 @@ function DashboardServerRow({ instance, withStats: wanted }: { instance: Instanc
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-muted-foreground">
           <span className="truncate">{softwareLabel(instance)}</span>
-          <span className="tabular-nums">:{instance.game_port}</span>
-          <span>{formatMemoryMb(instance.memory_mb)} heap</span>
+          {instance.limited ? (
+            // a friend's short answer (B4): the players count instead of port and memory
+            playersOnlineText(instance) && (
+              <span className="inline-flex items-center gap-1 tabular-nums">
+                <Users className="size-3" aria-hidden />
+                {playersOnlineText(instance)}
+              </span>
+            )
+          ) : (
+            <>
+              <span className="tabular-nums">:{instance.game_port}</span>
+              <span>{formatMemoryMb(instance.memory_mb)} heap</span>
+            </>
+          )}
           {live && stats && (
             <>
               {stats.cpu_percent !== undefined && (

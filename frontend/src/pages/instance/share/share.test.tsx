@@ -14,7 +14,7 @@ import { copyText } from "@/lib/clipboard";
 import { qk } from "@/lib/queries";
 import type { AuthState, Instance, PermissionCode } from "@/lib/types";
 import { makeInstance } from "@/test/fixtures";
-import { shareKey, withoutPassword, type ShareAnswer } from "./share-api";
+import { shareKey, type ShareAnswer } from "./share-api";
 import { ShareButton, ShareCard } from "./ShareCard";
 
 vi.mock("@/lib/clipboard", () => ({ copyText: vi.fn(async () => true) }));
@@ -41,7 +41,7 @@ const VALHEIM = (over: Partial<ShareAnswer> = {}): ShareAnswer => ({
     { id: "protection", ok: true, label: "Strangers are kept out by a join password", hint: "" },
     { id: "ports", ok: null, label: "Forward on your router: UDP 2456, UDP 2457", hint: "The panel does not change your router." },
   ],
-  password: SECRET,
+  password_set: true,
   ...over,
 });
 
@@ -65,6 +65,7 @@ beforeEach(() => {
       if (query?.with_password === "true") {
         a.invite_text = a.invite_text.replace("Password: ask me for it", `Password: ${SECRET}`);
         a.invite_has_password = true;
+        a.password = SECRET;
       }
       return a;
     }
@@ -90,16 +91,6 @@ function renderCard(instance: Instance, globalPerms: PermissionCode[] = []) {
 }
 
 describe("the Share card", () => {
-  it("keeps the password out of the cached answer", () => {
-    const kept = withoutPassword(VALHEIM());
-    expect(kept).not.toHaveProperty("password");
-    expect(kept).toMatchObject({ passwordReadable: true, passwordSet: true });
-    expect(withoutPassword(VALHEIM({ password: "" }))).toMatchObject({ passwordReadable: true, passwordSet: false });
-    const friend = VALHEIM();
-    delete friend.password;
-    expect(withoutPassword(friend)).toMatchObject({ passwordReadable: false, passwordSet: null });
-  });
-
   it("shows the address, ports, protection, steps and checklist; copies the address", async () => {
     const { qc, user } = renderCard(valheim());
     expect(await screen.findByLabelText("Address friends type")).toHaveTextContent("play.example.org:2456");
@@ -130,12 +121,20 @@ describe("the Share card", () => {
     expect(JSON.stringify(qc.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(SECRET);
   });
 
+  it("follows password_set: unknown when the password cannot be read now", async () => {
+    answer = VALHEIM({ password_set: null });
+    renderCard(valheim());
+    expect(await screen.findByText("Protected by a join password? The panel could not check it right now.")).toBeInTheDocument();
+    expect(screen.getByText("The join password could not be read right now.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy password" })).not.toBeInTheDocument();
+  });
+
   it("marks failing items and links to where they are fixed", async () => {
     answer = VALHEIM({
       address: { host: null, source: null, note: "No public address is set: an administrator sets it in System settings." },
       connect: null,
       protection: { kind: "password", on: false, label: "a join password" },
-      password: "",
+      password_set: false,
       checklist: [
         { id: "running", ok: false, label: "The server is running", hint: "Start it before your friends join." },
         { id: "public_address", ok: false, label: "A public address is set", hint: "No public address is set." },
@@ -160,7 +159,6 @@ describe("the Share card", () => {
 
   it("a friend sees it without password and without fix-it links", async () => {
     const friendAnswer = VALHEIM({ checklist: [{ id: "public_address", ok: false, label: "A public address is set", hint: "Not set." }] });
-    delete friendAnswer.password;
     answer = friendAnswer;
     const { user } = renderCard(valheim({ limited: true, permissions: ["instance.control"] }));
     await user.click(await screen.findByRole("button", { name: "Copy invite" }));
@@ -177,7 +175,7 @@ describe("the Share card", () => {
       game_label: "Minecraft",
       protection: { kind: "whitelist", on: false, label: "the whitelist" },
       open_warning: "Anyone with a Minecraft account can join while the whitelist is off.",
-      password: null,
+      password_set: false,
     });
     const post = vi.spyOn(api, "post").mockResolvedValue({ via: "file", output: "" } as never);
     const patch = vi.spyOn(api, "patch").mockResolvedValue({ values: { "white-list": "true" } } as never);

@@ -27,6 +27,8 @@ export interface DiscordSettings {
     guild_channels: DiscordNamed[];
     application_id: string | null;
     invite_url: string | null;
+    /** With `state: "error"`: when the bot tries again (epoch seconds); null otherwise. */
+    retry_at?: number | null;
   };
 }
 
@@ -56,6 +58,12 @@ export function parseIds(text: string): string[] {
 export function idsError(ids: string[]): string | null {
   const bad = ids.find((id) => !SNOWFLAKE.test(id));
   return bad ? `“${bad}” is not a Discord id (15 to 22 digits)` : null;
+}
+
+/** "next try at 14:32" for a bot in error with a retry time, else null. */
+export function nextTryText(s: DiscordSettings["status"]): string | null {
+  if (s.state !== "error" || typeof s.retry_at !== "number") return null;
+  return `next try at ${new Date(s.retry_at * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 /** The state in words for the page. */

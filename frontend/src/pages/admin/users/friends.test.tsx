@@ -13,7 +13,7 @@ import { AppLayout } from "@/components/layout/AppLayout";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/hooks/use-theme";
 import { api, ApiError } from "@/lib/api";
-import { friendOnly } from "@/lib/limited";
+import { friendOnly, playersOnlineText } from "@/lib/limited";
 import { qk } from "@/lib/queries";
 import { instanceSections } from "@/lib/sections";
 import type { AuthState, Instance, PermissionCode } from "@/lib/types";
@@ -73,6 +73,14 @@ describe("who is only a friend", () => {
     expect(friendOnly(authFor(["instance.view"]).user, [limitedServer()])).toBe(false);
     expect(friendOnly(authFor([], { is_owner: true }).user, [])).toBe(false);
     expect(friendOnly(user, undefined)).toBe(false);
+  });
+
+  it("says how many play, from the short answer", () => {
+    expect(playersOnlineText({ players_online: 3, players_max: 10 })).toBe("3 of 10 players online");
+    expect(playersOnlineText({ players_online: 1, players_max: null })).toBe("1 player online");
+    expect(playersOnlineText({ players_online: 0, players_max: 10 })).toBe("0 of 10 players online");
+    expect(playersOnlineText({ players_online: null, players_max: 10 })).toBeNull();
+    expect(playersOnlineText({})).toBeNull();
   });
 
   it("a limited server has its overview only, and no Settings in its action menu", async () => {
@@ -156,7 +164,7 @@ describe("the app of a friend", () => {
   }
 
   it("a server page: status, Start and the Share card; no tabs, no other page reached", async () => {
-    const server = limitedServer();
+    const server = limitedServer({ status: "running", players_online: 2, players_max: 10 });
     gets[`/instances/${server.id}/share`] = {
       game: "valheim",
       game_label: "Valheim",
@@ -173,7 +181,8 @@ describe("the app of a friend", () => {
     };
     renderAt(`/servers/${server.id}/console`, [{ path: "/servers/:id", element: <InstanceLayout />, children: [{ index: true, element: <Overview /> }, { path: "console", element: <p>console page</p> }] }], [server]);
     expect(await screen.findByLabelText("Address friends type")).toHaveTextContent("play.example.org:2456");
-    expect(screen.getByRole("button", { name: /Start/ })).toBeInTheDocument();
+    expect(screen.getByText(/2 of 10 players online/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeInTheDocument();
     expect(screen.queryByRole("navigation", { name: "Server sections" })).not.toBeInTheDocument();
     expect(screen.queryByText("console page")).not.toBeInTheDocument();
     expect(screen.queryByText(/Java|port undefined/)).not.toBeInTheDocument();
@@ -181,9 +190,11 @@ describe("the app of a friend", () => {
   });
 
   it("the dashboard lists their servers without stats, activity or host panels", async () => {
-    const running = limitedServer({ status: "running" });
+    const running = limitedServer({ status: "running", players_online: 4, players_max: null });
     renderAt("/", [{ path: "/", element: <Dashboard /> }], [running]);
     expect(await screen.findByRole("link", { name: "Vikings" })).toBeInTheDocument();
+    expect(screen.getByText("4 players online")).toBeInTheDocument();
+    expect(screen.queryByText(/heap|:undefined/)).not.toBeInTheDocument();
     expect(screen.queryByText("Recent activity")).not.toBeInTheDocument();
     expect(screen.queryByText("Host capacity")).not.toBeInTheDocument();
     await new Promise((r) => setTimeout(r, 20));

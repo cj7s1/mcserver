@@ -24,7 +24,7 @@ import { isMinecraft } from "@/lib/games";
 import type { Instance } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { playerNameError, usePlayerAction } from "../players/player-utils";
-import { fetchWithPassword, shareKey, useShareCard, type ShareCardData, type ShareChecklistItem } from "./share-api";
+import { fetchWithPassword, shareKey, useShareCard, type ShareAnswer, type ShareChecklistItem } from "./share-api";
 
 async function copy(text: string, what: string) {
   if (await copyText(text)) toast.success(`${what} copied`);
@@ -62,7 +62,7 @@ const MARK = {
 } as const;
 
 /** Where a failing checklist item is fixed, for users who may fix it there. */
-function fixLink(item: ShareChecklistItem, data: ShareCardData, instance: Instance, mayConfigure: boolean, maySystem: boolean): ReactNode {
+function fixLink(item: ShareChecklistItem, data: ShareAnswer, instance: Instance, mayConfigure: boolean, maySystem: boolean): ReactNode {
   if (item.ok === true) return null;
   const link = (to: string, text: string) => (
     <Link to={to} className="font-medium text-primary hover:underline">
@@ -81,7 +81,7 @@ function fixLink(item: ShareChecklistItem, data: ShareCardData, instance: Instan
   return null;
 }
 
-function Checklist({ data, instance, mayConfigure, maySystem }: { data: ShareCardData; instance: Instance; mayConfigure: boolean; maySystem: boolean }) {
+function Checklist({ data, instance, mayConfigure, maySystem }: { data: ShareAnswer; instance: Instance; mayConfigure: boolean; maySystem: boolean }) {
   return (
     <ul className="grid gap-2" aria-label="Checklist">
       {data.checklist.map((item) => {
@@ -106,9 +106,11 @@ function Checklist({ data, instance, mayConfigure, maySystem }: { data: ShareCar
   );
 }
 
-function ProtectionLine({ data }: { data: ShareCardData }) {
+function ProtectionLine({ data }: { data: ShareAnswer }) {
   const p = data.protection;
-  if (p.kind === "none" || p.on === false)
+  // a password game is protected when a join password is set (`password_set`, null = cannot be read now)
+  const on = p.kind === "password" && data.password_set !== undefined ? data.password_set : p.on;
+  if (p.kind === "none" || on === false)
     return (
       <p className="flex items-start gap-2 text-sm text-amber-800 dark:text-amber-200">
         <LockOpen className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -118,7 +120,7 @@ function ProtectionLine({ data }: { data: ShareCardData }) {
         </span>
       </p>
     );
-  if (p.on === null)
+  if (on === null)
     return (
       <p className="flex items-start gap-2 text-sm text-muted-foreground">
         <CircleHelp className="mt-0.5 size-4 shrink-0" aria-hidden />
@@ -134,7 +136,7 @@ function ProtectionLine({ data }: { data: ShareCardData }) {
 }
 
 /** Minecraft: whitelist a friend by their Minecraft name; offer to turn the whitelist on when it is off. */
-function AddFriend({ instance, data, mayConfigure }: { instance: Instance; data: ShareCardData; mayConfigure: boolean }) {
+function AddFriend({ instance, data, mayConfigure }: { instance: Instance; data: ShareAnswer; mayConfigure: boolean }) {
   const id = useId();
   const qc = useQueryClient();
   const [name, setName] = useState("");
@@ -217,7 +219,7 @@ export function ShareContent({ instance, enabled = true }: { instance: Instance;
   const mayConfigure = !limited && instance.permissions.includes("instance.configure");
   const maySystem = !limited && canGlobal("system.settings");
   const passwordGame = data.protection.kind === "password";
-  const mayCopyPassword = data.passwordReadable && passwordGame && data.passwordSet === true;
+  const mayCopyPassword = mayConfigure && passwordGame && data.password_set === true;
   const mayAddFriend = !limited && isMinecraft(instance) && instance.permissions.includes("instance.players");
 
   return (
@@ -248,10 +250,10 @@ export function ShareContent({ instance, enabled = true }: { instance: Instance;
 
       <div className="grid gap-2">
         <ProtectionLine data={data} />
-        {data.passwordReadable && passwordGame && (
+        {mayConfigure && passwordGame && data.password_set !== undefined && (
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <KeyRound className="size-4 text-muted-foreground" aria-hidden />
-            {data.passwordSet === true ? (
+            {data.password_set === true ? (
               <>
                 <span>Join password: ••••••••</span>
                 <CopyAction
@@ -263,7 +265,7 @@ export function ShareContent({ instance, enabled = true }: { instance: Instance;
                   }}
                 />
               </>
-            ) : data.passwordSet === false ? (
+            ) : data.password_set === false ? (
               <span className="text-muted-foreground">No join password is set.</span>
             ) : (
               <span className="text-muted-foreground">The join password could not be read right now.</span>

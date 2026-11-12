@@ -1,9 +1,9 @@
 /**
  * The Share card's data (B1): `GET /api/instances/<id>/share` (backend apps/instances/share.py).
  *
- * The plain answer carries the join password for users who may configure the server. It never goes into the
- * query cache: the query keeps only whether a password is set; the password itself is fetched on demand
- * (`?with_password=true`) by the copy buttons and dropped right after it was copied.
+ * The plain answer never carries the join password, only `password_set`. The password itself (and an invite
+ * text with it) is fetched on demand (`?with_password=true`, users who may configure the server) by the copy
+ * buttons and dropped right after it was copied: it never enters the query cache.
  */
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -33,34 +33,18 @@ export interface ShareAnswer {
   invite_text: string;
   invite_has_password: boolean;
   checklist: ShareChecklistItem[];
-  /** Only for users who may configure the server: "" none set, null unknown or not a password game. */
+  /** A join password is set (true), none (false), cannot be read now (null); false for games without one. */
+  password_set?: boolean | null;
+  /** Only in the `with_password=true` answer: "" none set, null unknown or not a password game. */
   password?: string | null;
-}
-
-/** What the page keeps: the answer without the password, plus whether this user may read one and whether one is set. */
-export interface ShareCardData extends Omit<ShareAnswer, "password"> {
-  /** The answer carried the password field: this user may copy the password (with_password). */
-  passwordReadable: boolean;
-  /** A join password is set (true), none (false), unknown (null). */
-  passwordSet: boolean | null;
 }
 
 export const shareKey = (instanceId: string) => ["instances", instanceId, "share"] as const;
 
-export function withoutPassword(answer: ShareAnswer): ShareCardData {
-  const { password, ...rest } = answer;
-  const readable = Object.prototype.hasOwnProperty.call(answer, "password");
-  return {
-    ...rest,
-    passwordReadable: readable,
-    passwordSet: !readable || password === null || password === undefined ? null : password !== "",
-  };
-}
-
 export function useShareCard(instanceId: string, enabled = true) {
   return useQuery({
     queryKey: shareKey(instanceId),
-    queryFn: async () => withoutPassword(await api.get<ShareAnswer>(`/instances/${instanceId}/share`)),
+    queryFn: () => api.get<ShareAnswer>(`/instances/${instanceId}/share`),
     enabled,
     staleTime: 15_000,
     retry: false,

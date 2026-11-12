@@ -533,6 +533,9 @@ export interface Instance {
    * permissions, ...); every other field is missing. The page then offers status, Start/Stop and the Share card.
    */
   limited?: boolean;
+  /** Only in the short answer (`limited`): players online and the maximum from the newest sample; null = unknown. */
+  players_online?: number | null;
+  players_max?: number | null;
   /** Stop when empty (B2): minutes without players before the server is stopped; 0 = off; else 5..1440. */
   idle_stop_minutes?: number;
   /** Why "stop when empty" cannot be offered for this server (the panel cannot read its player count); null = it can. */

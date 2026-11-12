@@ -16,6 +16,7 @@ import { gameLabel, hasCapability, isMinecraft, variantLabel } from "@/lib/games
 import { sendPower } from "@/lib/power";
 import { hasPerm, useInstance, useInvalidateInstance } from "@/lib/queries";
 import { restartRequiredText } from "@/lib/restart-required";
+import { playersOnlineText } from "@/lib/limited";
 import { instanceSections, sectionPath } from "@/lib/sections";
 import type { Instance, PermissionCode } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -153,8 +154,11 @@ export function InstanceLayout() {
               </div>
               <p className="mt-0.5 text-sm text-muted-foreground [overflow-wrap:anywhere]">
                 {instance.limited ? (
-                  // a friend's short answer (B4) has no Java version or port fields
-                  softwareLabel(instance)
+                  // a friend's short answer (B4) has no Java version or port fields; it has the players count
+                  <>
+                    {softwareLabel(instance)}
+                    {playersOnlineText(instance) && ` · ${playersOnlineText(instance)}`}
+                  </>
                 ) : (
                   <>
                     {softwareLabel(instance)}
