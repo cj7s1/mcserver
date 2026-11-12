@@ -197,6 +197,7 @@ class Cs2Definition(SteamGameDefinition):
             link="https://steamcommunity.com/dev/managegameservers",
             pattern=GSLT_PATTERN,
             pattern_help="32 characters, digits and A-F (as Steam shows it)",
+            per_server=True,  # one token per server: a copy does not take it over
         ),
         SecretSpec(
             JOIN_PASSWORD,

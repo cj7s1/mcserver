@@ -190,3 +190,80 @@ def test_e8_a_start_of_an_installed_server_keeps_the_short_watch(
         resp = clients["owner"].post(f"/api/instances/{inst.id}/power", {"action": "start"}, format="json")
     job = Job.objects.get(pk=resp.json()["id"])
     assert job.status == JobStatus.SUCCEEDED and "not ready within 0 minutes" in " ".join(job.log)
+
+
+# --- E-4 (I-3) ------------------------------------------------------------------------------------------------
+# adopted from e-bugs/poc/backend/test_e_clone_drops_secrets.py
+def _clone(clients: Any, capture: Any, src: Instance, name: str) -> Instance:
+    with capture(execute=True):
+        resp = clients["owner"].post(f"/api/instances/{src.id}/clone", {"name": name}, format="json")
+    assert resp.status_code == 202, resp.json()
+    job = Job.objects.get(pk=resp.json()["job"]["id"])
+    assert job.status == JobStatus.SUCCEEDED, job.error
+    return Instance.objects.get(pk=resp.json()["instance"]["id"])
+
+
+def test_e4_a_cloned_valheim_server_keeps_the_join_password(clients, fake_agent, django_capture_on_commit_callbacks):
+    from apps.instances.spec import build_spec
+
+    src = create(clients, django_capture_on_commit_callbacks, "valheim", secrets={"server_password": "sesame-42"})
+    clone = _clone(clients, django_capture_on_commit_callbacks, src, "Copy of the world")
+    assert clone.secret_values == {"server_password": "sesame-42"}
+    assert build_spec(clone)["env"]["SERVER_PASS"] == "sesame-42"
+
+
+def test_e4_a_valheim_server_restored_as_new_keeps_the_join_password(clients, fake_agent, django_capture_on_commit_callbacks):
+    from apps.backups.models import Backup
+    from apps.instances.spec import build_spec
+
+    src = create(clients, django_capture_on_commit_callbacks, "valheim", secrets={"server_password": "sesame-42"})
+    assert run("backup", src, django_capture_on_commit_callbacks).status == JobStatus.SUCCEEDED
+    backup = Backup.objects.get(instance=src)
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post(
+            f"/api/instances/{src.id}/backups/{backup.id}/restore-as-new", {"name": "Restored"}, format="json"
+        )
+    assert resp.status_code == 202, resp.json()
+    new = Instance.objects.get(pk=resp.json()["instance"]["id"])
+    assert Job.objects.get(pk=resp.json()["job"]["id"]).status == JobStatus.SUCCEEDED
+    assert build_spec(new)["env"].get("SERVER_PASS") == "sesame-42"
+
+
+def test_e4_a_cloned_palworld_server_keeps_the_join_password(clients, fake_agent, django_capture_on_commit_callbacks):
+    from apps.instances.spec import build_spec
+
+    src = create(clients, django_capture_on_commit_callbacks, "palworld", secrets={"server_password": "join-me"})
+    clone = _clone(clients, django_capture_on_commit_callbacks, src, "Pal copy")
+    assert build_spec(clone)["env"].get("SERVER_PASSWORD") == "join-me"
+    # the generated admin password goes with it (the copied world's admins log in with it)
+    assert clone.secret_values.get("admin_password") == src.secret_values.get("admin_password")
+
+
+def test_e4_a_cs2_copy_keeps_the_passwords_but_not_the_servers_own_token(clients, fake_agent, django_capture_on_commit_callbacks):
+    token = "A" * 32
+    src = create(clients, django_capture_on_commit_callbacks, "cs2", secrets={"server_password": "joinme1", "gslt": token})
+    assert src.secret_values["gslt"] == token
+    clone = _clone(clients, django_capture_on_commit_callbacks, src, "CS copy")
+    assert clone.secret_values.get("server_password") == "joinme1" and "gslt" not in clone.secret_values
+
+
+def test_e4_a_valheim_server_without_its_join_password_is_not_started(clients, fake_agent, django_capture_on_commit_callbacks):
+    """A copy made before this fix: the start is refused (409 secret_required with the key), at the request and
+    in a job (a schedule, the resume after a host restart)."""
+    src = create(clients, django_capture_on_commit_callbacks, "valheim")
+    Instance.objects.filter(pk=src.pk).update(secrets="")
+    src.refresh_from_db()
+    for action in ("start", "restart"):
+        resp = clients["owner"].post(f"/api/instances/{src.id}/power", {"action": action}, format="json")
+        assert resp.status_code == 409, resp.json()
+        error = resp.json()["error"]
+        assert error["code"] == "secret_required" and error["details"] == {"key": "server_password", "label": "Join password"}
+    job = run("start", src, django_capture_on_commit_callbacks)
+    assert job.status == JobStatus.FAILED and job.error_code == "secret_required"
+    assert str(src.id) not in fake_agent.containers or not fake_agent.containers[str(src.id)]["running"]
+    # set it: the start goes through
+    src.set_secret_values({"server_password": "sesame-42"})
+    src.save(update_fields=["secrets"])
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post(f"/api/instances/{src.id}/power", {"action": "start"}, format="json")
+    assert resp.status_code == 202 and Job.objects.get(pk=resp.json()["id"]).status == JobStatus.SUCCEEDED

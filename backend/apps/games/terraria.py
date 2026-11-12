@@ -23,8 +23,10 @@ What the panel knows about it (docs/design/GAME-DEFINITIONS.md 8.3/8.4, correcte
   as the fallback. ``exit`` (and TShock's ``off``) would end the server: the panel's Stop instead.
 * Stop: PassiveLemon's script saves on SIGTERM and exits 143 (a clean stop for this image), TShock
   saves on SIGINT and exits 0.
-* TShock's first start prints a one-time ``/setup`` code; the panel instead creates the owner
-  account over REST (setup step ``owner_account``, password from the secret ``owner_password``).
+* TShock's first start would print a one-time ``/setup`` code that makes any player superadmin: the
+  panel switches that system off with an empty ``setup.lock`` (written at create and before every
+  apply, which also deletes a ``setup-code.txt`` left behind; C-8) and creates the owner account over
+  REST instead (setup step ``owner_account``, password from the secret ``owner_password``).
 """
 
 from __future__ import annotations
@@ -53,6 +55,9 @@ MODPACK = "mcpanel"
 TMODLOADER_TERRARIA = "1.4.4.9"
 CONFIG_FILE = "serverconfig.txt"
 TSHOCK_CONFIG = "config.json"
+# TShock's one-time /setup system: off for good while setup.lock exists at a start; its code file
+SETUP_LOCK = "setup.lock"
+SETUP_CODE = "setup-code.txt"
 # tModLoader keeps the mods' data of a world in <world>.twld next to the .wld; the saves page moves
 # both aside but downloads and imports the .wld only
 TMODLOADER_TWLD_NOTE = (
@@ -576,6 +581,7 @@ class TerrariaDefinition(GameDefinition):
         if variant == TSHOCK:
             values = {k: v for k, v in (settings.get("tshock") or {}).items() if TSHOCK_FILE.field(k) is not None}
             files[TSHOCK_CONFIG] = codecs.get("json").update("{}", {**values, **self.rest_settings(instance)})
+            files[SETUP_LOCK] = ""  # TShock's one-time /setup code is never generated (C-8)
         return files
 
     # -- before every apply ---------------------------------------------------------------------------------
@@ -622,11 +628,35 @@ class TerrariaDefinition(GameDefinition):
                 ) from exc
             if raw is None or js.parse(raw) != js.parse(new):
                 client.write_text(instance.id, TSHOCK_CONFIG, new)
+            self.lock_setup_code(instance, client)
         if variant == TMODLOADER:
             enabled = f"ModPacks/{MODPACK}/Mods/enabled.json"
             if _read_text(client, instance, enabled) is None:
                 client.mkdir(instance.id, f"ModPacks/{MODPACK}/Mods", parents=True)
                 client.write_text(instance.id, enabled, "[]\n")
+
+    def lock_setup_code(self, instance: Instance, client: AgentClient) -> None:
+        """Switch TShock's one-time ``/setup`` system off (C-8): any player who guesses its 7-digit code (no
+        lockout) becomes superadmin, and TShock disables it only at a start at which ``setup.lock`` exists or
+        an account does. Writes the empty lock when it is missing and deletes a ``setup-code.txt`` left from
+        an earlier start (servers created before this fix, restored or imported folders)."""
+        if _read_text(client, instance, SETUP_LOCK) is None:
+            client.write_text(instance.id, SETUP_LOCK, "")
+        if _read_text(client, instance, SETUP_CODE) is not None:
+            try:
+                client.delete_files(instance.id, [SETUP_CODE])
+            except ApiError as exc:
+                if exc.error_code != "not_found":
+                    raise
+
+    def secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        # TShock's one-time setup code (superadmin for whoever types it): never served by the file API
+        base = super().secret_paths(instance)
+        return (*base, SETUP_CODE) if self.variant(instance) == TSHOCK else base
+
+    def extract_writable_secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        # an archive may hold a setup-code.txt: harmless, the panel deletes it before every start
+        return (SETUP_CODE,) if self.variant(instance) == TSHOCK else ()
 
     def masked_text(self, instance: Instance, path: str, content: str) -> str:
         """The text editor's view of a server file: TShock's REST token hidden in config.json (and in
@@ -680,7 +710,7 @@ class TerrariaDefinition(GameDefinition):
         how = "created" if result.get("created") else "updated (it existed)"
         return (
             f"Account '{account}' {how} in the owner group; log in in game with /login {account} <password>. "
-            "TShock turns its one-time /setup code off at its next start."
+            "TShock's one-time /setup code is off (the panel keeps setup.lock in place)."
         )
 
     # -- console -------------------------------------------------------------------------------------------

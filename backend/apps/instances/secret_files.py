@@ -119,7 +119,11 @@ EXTRACT_PROTECTED_FEATURE = "extract_protected"  # the agent skips the archive e
 def extract_protected(instance: Instance) -> list[str]:
     """What an archive extract or import must never write (``[]``: Minecraft, Terraria): the secret
     files, and the whole panel folder when one of them lives there."""
-    paths = set(secret_paths(instance))
+    definition = games.get_or_none(instance.game)
+    # secret files the game writes itself and the panel deletes anyway (TShock's setup-code.txt): an archive may
+    # write them, so the request stays as it was for such games (older agents keep working)
+    writable = {norm(p) for p in definition.extract_writable_secret_paths(instance)} if definition is not None else set()
+    paths = set(secret_paths(instance)) - writable
     if any(_within(p, PANEL_FOLDER) for p in paths):
         paths = {p for p in paths if not _within(p, PANEL_FOLDER)} | {PANEL_FOLDER}
     return sorted(paths)

@@ -59,6 +59,9 @@ def apply_container(
             raise ConflictError("This server is archived; unarchive it before starting it", code="archived")
         ctx.log("The server is archived: its container is created when it is next started")
         return {"skipped": "archived"}
+    if start:
+        # a required secret that is not set (Valheim's join password: the image's default applies without it)
+        games.for_instance(instance).require_secrets(instance)  # 409 secret_required (E-4)
     client = AgentClient(instance.node)
     # a server of another game needs an agent with that game's runtime profile (409 agent_lacks_game)
     games.require_agent_support(instance.game, client, games.for_instance(instance).agent_variant(instance))
@@ -283,6 +286,8 @@ def start_server(
     client = AgentClient(instance.node)
     status = client.status(instance.id)
     exists = bool(status.get("exists"))
+    if not status.get("running"):
+        games.for_instance(instance).require_secrets(instance)  # 409 secret_required (E-4)
     # Satisfactory while its claim is checked again: a container made with published ports is never
     # started as it is, also not by the jobs that start a server again after their work
     apply_changes = apply_changes or games.for_instance(instance).must_apply_before_start(instance)
@@ -497,6 +502,7 @@ def restart(job: Job, ctx: JobContext) -> dict[str, Any]:
     if (skipped := _warn_players_first(job, ctx, "restart")) is not None:
         return skipped
     instance = _instance(job)  # (re)loaded after the countdown: settings may have changed
+    games.for_instance(instance).require_secrets(instance)  # 409 secret_required (E-4), before the stop
     client = AgentClient(instance.node)
     _set_desired(instance, DesiredState.RUNNING)
     status = client.status(instance.id)

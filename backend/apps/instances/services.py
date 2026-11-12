@@ -434,6 +434,10 @@ def power(
         reconcile_instance(instance.id)
         return status
     allow_overcommit = bool(allow_overcommit) and action in ("start", "restart")
+    if action in ("start", "restart"):
+        from apps import games
+
+        games.for_instance(instance).require_secrets(instance)  # 409 secret_required (E-4, I-3)
     if action in ("start", "restart") and not allow_overcommit:
         from . import capacity
 

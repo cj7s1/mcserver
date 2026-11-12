@@ -189,6 +189,9 @@ class SecretSpec:
     # container's environment); ``pattern_help`` says it in words
     pattern: str = ""
     pattern_help: str = ""
+    # a token that belongs to this one server (CS2's GSLT: one per server): a clone or a server restored as
+    # new does not take it over (``GameDefinition.copied_state``)
+    per_server: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         data = {"key": self.key, "label": self.label, "help": self.help, "required": self.required, "link": self.link}
@@ -755,6 +758,11 @@ class GameDefinition:
         ini with the RCON password and cannot be masked)."""
         return (self.control_secret_file,) if self.control_secret_file else ()
 
+    def extract_writable_secret_paths(self, instance: Instance) -> tuple[str, ...]:
+        """Secret files (``secret_paths``) an archive extract may still write: files the game writes itself
+        that the panel deletes before every start (TShock's setup-code.txt). Never a control secret."""
+        return ()
+
     def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
         """Server files with a secret inside (``masked_text`` hides it, e.g. TShock's config.json):
         downloads are masked, zips leave them out for users without ``instance.configure``."""
@@ -788,8 +796,33 @@ class GameDefinition:
     def copied_state(self, source: Instance) -> dict[str, Any]:
         """Fields a clone or a server restored from a backup of ``source`` takes over besides its
         settings, because its copied files depend on them (Satisfactory: the admin password the copied
-        claim was made with, the join password, the API token; the setup runs again)."""
-        return {}
+        claim was made with, the join password, the API token; the setup runs again).
+
+        Every game: the source's secrets (join and admin passwords: a copy must not run open, or with an
+        image's default password, E-4), except the ones that belong to that one server (``per_server``,
+        CS2's GSLT)."""
+        import json
+
+        per_server = {s.key for s in self.secret_specs if s.per_server}
+        values = {k: v for k, v in sorted(source.secret_values.items()) if v and k not in per_server}
+        return {"secrets": json.dumps(values)} if values else {}
+
+    def missing_secret(self, instance: Instance) -> SecretSpec | None:
+        """The first required secret of this server that is not set (Valheim: the join password; without it
+        the image starts with its default password), or None."""
+        values = instance.secret_values
+        return next((s for s in self.secret_specs_for(instance) if s.required and not values.get(s.key)), None)
+
+    def require_secrets(self, instance: Instance) -> None:
+        """Refuse to start a server whose required secret is missing (409 ``secret_required``, I-3)."""
+        spec = self.missing_secret(instance)
+        if spec is not None:
+            raise ConflictError(
+                f"Set the {spec.label.lower()} first (Settings, Game settings, Secrets): a {self.label} server does not "
+                "start without it",
+                code="secret_required",
+                details={"key": spec.key, "label": spec.label},
+            )
 
     def world_folders(self) -> tuple[str, ...]:
         """The folders a clone "without the worlds" leaves out (the saves model's folders)."""
