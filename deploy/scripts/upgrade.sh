@@ -1087,8 +1087,8 @@ cmd_status() {
         show_containers
         if service_container agent >/dev/null && ! service_container agent running >/dev/null; then
             # a server network removed while Docker was down leaves the agent's endpoint behind (FX-1)
-            say "  The agent is not running. If it does not start with \"network ... not found\" (a server's"
-            say "  network was removed while Docker was down), recreate it: docker compose up -d --force-recreate agent"
+            say "  The agent is not running. If it does not start with \"network ... not found\" (it was killed while a"
+            say "  server ran and that server's network is gone), recreate it: docker compose up -d --force-recreate agent"
         fi
     fi
     say ""

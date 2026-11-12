@@ -235,3 +235,14 @@ def test_the_firewall_docs_say_the_agent_reaches_no_lan_address_either():
     assert "The server networks never take that route (the agent joins them with gateway priority -1000)" in security
     assert "The agent's own traffic is not affected" not in security
     assert "The agent itself cannot open new connections to LAN addresses either" in words("docs/UNRAID.md")
+
+
+def test_fx1_the_agent_is_on_a_server_network_only_while_the_server_runs():
+    security = words("docs/SECURITY.md")
+    assert "but only while that server runs" in security and "at its own shutdown" in security
+    assert "Only a hard kill of the agent while servers run leaves such a network" in security
+    header = read("deploy/docker-compose.yml").split("name: mcpanel", 1)[0]
+    assert "the agent joins each while its server" in header and "leaves it when the server stops" in header
+    for path in ("docs/UNRAID.md", "DEPLOYMENT.md"):
+        assert "killed hard while servers ran" in words(path), path
+    assert "only while its server runs" in read("CLAUDE.md")

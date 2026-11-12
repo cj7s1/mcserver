@@ -1011,7 +1011,7 @@ rebuild brings their fixes, never a new Debian release or Redis major by surpris
 
 | Symptom | Check |
 |---|---|
-| The `agent` container does not start: "network ... not found" | A game server's network was removed while Docker was down (on Unraid: Settings → Docker → "Preserve user defined networks" must be on). In `deploy/`: `docker compose up -d --force-recreate agent`; the agent makes the missing networks again. `./scripts/upgrade.sh status` names the command when the agent is not running. |
+| The `agent` container does not start: "network ... not found" | The agent was killed hard while servers ran (it leaves the servers' networks when they stop and when it stops), and one of those networks was removed while Docker was down (on Unraid: Settings → Docker → "Preserve user defined networks" must be on). In `deploy/`: `docker compose up -d --force-recreate agent`; the agent makes a missing network again at the next start of its server. `./scripts/upgrade.sh status` names the command when the agent is not running. |
 | A server shows "failed" (exit code 128) after the host started | Docker could not start its container because its network was missing. Press Start: the agent makes the network again. |
 | Browser shows "Bad Request (400)" | Add the host you typed to `MCPANEL_ALLOWED_HOSTS`. |
 | Login works but actions fail with CSRF errors | Add the exact origin (`http://ip:port`) to `MCPANEL_CSRF_TRUSTED_ORIGINS`. |

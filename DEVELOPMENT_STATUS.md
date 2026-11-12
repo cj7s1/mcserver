@@ -71,7 +71,12 @@ over the new dialogs.
 Found and fixed during the work: the agent's default route moved to a server's network when it joined one;
 it now joins with gateway priority -1000 and the networks are named `zz_mcpanel_i_<12 hex>` (proven on
 Docker 29.9). After a rollback to an older version, servers on their own network need one stop and start
-before their console, player list and save-before-stop work again (DEPLOYMENT.md, "Rollback").
+before their console, player list and save-before-stop work again (DEPLOYMENT.md, "Rollback"). From the
+end-to-end run on real containers (FX-1): the agent stayed attached to server networks, so its container
+could not start once such a network was gone; it now joins a server's network only while that server runs
+(and leaves at its own shutdown); "Preserve user defined networks" must be on on Unraid, and
+`docker compose up -d --force-recreate agent` is the fallback after a hard kill (UNRAID.md, DEPLOYMENT.md
+troubleshooting).
 
 **For the owner's server at the upgrade:** no database migration; `chmod -R go-w` on the checkout once
 (`run` refuses until then; the hook installer and the nightly dump do it themselves); everyone signs in

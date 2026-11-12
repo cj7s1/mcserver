@@ -543,10 +543,12 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
 * **A server stays busy after the `panel` row was stopped during a job:** the job is marked as
   failed about 6 minutes later, or at once with **Mark as failed** on the Activity page.
 * **Servers did not come back after a reboot:** see UNRAID-SHUTDOWN.md, "How the servers come back".
-* **The `agent` container does not start, with "network ... not found":** a game server's network was
-  removed while Docker was down (check "Preserve user defined networks", section 1). In `deploy/`:
-  `docker compose up -d --force-recreate agent`; the agent then makes the missing networks again.
-  `./scripts/upgrade.sh status` names this command when the agent is not running.
+* **The `agent` container does not start, with "network ... not found":** it was killed hard while
+  servers ran (the agent leaves the servers' networks when they stop and when it stops), and one of
+  those networks was removed while Docker was down (check "Preserve user defined networks", section 1).
+  In `deploy/`: `docker compose up -d --force-recreate agent`; the agent makes a missing network again at
+  the next start of its server. `./scripts/upgrade.sh status` names this command when the agent is not
+  running.
 * **A server shows "failed" after the host started (exit code 128):** Docker could not start its
   container because its network was missing. Press **Start**: the agent makes the network again and
   starts it.

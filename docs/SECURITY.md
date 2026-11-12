@@ -231,17 +231,24 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
 
 Every server gets a bridge network of its own, `zz_mcpanel_i_<first 12 hex digits of its id>`, with a
 /29 of `AGENT_INSTANCE_POOL` (default `10.213.0.0/16`, a private IPv4 range, at least a /28). The agent
-attaches its own container to it to reach the control ports, and Docker isolates bridges from each
-other: a server reaches itself and the agent, no other server. Checked on real Docker (2026-11-12):
+attaches its own container to it to reach the control ports, but only while that server runs: it joins
+right before the server starts (and when it finds a running server's network not joined), and leaves
+when the server stops or is killed, within 15 s when the server exits by itself, before a retire or
+remove, and at its own shutdown; at its start it joins only the networks of running servers. Docker
+isolates bridges from each other: a server reaches itself and the agent, no other server. Checked on
+real Docker (2026-11-12):
 two servers on their own networks could not reach each other's RCON or game port, the agent API
 answered 403 from both, and the internet worked. The network keeps its subnet
 (`<data root>/agent/server-networks.json`), goes with the server's last container, and is made again
 with the same name and subnet when it is missing. On Unraid, **"Preserve user defined networks"
 (Settings -> Docker) must be on**, as the stack's own Compose networks have always needed: otherwise
-Unraid removes user-defined networks when Docker restarts. If a server's network was removed while
-Docker was down anyway, the agent container may not start ("network ... not found": `docker compose
-up -d --force-recreate agent` in `deploy/` repairs it), and a server Docker could not start shows as
-failed after the host start: Start starts it again. Labels `io.mcpanel.managed=true`,
+Unraid removes user-defined networks when Docker restarts. Because the agent leaves every server
+network when its servers stop and at its own shutdown, its container starts even when a server's
+network was removed meanwhile. Only a hard kill of the agent while servers run leaves such a network
+in its configuration; if that network is then gone, the agent container does not start ("network ...
+not found") and `docker compose up -d --force-recreate agent` in `deploy/` repairs it. A server Docker
+could not start because its network was missing shows as failed after the host start: Start makes the
+network again and starts it. Labels `io.mcpanel.managed=true`,
 `io.mcpanel.instance=<id>`, `io.mcpanel.network=server`; `GET /v1/info` reports `per_server_networks`.
 
 A server stays on the shared `mcpanel_instances` network (where the servers reach each other, as
