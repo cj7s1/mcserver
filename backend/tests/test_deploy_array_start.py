@@ -1,0 +1,352 @@
+"""deploy/unraid/array-start.sh: everything MCPanel needs at an Unraid array start (one User Scripts line).
+
+From the owner's server after a reboot: Unraid ships no Docker Compose (his standalone binary was linked into
+/usr/local/lib/docker/cli-plugins, which is in RAM), the panel container restarted for hours because Docker
+29 had dropped its network after a failed first start, and the shutdown hook was never installed. The
+script runs here against stand-ins for `docker`, `id` and `logger` (a stand-in `docker` that keeps the
+platform containers in a file), with the real install-hook.sh and a stand-in instance-firewall.sh.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from .test_upgrade_script import Site
+from .test_upgrade_script import pytestmark as _upgrade_skip
+
+REPO = Path(__file__).resolve().parents[2]
+UNRAID = Path(os.environ.get("MCPANEL_UNRAID_SCRIPTS") or REPO / "deploy" / "unraid")
+
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+
+# docker stand-in. $FAKE/containers: lines "id|service|running|network mode|networks|name"; the
+# answers of `docker compose version` come from the plugin link in $CLI (like the real CLI) or
+# $FAKE/compose_builtin; $FAKE/daemon_down makes the daemon not answer.
+FAKE_DOCKER = r"""#!/bin/bash
+F=$FAKE
+printf '%s\n' "$*" >>"$F/calls.log"
+rows() { cat "$F/containers" 2>/dev/null; }
+set_row() { # set_row ID FIELD VALUE (fields: 1 id 2 service 3 running 4 mode 5 networks 6 name)
+    local tmp="$F/containers.new"
+    while IFS='|' read -r id service running mode nets name; do
+        if [ "$id" = "$1" ]; then
+            case "$2" in 3) running=$3 ;; 5) nets=$3 ;; esac
+        fi
+        printf '%s|%s|%s|%s|%s|%s\n' "$id" "$service" "$running" "$mode" "$nets" "$name"
+    done < <(rows) >"$tmp"
+    mv "$tmp" "$F/containers"
+}
+field() { rows | while IFS='|' read -r id service running mode nets name; do [ "$id" = "$1" ] && eval "printf '%s' \"\$$2\""; done; }
+case "$1" in
+    compose)
+        if [ "$2" = version ] && { [ -x "$CLI/docker-compose" ] || [ -e "$F/compose_builtin" ]; }; then
+            echo "Docker Compose version v5.7.0"; exit 0
+        fi
+        echo "docker: 'compose' is not a docker command." >&2; exit 1 ;;
+    version) [ -e "$F/daemon_down" ] && { echo "Cannot connect to the Docker daemon" >&2; exit 1; }; echo 29.9.2 ;;
+    ps) rows | cut -d'|' -f1 ;;
+    inspect)
+        id=${*: -1}
+        line=$(rows | grep "^$id|") || exit 1
+        IFS='|' read -r _ service running mode nets name <<<"$line"
+        printf '%s|%s|%s|%s|/%s\n' "$service" "$running" "$mode" "$nets" "$name" ;;
+    stop) set_row "${*: -1}" 3 false ;;
+    start)
+        id=${*: -1}
+        [ "$(field "$id" nets)" -gt 0 ] || { echo "failed to set up container networking" >&2; exit 1; }
+        set_row "$id" 3 true ;;
+    network)
+        case "$2" in
+            inspect) grep -qx "${*: -1}" "$F/networks" 2>/dev/null ;;
+            connect)
+                [ -e "$F/connect_fails" ] && exit 1
+                id=${*: -1}
+                set_row "$id" 5 $(( $(field "$id" nets) + 1 )) ;;
+            *) exit 1 ;;
+        esac ;;
+    *) echo "fake docker: unhandled $*" >&2; exit 97 ;;
+esac
+"""
+FAKE_ID = '#!/bin/sh\nif [ "$1" = -u ]; then cat "$FAKE/uid"; else PATH=/usr/bin:/bin exec id "$@"; fi\n'
+FAKE_LOGGER = '#!/bin/sh\nprintf "%s\\n" "$*" >>"$FAKE/syslog"\n'
+FAKE_FIREWALL = """#!/bin/bash
+printf '%s\\n' "$*" >>"$FAKE/firewall.log"
+case "$1" in
+    install) echo "Game containers' addresses: 10.213.0.0/16 172.19.0.0/16"; echo "Installed: chains ..." ;;
+    status) echo "Instance firewall: installed and up to date (config 0123456789abcdef)." ;;
+esac
+"""
+
+
+class Box:
+    """An Unraid host as far as the script sees it: a checkout, the flash folder, RAM folders, Docker."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.top = tmp_path / "mcpanel-src"
+        self.unraid = self.top / "deploy" / "unraid"
+        self.unraid.mkdir(parents=True)
+        (self.top / ".git").mkdir()
+        for name in ("array-start.sh", "install-hook.sh", "stopping_docker"):
+            shutil.copy(UNRAID / name, self.unraid / name)
+            (self.unraid / name).chmod(0o755)
+        (self.unraid / "instance-firewall.sh").write_text(FAKE_FIREWALL)
+        (self.unraid / "instance-firewall.sh").chmod(0o755)
+        self.boot = tmp_path / "boot" / "config" / "plugins" / "mcpanel"
+        self.cli = tmp_path / "usr-local-lib-docker" / "cli-plugins"
+        self.plugins = tmp_path / "emhttp-plugins"
+        self.plugins.mkdir()
+        self.fake = tmp_path / "fake"
+        self.fake.mkdir()
+        (self.fake / "uid").write_text("0\n")
+        (self.fake / "networks").write_text("mcpanel_internal\nmcpanel_instances\n")
+        self.store = tmp_path / "cache" / "system"  # where the owner keeps the Compose binary
+        self.store.mkdir(parents=True)
+        self.compose_bin = self.store / "docker-compose"
+        self.compose_bin.write_text("#!/bin/sh\necho compose\n")
+        self.compose_bin.chmod(0o755)
+        self.bin = tmp_path / "bin"
+        self.bin.mkdir()
+        for name, text in (("docker", FAKE_DOCKER), ("id", FAKE_ID), ("logger", FAKE_LOGGER)):
+            (self.bin / name).write_text(text)
+            (self.bin / name).chmod(0o755)
+        self.containers(
+            ("p1", "panel", "true", "mcpanel_internal", 1, "mcpanel-panel-1"),
+            ("a1", "agent", "true", "mcpanel_internal", 2, "mcpanel-agent-1"),
+            ("d1", "postgres", "true", "mcpanel_internal", 1, "mcpanel-postgres-1"),
+        )
+
+    def containers(self, *rows: tuple) -> None:
+        (self.fake / "containers").write_text("".join("|".join(str(v) for v in row) + "\n" for row in rows))
+
+    def container(self, cid: str) -> list[str]:
+        for line in (self.fake / "containers").read_text().splitlines():
+            if line.startswith(cid + "|"):
+                return line.split("|")
+        raise KeyError(cid)
+
+    def run(self, *args: str, wait_stack: int = 0) -> subprocess.CompletedProcess[str]:
+        env = {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "FAKE": str(self.fake),
+            "CLI": str(self.cli),
+            "MCPANEL_BOOT_STATE": str(self.boot),
+            "MCPANEL_CLI_PLUGINS": str(self.cli),
+            "MCPANEL_STACK_WAIT": str(wait_stack),
+            "MCPANEL_HOOK_ROOT": str(self.plugins),
+            "MCPANEL_DISK_CFG": str(self.plugins / "no-disk.cfg"),
+        }
+        return subprocess.run(
+            ["bash", str(self.unraid / "array-start.sh"), *args], env=env, capture_output=True, text=True, timeout=60
+        )
+
+    def calls(self, prefix: str = "") -> list[str]:
+        path = self.fake / "calls.log"
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [line for line in lines if line.startswith(prefix)]
+
+    def syslog(self) -> str:
+        path = self.fake / "syslog"
+        return path.read_text() if path.exists() else ""
+
+    def hook_installed(self) -> bool:
+        return (self.plugins / "mcpanel" / "event" / "stopping_docker").exists()
+
+
+@pytest.fixture
+def box(tmp_path: Path) -> Box:
+    return Box(tmp_path)
+
+
+CHANGING = ("stop", "start", "network connect")
+
+
+def test_first_boot_links_compose_installs_the_hook_and_repairs_the_panel(box):
+    box.containers(
+        ("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"),  # the restart loop of the owner's server
+        ("a1", "agent", "true", "mcpanel_internal", 2, "mcpanel-agent-1"),
+        ("d1", "postgres", "true", "mcpanel_internal", 1, "mcpanel-postgres-1"),
+    )
+    done = box.run("--compose-bin", str(box.compose_bin))
+    assert done.returncode == 0, done.stdout + done.stderr
+    # 1. Compose: linked into the CLI plugin folder (in RAM on Unraid), the path remembered on the flash
+    link = box.cli / "docker-compose"
+    assert link.is_symlink() and os.readlink(link) == str(box.compose_bin)
+    state = box.boot / "array-start.env"
+    assert f"COMPOSE_BIN={box.compose_bin}" in state.read_text().splitlines()
+    assert stat.S_IMODE(state.stat().st_mode) == 0o600
+    # 3. the shutdown hook
+    assert box.hook_installed()
+    # 4. the firewall was never installed by the owner: not touched
+    assert not (box.fake / "firewall.log").exists()
+    assert "Firewall: not installed on this host by its owner" in done.stdout
+    # 5. the panel: stopped, connected with its service name as alias, started
+    assert box.calls("stop") == ["stop -t 30 p1"]
+    assert box.calls("network connect") == ["network connect --alias panel mcpanel_internal p1"]
+    assert box.calls("start") == ["start p1"]
+    assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "1"]
+    for said in ("Compose: linked", "Shutdown hook: installed", "mcpanel-panel-1 has no network", "repaired and started"):
+        assert said in box.syslog(), said
+    assert done.stdout.rstrip().endswith("Done: everything is in place.")
+
+
+def test_later_boots_need_no_argument(box):
+    assert box.run("--compose-bin", str(box.compose_bin)).returncode == 0
+    shutil.rmtree(box.cli)  # a reboot: /usr/local/lib/docker/cli-plugins is in RAM
+    shutil.rmtree(box.plugins / "mcpanel")  # ... and so is Unraid's plugin folder with the hook
+    again = box.run()
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert os.readlink(box.cli / "docker-compose") == str(box.compose_bin) and box.hook_installed()
+    assert box.calls("stop") == []  # nothing to repair
+
+
+def test_without_compose_it_says_how_to_get_one_and_goes_on(box):
+    done = box.run()
+    assert done.returncode == 1
+    assert "Docker Compose is missing (Unraid ships none) and no binary is configured" in done.stdout
+    assert "--compose-bin /path/to/docker-compose" in done.stdout
+    assert box.hook_installed()  # the other steps ran
+    assert "Done, but 1 thing(s) need you:" in done.stdout
+    (box.fake / "compose_builtin").touch()  # a host with Compose (a plugin of Unraid's apps)
+    ok = box.run()
+    assert ok.returncode == 0 and "Compose: ok (Docker Compose version" in ok.stdout and not box.cli.exists()
+
+
+@pytest.mark.parametrize("loose", ["binary", "folder"])
+def test_a_compose_binary_others_can_write_is_not_linked(box, loose):
+    (box.compose_bin if loose == "binary" else box.store).chmod(0o777)
+    done = box.run("--compose-bin", str(box.compose_bin))
+    assert done.returncode == 1 and "not linked: group or others can write" in done.stdout
+    assert not (box.cli / "docker-compose").exists()
+    missing = box.run("--compose-bin", str(box.store / "nope"))
+    assert "no executable file there; not remembered" in missing.stdout
+
+
+def test_the_firewall_is_put_back_only_where_it_was_installed(box):
+    (box.fake / "compose_builtin").touch()
+    state = box.top / "deploy" / "instance-firewall.env"
+    state.write_text("INSTALLED=no\nALLOW=192.168.1.20/32\n")
+    assert box.run().returncode == 0 and not (box.fake / "firewall.log").exists()
+    state.write_text("INSTALLED=yes\n")
+    done = box.run()
+    assert done.returncode == 0
+    assert (box.fake / "firewall.log").read_text().splitlines() == ["install --wait 120"]
+    assert "Firewall: installed again" in done.stdout
+
+
+def test_without_docker_only_the_hook_is_installed(box):
+    (box.fake / "compose_builtin").touch()
+    (box.fake / "daemon_down").touch()
+    done = box.run("--wait", "0")
+    assert done.returncode == 1 and "the Docker daemon did not answer within 0 s" in done.stdout
+    assert box.hook_installed() and box.calls("ps") == []
+
+
+def test_the_agent_gets_its_shared_network_back_too(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("a1", "agent", "false", "mcpanel_internal", 0, "mcpanel-agent-1"))
+    done = box.run()
+    assert done.returncode == 0, done.stdout
+    assert box.calls("network connect") == [
+        "network connect --alias agent mcpanel_internal a1",
+        "network connect mcpanel_instances a1",
+    ]
+
+
+def test_a_failed_repair_names_the_compose_way(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"))
+    (box.fake / "connect_fails").touch()
+    done = box.run()
+    assert done.returncode == 1 and "docker compose up -d --force-recreate panel" in done.stdout
+
+
+def test_a_container_that_stays_down_is_reported(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("d1", "postgres", "false", "mcpanel_internal", 1, "mcpanel-postgres-1"))
+    done = box.run()
+    assert done.returncode == 1 and "mcpanel-postgres-1 is not running after 0 s" in done.stdout
+    assert box.calls("stop") == []  # it has its network: nothing to repair
+
+
+def test_dry_run_and_status_change_nothing(box):
+    box.containers(("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"))
+    (box.fake / "uid").write_text("1000\n")  # neither needs root
+    plan = box.run("dry-run", "--compose-bin", str(box.compose_bin))
+    assert plan.returncode == 0, plan.stdout + plan.stderr
+    text = plan.stdout
+    for said in (
+        f"would run: ln -sfn {box.compose_bin} {box.cli}/docker-compose",
+        f"would remember in {box.boot}/array-start.env: COMPOSE_BIN={box.compose_bin}",
+        f"would run: bash {box.unraid}/install-hook.sh install",
+        "would run: docker stop -t 30 p1",
+        "would run: docker network connect --alias panel mcpanel_internal p1",
+        "would run: docker start p1",
+        "Nothing was changed.",
+    ):
+        assert said in text, said
+    assert not box.cli.exists() and not box.boot.exists() and not box.hook_installed()
+    assert not [call for call in box.calls() if call.startswith(CHANGING)]
+    assert box.syslog() == ""
+
+    status = box.run("status")
+    assert status.returncode == 1
+    for said in (
+        "MISSING Compose: 'docker compose' does not answer",
+        "MISSING Shutdown hook",
+        "REPAIR mcpanel-panel-1: no network although it belongs on mcpanel_internal",
+        f"User Scripts line (At Startup of Array): bash {box.unraid}/array-start.sh",
+    ):
+        assert said in status.stdout, said
+    assert not [call for call in box.calls() if call.startswith(CHANGING)]
+
+
+def test_status_after_a_good_run_says_ok_everywhere(box):
+    assert box.run("--compose-bin", str(box.compose_bin)).returncode == 0
+    status = box.run("status")
+    assert status.returncode == 0, status.stdout
+    lines = [line.strip() for line in status.stdout.splitlines() if line.startswith("  ") and "User Scripts" not in line]
+    assert lines and all(line.startswith(("ok", "remembered")) for line in lines), lines
+
+
+def test_root_and_the_rule_of_the_other_root_scripts(box):
+    (box.fake / "uid").write_text("1000\n")
+    refused = box.run()
+    assert refused.returncode == 1 and "run this as root" in refused.stderr
+    (box.fake / "uid").write_text("0\n")
+    (box.fake / "compose_builtin").touch()
+    (box.unraid / "array-start.sh").chmod(0o777)
+    warned = box.run("status")
+    assert "WARNING: group or others can write" in warned.stdout
+    done = box.run()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "were loose and have been tightened" in done.stdout
+    assert stat.S_IMODE((box.unraid / "array-start.sh").stat().st_mode) == 0o755
+    for bad in (("--project", "Bad Name"), ("--compose-bin", "relative/path"), ("--wait", "soon"), ("frobnicate",)):
+        assert box.run(*bad).returncode in (1, 64), bad
+
+
+def test_the_script_says_it_is_untested_on_unraid_and_how_to_check():
+    text = (UNRAID / "array-start.sh").read_text()
+    head = text.split("set -u", 1)[0]
+    assert "NOT RUN ON A REAL UNRAID HOST YET" in head and "bash array-start.sh dry-run" in head
+    assert "bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh" in head
+    assert os.access(UNRAID / "array-start.sh", os.X_OK)
+    assert subprocess.run(["bash", "-n", str(UNRAID / "array-start.sh")], check=False).returncode == 0
+
+
+@_upgrade_skip
+def test_upgrade_sh_names_this_script_when_compose_is_missing(tmp_path: Path):
+    site = Site(tmp_path)
+    real = site.bin / "docker"
+    real.rename(site.bin / "docker-shim")
+    real.write_text('#!/bin/bash\n[ "$1 $2" = "compose version" ] && exit 1\nexec "$(dirname "$0")/docker-shim" "$@"\n')
+    real.chmod(0o755)
+    refused = site.upgrade("status")
+    assert refused.returncode == 1 and "the docker compose plugin is missing" in refused.stderr
+    assert f"bash {site.deploy}/unraid/array-start.sh --compose-bin" in refused.stderr

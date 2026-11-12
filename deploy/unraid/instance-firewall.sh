@@ -54,8 +54,10 @@
 # fingerprints as the names of two empty chains, MCPANEL-C-<settings> and MCPANEL-A-<rules as loaded>
 # (no extra kernel module needed, unlike comment rules), and inserts each jump once, at the top. status
 # compares both; remove deletes the jumps, the chains and the two markers. iptables keeps
-# rules in memory only: Unraid forgets them at every boot, so run `install` at every array start
-# (docs/UNRAID.md, "The game servers' firewall"). Docker never touches DOCKER-USER or other chains.
+# rules in memory only: Unraid forgets them at every boot. `install` records INSTALLED=yes in its state
+# file (deploy/instance-firewall.env) and `remove` INSTALLED=no: deploy/unraid/array-start.sh, run at every
+# array start, installs the rules again where they were installed (docs/UNRAID.md, "The game servers'
+# firewall"). Docker never touches DOCKER-USER or other chains.
 #
 # Root runs this script. When group or others can write it, its folder, its state file or the env file,
 # `install` and `remove` run as root from the MCPanel checkout tighten the checkout (chmod -R go-w) and
@@ -393,15 +395,33 @@ describe() {
     fi
 }
 
+# save_state yes|no: the stored entries and INSTALLED=, which deploy/unraid/array-start.sh reads at boot
+# (it puts the rules back only where the owner had installed them)
 save_state() {
     local entry
     (
         umask 077
         {
             say "# instance-firewall.sh: what every install repeats (written by install; --forget ENTRY removes one)"
+            say "INSTALLED=$1"
             for entry in "${ALLOWS[@]+"${ALLOWS[@]}"}"; do say "ALLOW=${entry}"; done
             for entry in "${STORED_DNS[@]+"${STORED_DNS[@]}"}"; do say "ALLOW_DNS=${entry}"; done
         } >"${STATE_FILE}.new" && mv -f "${STATE_FILE}.new" "${STATE_FILE}"
+    ) || fail "could not write ${STATE_FILE}"
+}
+
+# mark_removed: INSTALLED=no in the state file, the stored entries kept (array-start.sh no longer puts the
+# rules back at boot). Nothing to do without a state file: nothing was installed with this version.
+mark_removed() {
+    local line
+    [ -f "${STATE_FILE}" ] || return 0
+    (
+        umask 077
+        while IFS= read -r line || [ -n "${line}" ]; do
+            case "${line}" in INSTALLED=*) ;; *) say "${line}" ;; esac
+        done <"${STATE_FILE}" >"${STATE_FILE}.new" || exit 1
+        say "INSTALLED=no" >>"${STATE_FILE}.new" || exit 1
+        mv -f "${STATE_FILE}.new" "${STATE_FILE}"
     ) || fail "could not write ${STATE_FILE}"
 }
 
@@ -435,7 +455,7 @@ cmd_install() {
     drop_markers C "$(config_hash)"
     ensure_jump DOCKER-USER "${FWD}"
     ensure_jump INPUT "${IN}"
-    if [ "${#ADD_ALLOW[@]}" -gt 0 ] || [ "${#ADD_DNS[@]}" -gt 0 ] || [ "${#FORGET[@]}" -gt 0 ]; then save_state; fi
+    save_state yes
     describe
     say "Installed: chains ${FWD} (from DOCKER-USER) and ${IN} (from INPUT). They are gone after a reboot until this runs again."
     logger -t mcpanel -- "instance firewall installed for ${SOURCES[*]} (config $(config_hash))" 2>/dev/null || true
@@ -458,6 +478,7 @@ cmd_remove() {
     [ -z "$(markers C)$(markers A)" ] || removed=1
     drop_markers C
     drop_markers A
+    mark_removed
     if [ "${removed}" = 1 ]; then
         say "Removed: the game containers can reach this host and the LAN again."
         logger -t mcpanel -- "instance firewall removed" 2>/dev/null || true

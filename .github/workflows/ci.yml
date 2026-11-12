@@ -127,7 +127,7 @@ jobs:
           shellcheck --version
           shellcheck deploy/scripts/generate-secrets.sh deploy/scripts/upgrade.sh backend/container/entrypoint.sh \
             .github/scripts/panel-acceptance.sh .github/scripts/upgrade-rehearsal.sh deploy/unraid/stopping_docker \
-            deploy/unraid/instance-firewall.sh
+            deploy/unraid/instance-firewall.sh deploy/unraid/array-start.sh
           shellcheck --exclude=SC2016 deploy/unraid/install-hook.sh
       - name: Generate throw-away env files
         run: |

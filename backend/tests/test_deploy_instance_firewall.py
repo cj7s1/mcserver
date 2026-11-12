@@ -376,3 +376,19 @@ def test_install_at_boot_waits_for_docker(host):
     assert late.returncode == 1 and "DOCKER-USER does not exist" in late.stderr
     assert time.monotonic() - started >= 5
     assert host.run("install", "--wait", "soon").returncode == 1
+
+
+def test_install_and_remove_are_remembered_for_the_boot(host):
+    """deploy/unraid/array-start.sh puts the rules back at boot only where the owner had installed them."""
+    assert host.run("remove").returncode == 0
+    assert not host.state.exists()  # never installed: nothing remembered
+    assert host.run("install", "--allow", "192.168.1.30").returncode == 0
+    assert "INSTALLED=yes" in host.state.read_text().splitlines()
+    assert stat.S_IMODE(host.state.stat().st_mode) == 0o600
+    assert host.run("remove").returncode == 0
+    lines = host.state.read_text().splitlines()
+    assert "INSTALLED=no" in lines and "INSTALLED=yes" not in lines
+    assert "ALLOW=192.168.1.30/32" in lines  # the stored entries stay
+    assert host.run("install").returncode == 0
+    assert "INSTALLED=yes" in host.state.read_text().splitlines()
+    assert f"-A MCPANEL-FWD -s {POOL} -d 192.168.1.30/32 -j RETURN" in host.chain("MCPANEL-FWD")

@@ -522,7 +522,9 @@ show_log() { # status: the newest log and how the command that wrote it ended
 # --- what is there ----------------------------------------------------------------------
 preflight() {
     command -v docker >/dev/null 2>&1 || die "docker is not installed"
-    docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing (docker compose version)"
+    docker compose version >/dev/null 2>&1 || die "the docker compose plugin is missing (docker compose version)
+         On Unraid (which ships none): bash $DEPLOY_DIR/unraid/array-start.sh --compose-bin <your docker-compose binary>
+         links it now and at every array start (docs/UNRAID.md, section 1)."
     command -v git >/dev/null 2>&1 || die "git is not installed"
     docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || die "the Docker daemon does not answer"
     [ -f "$DEPLOY_DIR/docker-compose.yml" ] || die "$DEPLOY_DIR/docker-compose.yml not found"
