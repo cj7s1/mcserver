@@ -1,6 +1,6 @@
 """B-6 of the security review (2026-11-11): every walk of a server folder or of a backup is bounded, with a
 ``truncated`` flag (or an honest ``complete``) where the answer stops short. The caps are generous: no real
-server comes near them (listing 20,000 entries, search 50,000 files / 30 s, zip 200,000 files, one hash pass
+server comes near them (listing 20,000 entries, search 50,000 files / 30 s, zip unbounded (streamed), one hash pass
 64 GiB and one pass per server at a time, backup browser 20,000 entries, 16 KiB per /logs line)."""
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import pytest
 
 from mcagent import archive, backups, docker_ops, hashcache, safefs
 from mcagent.backups import Restic
-from mcagent.errors import AgentError
 from mcagent.safefs import SafeRoot
 
 from . import fake_restic
@@ -55,12 +54,27 @@ def test_a_search_stops_after_its_time(tmp_path):
     assert truncated is True and results == []
 
 
-def test_a_zip_of_too_many_files_is_refused(tmp_path, monkeypatch):
-    _files(tmp_path, 12)
-    monkeypatch.setattr(archive, "MAX_ZIP_FILES", 10)
-    with pytest.raises(AgentError) as err:
-        archive.stream_zip(SafeRoot(tmp_path), "many")
-    assert err.value.code == "archive_too_large" and "more than 10 files" in str(err.value)
+def test_a_zip_streams_any_number_of_files(tmp_path, monkeypatch):
+    """R-5: no file cap (a long-played Project Zomboid world has a file per map chunk): the zip is built from a
+    walk while it streams; nothing holds the list of files."""
+    import io
+    import zipfile
+
+    _files(tmp_path, 3000)
+    walked: list[int] = []
+    real_walk = SafeRoot.walk_files
+
+    def counting(self, *a, **k):
+        walked.append(0)
+        for item in real_walk(self, *a, **k):
+            walked[-1] += 1
+            yield item
+
+    monkeypatch.setattr(SafeRoot, "walk_files", counting)
+    data = b"".join(archive.stream_zip(SafeRoot(tmp_path), "many"))
+    assert len(zipfile.ZipFile(io.BytesIO(data)).namelist()) == 3000
+    assert walked == [3000, 3000]  # one walk to add up, one to stream
+    assert not hasattr(archive, "MAX_ZIP_FILES")
 
 
 def test_a_hash_pass_reads_at_most_its_bytes(tmp_path, agent_settings, monkeypatch):

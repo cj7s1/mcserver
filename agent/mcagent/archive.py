@@ -27,7 +27,7 @@ import tarfile
 import threading
 import time
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import IO
 
@@ -36,7 +36,6 @@ from .safefs import PathError, SafeRoot, split_path, touches_protected
 
 MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024  # 64 GiB uncompressed
 MAX_FILES = 500_000
-MAX_ZIP_FILES = 200_000  # files of one zip download (B-6)
 MAX_RATIO = 200  # uncompressed/compressed per member (zip only)
 CHUNK = 1024 * 1024
 # zipfile reads the whole central directory into memory and builds a ZipInfo per entry
@@ -544,30 +543,32 @@ def stream_zip(
         if any(prefix == other for _p, other in folders):
             raise AgentError(f"Two folders are both named '{prefix}'", "invalid_path", 400)
         folders.append((parts, prefix))
-    files: list[tuple[str, str, os.stat_result]] = []  # (path, name in the zip, stat)
+
+    def files(too_deep: list[str] | None = None) -> Iterator[tuple[str, str, os.stat_result]]:
+        """(path, name in the zip, stat) of every file, walked as they are needed: nothing is collected,
+        so the number of files is not bounded by memory (R-5: a long-played Project Zomboid world has a
+        file per map chunk)."""
+        for parts, prefix in folders:
+            for path, st in root.walk_files("/".join(parts), max_depth=64, too_deep=too_deep):
+                if excluded and _is_excluded(split_path(path), excluded):
+                    continue
+                yield path, "/".join([prefix, *split_path(path)[len(parts) :]]), st
+
+    # a first walk only adds up (a too-large or too-deep folder is an error response, not a broken download);
+    # the zip is built from a second walk while it streams
     too_deep: list[str] = []
-    for parts, prefix in folders:
-        for path, st in root.walk_files("/".join(parts), max_depth=64, too_deep=too_deep):
-            if excluded and _is_excluded(split_path(path), excluded):
-                continue
-            files.append((path, "/".join([prefix, *split_path(path)[len(parts) :]]), st))
-            if len(files) > MAX_ZIP_FILES:
-                break
-    if len(files) > MAX_ZIP_FILES:  # B-6: the list of files is held in memory before the zip starts
-        raise AgentError(
-            f"The folder holds more than {MAX_ZIP_FILES} files; it cannot be downloaded as a zip",
-            "archive_too_large",
-            413,
-        )
+    total = 0
+    for _path, _arcname, st in files(too_deep):
+        total += st.st_size
     if too_deep:  # a zip without them would look complete (B-13)
         raise AgentError(
             f"The folder holds folders deeper than 64 levels ({len(too_deep)}); it cannot be downloaded as a zip",
             "archive_too_large",
             413,
         )
-    if sum(st.st_size for _p, _a, st in files) > max_bytes:
+    if total > max_bytes:
         raise AgentError("Folder is too large to download as a zip", "archive_too_large", 413)
-    return _zip_stream(root, files)
+    return _zip_stream(root, files())
 
 
 ZIP_MIN_DATE = (1980, 1, 1, 0, 0, 0)  # the zip format cannot store earlier times
@@ -594,7 +595,7 @@ def zip_name(arcname: str) -> str:
         return arcname.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
-def _zip_stream(root: SafeRoot, files: list[tuple[str, str, os.stat_result]]) -> Iterator[bytes]:
+def _zip_stream(root: SafeRoot, files: Iterable[tuple[str, str, os.stat_result]]) -> Iterator[bytes]:
     q: queue.Queue[bytes | BaseException | None] = queue.Queue(maxsize=ZIP_QUEUE_CHUNKS)
     cancelled = threading.Event()
     sink = _PipeWriter(q, cancelled)
