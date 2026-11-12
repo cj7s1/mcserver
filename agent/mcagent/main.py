@@ -644,7 +644,12 @@ PULL_NEWER_TIMEOUT = 180.0  # pull="newer": how long the check for a newer image
 
 
 def _pull_for_apply(
-    op: Operation, image: str, pull: str, warnings: list[str], settings: Settings | None = None
+    op: Operation,
+    image: str,
+    pull: str,
+    warnings: list[str],
+    settings: Settings | None = None,
+    profile: profiles.RuntimeProfile | None = None,
 ) -> bool:
     """Make the image available as ``pull`` asks; returns whether a pull succeeded.
 
@@ -667,6 +672,12 @@ def _pull_for_apply(
         docker_ops.remember_pull(settings, image)
         return True
     if pull == "newer":
+        # a tag the profile pins to a digest never legitimately gets newer: while the local image is the
+        # pinned one, it is not pulled at all (R-2: a re-pushed tag would move the local tag to an image
+        # this agent refuses, and every stopped server of it could not start any more)
+        if profile is not None and docker_ops.local_image_is_pinned(settings, profile, image):
+            log.info("Apply: %s is pinned and the image on this host is the pinned one; not pulled", image)
+            return False
         checked = docker_ops.recently_checked(settings, image)
         if checked is not None:
             log.info(
@@ -708,7 +719,7 @@ async def apply_spec(
     def _apply(op: Operation) -> dict[str, Any]:
         warnings: list[str] = []
         tag_before = docker_ops.local_image_id(image)
-        pulled = _pull_for_apply(op, image, body.pull, warnings, settings)
+        pulled = _pull_for_apply(op, image, body.pull, warnings, settings, profile)
         if body.spec.cpu_limit:
             cpus = docker_ops.host_cpus()
             if cpus is not None and body.spec.cpu_limit > cpus:
@@ -752,6 +763,7 @@ async def apply_spec(
                     body.spec,
                     _spec_hash(body.spec),
                     name=docker_ops.replacement_name(instance_id),
+                    warnings=warnings,
                 )
                 try:
                     op.update(0.9, "Stopping and removing previous container (data is kept)")
@@ -765,7 +777,9 @@ async def apply_spec(
                     raise
             else:
                 op.update(0.92, "Creating container")
-                c = docker_ops.create_container(settings, instance_id, body.spec, _spec_hash(body.spec))
+                c = docker_ops.create_container(
+                    settings, instance_id, body.spec, _spec_hash(body.spec), warnings=warnings
+                )
             # a new container: what the claim guard recorded about the old one's run is history now
             claimguard.clear(settings, instance_id)
             if body.start or was_running:

@@ -105,3 +105,79 @@ def test_create_container_checks_the_digest(settings, monkeypatch):
     with pytest.raises(AgentError) as err:
         docker_ops.create_container(settings, IID, spec, "h")
     assert err.value.code == "image_digest_mismatch"
+
+
+# --- R-2: a re-pushed pinned tag never makes a server unstartable while the pinned image is here ----------
+def test_a_pinned_tag_is_not_pulled_newer_while_the_local_image_is_the_pinned_one(settings, monkeypatch):
+    """Adopted from audit-2026-11-09/fixes/review/agent-net/test_r_pinned_tag_repush.py, turned around."""
+    from mcagent import main
+
+    local = {"attrs": {"Id": "sha256:" + "c" * 64, "RepoDigests": [f"x@{PZ_DIGEST}"]}}
+    pulls: list[str] = []
+    monkeypatch.setattr(docker_ops, "client", lambda: SimpleNamespace(images=_Images(local["attrs"])))
+    monkeypatch.setattr(docker_ops, "local_image_id", lambda image: local["attrs"]["Id"])
+    monkeypatch.setattr(docker_ops, "recently_checked", lambda s, image: None)
+    monkeypatch.setattr(docker_ops, "pull_image_bounded", lambda image, t, p: pulls.append(image))
+    monkeypatch.setattr(docker_ops, "remember_pull", lambda s, image: None)
+    op = SimpleNamespace(update=lambda *a, **k: None)
+    assert main._pull_for_apply(op, PZ_IMAGE, "newer", [], settings, PZ) is False
+    assert pulls == []
+    # another tag of the same image is checked as before
+    other = "indifferentbroccoli/projectzomboid-server-docker:v1.3.0"
+    assert main._pull_for_apply(op, other, "newer", [], settings, PZ) is True and pulls == [other]
+
+
+class _TwoImages:
+    """The local tag names the re-pushed image; the pinned one is still here under its digest."""
+
+    def __init__(self, pinned_present: bool):
+        self.pinned_present = pinned_present
+
+    def get(self, ref):
+        if ref == PZ_IMAGE:
+            return SimpleNamespace(
+                attrs={"Id": OTHER, "RepoDigests": [f"repo@{OTHER}"], "Config": {}}, id=OTHER
+            )
+        if self.pinned_present and ref in (
+            f"indifferentbroccoli/projectzomboid-server-docker@{PZ_DIGEST}",
+            PZ_DIGEST,
+        ):
+            return SimpleNamespace(
+                attrs={"Id": PZ_DIGEST, "RepoDigests": [], "Config": {"Volumes": None}}, id=PZ_DIGEST
+            )
+        raise ImageNotFound("no such image")
+
+
+def test_a_moved_tag_falls_back_to_the_pinned_image_that_is_still_here(settings, monkeypatch):
+    monkeypatch.setattr(docker_ops, "client", lambda: SimpleNamespace(images=_TwoImages(True)))
+    ref = docker_ops.check_tag_digest(settings, PZ, PZ_IMAGE)
+    assert ref == f"indifferentbroccoli/projectzomboid-server-docker@{PZ_DIGEST}"
+
+
+def test_create_container_uses_the_pinned_image_and_says_so(settings, monkeypatch):
+    created: list[dict] = []
+    fake = SimpleNamespace(
+        images=_TwoImages(True),
+        api=SimpleNamespace(
+            api_version="1.47", create_container=lambda **kw: created.append(kw) or {"Id": "n"}
+        ),
+        containers=SimpleNamespace(get=lambda cid: SimpleNamespace(id=cid)),
+    )
+    monkeypatch.setattr(docker_ops, "client", lambda: fake)
+    monkeypatch.setattr(docker_ops, "ensure_network", lambda _s: None)
+    (settings.instances_dir / str(IID)).mkdir(parents=True)
+    spec = InstanceSpec(
+        name="pz", image=PZ_IMAGE, memory_limit_mb=8192, rcon_password="x" * 16, game="project-zomboid",
+        env={"SERVER_NAME": "pz"},
+    )  # fmt: skip
+    warnings: list[str] = []
+    docker_ops.create_container(settings, IID, spec, "h", warnings=warnings)
+    assert created[-1]["image"] == f"indifferentbroccoli/projectzomboid-server-docker@{PZ_DIGEST}"
+    assert warnings and "pinned image" in warnings[0]
+
+
+def test_refused_only_when_no_pinned_image_is_here(settings, monkeypatch):
+    monkeypatch.setattr(docker_ops, "client", lambda: SimpleNamespace(images=_TwoImages(False)))
+    with pytest.raises(AgentError) as err:
+        docker_ops.check_tag_digest(settings, PZ, PZ_IMAGE)
+    assert err.value.code == "image_digest_mismatch"

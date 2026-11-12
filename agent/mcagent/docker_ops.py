@@ -754,29 +754,68 @@ def declared_volumes(image: str) -> list[str]:
     return sorted(((attrs.get("Config") or {}).get("Volumes") or {}).keys())
 
 
-def check_tag_digest(settings: Settings, profile: RuntimeProfile, image: str) -> None:
-    """409 ``image_digest_mismatch`` when ``image`` (``repository:tag``) is a tag the profile pins
-    (``tag_digests``) and the local image is none of its digests: the tag was moved (re-pushed) since
-    it was checked (A-8). Its RepoDigests are compared, and its id (Docker's containerd image store
-    uses the manifest digest as the id). Nothing to check for other tags or with the check off."""
+def _image_digests(img: Any) -> set[str]:
+    attrs = getattr(img, "attrs", None) or {}
+    seen = {str(ref).rpartition("@")[2] for ref in attrs.get("RepoDigests") or [] if "@" in str(ref)}
+    seen.add(str(attrs.get("Id") or getattr(img, "id", "") or ""))
+    return {d for d in seen if d}
+
+
+def pinned_digests(settings: Settings, profile: RuntimeProfile, image: str) -> tuple[str, ...]:
+    """The digests the profile pins for ``image`` (``repository:tag``; ``tag_digests``), () when it pins
+    none or the check is off."""
     if not settings.image_digest_check or not profile.tag_digests or "@" in image:
-        return
-    _repo, tag = split_image(image)
-    allowed = profile.tag_digests.get(tag)
+        return ()
+    return tuple(profile.tag_digests.get(split_image(image)[1]) or ())
+
+
+def local_image_is_pinned(settings: Settings, profile: RuntimeProfile, image: str) -> bool:
+    """Whether ``image`` is a pinned tag and the image it names on this host is one of its digests."""
+    allowed = pinned_digests(settings, profile, image)
     if not allowed:
-        return
+        return False
+    try:
+        return bool(_image_digests(client().images.get(image)) & set(allowed))
+    except ImageNotFound:
+        return False
+
+
+def check_tag_digest(settings: Settings, profile: RuntimeProfile, image: str) -> str | None:
+    """For ``image`` (``repository:tag``), a tag the profile pins (``tag_digests``; A-8): None when the
+    local image is one of its digests (or nothing is pinned, or the check is off). When the tag was moved
+    on this host (re-pushed and pulled) but an image with a pinned digest is still here, that image's
+    reference (``repository@sha256:...``) to create the container from (R-2). 409
+    ``image_digest_mismatch`` only when no image with a pinned digest is available. Its RepoDigests are
+    compared, and its id (Docker's containerd image store uses the manifest digest as the id)."""
+    allowed = pinned_digests(settings, profile, image)
+    if not allowed:
+        return None
     try:
         img = client().images.get(image)
     except ImageNotFound as exc:
         raise AgentError(f"Image {image} is not present", "image_missing", 409) from exc
-    attrs = img.attrs or {}
-    seen = {str(ref).rpartition("@")[2] for ref in attrs.get("RepoDigests") or [] if "@" in str(ref)}
-    seen.add(str(attrs.get("Id") or getattr(img, "id", "") or ""))
+    seen = _image_digests(img)
     if seen & set(allowed):
-        return
+        return None
+    repo, _tag = split_image(image)
+    for digest in allowed:
+        for ref in (f"{repo}@{digest}", digest):
+            try:
+                kept = client().images.get(ref)
+            except (ImageNotFound, APIError):
+                continue
+            if digest in _image_digests(kept):
+                log.warning(
+                    "%s was moved in the registry (now %s); the server is created from the pinned image %s@%s",
+                    image,
+                    ", ".join(sorted(seen)) or "unknown",
+                    repo,
+                    digest,
+                )
+                return f"{repo}@{digest}"
     raise AgentError(
         f"The image {image} on this host is not the one this agent knows for that tag "
-        f"(digest {', '.join(sorted(d for d in seen if d)) or 'unknown'}; expected {', '.join(allowed)}): "
+        f"(digest {', '.join(sorted(seen)) or 'unknown'}; expected {', '.join(allowed)}): "
         "the tag was moved in the registry, so the container is not created. Use a version this agent "
         "knows, or set AGENT_IMAGE_DIGEST_CHECK=false after checking the new image",
         "image_digest_mismatch",
@@ -901,17 +940,29 @@ def server_protected_paths(settings: Settings, instance_id: UUID) -> tuple[str, 
 
 
 def create_container(
-    settings: Settings, instance_id: UUID, spec: InstanceSpec, spec_hash: str, *, name: str | None = None
+    settings: Settings,
+    instance_id: UUID,
+    spec: InstanceSpec,
+    spec_hash: str,
+    *,
+    name: str | None = None,
+    warnings: list[str] | None = None,
 ) -> Container:
     """Create the container (stopped). ``name`` replaces the usual name (used while the old
     container of the server still exists; see :func:`replacement_name`). For a profile with
     ``mount_image_volumes`` the image is inspected for its VOLUMEs first (never for Minecraft)."""
     profile = profiles.for_spec(spec)
     image_volumes = None
+    pinned_ref = None
     if profile.mount_image_volumes or profile.game != profiles.DEFAULT_GAME:
         image = validate_image(settings, spec.image, profile)
-        image_volumes = declared_volumes(image)
-        check_tag_digest(settings, profile, image)
+        pinned_ref = check_tag_digest(settings, profile, image)
+        image_volumes = declared_volumes(pinned_ref or image)
+        if pinned_ref is not None and warnings is not None:
+            warnings.append(
+                f"{image} was moved in the registry since this agent pinned it; the server runs the pinned "
+                f"image {pinned_ref}"
+            )
     kwargs = build_create_kwargs(
         settings, instance_id, spec, spec_hash, image_volumes if profile.mount_image_volumes else None
     )
@@ -943,6 +994,8 @@ def create_container(
     if profile.prepare_start is not None or profile.literal_owner is not None:
         prepare_start(settings, instance_id, profile)
     write_agent_files(settings, instance_id, profile, spec)
+    if pinned_ref is not None:
+        kwargs["image"] = pinned_ref  # the known image, not what the moved tag names now (R-2)
     if spec.network is None and kwargs["network"] == settings.instance_network:
         # a spec without a network (the panel's default): the server's own bridge (A-1, pernet), else
         # the shared instance network as before
