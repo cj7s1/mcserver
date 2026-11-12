@@ -1196,7 +1196,7 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
 
     from apps.nodes.models import Node
 
-    from .services import allocate_port, ports_in_use
+    from .services import allocate_port, node_ports_locked, ports_in_use
 
     instance = _instance(job)
     source = AgentClient(instance.node)
@@ -1239,23 +1239,24 @@ def migrate(job: Job, ctx: JobContext) -> dict[str, Any]:
         _tag_backups_on_node(instance, old_node)  # they stay in the old node's restic repository
         port_changed = None
         fields = ["node", "game_port", "container_spec_hash"]
-        if instance.ports and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
-            # named ports: each keeps its number when it is free there for its protocol
-            from .services import assign_named_ports
+        with node_ports_locked(target_node):  # (E-6: no other server takes the same ports meanwhile)
+            if instance.ports and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+                # named ports: each keeps its number when it is free there for its protocol
+                from .services import assign_named_ports
 
-            ports = assign_named_ports(games.for_instance(instance), target_node, exclude=instance, current=instance.ports)
-            if ports != instance.ports:
-                port_changed = (instance.game_port, int(ports[0]["host_port"]))
-                instance.ports = ports
-                instance.game_port = int(ports[0]["host_port"])
-                fields.append("ports")
-        elif instance.game_port in ports_in_use(target_node, exclude=instance):
-            new_port = allocate_port(target_node, exclude=instance)
-            port_changed = (instance.game_port, new_port)
-            instance.game_port = new_port
-        instance.node = target_node
-        instance.container_spec_hash = ""
-        instance.save(update_fields=fields)
+                ports = assign_named_ports(games.for_instance(instance), target_node, exclude=instance, current=instance.ports)
+                if ports != instance.ports:
+                    port_changed = (instance.game_port, int(ports[0]["host_port"]))
+                    instance.ports = ports
+                    instance.game_port = int(ports[0]["host_port"])
+                    fields.append("ports")
+            elif instance.game_port in ports_in_use(target_node, exclude=instance):
+                new_port = allocate_port(target_node, exclude=instance)
+                port_changed = (instance.game_port, new_port)
+                instance.game_port = new_port
+            instance.node = target_node
+            instance.container_spec_hash = ""
+            instance.save(update_fields=fields)
         moved = True
         ctx.progress(0.88, f"Creating the container on {target_node.name}")
         # (memory is checked: the server did not count on the target node before)

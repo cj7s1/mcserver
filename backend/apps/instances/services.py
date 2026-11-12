@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +26,30 @@ from apps.nodes.models import Node
 from .models import Instance, Schedule
 
 log = logging.getLogger(__name__)
+
+
+@contextmanager
+def node_ports_locked(node: Node) -> Iterator[None]:
+    """A transaction in which no other request or job assigns ports on ``node`` (E-6): the node's row is locked
+    (``SELECT ... FOR UPDATE``) until the new or changed servers are saved. Named ports of the other games have
+    no unique index (Minecraft's ``game_port`` has one), so two creates, clones or restores of the same game at
+    once would otherwise both get the default port."""
+    with transaction.atomic():
+        list(Node.objects.select_for_update().filter(pk=node.pk).values_list("pk", flat=True))
+        yield
+
+
+def grant_copy_access(user: Any, source: Instance, target: Instance) -> None:
+    """The user who cloned ``source`` or restored one of its backups as ``target`` gets the role they hold on
+    the source on the copy (D-11: without it the copy was invisible to them). Never more: the copy holds the
+    source's files and secrets. Users who see every server (global ``instance.view``, the owner) get no grant,
+    as on create."""
+    from apps.accounts.models import InstanceAccess
+
+    if user is None or getattr(user, "is_root", False) or "instance.view" in user.global_permissions():
+        return
+    for access in InstanceAccess.objects.filter(user=user, instance=source).select_related("role"):
+        InstanceAccess.objects.get_or_create(user=user, instance=target, defaults={"role": access.role, "created_by": user})
 
 
 def port_range() -> tuple[int, int]:
@@ -434,6 +459,10 @@ def power(
         reconcile_instance(instance.id)
         return status
     allow_overcommit = bool(allow_overcommit) and action in ("start", "restart")
+    if allow_overcommit:
+        from . import capacity
+
+        capacity.require_overcommit_right(user)  # 403 overcommit_not_allowed (D-4, I-5)
     if action in ("start", "restart"):
         from apps import games
 

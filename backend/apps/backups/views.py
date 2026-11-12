@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
@@ -277,14 +276,17 @@ class BackupRestoreNewView(APIView):
         # One transaction: when the source is busy (409 instance_busy) the new server record is
         # rolled back with the failed enqueue instead of being left behind as an orphan.
         extra: dict[str, Any] = {}
-        if (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
-            # named ports, per protocol; the pinned choices of the source (its save was made with them)
-            requested = {source.ports[0]["name"]: port} if port and source.ports else None
-            extra["ports"] = services.assign_named_ports(games.for_instance(source), repo_node, requested)
+        other_game = (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME
+        if other_game:
+            # the pinned choices of the source (its save was made with them)
             extra["game_options"] = dict(source.game_options or {})
             extra.update(games.for_instance(source).copied_state(source))
-            port = int(extra["ports"][0]["host_port"]) if extra["ports"] else port
-        with transaction.atomic():
+        with services.node_ports_locked(repo_node):  # (E-6: the ports are assigned and saved under the node's lock)
+            if other_game:
+                # named ports, per protocol
+                requested = {source.ports[0]["name"]: port} if port and source.ports else None
+                extra["ports"] = services.assign_named_ports(games.for_instance(source), repo_node, requested)
+                port = int(extra["ports"][0]["host_port"]) if extra["ports"] else port
             if extra:
                 pass  # named ports: checked per protocol above
             elif port:
@@ -300,6 +302,7 @@ class BackupRestoreNewView(APIView):
                 **{f: getattr(source, f) for f in copy_fields},
                 **extra,
             )
+            services.grant_copy_access(request.user, source, target)  # (D-11)
             job = enqueue(
                 "restore_new",
                 title=f"Restore '{backup.name}' as {target.name}",

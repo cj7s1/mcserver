@@ -185,15 +185,34 @@ def on_node(instance: Any, node: Any) -> Any:
     return probe
 
 
-def admit_request(instance: Any, *, starts: bool, allow_overcommit: Any, node: Any = None) -> dict[str, Any]:
+# who may start a server that does not fit into the node's memory (``allow_overcommit``, D-4/I-5): the
+# memory reserve is the administrator's setting, so overriding it is too
+OVERCOMMIT_PERMISSION = "system.settings"
+
+
+def require_overcommit_right(user: Any) -> None:
+    """403 ``overcommit_not_allowed`` unless ``user`` (None: the panel itself) holds OVERCOMMIT_PERMISSION."""
+    if user is None or OVERCOMMIT_PERMISSION in user.global_permissions():
+        return
+    raise ApiError(
+        "Starting a server that does not fit into the node's memory needs an administrator (the global "
+        "permission to change system settings); ask one, or stop another server first.",
+        code="overcommit_not_allowed",
+        status_code=403,
+    )
+
+
+def admit_request(instance: Any, *, starts: bool, allow_overcommit: Any, node: Any = None, user: Any = None) -> dict[str, Any]:
     """For a request that queues a job which starts the server (create with start, a software or
     modpack update with "start afterwards", a recreate of a running server, a migration of a
     running server to ``node``): 409 ``insufficient_memory`` now, with the numbers, so the user
     can confirm "Start anyway" like for a power start (frontend ``lib/power.ts``); with
-    ``allow_overcommit`` the job params that make the job start it anyway (``handlers.admit_memory``)."""
+    ``allow_overcommit`` the job params that make the job start it anyway (``handlers.admit_memory``),
+    only for an administrator (``require_overcommit_right``: ``user`` is the requester)."""
     if not starts:
         return {}
     if allow_overcommit is True:
+        require_overcommit_right(user)
         return {"allow_overcommit": True}
     admit(instance if node is None else on_node(instance, node))
     return {}

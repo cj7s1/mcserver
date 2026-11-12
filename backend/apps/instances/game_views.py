@@ -13,7 +13,6 @@ import time
 import zipfile
 from typing import Any
 
-from django.db import transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
@@ -76,9 +75,12 @@ def create_other_game(request: Request, data: dict[str, Any], node: Node, defini
     probe = Instance(**fields)
     fields["image"] = definition.image(probe)
     overcommit = capacity.admit_request(
-        Instance(**fields), starts=bool(data.get("start", True)), allow_overcommit=data.get("allow_overcommit")
+        Instance(**fields),
+        starts=bool(data.get("start", True)),
+        allow_overcommit=data.get("allow_overcommit"),
+        user=request.user,
     )
-    with transaction.atomic():
+    with services.node_ports_locked(node):  # (E-6: two creates at once never get the same ports)
         ports = services.assign_named_ports(definition, node, data.get("ports"))
         fields["ports"] = ports
         fields["game_port"] = int(ports[0]["host_port"]) if ports else services.allocate_port(node)
@@ -161,6 +163,7 @@ def game_software_update(request: Request, instance: Instance) -> Response:
         instance,
         starts=bool(data.get("start")) and not capacity.runs_now(instance),
         allow_overcommit=data.get("allow_overcommit"),
+        user=request.user,
     )
     job = enqueue(
         "software_update",

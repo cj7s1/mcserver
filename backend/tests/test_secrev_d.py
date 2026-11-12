@@ -277,3 +277,156 @@ def test_d3_old_failed_logins_are_pruned(users: Any) -> None:
     assert prune_login_failures() == 1
     assert set(AuditEvent.objects.values_list("pk", flat=True)) >= {new.pk, other.pk}
     assert not AuditEvent.objects.filter(pk=old.pk).exists()
+
+
+# --- D-4 (I-5) ------------------------------------------------------------------------------------------------
+def _grant(make_user: Any, instance: Any, name: str, codes: list[str], role: Any = None) -> Any:
+    from apps.accounts.models import InstanceAccess, Role
+
+    grant = Role.objects.create(key=f"r-{name}", name=f"r {name}", permissions=sorted({"instance.view", *codes}))
+    user = make_user(name, role=role) if role is not None else make_user(name)
+    InstanceAccess.objects.create(user=user, instance=instance, role=grant)
+    return user
+
+
+def _server(make_instance: Any, fake_agent: Any, name: str, *, running: bool, **fields: Any) -> Any:
+    from django.utils import timezone
+
+    from apps.instances.models import Instance
+    from apps.instances.spec import build_spec, current_spec_hash
+
+    fields.setdefault("desired_state", "running" if running else "stopped")
+    inst = make_instance(name=name, **fields)
+    fake_agent.apply(inst.id, build_spec(inst), start=running)
+    Instance.objects.filter(pk=inst.pk).update(
+        container_spec_hash=current_spec_hash(inst),
+        installed_at=timezone.now(),
+        status="running" if running else "stopped",
+        container_state="running" if running else "exited",
+    )
+    inst.refresh_from_db()
+    return inst
+
+
+@pytest.mark.django_db
+def test_d4_only_an_administrator_overrides_the_memory_admission(
+    make_instance: Any, fake_agent: Any, make_user: Any, client_for: Any, users: Any, django_capture_on_commit_callbacks: Any
+) -> None:
+    """Adopted from d-panel-web/poc test_power_control_alone_overrides_the_memory_admission: 16 GiB node, 4 GiB
+    reserve, an 8 GiB server runs, a 6 GiB one does not fit."""
+    from apps.accounts.models import Role
+    from apps.jobs.models import Job, JobStatus
+
+    _server(make_instance, fake_agent, "Big", running=True, memory_mb=8192)
+    other = _server(make_instance, fake_agent, "Other", running=False, memory_mb=6144)
+    friend = client_for(_grant(make_user, other, "friend", ["instance.control"]))
+    url = f"/api/instances/{other.id}/power"
+    refused = friend.post(url, {"action": "start"}, format="json")
+    assert refused.status_code == 409 and refused.json()["error"]["code"] == "insufficient_memory"
+    forced = friend.post(url, {"action": "start", "allow_overcommit": True}, format="json")
+    assert forced.status_code == 403 and forced.json()["error"]["code"] == "overcommit_not_allowed"
+    assert not fake_agent.containers[str(other.id)]["running"]
+    # with the global permission to change system settings (an administrator) it is honoured
+    admin_role = Role.objects.create(key="settings-admin", name="Settings admin", permissions=["system.settings"])
+    admin = client_for(_grant(make_user, other, "admin2", ["instance.control"], role=admin_role))
+    with django_capture_on_commit_callbacks(execute=True):
+        ok = admin.post(url, {"action": "start", "allow_overcommit": True}, format="json")
+    assert ok.status_code == 202, ok.content
+    assert Job.objects.get(pk=ok.json()["id"]).status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.django_db
+def test_d4_the_other_places_refuse_it_too(
+    make_instance: Any, fake_agent: Any, make_user: Any, client_for: Any, roles: Any
+) -> None:
+    from apps.accounts.models import Role
+
+    _server(make_instance, fake_agent, "Big", running=True, memory_mb=8192)
+    running = _server(make_instance, fake_agent, "Running", running=True, memory_mb=1024)
+    creator = Role.objects.create(key="creator", name="Creator", permissions=["instance.create"])
+    user = _grant(make_user, running, "builder", ["instance.configure", "instance.control"], role=creator)
+    client = client_for(user)
+    body = {"name": "Huge", "accept_eula": True, "server_type": "VANILLA", "minecraft_version": "1.20.4"}
+    resp = client.post("/api/instances/", {**body, "memory_mb": 10000, "allow_overcommit": True}, format="json")
+    assert resp.status_code == 403 and resp.json()["error"]["code"] == "overcommit_not_allowed", resp.content
+    resp = client.post(f"/api/instances/{running.id}/recreate", {"allow_overcommit": True}, format="json")
+    assert resp.status_code == 403 and resp.json()["error"]["code"] == "overcommit_not_allowed", resp.content
+
+
+# --- D-11 -----------------------------------------------------------------------------------------------------
+@pytest.mark.django_db
+def test_d11_a_clone_is_visible_to_the_user_who_made_it(
+    make_instance: Any, fake_agent: Any, make_user: Any, client_for: Any, roles: Any
+) -> None:
+    """Adopted from d-panel-web/poc test_clone_is_invisible_to_the_user_who_made_it."""
+    from apps.accounts.models import InstanceAccess, Role
+
+    creator_role = Role.objects.create(key="creator", name="Creator", permissions=["instance.create"])
+    user = make_user("builder", role=creator_role)
+    source = _server(make_instance, fake_agent, "Source", running=False)
+    InstanceAccess.objects.create(user=user, instance=source, role=roles["server_manager"])
+    client = client_for(user)
+    resp = client.post(f"/api/instances/{source.id}/clone", {"name": "My copy"}, format="json")
+    assert resp.status_code == 202, resp.content
+    clone_id = resp.json()["instance"]["id"]
+    assert client.get(f"/api/instances/{clone_id}").status_code == 200
+    assert "My copy" in [i["name"] for i in client.get("/api/instances/").json()]
+    grant = InstanceAccess.objects.get(instance_id=clone_id)
+    assert grant.user == user and grant.role == roles["server_manager"]  # what they hold on the source, no more
+
+
+@pytest.mark.django_db
+def test_d11_restore_as_new_gives_the_same_role_and_admins_get_no_grant(
+    make_instance: Any,
+    fake_agent: Any,
+    make_user: Any,
+    client_for: Any,
+    roles: Any,
+    users: Any,
+    django_capture_on_commit_callbacks: Any,
+) -> None:
+    from apps.accounts.models import InstanceAccess, Role
+    from apps.backups.models import Backup, BackupStatus
+
+    source = _server(make_instance, fake_agent, "Source", running=False)
+    backup = Backup.objects.create(instance=source, name="b", status=BackupStatus.SUCCEEDED, snapshot_id="abc123")
+    restorer_role = Role.objects.create(key="restorer", name="Restorer", permissions=["instance.create"])
+    operator = Role.objects.create(key="op-restore", name="Op", permissions=["instance.view", "instance.restore"])
+    user = make_user("restorer", role=restorer_role)
+    InstanceAccess.objects.create(user=user, instance=source, role=operator)
+    resp = client_for(user).post(f"/api/instances/{source.id}/backups/{backup.id}/restore-as-new", {"name": "R"}, format="json")
+    assert resp.status_code == 202, resp.content
+    new_id = resp.json()["instance"]["id"]
+    assert InstanceAccess.objects.get(instance_id=new_id, user=user).role == operator
+    # the owner sees every server: no grant
+    other = _server(make_instance, fake_agent, "Other", running=False)
+    resp = client_for(users["owner"]).post(f"/api/instances/{other.id}/clone", {"name": "Owner copy"}, format="json")
+    assert resp.status_code == 202 and not InstanceAccess.objects.filter(instance_id=resp.json()["instance"]["id"]).exists()
+
+
+# --- E-6 (slice E; the requests are here with the other D tests of the same views) ------------------------------
+@pytest.mark.django_db
+def test_e6_named_ports_are_assigned_under_the_nodes_lock(
+    clients: Any, fake_agent: Any, django_capture_on_commit_callbacks: Any
+) -> None:
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from tests.test_games_six import body, create
+
+    def locked(sqls: list[str]) -> bool:
+        return any("FOR UPDATE" in q and '"nodes_node"' in q for q in sqls)
+
+    with CaptureQueriesContext(connection) as queries, django_capture_on_commit_callbacks(execute=False):
+        assert clients["owner"].post("/api/instances/", body("rust"), format="json").status_code == 201
+    assert locked([q["sql"] for q in queries.captured_queries])
+    src = create(clients, django_capture_on_commit_callbacks, "palworld")
+    with CaptureQueriesContext(connection) as queries, django_capture_on_commit_callbacks(execute=False):
+        assert clients["owner"].post(f"/api/instances/{src.id}/clone", {"name": "Copy"}, format="json").status_code == 202
+    assert locked([q["sql"] for q in queries.captured_queries])
+    with CaptureQueriesContext(connection) as queries:
+        resp = clients["owner"].patch(
+            f"/api/instances/{src.id}", {"ports": [{"name": src.ports[0]["name"], "host_port": 28211}]}, format="json"
+        )
+    assert resp.status_code == 200, resp.content
+    assert locked([q["sql"] for q in queries.captured_queries])

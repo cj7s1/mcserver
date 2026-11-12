@@ -239,7 +239,10 @@ class InstanceModpackUpdateView(APIView):
         # a stopped server started afterwards must fit into the node's memory (a running one is started
         # again without the check: it ran when the job began)
         overcommit = capacity.admit_request(
-            instance, starts=start and not capacity.runs_now(instance), allow_overcommit=request.data.get("allow_overcommit")
+            instance,
+            starts=start and not capacity.runs_now(instance),
+            allow_overcommit=request.data.get("allow_overcommit"),
+            user=request.user,
         )
         job = enqueue(
             "modpack_update",

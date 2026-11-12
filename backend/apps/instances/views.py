@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -150,7 +151,10 @@ class InstanceListView(APIView):
         # a server that starts right away must fit into the node's memory (409 insufficient_memory before
         # anything is created; the client asks "Start anyway?" and sends allow_overcommit)
         overcommit = capacity.admit_request(
-            Instance(**fields), starts=bool(data.get("start", True)), allow_overcommit=data.get("allow_overcommit")
+            Instance(**fields),
+            starts=bool(data.get("start", True)),
+            allow_overcommit=data.get("allow_overcommit"),
+            user=request.user,
         )
 
         requested_port = data.get("game_port")
@@ -261,34 +265,39 @@ class InstanceDetailView(APIView):
                 # downgrade and takes a pre-update backup; a plain field edit would skip all that.
                 message = "Change the Minecraft or loader version through the software update (POST .../software)"
             raise ValidationError({field: [message] for field in version_fields})
-        if "ports" in ser.validated_data and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
-            definition = games.for_instance(instance)
-            requested = {
-                str(p["name"]): {"host_port": p.get("host_port"), "host_ip": p.get("host_ip") or ""}
-                for p in ser.validated_data["ports"]
-            }
-            ports = services.assign_named_ports(definition, instance.node, requested, exclude=instance, current=instance.ports)
-            changed.pop("ports", None)
-            if ports != instance.ports:
-                changed["ports"] = ports
-                changed["game_port"] = int(ports[0]["host_port"]) if ports else instance.game_port
-                if changed["game_port"] == instance.game_port:
-                    changed.pop("game_port")
-        elif "game_port" in changed:
-            services.check_port_available(instance.node, changed["game_port"], exclude=instance)
-        for extra in changed.get("extra_ports", []):
-            services.check_port_available(instance.node, extra["host_port"], exclude=instance)
-        if "java_version" in changed:
-            changed["image"] = image_for(changed["java_version"])
-        if changed:
-            for field, value in changed.items():
-                setattr(instance, field, value)
-            try:
-                # only the edited columns: a full-row save would write back the stale job lock,
-                # status and whatever a running job changed since this request loaded the row
-                instance.save(update_fields=[*changed, "updated_at"])
-            except IntegrityError as exc:
-                raise ConflictError("That port is already used by another server", code="port_conflict") from exc
+        # named ports are assigned and saved under the node's lock (E-6); other edits need none
+        named = "ports" in ser.validated_data and (instance.game or games.DEFAULT_GAME) != games.DEFAULT_GAME
+        with services.node_ports_locked(instance.node) if named else nullcontext():
+            if named:
+                definition = games.for_instance(instance)
+                requested = {
+                    str(p["name"]): {"host_port": p.get("host_port"), "host_ip": p.get("host_ip") or ""}
+                    for p in ser.validated_data["ports"]
+                }
+                ports = services.assign_named_ports(
+                    definition, instance.node, requested, exclude=instance, current=instance.ports
+                )
+                changed.pop("ports", None)
+                if ports != instance.ports:
+                    changed["ports"] = ports
+                    changed["game_port"] = int(ports[0]["host_port"]) if ports else instance.game_port
+                    if changed["game_port"] == instance.game_port:
+                        changed.pop("game_port")
+            elif "game_port" in changed:
+                services.check_port_available(instance.node, changed["game_port"], exclude=instance)
+            for extra in changed.get("extra_ports", []):
+                services.check_port_available(instance.node, extra["host_port"], exclude=instance)
+            if "java_version" in changed:
+                changed["image"] = image_for(changed["java_version"])
+            if changed:
+                for field, value in changed.items():
+                    setattr(instance, field, value)
+                try:
+                    # only the edited columns: a full-row save would write back the stale job lock,
+                    # status and whatever a running job changed since this request loaded the row
+                    instance.save(update_fields=[*changed, "updated_at"])
+                except IntegrityError as exc:
+                    raise ConflictError("That port is already used by another server", code="port_conflict") from exc
         if changed.keys() & self.EDITABLE_RESTART:
             services.bump_revision(instance)
         audit.record(
@@ -413,7 +422,7 @@ class InstanceActionView(APIView):
             # a running server is started again from the new container: the same memory check as a start
             data = request.data if isinstance(request.data, dict) else {}
             params = capacity.admit_request(
-                instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit")
+                instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit"), user=request.user
             )
         job = enqueue(action, title=f"{title}: {instance.name}", instance=instance, user=request.user, params=params or None)
         audit.record(f"instance.{action}", request=request, instance=instance, target=instance, details=params or None)
@@ -468,15 +477,18 @@ class InstanceCloneView(APIView):
         fields = {f: getattr(source, f) for f in copy_fields}
         games.require_agent_support(source.game, AgentClient(source.node))  # 409 agent_lacks_game
         port = ser.validated_data.get("game_port")
-        if (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME:
+        other_game = (source.game or games.DEFAULT_GAME) != games.DEFAULT_GAME
+        if other_game:
             fields["game_options"] = dict(source.game_options or {})
             fields.update(games.for_instance(source).copied_state(source))
-            requested = {source.ports[0]["name"]: port} if port and source.ports else None
-            fields["ports"] = services.assign_named_ports(games.for_instance(source), source.node, requested, host_ip="")
-            port = int(fields["ports"][0]["host_port"]) if fields["ports"] else 0
         # One transaction: if the source is busy (409 instance_busy) the new record is rolled
-        # back instead of being left behind as an empty orphan server.
-        with transaction.atomic():
+        # back instead of being left behind as an empty orphan server. The node's ports are locked
+        # until the copy is saved (E-6).
+        with services.node_ports_locked(source.node):
+            if other_game:
+                requested = {source.ports[0]["name"]: port} if port and source.ports else None
+                fields["ports"] = services.assign_named_ports(games.for_instance(source), source.node, requested, host_ip="")
+                port = int(fields["ports"][0]["host_port"]) if fields["ports"] else 0
             if port and "ports" in fields:
                 pass  # named ports: checked per protocol above
             elif port:
@@ -486,6 +498,7 @@ class InstanceCloneView(APIView):
             target = Instance.objects.create(
                 name=ser.validated_data["name"], game_port=port, source=Source.CLONED, created_by=request.user, **fields
             )
+            services.grant_copy_access(request.user, source, target)  # (D-11)
             job = enqueue(
                 "clone",
                 title=f"Clone {source.name} → {target.name}",
@@ -1706,6 +1719,7 @@ class SoftwareUpdateView(APIView):
             instance,
             starts=bool(data.get("start")) and not capacity.runs_now(instance),
             allow_overcommit=data.get("allow_overcommit"),
+            user=request.user,
         )
         job = enqueue(
             "software_update",
@@ -1825,7 +1839,11 @@ class MigrateView(APIView):
         games.require_agent_support(instance.game, AgentClient(target), definition.agent_variant(instance))
         # a running server is started on the target node: it must fit there (the job checks it again before copying)
         overcommit = capacity.admit_request(
-            instance, starts=capacity.runs_now(instance), allow_overcommit=data.get("allow_overcommit"), node=target
+            instance,
+            starts=capacity.runs_now(instance),
+            allow_overcommit=data.get("allow_overcommit"),
+            node=target,
+            user=request.user,
         )
         job = enqueue(
             "migrate",
