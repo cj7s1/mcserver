@@ -32,7 +32,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { errorMessage } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
+import { startDownload } from "@/lib/downloads";
 import { formatBytes, formatDateTime, relativeTime } from "@/lib/format";
 import type { FileEntry } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -47,6 +49,11 @@ import {
   type SortDir,
   type SortKey,
 } from "./file-utils";
+
+/** A menu item's download: a ticket first, then the browser downloads it (lib/downloads.ts, D-1). */
+function download(url: string, name: string): void {
+  startDownload(url, name).catch((err: unknown) => toast.error(`Download failed: ${errorMessage(err)}`));
+}
 
 export interface FileActions {
   open: (entry: FileEntry) => void;
@@ -194,10 +201,8 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
       <DropdownMenuItem key="open" onSelect={() => actions.open(entry)}>
         <FolderOpen /> Open
       </DropdownMenuItem>,
-      <DropdownMenuItem key="zip" asChild>
-        <a href={actions.archiveHref(entry)} download={`${entry.name}.zip`}>
-          <FileArchive /> Download as .zip
-        </a>
+      <DropdownMenuItem key="zip" onSelect={() => download(actions.archiveHref(entry), `${entry.name}.zip`)}>
+        <FileArchive /> Download as .zip
       </DropdownMenuItem>,
     );
   }
@@ -216,10 +221,8 @@ function RowMenu({ entry, canWrite, actions }: { entry: FileEntry; canWrite: boo
       );
     }
     items.push(
-      <DropdownMenuItem key="download" asChild>
-        <a href={actions.downloadHref(entry)} download={entry.name}>
-          <Download /> Download
-        </a>
+      <DropdownMenuItem key="download" onSelect={() => download(actions.downloadHref(entry), entry.name)}>
+        <Download /> Download
       </DropdownMenuItem>,
     );
   }

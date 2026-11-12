@@ -6,7 +6,8 @@
  * notice{level, message, id?, job_id?} (a note from the panel, e.g. that a typed `stop` was turned into a
  * Stop of the server or refused; `id` names the command it answers, whose command_result with the same
  * text follows; `job_id` is the stop job). Unknown types are ignored.
- * Client → server: command{id,command}.
+ * Client → server: auth{token} first (this browser's session token, D-1: the panel sends nothing, not even
+ * hello, and takes no other frame before it), then command{id,command}.
  *
  * Reconnects with exponential backoff (1 s → 30 s). The backoff only resets once a
  * connection has stayed up for a while so a server that accepts and immediately
@@ -15,6 +16,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { closeSocket, sessionStillValid, wsUrl } from "@/lib/events";
+import { sendAuthFrame, socketAuthenticated } from "@/lib/session-token";
 
 export type ConsoleServerMessage =
   | { type: "hello"; can_command: boolean }
@@ -73,6 +75,7 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
       ws = sock;
       wsRef.current = sock;
       sock.onopen = () => {
+        sendAuthFrame(sock);
         healthyTimer = setTimeout(() => {
           backoff = 1000;
         }, HEALTHY_AFTER);
@@ -165,7 +168,8 @@ export function useConsoleSocket(instanceId: string, onEvent: (msg: ConsoleServe
 
   const send = useCallback((msg: { type: "command"; id: string; command: string }): boolean => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    // never before the auth frame (sent first thing on open); the input waits for hello anyway
+    if (!ws || ws.readyState !== WebSocket.OPEN || !socketAuthenticated(ws)) return false;
     ws.send(JSON.stringify(msg));
     return true;
   }, []);

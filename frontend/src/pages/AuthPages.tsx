@@ -10,6 +10,8 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
 import { api, errorMessage, throttledMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
+import { setSessionToken } from "@/lib/session-token";
+import type { AuthState, SignInAnswer } from "@/lib/types";
 
 function AuthCard({ title, subtitle, children }: { title: string; subtitle?: ReactNode; children: ReactNode }) {
   return (
@@ -34,6 +36,9 @@ const passwordSchema = z.string().min(10, "Use at least 10 characters");
 
 export function LoginPage() {
   const qc = useQueryClient();
+  // signed in by cookie but without this browser's session token (D-1): an expired or replaced token,
+  // or a session from before the panel bound sessions to it (the gate above re-renders on every change)
+  const again = !!qc.getQueryData<AuthState>(qk.auth)?.session_token_required;
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -44,7 +49,8 @@ export function LoginPage() {
     setBusy(true);
     setError(null);
     try {
-      await api.post("/auth/login", { username, password });
+      const answer = await api.post<SignInAnswer>("/auth/login", { username, password });
+      setSessionToken(answer?.session_token); // every later request carries it (lib/session-token.ts)
       await qc.invalidateQueries({ queryKey: qk.auth });
     } catch (err) {
       // 429 throttled (too many failed sign-ins for this account or from this address): with the wait
@@ -57,6 +63,11 @@ export function LoginPage() {
   return (
     <AuthCard title="Sign in to MCPanel" subtitle="Manage your Minecraft servers">
       <form className="grid gap-4" onSubmit={submit}>
+        {again && !error && (
+          <Alert>
+            <AlertDescription>Your session needs a new sign-in. Please sign in again.</AlertDescription>
+          </Alert>
+        )}
         {error && (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -98,12 +109,13 @@ export function SetupPage() {
     if (form.password !== form.confirm) return setError("Passwords do not match");
     setBusy(true);
     try {
-      await api.post("/auth/setup", {
+      const answer = await api.post<SignInAnswer>("/auth/setup", {
         username: form.username,
         email: form.email,
         password: form.password,
         ...(tokenRequired ? { setup_token: form.setupToken.trim() } : {}),
       });
+      setSessionToken(answer?.session_token);
       await qc.invalidateQueries({ queryKey: qk.auth });
     } catch (err) {
       setError(errorMessage(err));

@@ -35,6 +35,15 @@ export function resolveAuthState(
   return markMustChangePassword(state);
 }
 
+/**
+ * The auth state after the panel refused this browser's session token (D-1): signed out, with
+ * `session_token_required` so the login page asks to sign in again. The same object when it already says so.
+ */
+export function signedOutForToken(state: AuthState | undefined): AuthState {
+  if (state && !state.authenticated && state.session_token_required) return state;
+  return { setup_required: state?.setup_required ?? false, authenticated: false, user: null, session_token_required: true };
+}
+
 /** Id of the signed-in user; null when nobody is signed in; undefined while unknown. */
 export function sessionUserId(state: AuthState | undefined): number | null | undefined {
   if (state === undefined) return undefined;

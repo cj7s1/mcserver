@@ -5,6 +5,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState, ErrorState, LoadingState } from "@/components/States";
+import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, downloadUrl, errorMessage } from "@/lib/api";
@@ -176,9 +177,9 @@ export function BrowseBackupDialog({
                       <td className="px-2 py-1 text-right whitespace-nowrap">
                         {e.type === "file" && (
                           <Button variant="ghost" size="icon-xs" asChild>
-                            <a href={downloadUrl(`${base}/download`, { path: e.path })} download={e.name} aria-label={`Download ${e.name}`}>
+                            <DownloadLink href={downloadUrl(`${base}/download`, { path: e.path })} download={e.name} aria-label={`Download ${e.name}`}>
                               <Download />
-                            </a>
+                            </DownloadLink>
                           </Button>
                         )}
                         {canRestore && (

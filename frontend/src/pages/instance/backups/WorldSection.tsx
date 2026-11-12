@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router";
 import { Section } from "@/components/PageHeader";
 import { ErrorState, LoadingState } from "@/components/States";
+import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { formatBytes, formatDateTime, relativeTime } from "@/lib/format";
 import type { Instance, Job, WorldFolder, WorldInfo } from "@/lib/types";
@@ -176,10 +177,10 @@ export function WorldSection({
         <>
           {world?.download_url ? (
             <Button size="sm" variant="outline" asChild>
-              <a href={world.download_url} download>
+              <DownloadLink href={world.download_url} download>
                 <Download /> <span className="hidden sm:inline">Download world (.zip)</span>
                 <span className="sm:hidden">Download</span>
-              </a>
+              </DownloadLink>
             </Button>
           ) : (
             <Button size="sm" variant="outline" disabled>

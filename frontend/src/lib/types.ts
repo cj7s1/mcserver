@@ -387,6 +387,16 @@ export interface AuthState {
   setup_token_required?: boolean;
   authenticated: boolean;
   user: Me | null;
+  /**
+   * true: the session cookie is signed in, but this browser did not send the session's token (none stored,
+   * or another one): the cookie alone is no sign-in (D-1). The login page asks to sign in again.
+   */
+  session_token_required?: boolean;
+}
+
+/** The answer of POST /auth/login and /auth/setup: the user plus this browser's session token (shown once). */
+export interface SignInAnswer extends Partial<Me> {
+  session_token?: string;
 }
 
 export interface PortMapping {

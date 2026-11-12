@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ErrorState, LoadingState } from "@/components/States";
 import { Badge } from "@/components/ui/badge";
+import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { api, ApiError, downloadUrl, errorMessage } from "@/lib/api";
@@ -190,9 +191,9 @@ export function FileEditorDialog({
               <RefreshCw className={cn(file.isFetching && "animate-spin")} /> Reload
             </Button>
             <Button size="sm" variant={nonUtf8 ? "default" : "outline"} className={cn(nonUtf8 && "ml-auto")} asChild>
-              <a href={downloadUrl(`/instances/${instance.id}/files/download`, { path: target.path })} download={name}>
+              <DownloadLink href={downloadUrl(`/instances/${instance.id}/files/download`, { path: target.path })} download={name}>
                 <Download /> Download
-              </a>
+              </DownloadLink>
             </Button>
             {editable && (
               <Button size="sm" className="ml-auto" onClick={doSave} disabled={!dirty || tooLarge || save.isPending}>

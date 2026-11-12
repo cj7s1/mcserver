@@ -3,9 +3,14 @@
  *
  * - Uses the session cookie (same origin) and sends Django's CSRF token header
  *   on unsafe methods.
+ * - Sends this browser's session token (`X-MCPanel-Session-Token`, lib/session-token.ts) with every
+ *   request, safe methods included: the panel refuses a signed-in session's request without it (401
+ *   `session_token_required`, D-1). Such an answer drops the token that was sent.
  * - Every non-2xx response becomes an ApiError carrying the backend's stable
  *   error code, message and details (see backend/apps/core/errors.py).
  */
+
+import { clearSessionToken, getSessionToken, SESSION_TOKEN_HEADER, SESSION_TOKEN_REQUIRED, sessionTokenHeaders } from "./session-token";
 
 export class ApiError extends Error {
   status: number;
@@ -123,7 +128,7 @@ let csrfPrimer: Promise<void> | null = null;
  */
 export async function ensureCsrfCookie(): Promise<void> {
   if (getCookie("mcpanel_csrftoken")) return;
-  csrfPrimer ??= fetch(buildUrl("/auth/state"), { credentials: "same-origin", headers: { Accept: "application/json" } })
+  csrfPrimer ??= fetch(buildUrl("/auth/state"), { credentials: "same-origin", headers: { Accept: "application/json", ...sessionTokenHeaders() } })
     .then(() => undefined)
     .catch(() => undefined)
     .finally(() => {
@@ -132,8 +137,20 @@ export async function ensureCsrfCookie(): Promise<void> {
   await csrfPrimer;
 }
 
+/** Whether the panel refused a request for lacking this browser's session token (D-1). */
+export function isSessionTokenRequiredError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 401 && err.code === SESSION_TOKEN_REQUIRED;
+}
+
+/** A 401 `session_token_required` ends the token that was sent (and only that one, see clearSessionToken). */
+function settleTokenRefusal(err: ApiError, sent: string | null): ApiError {
+  if (isSessionTokenRequiredError(err)) clearSessionToken(sent);
+  return err;
+}
+
 export async function request<T>(method: string, path: string, opts: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json", ...(opts.headers ?? {}) };
+  const token = getSessionToken();
+  const headers: Record<string, string> = { Accept: "application/json", ...(opts.headers ?? {}), ...sessionTokenHeaders(token) };
   let body: BodyInit | undefined;
   if (opts.body instanceof FormData) {
     body = opts.body;
@@ -159,7 +176,7 @@ export async function request<T>(method: string, path: string, opts: RequestOpti
     if ((err as Error).name === "AbortError") throw err;
     throw new ApiError(0, "network_error", "Cannot reach the panel API. Check your connection.");
   }
-  if (!resp.ok) throw notifyApiError(await parseError(resp));
+  if (!resp.ok) throw notifyApiError(settleTokenRefusal(await parseError(resp), token));
   if (resp.status === 204) return undefined as T;
   const text = await resp.text();
   return (text ? JSON.parse(text) : undefined) as T;
@@ -186,6 +203,8 @@ export function uploadWithProgress<T>(
     xhr.withCredentials = true;
     const token = getCookie("mcpanel_csrftoken");
     if (token) xhr.setRequestHeader("X-CSRFToken", token);
+    const sessionToken = getSessionToken();
+    if (sessionToken) xhr.setRequestHeader(SESSION_TOKEN_HEADER, sessionToken);
     xhr.setRequestHeader("Accept", "application/json");
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -201,11 +220,14 @@ export function uploadWithProgress<T>(
       else
         reject(
           notifyApiError(
-            new ApiError(
-              xhr.status,
-              body?.error?.code ?? `http_${xhr.status}`,
-              body?.error?.message ?? "Upload failed",
-              body?.error?.details ?? {},
+            settleTokenRefusal(
+              new ApiError(
+                xhr.status,
+                body?.error?.code ?? `http_${xhr.status}`,
+                body?.error?.message ?? "Upload failed",
+                body?.error?.details ?? {},
+              ),
+              sessionToken,
             ),
           ),
         );
@@ -215,6 +237,11 @@ export function uploadWithProgress<T>(
   });
 }
 
+/**
+ * The `/api/` URL of a download route (files/download, files/archive, saves/export, backups/<id>/download).
+ * A link to it sends no session token: hand it to `startDownload` (lib/downloads.ts, or the DownloadLink
+ * component), which gets a ticket for it first.
+ */
 export function downloadUrl(path: string, query?: Query): string {
   return buildUrl(path, query);
 }

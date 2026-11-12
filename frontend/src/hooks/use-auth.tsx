@@ -1,7 +1,8 @@
 import { hashKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
-import { api, onApiError } from "@/lib/api";
-import { isMustChangePasswordError, markMustChangePassword, resolveAuthState, sessionUserId } from "@/lib/auth-gate";
+import { api, isSessionTokenRequiredError, onApiError } from "@/lib/api";
+import { isMustChangePasswordError, markMustChangePassword, resolveAuthState, sessionUserId, signedOutForToken } from "@/lib/auth-gate";
+import { clearSessionToken, getSessionToken } from "@/lib/session-token";
 import { qk, useAuthState } from "@/lib/queries";
 import type { AuthState, Me, PermissionCode } from "@/lib/types";
 import { clearUserStorage, syncStorageOwner } from "@/lib/user-storage";
@@ -26,6 +27,7 @@ export function useAuth() {
     can: (code: PermissionCode) => !!user?.permissions.includes(code),
     logout: async () => {
       clearUserStorage(); // first, so this tab's history never outlives the click (even if the request fails)
+      clearSessionToken(); // and the cookie alone signs nobody in (logout needs no token)
       await api.post("/auth/logout");
       // Drop every cached response, then tell the mounted auth gate directly (observers of removed
       // queries are not notified) and confirm with the server.
@@ -43,7 +45,10 @@ export function useAuth() {
  *   the previous account's cached responses are dropped (the gate also remounts the pages, keyed
  *   by user id), before anything renders for the new user;
  * - a 403 `must_change_password` from any request flags the cached user so the gate shows the
- *   "Set a new password" screen immediately.
+ *   "Set a new password" screen immediately;
+ * - a 401 `session_token_required` (the panel did not get this browser's session token, D-1; lib/api.ts
+ *   already dropped the token it sent) signs the tab out: the login page asks to sign in again. When a
+ *   newer token is stored meanwhile (signed in again in another tab), the state is only re-read.
  */
 export function useAuthLifecycle(state: AuthState | undefined) {
   const qc = useQueryClient();
@@ -73,6 +78,16 @@ export function useAuthLifecycle(state: AuthState | undefined) {
   useEffect(
     () =>
       onApiError((err) => {
+        if (isSessionTokenRequiredError(err)) {
+          const current = qc.getQueryData<AuthState>(qk.auth);
+          if (!getSessionToken()) {
+            const next = signedOutForToken(current);
+            if (next === current) return; // already showing the login page: nothing more (no refetch loop)
+            qc.setQueryData(qk.auth, next);
+          }
+          void qc.invalidateQueries({ queryKey: qk.auth });
+          return;
+        }
         if (!isMustChangePasswordError(err)) return;
         const current = qc.getQueryData<AuthState>(qk.auth);
         const next = markMustChangePassword(current);

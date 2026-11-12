@@ -9,6 +9,7 @@ import { useState } from "react";
 import { Section } from "@/components/PageHeader";
 import { ErrorState, LoadingState } from "@/components/States";
 import { Badge } from "@/components/ui/badge";
+import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { downloadUrl } from "@/lib/api";
 import { formatBytes, relativeTime } from "@/lib/format";
@@ -69,9 +70,9 @@ export function SavesSection({
         <>
           {canImportExport && canDownload && data?.current && (
             <Button asChild size="sm" variant="outline">
-              <a href={downloadUrl(`/instances/${instance.id}/saves/export`)} download>
+              <DownloadLink href={downloadUrl(`/instances/${instance.id}/saves/export`)} download>
                 <Download /> Download
-              </a>
+              </DownloadLink>
             </Button>
           )}
           {canImportExport && canChange && (

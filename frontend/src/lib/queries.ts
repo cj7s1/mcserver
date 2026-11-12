@@ -1,6 +1,7 @@
 /** TanStack Query keys and hooks shared across pages. */
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { clearSessionToken, getSessionToken } from "./session-token";
 import type { AuthState, Instance, Job, Stats, SystemInfo } from "./types";
 
 export const qk = {
@@ -33,8 +34,19 @@ export const qk = {
   audit: ["audit"] as const,
 };
 
+/**
+ * GET /auth/state. An answer with `session_token_required` (the cookie is signed in but the token this
+ * browser sent is not the session's, D-1) drops that token: the gate then shows the login page.
+ */
+export async function fetchAuthState(): Promise<AuthState> {
+  const sent = getSessionToken();
+  const state = await api.get<AuthState>("/auth/state");
+  if (state?.session_token_required) clearSessionToken(sent);
+  return state;
+}
+
 export function useAuthState() {
-  return useQuery({ queryKey: qk.auth, queryFn: () => api.get<AuthState>("/auth/state"), staleTime: 60_000 });
+  return useQuery({ queryKey: qk.auth, queryFn: fetchAuthState, staleTime: 60_000 });
 }
 
 export function useInstances(archived: "false" | "true" | "all" = "false") {

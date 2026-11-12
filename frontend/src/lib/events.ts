@@ -2,6 +2,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { qk } from "./queries";
+import { sendAuthFrame } from "./session-token";
 import type { AuthState } from "./types";
 
 export function wsUrl(path: string): string {
@@ -54,12 +55,15 @@ export function useLiveEvents(enabled: boolean): boolean {
     const life = { closed: false };
 
     const connect = () => {
-      ws = new WebSocket(wsUrl("/ws/events/"));
-      ws.onopen = () => {
+      const sock = new WebSocket(wsUrl("/ws/events/"));
+      ws = sock;
+      sock.onopen = () => {
+        // first frame: this browser's session token (D-1); the panel sends no event before it
+        sendAuthFrame(sock);
         setConnected(true);
         retry.current = 1000;
       };
-      ws.onmessage = (ev) => {
+      sock.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data) as { type: string; instance_id: string | null; payload: any };
           applyLiveEvent(qc, msg);
@@ -67,11 +71,12 @@ export function useLiveEvents(enabled: boolean): boolean {
           /* ignore malformed */
         }
       };
-      ws.onclose = (ev: CloseEvent) => {
+      sock.onclose = (ev: CloseEvent) => {
         setConnected(false);
         if (life.closed) return;
-        // 4401 session gone / 4403 access revoked: refresh auth (shows login if signed out). A 4401
-        // while the tab is still signed in (own password change: new session key) reconnects.
+        // 4401 session gone (or this browser's session token refused) / 4403 access revoked: refresh
+        // auth (shows login if signed out). A 4401 while the tab is still signed in (own password
+        // change: new session key) reconnects.
         if (ev.code === 4401 || ev.code === 4403) {
           void sessionStillValid(qc).then((ok) => {
             if (ok && ev.code === 4401 && !life.closed) schedule();

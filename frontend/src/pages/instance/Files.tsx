@@ -28,6 +28,7 @@ import {
   BreadcrumbPage,
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
+import { DownloadLink } from "@/components/DownloadLink";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
@@ -303,13 +304,13 @@ function FileBrowser({ instance, canWrite }: { instance: Instance; canWrite: boo
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button asChild variant="outline" size="sm">
-                      <a
+                      <DownloadLink
                         href={folderZipHref}
                         download={folderZipName}
                         aria-label={path ? `Download the folder ${baseName(path)} as a .zip` : "Download the whole server folder as a .zip"}
                       >
                         <FolderArchive /> <span className="hidden sm:inline">Download .zip</span>
-                      </a>
+                      </DownloadLink>
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent className="max-w-64">

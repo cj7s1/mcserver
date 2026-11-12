@@ -8,6 +8,7 @@
  * should additionally include the user id (see `userScopedKey`) so a missed cleanup can never
  * show one user's data to another.
  */
+import { SESSION_TOKEN_KEY } from "./session-token";
 
 /** Marker recording which user id the panel keys in a storage area belong to. */
 export const STORAGE_OWNER_KEY = "mcpanel.storage.owner";
@@ -92,7 +93,10 @@ function defaultAreas(): StorageArea[] {
     /* access can throw SecurityError when storage is disabled */
   }
   try {
-    if (typeof localStorage !== "undefined") areas.push({ storage: localStorage, keep: (k) => BROWSER_PREFERENCE_KEYS.has(k) });
+    // the session token is not user data of a page: lib/session-token.ts sets and clears it with the sign-in
+    // (a sign-in makes the stored owner change, which must not wipe the token it just stored)
+    if (typeof localStorage !== "undefined")
+      areas.push({ storage: localStorage, keep: (k) => BROWSER_PREFERENCE_KEYS.has(k) || k === SESSION_TOKEN_KEY });
   } catch {
     /* ignore */
   }
