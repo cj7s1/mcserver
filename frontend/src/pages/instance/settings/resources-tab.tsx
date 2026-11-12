@@ -14,6 +14,7 @@ import { MemoryCommitBar } from "@/components/MemoryCommitBar";
 import { useInstances, useSystemInfo } from "@/lib/queries";
 import { memoryCommitment } from "@/pages/library/server-utils";
 import type { Instance } from "@/lib/types";
+import { IdleStopSection } from "./idle-stop";
 import {
   Advanced,
   Field,
@@ -386,6 +387,8 @@ export function ResourcesTab({ instance, can, onDirtyChange }: TabProps) {
           </Advanced>
         </div>
       </Section>
+
+      <IdleStopSection instance={instance} canEdit={canEdit && !instance.archived_at} />
 
       {canEdit && (
         <SaveBar

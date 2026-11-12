@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, PackageOpen, RefreshCw, TriangleAlert } from "lucide-react";
+import { ChevronRight, PackageOpen, RefreshCw, Timer, TriangleAlert } from "lucide-react";
 import { Link } from "react-router";
 import { BackupNotice } from "@/components/BackupNotice";
 import { Section } from "@/components/PageHeader";
@@ -158,6 +158,18 @@ function OverviewContent() {
       <DiagnosticsCard instance={instance} can={can} now={now} />
 
       <StatTiles instance={instance} stats={stats.data} latest={latest} disk={disk} now={now} />
+
+      {!!instance.idle_stop_minutes && !instance.idle_stop_unavailable && (
+        <p className="-mt-2 flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+          <Timer className="size-3.5" aria-hidden />
+          Stops by itself after {instance.idle_stop_minutes} minutes with nobody on it.
+          {can("instance.configure") && (
+            <Link to={`/servers/${instance.id}/settings?tab=resources`} className="font-medium text-primary hover:underline">
+              Change
+            </Link>
+          )}
+        </p>
+      )}
 
       {!instance.archived_at && <ResourceCharts instanceId={instance.id} samples={samples} running={running} />}
 
