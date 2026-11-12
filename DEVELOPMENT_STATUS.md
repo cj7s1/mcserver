@@ -36,6 +36,13 @@ columns of the servers table with database defaults; a rollback loses only their
   run against Discord.** discord.py 2.7.1 pinned (about 15 MB in the image).
 * **Friend role and invite links** (role `friend` with `instance.control` + `instance.overview`, short answers
   `limited: true`; `POST /api/users/invite`, a 24-hour one-time link): unit-tested (`tests/test_friends_access.py`).
+* **Review of 2026-11-12 and the second real-container run (FX2):** a Friend only starts and stops (no kill,
+  restart, warning text, override or cancelling a countdown), gets a reduced short answer and none of the global
+  answers about the host; the bot's service account is found by its id and its names are reserved, it never pings
+  and sends plain text, `/stop` confirms when the count is unknown, it survives a database restart and is an
+  optional child (never makes the panel unhealthy); an unread player count is unknown and never "empty"; the idle
+  stop skips a pending countdown; join-password reveals are audited; the Share card has Minecraft's online-mode
+  item; a rollback from this feature set says what it loses (`upgrade.sh`, FX2-4). Docs: FRIENDS.md, SECURITY.md.
 * Pages (frontend): the Share card on the Overview and the header's Share button; Settings → Resources → Stop
   when empty; System → Discord and each server's Settings → General → Discord; Users → Invite a friend, and a
   friend's app with only their servers' status, Start/Stop and Share card.
@@ -56,7 +63,11 @@ read-only research: the plugin manager's script, `emhttp_event`, `rc.docker`, `l
   ticked), Roll back (dry run first), boot tasks, firewall, Install Compose (v5.7.0, SHA-256 pinned, kept on
   the flash drive and checked before every use; a binary in the settings is preferred while it exists),
   settings (checkout and project found from the stack's Compose labels when empty). Every changing action
-  shows its exact commands first; one at a time (flock: a killed action frees it); logs in /tmp/mcpanel/logs.
+  shows its exact commands first; one at a time (flock: a killed action frees it); logs in /run/mcpanel/logs.
+* **2026.11.12a (review F-12..F-14):** the run folder is `/run/mcpanel` (root's, checked on every use, also by
+  the PHP; noclobber; at most 10 logs and 32 MB), the Compose copy that is moved into place is hashed itself,
+  the unattended boot run uses the strict checkout check with root as owner and says "NEEDS YOU" (page, syslog)
+  when it refuses; a checkout without `.git` works for the boot tasks.
 * At every Docker start: the boot tasks in the background (`array-start.sh run` of the checkout with the
   plugin's settings); a plugin update keeps the shutdown hook; removal takes it out. `array-start.sh` now
   waits for another run, writes the flash drive only when a setting changed, and its `status` takes
@@ -94,6 +105,13 @@ empty; "failed to resolve host postgres"), and the shutdown hook was not install
   that lost its network before its next start, a container of its own Compose project within about a minute
   (stop, reconnect, start; limited and logged; docs/SECURITY.md). `array-start.sh` is the fallback when the
   agent does not run.
+* Review of the repair (F-3..F-7, F-18, F-19): members are only long-running service containers of the project
+  (never a `docker compose run` one-off or a game server); their networks only grow, the agent always also has
+  `internal` and the shared instance network; a member that lost one of several networks is reconnected live,
+  stepwise (same IP and MAC, MAC, aliases only, plain); a game container that Docker started without its network
+  is stopped and started through the agent. `array-start.sh` takes the stack's networks from Compose's labels
+  (the agent's NetworkMode is the instance network), connects only what is missing, counts "already connected"
+  as done, starts what it stopped in any case (a trap), and skips one-offs.
 
 ## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`, 2026-11-12)
 

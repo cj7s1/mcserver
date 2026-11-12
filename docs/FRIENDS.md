@@ -25,10 +25,12 @@ the same. It shows what a friend needs, for the game of that server:
   same Minecraft version, the modpack, a mod such as HKMP 2.4.3, ...);
 * **Copy address**, **Copy password** and **Copy invite** (a ready message for Discord or a chat);
 * **a checklist**: the server runs, a public address is set, the protection is on, the ports to forward,
-  and the warning when the game lets anyone in by default; a missing item links to where you fix it.
+  and the warning when the game lets anyone in by default; for Minecraft also "Players need a Minecraft
+  account (online mode)"; a missing item links to where you fix it.
 
 Everyone who can see the server sees the card. **Only users who may change the server's settings see the
-join password**, and only they can copy the invite text with the password in it.
+join password**, and only they can copy the invite text with the password in it (each time is in the audit
+log).
 
 **What to send:** the invite text without the password, and the password another way (say it, or a
 private message). An invite text with the password is one copy away from everyone in a group chat.
@@ -54,7 +56,9 @@ without it a compromised one reaches your server and your LAN.
 
 * **Minecraft: the whitelist.** In the Share card, **Add a friend** takes a Minecraft name, puts it on the
   whitelist and offers to switch the whitelist on. The Players page lists and edits it too. With the
-  whitelist on, only the names on it can join.
+  whitelist on, only the names on it can join, **as long as online mode is on**: with `online-mode=false`
+  anyone can join under any name, also yours or an operator's, without an account, and the card says the
+  server is not protected.
 * **Valheim, Palworld, Counter-Strike 2, Satisfactory:** the join password is under Settings → Game
   settings → **Secrets** (Valheim requires one; Satisfactory asks at creation).
 * **Factorio:** the game password in the server's game settings. **Terraria:** the server password in its
@@ -91,8 +95,10 @@ A server that nobody plays on can stop by itself: the server's **Settings → Re
 (5 to 1440; 0 = off). The panel looks at the player count it samples every minute anyway. It stops the
 server when it has been ready for at least that time (and at least 5 minutes), every sample of that time
 said 0 players, there was no gap of more than 3 minutes in the samples, and the newest is less than 3
-minutes old. It never stops a server while a job runs for it (a backup, an update) or while the count is
-unknown. The stop is the ordinary Stop: the world is saved first.
+minutes old. It never stops a server while a job runs for it (a backup, an update), while a restart or stop
+countdown of yours is pending, or while the count is unknown: a count the panel could not read is never
+taken for "nobody". The stop is the ordinary Stop: the world is saved first. It looks at the samples taken
+before you switched it on too: a server that was already empty for the chosen time stops at the next check.
 
 You see it as the job "Stop (empty for N minutes)" and in the audit log; the notification **"Server stopped
 because nobody played on it"** (event `instance.idle_stopped`) goes to the notification channels that
@@ -138,8 +144,8 @@ The slash commands appear in your Discord server at once (they are registered fo
 | `/servers` | everyone in your Discord server | the available servers, running or not, players online |
 | `/status <server>` | everyone | its state, players and address |
 | `/join <server>` | everyone | the Share card's invite text, visible to the member only; the password only with "Let /join show the password" |
-| `/start <server>` | members with one of the roles | "starting...", in the channel; then "X is ready." or "X did not start: <why>" |
-| `/stop <server>` | members with one of the roles | stops it (the world is saved first); with players online it asks to repeat it with `confirm: True` |
+| `/start <server>` | members with one of the roles | "Starting X… I will post here when it is ready; /status X always shows how it goes.", in the channel; then "X is ready." or "X did not start: <why>" |
+| `/stop <server>` | members with one of the roles | stops it (the world is saved first); with players online, or when the panel cannot tell (always on Valheim), it asks to repeat it with `confirm: True` |
 
 Server names complete as you type, from the available servers only. Refusals ("you need one of the roles",
 "no server called X is available in Discord") are visible to the member only; starts and stops are answered
@@ -151,17 +157,21 @@ in the channel, and also posted in the announcement channel when you chose one.
 * start a server the web UI would refuse: the same rules apply (the memory check without "Start anyway",
   missing passwords, a server that is busy: the panel's message is the answer);
 * answer in another Discord server: it answers only in the one you configured;
-* show a secret other than the join password, and that only where you allowed it.
+* show a secret other than the join password, and that only where you allowed it (each such answer is in the
+  audit log);
+* ping anyone: its messages never mention a member, a role or `@everyone`, and names are shown as plain text.
 
-Every start and stop is in the audit log under the service user **`discord-bot`** (it cannot sign in) with
-the member's Discord name and ID. Each member may start or stop 4 times in 10 minutes and use 20 other
-commands a minute.
+Every start and stop is in the audit log under the bot's service account, listed on the Users page as
+**Discord bot (service account)** (it cannot sign in, be edited or get a reset link; the names `discord-bot`
+and `discord-bot-<n>` are reserved for it), with the member's Discord name and ID. Each member may start or
+stop 4 times in 10 minutes and use 20 other commands a minute.
 
 ### When the page shows an error
 
 * **"Discord refused the bot token":** the token was reset or mistyped. Developer portal → Bot → Reset Token,
-  paste the new one, save.
-* **"No connection to Discord"**: no internet, or Discord is down. The bot tries again by itself.
+  paste the new one, save (it tries at once then; by itself only every 30 minutes).
+* **"No connection to Discord"**: no internet, or Discord is down. The bot tries again by itself (after 5
+  seconds, then less often, at most every 5 minutes); the page shows when. The panel stays healthy meanwhile.
 * **Not running:** the bot's process did not report for a while; `docker compose logs --tail 50 panel | grep
   -F '[discord]'` says why.
 * **Connected, but no slash commands in Discord:** the bot was not invited with the link the page shows
@@ -170,14 +180,16 @@ commands a minute.
   one whose ID you entered.
 * **No announcements:** give the bot's role View Channel and Send Messages in that channel.
 
-Changes of the settings apply without a restart. To switch the bot off: **Bot on** off (or clear the token); to cut it off completely, Reset Token in the
-developer portal.
+Changes of the settings apply without a restart. To switch the bot off: **Bot on** off (or clear the token);
+to cut it off completely, Reset Token in the developer portal.
 
 ## 4. Friends in the panel (optional)
 
 A friend can also get an account in the panel, with the role **Friend**: they see the servers you granted
-them, their status, the power buttons (start, stop, restart) and the Share card (never the password). Nothing else: no
-console, files, settings, backups, players or other servers.
+them, their status and player count, **Start** and **Stop**, and the Share card (never the password).
+Nothing else: no restart or kill, no in-game warning text, no cancelling of your countdowns, no console,
+files, settings, backups or other servers, and nothing about your server's host (its ports, resources or
+addresses beyond the Share card).
 
 **Invite a friend:** **Users → Invite a friend**: a user name, optionally an e-mail address, and the servers.
 The panel shows a link: send it privately. It works **once, for 24 hours**; the friend chooses a password

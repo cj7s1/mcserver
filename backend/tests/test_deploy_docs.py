@@ -258,7 +258,7 @@ def test_the_agents_network_repair_is_documented_with_its_scope_and_limits():
         "never a container outside the project",
         "one attempt per container per 5 minutes",
         "after 3 failed or undone repairs it gives up",
-        "`deploy/unraid/array-start.sh` (Unraid, at every array start) is the fallback",
+        "`deploy/unraid/array-start.sh` (Unraid, at every array start or Docker start with the plugin) is the fallback",
     ):
         assert needle in security, needle
     unraid = words("docs/UNRAID.md")
@@ -316,7 +316,7 @@ def test_the_plugin_is_in_security_deployment_status_roadmap_and_the_map():
         "never through a shell",
         "Unraid's `StartCommand.php` runs any file there with the arguments of a POST",
         "within 12 hours, once",
-        "checked against the pin again before every use",
+        "checked against the pin before it is moved into place",
         "every file of the plugin has a `Mode`",
     ):
         assert needle in security, needle
@@ -352,7 +352,7 @@ def test_friends_md_covers_sharing_idle_stop_the_discord_bot_and_friend_accounts
         "### What the bot can never do",
         "### When the page shows an error",
         "4 times in 10 minutes",
-        "**`discord-bot`**",
+        "**Discord bot (service account)**",
         "**once, for 24 hours**",
         "**Never forward the panel's port on your router.**",
         "**Tailscale:**",
@@ -402,7 +402,8 @@ def test_security_status_roadmap_and_the_map_know_the_friends_features():
         "The API takes it and never returns it",
         "**One Discord server.**",
         "4 times in 10 minutes",
-        "the service user `discord-bot`",
+        "the bot's service account",
+        "`discord_service_user_id`",
         "only to users with `instance.configure`",
         "A Friend never gets it from the panel",
         "`instance.overview` belongs to this role only",
@@ -414,3 +415,43 @@ def test_security_status_roadmap_and_the_map_know_the_friends_features():
     claude = read("CLAUDE.md")
     for needle in ("apps/instances/share.py", "apps/instances/idle.py", "apps/discordbot/", "`instance.overview`", "`discord`"):
         assert needle in claude, needle
+
+
+# --- the review of 2026-11-12 and the second real-container run ------------------------------------------------
+def test_the_docs_follow_the_review_of_the_friends_features_and_the_plugin():
+    friends = words("docs/FRIENDS.md")
+    for needle in (
+        "**Start** and **Stop**, and the Share card (never the password). Nothing else: no restart or kill",
+        'a count the panel could not read is never taken for "nobody"',
+        "when the panel cannot tell (always on Valheim)",
+        "**as long as online mode is on**",
+        "Players need a Minecraft account (online mode)",
+        "**Discord bot (service account)**",
+        "ping anyone",
+    ):
+        assert needle in friends, needle
+    security = words("docs/SECURITY.md")
+    for needle in (
+        "A Friend account sees the status and the Share card of the servers shared with it and can start and stop them",
+        "may only **start and stop**: no kill or restart",
+        "never mention anyone (`allowed_mentions` none",
+        "`instance.secret_revealed`, key `join_password`",
+        "The run folder (lock, task state, plans, logs) is `/run/mcpanel`",
+        "that copy itself is checked against the pin before it is moved into place",
+        "wants **root as the owner**",
+        "never touches one-off containers",
+        "A game container that Docker started by itself (restart policy)",
+    ):
+        assert needle in security, needle
+    unraid = words("docs/UNRAID.md")
+    for needle in (
+        '"MCPanel plugin installed. Its page: Settings > User Utilities > MCPanel." and three more lines',
+        "the shutdown hook in the plugin's folder and the action logs (`/run/mcpanel`) go at once",
+        "`chown -R root:root <checkout> && chmod -R go-w <checkout>`",
+        "A checkout without `.git` (the ZIP download) works for the boot tasks",
+        "`/run/mcpanel/logs` (the newest 10, at most 32 MB)",
+    ):
+        assert needle in unraid, needle
+    assert "/tmp/mcpanel/" not in read("docs/UNRAID.md") + read("docs/SECURITY.md") + read("CLAUDE.md")
+    assert "A rollback's dry run (and the rollback) says what it loses" in words("DEPLOYMENT.md")
+    assert "never makes the container unhealthy" in words("DEPLOYMENT.md")

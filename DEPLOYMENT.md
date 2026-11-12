@@ -86,7 +86,7 @@ of the process that wrote it:
 | `[worker]` | Celery jobs: installs, backups, restores, updates (and periodic tasks when it has a free slot). `MCPANEL_WORKER_CONCURRENCY` jobs at a time. |
 | `[periodic]` | Celery, periodic tasks only (reconcile loop, schedules, job watchdog, metrics, modpack update checks), so they keep running while long jobs fill every `[worker]` slot. Always 2 slots. Never runs jobs. |
 | `[beat]` | Scheduler: queues the periodic tasks above. |
-| `[discord]` | The Discord bot ([docs/FRIENDS.md](docs/FRIENDS.md)), connected out to Discord only. While it is switched off (or has no token or Discord server) it exits at once and is **idle**: healthy, tried again every 5 minutes or at once when its settings change. About 70-90 MB while connected (estimated). Only the `all` command runs it: a setup that starts web, worker and beat as containers of their own needs one more with `manage run_discord_bot`. |
+| `[discord]` | The Discord bot ([docs/FRIENDS.md](docs/FRIENDS.md)), connected out to Discord only, and **optional**: its state is reported (`/api/health` `components`, a `note:` line of the health check) but never makes the container unhealthy or holds up its start. While it is switched off (or has no token or Discord server) it exits at once and is **idle**, tried again every 5 minutes or at once when its settings change; while Discord cannot be reached it stays up and tries again (5 s, doubling to 5 minutes; a refused token every 30 minutes). About 70-90 MB while connected (estimated). Only the `all` command runs it: a setup that starts web, worker and beat as containers of their own needs one more with `manage run_discord_bot`. |
 
 ```bash
 docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status   # state of each process
@@ -101,8 +101,8 @@ What to expect from it:
   `components` in `/api/health`. After three failed checks (about 90 seconds) Docker shows the
   container as **unhealthy**. If Redis dies it is started again and the other four are restarted
   after it.
-* **Healthy** means: the database and the cache answer, all five processes run (the Discord bot runs
-  or is idle), both workers
+* **Healthy** means: the database and the cache answer, all five processes run (the Discord bot does
+  not count), both workers
   answered a ping in the last 2 minutes and the reconcile task ran in the last 3 minutes.
 * `docker compose stop panel` / `restart panel` / `down` give running jobs up to 110 seconds to
   finish. A job that is waiting at that moment (for the agent, for a countdown or for a server's
@@ -583,7 +583,7 @@ Notes:
 bot, the Friend role; [docs/FRIENDS.md](docs/FRIENDS.md)) has one database migration,
 `instances.0008_unraid_and_friends`: four columns of the servers table, each with a database default. The
 dry run lists it and ends with `./scripts/upgrade.sh run --with-migrations`; a plain `run` refuses
-before it changes anything. On the Unraid plugin's page, tick "Allow the database migrations of this
+before it changes anything. A rollback's dry run (and the rollback) says what it loses, as below. On the Unraid plugin's page, tick "Allow the database migrations of this
 version". **A rollback** undoes the migration: the servers' "Stop when empty", "Available in Discord",
 their Discord roles and "Let /join show the password" are lost (nothing else). The Discord settings stay in
 the system settings, unused by the older version (its panel runs no bot); Friend accounts stay and see

@@ -304,13 +304,22 @@ reboot ("failed to resolve host postgres"). The agent repairs two kinds of conta
   lost its network to the network it was created for (`HostConfig.NetworkMode`: its server network,
   the shared instance network or the allowed custom network), making the network again when it is the
   agent's. A container that cannot be repaired is removed (its last-run record is kept) and made again
-  by the panel at the next start.
+  by the panel at the next start. A game container that Docker started by itself (restart policy) after
+  a failed start and that runs without a network is stopped and started again through the agent, under
+  the server's lock and the same limits, so it is attached first.
 * **The containers of its own Compose project** (`AGENT_REPAIR_PLATFORM_NETWORKS`, default `true`): at
   its start and every 60 seconds it looks at the members of its own project (the
   `com.docker.compose.project` label of its own container; nothing when it does not run in a container
-  or has no such label). A running or restarting member that has no network although its
-  `NetworkMode` names a user-defined network is stopped, connected again to every network it was seen
-  on (`<data root>/agent/platform-networks.json`; aliases: service and container name) and started.
+  or has no such label). Members are only the long-running service containers of the project (project,
+  service, config-hash and container-number labels, not a one-off): a `docker compose run` container (as
+  upgrade.sh uses) and a game server (`io.mcpanel.managed`) are never touched. The networks a member
+  belongs on are those of the project it was seen on (per container, only ever added to, in
+  `<data root>/agent/platform-networks.json`) plus its `NetworkMode`; the agent always also the shared
+  instance network and the project's `internal` network. A member that lost one of several networks is
+  connected again while it runs; one with no network left is stopped, connected again and started.
+  Reconnecting falls back in steps (same address and MAC, same MAC, the aliases only, plain; aliases:
+  service and container name); a member left off its network is logged as an error and tried again at
+  every pass.
   It reconnects itself the same way, without a restart. It also restores a lost service name: Unraid's
   Docker start can disconnect a container and connect it again without its Compose aliases (the panel
   then cannot resolve `postgres` or `agent` although every container has its network), so a member that
@@ -321,8 +330,11 @@ reboot ("failed to resolve host postgres"). The agent repairs two kinds of conta
   warning and reported in `GET /v1/info` (`platform_network_repair`). The agent's Docker socket could
   do far more; this is the only thing it does to containers that are not game servers.
 
-When the agent itself does not run, `deploy/unraid/array-start.sh` (Unraid, at every array start) is the
-fallback for the same repair, and `docker compose up -d --force-recreate <service>` the manual one.
+When the agent itself does not run, `deploy/unraid/array-start.sh` (Unraid, at every array start or Docker
+start with the plugin) is the fallback for the same repair: it connects a stack container to what it misses
+of the project's internal network (and the agent to the shared instance network) by Compose's labels, never
+touches one-off containers, counts "already connected" as done, and starts again whatever it stopped. The
+manual way is `docker compose up -d --force-recreate <service>`.
 
 Not reachable from a game container: the agent's API (it refuses requests from the instance networks
 and the bridge gateways even with a valid token, above), Postgres, the panel's container address,
@@ -568,24 +580,31 @@ change.
   `.git/config`, `.git/hooks`, `deploy/`, `deploy/scripts`, `deploy/unraid` or the scripts root runs
   are writable by group or others (the repair is named: `chmod -R go-w <checkout>`), and the page runs
   no git then. git runs with `-c core.fsmonitor= -c core.hooksPath=/dev/null` and never asks for a
-  password. The boot tasks leave this check to `array-start.sh`, which tightens the checkout itself as
-  root (section "The source folder"). What that section says about the folder that holds the checkout
-  applies to the plugin's settings as well.
+  password. The check also wants **root as the owner** of what root runs or git reads there. The
+  unattended boot tasks (at every Docker start) use the same check: they run the checkout's scripts
+  only when it passes, and otherwise report "NEEDS YOU" with the repair (`chown -R root:root <checkout>
+  && chmod -R go-w <checkout>`) on the page and in the syslog instead of running anything (unlike the
+  User Script, the plugin does not repair the checkout itself). A checkout without `.git` (the ZIP
+  download) is fine for the boot tasks; the git tasks need a clone. What "The source folder" says about
+  the folder that holds the checkout applies to the plugin's settings as well.
 * **Settings.** `/boot/config/plugins/mcpanel/mcpanel.cfg` holds two paths and a project name, each
   checked before it is kept (absolute, no quotes, `$`, backticks or backslashes; Compose's name
   pattern) and read back line by line with a pattern, never sourced. The plugin keeps no secret and
   never reads `deploy/.env`.
 * **Docker Compose.** Install Compose downloads one pinned release (v5.7.0) over HTTPS and keeps it
-  only when its SHA-256 is the pinned one. The copy on the flash drive is checked against the pin
-  again before every use (the flash drive is a FAT file system, often exported over SMB): a changed
-  file is refused and reported. The copy root runs is in RAM, mode 755. The plugin makes
+  only when its SHA-256 is the pinned one, checked again on the copy written to the flash drive before
+  it replaces the old one. Before every use the copy root runs is made in RAM from the flash drive's
+  (a FAT file system, often exported over SMB) and that copy itself is checked against the pin before it
+  is moved into place, mode 755; a changed file is refused and reported ("NEEDS YOU"). The plugin makes
   `/usr/local/lib/docker`, its `cli-plugins` folder and `/usr/local/lib/mcpanel` 755 when group or
   others can write them: `docker` runs every `docker-*` program in that folder as root.
 * **Its own files.** The plugin manager writes files with the umask of whoever runs it (000 on the
   owner's server) and makes folders 0770: every file of the plugin has a `Mode`, and the last install
-  step removes group and other write from the plugin's folder. `/tmp/mcpanel` (lock, task state, logs)
-  must be a folder of root's that only root can write, not a symbolic link; the runner refuses
-  otherwise. Everything it starts runs with `umask 022`.
+  step removes group and other write from the plugin's folder. The run folder (lock, task state, plans,
+  logs) is `/run/mcpanel`, under `/run`, which only root can write (not the world-writable `/tmp`). Every
+  use (the runner's start, boot, descriptions and facts, and the page's PHP) checks that it and its logs
+  folder are folders of root's that only root can write, not symbolic links, and reads nothing from them
+  otherwise; new files there are made with noclobber. Everything it starts runs with `umask 022`.
 * **Updates of the plugin** come from its `pluginURL`, the repository's `main` branch, like any Unraid
   plugin: whoever can change that branch changes what root runs here at the next plugin update. That
   is the trust you already give the branch you `git pull`.
@@ -605,16 +624,25 @@ docs/FRIENDS.md describes the features. Not tried with real players or a real Di
   The bot asks for no privileged intent.
 * **One Discord server.** The commands are registered for the configured Discord server only, and an
   interaction from anywhere else gets "This bot only answers in its own Discord server." and nothing else.
+* **Plain text, no pings.** Its messages never mention anyone (`allowed_mentions` none on the client and every
+  message), and member names, server names and error texts are sent as plain text (no Markdown, masked or
+  clickable links). It survives a database restart (fresh connections; it reconnects its settings watcher).
+* **Its own account.** The audit actor is the service account whose id the panel keeps (system setting
+  `discord_service_user_id`), never an account found by name: a person's account called `discord-bot` is
+  never taken over. The names `discord-bot` and `discord-bot-<n>` are reserved (create, invite and rename
+  refuse them), and the service account cannot be edited or given a reset link.
 * **What it can do:** list the servers switched to "Available in Discord" (each server is off by default),
   their state, players and address; the Share card's invite text; start and stop. Starts and stops go
   through the same functions as the web UI's buttons: the memory check without its override, required
-  secrets, a busy server's refusal, the saving stop. Start and stop need one of the server's Discord roles,
-  else one of the default roles; nobody may when neither is set. Each Discord member may start or stop 4
-  times in 10 minutes and use 20 other commands a minute. It never runs console commands and never shows a
-  secret other than the join password of a server whose "Let /join show the password" is on.
+  secrets, a busy server's refusal, the saving stop. `/stop` asks for `confirm: True` when players are
+  online or when the panel cannot tell (an unknown player count, always on Valheim). Start and stop need
+  one of the server's Discord roles, else one of the default roles; nobody may when neither is set. Each
+  Discord member may start or stop 4 times in 10 minutes and use 20 other commands a minute. It never runs
+  console commands and never shows a secret other than the join password of a server whose "Let /join show
+  the password" is on.
 * **Who it trusts:** Discord decides who has a role. Whoever administers that Discord server can give
   themselves or others the right to start and stop the available servers, and everyone in it can see the
-  available servers, their state and address. Start and stop are audited as the service user `discord-bot`
+  available servers, their state and address. Start and stop are audited as the bot's service account
   (inactive, no usable password: it cannot sign in) with `via: "discord"` and the member's Discord name and
   ID.
 
@@ -622,22 +650,34 @@ docs/FRIENDS.md describes the features. Not tried with real players or a real Di
 
 `GET /api/instances/<id>/share` answers whoever can see the server (and a Friend), but the join password
 only to users with `instance.configure`; the invite text holds it only when such a user asks for it
-(`with_password=true`), and that answer is not cached (`Cache-Control: no-store`). A Friend never gets it
+(`with_password=true`), that answer is not cached (`Cache-Control: no-store`), and every answer that holds
+the password is audited (`instance.secret_revealed`, key `join_password`, never the value; `/join` in
+Discord with the password likewise, with the Discord user). For Minecraft, the card's checklist has the item
+"Players need a Minecraft account (online mode)": with `online-mode=false` anyone can join under any name
+(also an operator's) without an account, so the card then counts the server as unprotected even with the
+whitelist on. A Friend never gets it
 from the panel. In Discord, `/join` shows it only for a server whose "Let /join show the password" is on, and
 then to **everyone** in that Discord server who asks (the answer is private to the member, the right to ask
 is not).
 
 ### The Friend role
 
-A built-in role with two codes: `instance.control` (the power buttons: start, stop, restart, kill) and
-`instance.overview` ("see status": the status and the Share card). `instance.overview` belongs to this role
-only (custom roles cannot use it); `instance.view` includes it. A Friend gets short answers
-(`"limited": true`: status fields only), the Share card without the password, the power buttons without the
-memory check's override, and the status events; everything else about the server answers 403 (properties,
-config, files, console, players, metrics, jobs, backups, schedules, content, saves, access, settings), job
-events are not sent to them, and they see only the servers granted to them. Kill is a power button: a
-Friend can stop a server without saving it. Given as a global role instead of per server, it applies to
-every server.
+A Friend account sees the status and the Share card of the servers shared with it and can start and stop
+them; it cannot read files, consoles, settings, backups, the host's ports or other servers.
+
+The built-in role has two codes: `instance.control` and `instance.overview` ("see status": the status, the
+player count and the Share card). `instance.overview` belongs to this role only (custom roles cannot use it);
+`instance.view` includes it. On a server shared with them, a Friend may only **start and stop**: no kill or
+restart, no in-game warning text, no memory override and no cancelling of the owner's countdown (403 "On
+this server you may only start and stop it"). They get a short answer (`"limited": true`) without
+addresses beyond the Share card's (no `connection`), job texts or the agent's errors (`status_detail` is a
+fixed sentence; `active_job` and `power_countdown` keep only their kind and phase), and the status events;
+everything else about the server answers 403 (properties, config, files, console, players, metrics, jobs,
+backups, schedules, content, saves, access, settings), job events are not sent to them, and they see only
+the servers granted to them. None of the global answers about the host either: system info, ports in use,
+nodes, roles, permissions, catalogs, modpack providers, notification events, and no download tickets (a
+ticket is issued only for a download the caller may make). Given as a global role instead of per server, it
+applies to every server.
 
 ### Invite links
 
