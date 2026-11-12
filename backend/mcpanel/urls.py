@@ -1,7 +1,6 @@
 from django.conf import settings
 from django.http import FileResponse, Http404, HttpRequest
 from django.urls import include, path, re_path
-from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 from apps.accounts import views as accounts
 from apps.audit import views as audit
@@ -131,8 +130,7 @@ api_patterns = [
     path("notifications/channels", notifications.ChannelListView.as_view()),
     path("notifications/channels/<int:pk>", notifications.ChannelDetailView.as_view()),
     path("notifications/channels/<int:pk>/test", notifications.ChannelTestView.as_view()),
-    path("schema", SpectacularAPIView.as_view(), name="schema"),
-    path("docs", SpectacularSwaggerView.as_view(url_name="schema")),
+    path("schema", core.ApiSchemaView.as_view(), name="schema"),
 ]
 
 

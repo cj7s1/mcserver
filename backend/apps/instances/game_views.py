@@ -30,7 +30,7 @@ from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.core.permissions import get_instance_for, require
 from apps.core.streaming import AgentStreamingResponse
-from apps.core.utils import content_disposition
+from apps.core.utils import as_attachment
 from apps.games import codecs
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
@@ -655,8 +655,7 @@ class SavesExportView(APIView):
         else:
             chunks, _length, upstream = client.download(instance.id, path)
         response = AgentStreamingResponse(chunks, upstream, content_type=getattr(saves, "content_type", "application/zip"))
-        response["Content-Disposition"] = content_disposition(filename or f"{instance.name}-{path.rsplit('/', 1)[-1]}")
-        response["X-Content-Type-Options"] = "nosniff"
+        as_attachment(response, filename or f"{instance.name}-{path.rsplit('/', 1)[-1]}")
         audit.record(
             "files.download",
             request=request,

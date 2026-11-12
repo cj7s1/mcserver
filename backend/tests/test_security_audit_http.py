@@ -154,12 +154,13 @@ def test_spa_files_cannot_be_framed(frontend_dist, path):
 
 
 @pytest.mark.django_db
-def test_api_responses_only_restrict_framing():
+def test_api_responses_allow_nothing_and_no_framing():
     from django.test import Client
 
     resp = Client().get("/api/health")
     assert resp["X-Frame-Options"] == "DENY"
-    assert resp["Content-Security-Policy"] == "frame-ancestors 'none'"
+    # (C-4/D-7: no script, style or frame may load from an API answer; there is no HTML page under /api/)
+    assert resp["Content-Security-Policy"] == "default-src 'none'; frame-ancestors 'none'"
 
 
 @pytest.mark.django_db

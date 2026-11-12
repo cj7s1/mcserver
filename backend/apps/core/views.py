@@ -9,6 +9,7 @@ from typing import Any
 from django.conf import settings
 from django.db import connection
 from drf_spectacular.utils import extend_schema
+from drf_spectacular.views import SpectacularAPIView
 from rest_framework.permissions import AllowAny
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -300,3 +301,16 @@ def csrf_failure(request, reason: str = ""):  # type: ignore[no-untyped-def]
         },
         status=403,
     )
+
+
+class ApiSchemaView(SpectacularAPIView):
+    """``GET /api/schema``: the OpenAPI document for signed-in users, only when ``MCPANEL_API_DOCS`` is on (off by
+    default, D-7/D-13). Anyone else gets what the permissions say first (401/403), then 404."""
+
+    @extend_schema(exclude=True)
+    def get(self, request: Request, *args: Any, **kwargs: Any) -> Response:
+        if not getattr(settings, "MCPANEL_API_DOCS", False):
+            from rest_framework.exceptions import NotFound
+
+            raise NotFound()
+        return super().get(request, *args, **kwargs)

@@ -20,6 +20,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from apps.accounts import throttle as account_throttle
 from apps.audit import service as audit
 from apps.core.errors import ApiError
 from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
@@ -160,11 +161,12 @@ class LoginView(APIView):
     def post(self, request):  # type: ignore[no-untyped-def]
         ser = LoginSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
-        user = authenticate(request, username=ser.validated_data["username"], password=ser.validated_data["password"])
+        name = ser.validated_data["username"]
+        account_throttle.check("login", name)  # 429 after too many failures for this account (D-3)
+        user = authenticate(request, username=name, password=ser.validated_data["password"])
         if user is None:
-            audit.record(
-                "auth.login_failed", request=request, success=False, details={"username": ser.validated_data["username"][:150]}
-            )
+            account_throttle.failed("login", name)
+            audit.record("auth.login_failed", request=request, success=False, details={"username": name[:150]})
             raise ApiError("Invalid username or password", code="invalid_credentials", status_code=401)
         login(request, user)
         audit.record("auth.login", request=request, actor=user, target=user)
@@ -205,7 +207,9 @@ class PasswordChangeView(APIView):
         ser = PasswordChangeSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user = request.user
+        account_throttle.check("password", str(user.pk))  # 429 after too many wrong current passwords (D-3)
         if not user.check_password(ser.validated_data["old_password"]):
+            account_throttle.failed("password", str(user.pk))
             raise ValidationError({"old_password": ["Current password is incorrect"]})
         _validate_new_password(ser.validated_data["new_password"], user)
         user.set_password(ser.validated_data["new_password"])

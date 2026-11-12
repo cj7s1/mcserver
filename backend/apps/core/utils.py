@@ -13,6 +13,19 @@ def client_ip(request) -> str | None:  # type: ignore[no-untyped-def]
     return request.META.get("REMOTE_ADDR")
 
 
+# A file from a server folder is never content of the panel's origin (C-4): no script, style, frame or plugin
+# may run from it, whatever its name (``evil.js`` loaded by a <script src> under the SPA's script-src 'self')
+DOWNLOAD_CSP = "default-src 'none'; sandbox"
+
+
+def as_attachment(response, filename: str):  # type: ignore[no-untyped-def]
+    """Mark a download answer: attachment with a safe file name, ``nosniff`` and :data:`DOWNLOAD_CSP`."""
+    response["Content-Disposition"] = content_disposition(filename)
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = DOWNLOAD_CSP
+    return response
+
+
 def content_disposition(filename: str) -> str:
     """RFC 6266 attachment header that is safe for any file name (no header injection)."""
     import re

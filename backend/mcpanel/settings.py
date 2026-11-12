@@ -210,7 +210,10 @@ SESSION_COOKIE_NAME = "mcpanel_session"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
 SESSION_COOKIE_AGE = int(env("MCPANEL_SESSION_AGE_SECONDS", str(60 * 60 * 24 * 7)) or 0)
-SESSION_COOKIE_SECURE = env_bool("MCPANEL_SECURE_COOKIES", False)
+# behind an HTTPS proxy the cookies are Secure unless MCPANEL_SECURE_COOKIES says otherwise (D-8: with only the
+# proxy switch set they went out without Secure, and a browser sent them to plain-HTTP ports of the same name)
+BEHIND_TLS_PROXY = env_bool("MCPANEL_BEHIND_TLS_PROXY", False)
+SESSION_COOKIE_SECURE = env_bool("MCPANEL_SECURE_COOKIES", BEHIND_TLS_PROXY)
 CSRF_COOKIE_NAME = "mcpanel_csrftoken"
 CSRF_COOKIE_HTTPONLY = False  # SPA reads it to send X-CSRFToken
 CSRF_COOKIE_SAMESITE = "Lax"
@@ -219,7 +222,12 @@ CSRF_COOKIE_SECURE = SESSION_COOKIE_SECURE
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 SECURE_REFERRER_POLICY = "same-origin"
-if env_bool("MCPANEL_BEHIND_TLS_PROXY", False):
+# Strict-Transport-Security on HTTPS answers, opt-in (D-8): a browser applies it to the host name on every port,
+# so on a name shared with plain-HTTP web UIs (the NAS's own) it would break them. Only for a name of its own.
+SECURE_HSTS_SECONDS = int(env("MCPANEL_HSTS_SECONDS", "0") or 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = False
+SECURE_HSTS_PRELOAD = False
+if BEHIND_TLS_PROXY:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     USE_X_FORWARDED_HOST = True
 
@@ -234,6 +242,8 @@ REST_FRAMEWORK = {
         "apps.core.permissions.PasswordChangeEnforced",
     ],
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # JSON only: DRF's HTML "browsable API" would answer a browser with a page of the panel's origin (C-4/D-7)
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     "DEFAULT_PAGINATION_CLASS": None,
     "EXCEPTION_HANDLER": "apps.core.errors.exception_handler",
     "DEFAULT_THROTTLE_RATES": {"login": "10/min", "setup": "10/min"},
@@ -244,6 +254,10 @@ REST_FRAMEWORK = {
     "NUM_PROXIES": 0,
     "TEST_REQUEST_DEFAULT_FORMAT": "json",
 }
+
+# GET /api/schema (the OpenAPI document) for signed-in users; off by default (D-7, D-13). The Swagger page
+# (/api/docs), which ran a script from a CDN in the panel's origin, is gone.
+MCPANEL_API_DOCS = env_bool("MCPANEL_API_DOCS", False)
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "MCPanel API",
@@ -310,6 +324,7 @@ CELERY_TASK_ROUTES = {
     "apps.jobs.tasks.*": {"queue": "periodic"},
     "apps.metrics.tasks.*": {"queue": "periodic"},
     "apps.modpacks.tasks.*": {"queue": "periodic"},
+    "apps.accounts.tasks.*": {"queue": "periodic"},
     "apps.notifications.*": {"queue": "periodic"},
 }
 # "expires" drops ticks that waited too long in the queue (no pile-up behind busy workers);
@@ -320,6 +335,8 @@ CELERY_BEAT_SCHEDULE = {
     "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0, "options": {"expires": 110}},
     "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0, "options": {"expires": 50}},
     "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0, "options": {"expires": 3000}},
+    # failed sign-ins older than 90 days (D-3)
+    "auth-prune": {"task": "apps.accounts.tasks.prune_login_failures", "schedule": 86400.0, "options": {"expires": 3600}},
     # hourly tick; each modpack server is checked at most every 6 h (apps/modpacks/updates.py)
     "modpack-update-check": {
         "task": "apps.modpacks.tasks.check_updates_due",

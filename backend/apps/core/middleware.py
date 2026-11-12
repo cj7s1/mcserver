@@ -53,9 +53,10 @@ SPA_CSP = (
     "form-action 'self'",
     "frame-ancestors 'none'",
 )
-# API responses are JSON or attachments; /api/docs (Swagger UI) loads its own scripts and
-# styles, so only framing is restricted there.
-API_CSP = "frame-ancestors 'none'"
+# API responses are JSON or attachments: nothing may load or run from them (C-4/D-7; there is no HTML
+# page under /api/: JSON renderer only, no Swagger page). Downloads set their own, stricter policy with
+# ``sandbox`` (apps.core.utils.DOWNLOAD_CSP).
+API_CSP = "default-src 'none'; frame-ancestors 'none'"
 
 
 class SecurityHeadersMiddleware:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import mimetypes
 from typing import Any
 
 from django.db import IntegrityError, transaction
@@ -25,7 +24,7 @@ from apps.core.errors import ApiError, ConflictError
 from apps.core.models import SystemSetting
 from apps.core.permissions import get_instance_for, require, visible_instances
 from apps.core.streaming import AgentStreamingResponse, read_bytes
-from apps.core.utils import content_disposition
+from apps.core.utils import as_attachment
 from apps.jobs.models import ACTIVE_STATUSES, Job
 from apps.jobs.runner import enqueue
 from apps.jobs.serializers import JobSerializer
@@ -859,15 +858,15 @@ class FilesDownloadView(APIView):
         secret_files.require_not_secret(instance, path)
         chunks, length, upstream = AgentClient(instance.node).download(instance.id, path)
         filename = path.rsplit("/", 1)[-1] or "download"
-        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        # never a type the browser would run or render (C-4): text/javascript, text/html, image/svg+xml
+        content_type = "application/octet-stream"
         if secret_files.is_bearing(instance, path) and secret_files.masked_by_line(instance):
             # a file that may hold the server's passwords (Project Zomboid's logs record RCON logins): masked
             # line by line while it is streamed (no size limit; its length changes, so none is sent)
             response = AgentStreamingResponse(
                 secret_files.masked_stream(instance, path, chunks), upstream, content_type=content_type
             )
-            response["Content-Disposition"] = content_disposition(filename)
-            response["X-Content-Type-Options"] = "nosniff"
+            as_attachment(response, filename)
             audit.record(
                 "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
             )
@@ -881,17 +880,15 @@ class FilesDownloadView(APIView):
                 if close is not None:
                     close()
             response = HttpResponse(data, content_type=content_type)
-            response["Content-Disposition"] = content_disposition(filename)
-            response["X-Content-Type-Options"] = "nosniff"
+            as_attachment(response, filename)
             audit.record(
                 "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
             )
             return response  # type: ignore[return-value]
         response = AgentStreamingResponse(chunks, upstream, content_type=content_type)
-        response["Content-Disposition"] = content_disposition(filename)
+        as_attachment(response, filename)
         if length is not None:
             response["Content-Length"] = str(length)
-        response["X-Content-Type-Options"] = "nosniff"
         audit.record("files.download", request=request, instance=instance, target=instance, details={"path": path})
         return response
 
@@ -1798,8 +1795,7 @@ class FilesArchiveView(APIView):
             chunks, _length, upstream = client.download(instance.id, target, endpoint="archive")
         name = (request.query_params.get("name") or "").strip()[:100] or paths[0].strip("/").rsplit("/", 1)[-1] or instance.name
         response = AgentStreamingResponse(chunks, upstream, content_type="application/zip")
-        response["Content-Disposition"] = content_disposition(f"{name}.zip")
-        response["X-Content-Type-Options"] = "nosniff"
+        as_attachment(response, f"{name}.zip")
         details: dict[str, Any] = {"path": paths[0]} if len(paths) == 1 else {"paths": paths}
         if flushed:
             details["flushed"] = True

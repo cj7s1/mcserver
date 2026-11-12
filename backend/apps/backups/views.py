@@ -365,7 +365,7 @@ class BackupFileDownloadView(APIView):
             raise ApiError("This backup has no snapshot", code="not_restorable", status_code=409)
         require(request.user, "instance.files.read", instance)
         path = request.query_params.get("path", "")
-        from apps.core.utils import content_disposition
+        from apps.core.utils import as_attachment
         from apps.instances import secret_files
 
         # backups keep the control secret files (restic is encrypted); the browser never serves them
@@ -377,8 +377,7 @@ class BackupFileDownloadView(APIView):
             streamed = AgentStreamingResponse(
                 secret_files.masked_stream(instance, path, chunks), upstream, content_type="application/octet-stream"
             )
-            streamed["Content-Disposition"] = content_disposition(filename)
-            streamed["X-Content-Type-Options"] = "nosniff"
+            as_attachment(streamed, filename)
             audit.record(
                 "backup.file_download", request=request, instance=instance, target=backup, details={"path": path, "masked": True}
             )
@@ -393,17 +392,14 @@ class BackupFileDownloadView(APIView):
                 if close is not None:
                     close()
             masked = HttpResponse(data, content_type="application/octet-stream")
-            masked["Content-Disposition"] = content_disposition(filename)
-            masked["X-Content-Type-Options"] = "nosniff"
+            as_attachment(masked, filename)
             audit.record(
                 "backup.file_download", request=request, instance=instance, target=backup, details={"path": path, "masked": True}
             )
             return masked
         # streamed chunk by chunk under ASGI; the agent's response is closed when the browser goes away
         response = AgentStreamingResponse(chunks, upstream, content_type="application/octet-stream")
-
-        response["Content-Disposition"] = content_disposition(filename)
-        response["X-Content-Type-Options"] = "nosniff"
+        as_attachment(response, filename)
         audit.record("backup.file_download", request=request, instance=instance, target=backup, details={"path": path})
         return response
 

@@ -32,6 +32,7 @@ def test_throttle_is_per_remote_addr(users):
     for _ in range(10):
         APIClient(REMOTE_ADDR="198.51.100.1").post("/api/auth/login", {"username": "admin", "password": "nope-nope-nope"})
     blocked = APIClient(REMOTE_ADDR="198.51.100.1").post("/api/auth/login", {"username": "admin", "password": "nope-nope-nope"})
-    other = APIClient(REMOTE_ADDR="198.51.100.2").post("/api/auth/login", {"username": "admin", "password": "nope-nope-nope"})
+    # (another account: "admin" itself is now also limited per account, from any address, D-3)
+    other = APIClient(REMOTE_ADDR="198.51.100.2").post("/api/auth/login", {"username": "someone", "password": "nope-nope-nope"})
     assert blocked.status_code == 429
     assert other.status_code == 401
