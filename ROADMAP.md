@@ -146,6 +146,18 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
       worker), a second factor, `Instance.env` encryption, read-only root filesystems / CPU limit / disk quota
       for game containers (DEVELOPMENT_STATUS.md)
 
+## Friends (docs/FRIENDS.md; branch `feature/unraid-and-friends`, 2026-11-12)
+- [~] Share card: address, ports, protection, join steps and requirements per game, invite text, checklist,
+      Minecraft "Add a friend" (API done and unit-tested; the page pending). [ ] The join steps written from general
+      knowledge checked in each game's client
+- [~] Stop when empty (`idle_stop_minutes`, every game whose player count the panel reads; not Valheim;
+      Settings → Resources): unit-tested. [ ] Seen on a real server
+- [~] Discord bot (outbound only, one guild, `/servers` `/status` `/join` `/start` `/stop`, roles, rate limits,
+      service user `discord-bot`; System → Discord and each server's Settings → General): tested against fakes
+      of discord.py only. [ ] A live Discord server
+- [~] Friend role and invite links (API done and unit-tested). [ ] The pages; a friend through Tailscale or
+      Cloudflare Access
+
 ## Multi-game (docs/design/GAME-DEFINITIONS.md, section 10)
 - [x] Phase 1: game definitions and runtime profiles, Minecraft as the first game, no behaviour change (pin tests)
 - [x] Phase 2: named ports per protocol, memory model "plain", config files with codecs and the Game settings

@@ -7,6 +7,9 @@ and the few rules of each game. Minecraft, Factorio, Satisfactory and Terraria a
 
 ## Who can join by default
 
+How to share a server with friends (the Share card, passwords, whitelists, the Discord bot):
+[FRIENDS.md](FRIENDS.md).
+
 Once a game's port is forwarded on your router, this is who can join, for all ten games, until you
 change the settings:
 

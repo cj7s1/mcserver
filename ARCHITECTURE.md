@@ -19,7 +19,8 @@ Pterodactyl's panel/Wings. One panel can manage several hosts, each with its own
                                    └── instance + backup storage (bind-mounted host paths, restic repos)
 ```
 
-Three containers: `panel`, `agent`, `postgres`. The five processes of the panel container run under
+Three containers: `panel`, `agent`, `postgres`. The five processes of the panel container (six with the
+Discord bot, `discord`, which exits at once and stays idle while it is off) run under
 a small supervisor (`backend/container/supervise.py`, standard library only, started by the
 entrypoint's `all` mode after the migrations). They used to be five containers; they never were
 isolated from each other in any way that mattered (same image, same secrets, same network, same

@@ -71,6 +71,10 @@ Prism-Launcher-style instance management with game-panel administration, and it 
 - **Players:** whitelist, operators, bans, kick, and online and historical player lists.
 - **Multi-user:** a permission matrix with built-in and custom roles, per-server access grants, and an
   audit log.
+- **Friends:** a Share card per server (the address, the ports, the join steps of that game, a ready
+  invite text), stop when empty, a Discord bot your friends start and stop servers with (outbound only),
+  and an optional Friend role with invite links: [docs/FRIENDS.md](docs/FRIENDS.md). New and not tried
+  with real players or a real Discord server yet.
 - **Automation:** cron schedules (restart/stop/backup/snapshot/command) that wait for a busy server
   instead of being dropped and do not fire late power actions after downtime, in-game countdown
   warnings before restarts and stops (manual or scheduled, cancellable), Discord/webhook
@@ -128,7 +132,7 @@ To upgrade later: `(umask 022 && git pull)`, then in `deploy/`: `./scripts/upgra
 > Modded servers run third-party code. Docker raises the bar but is not a strong sandbox, so only install
 > content you trust. Never expose the panel to the internet without HTTPS, and preferably use a VPN.
 
-> **Before you forward a game's port**, check who can join: Terraria, Palworld, HKMP and
+> **Sharing a server with friends:** [docs/FRIENDS.md](docs/FRIENDS.md). **Before you forward a game's port**, check who can join: Terraria, Palworld, HKMP and
 > Counter-Strike 2 let anyone in until you set a password, Rust has no password or whitelist in the
 > panel, and Project Zomboid lets anyone create an account
 > ([docs/GAMES.md](docs/GAMES.md), "Who can join by default"). Every server has a network of its

@@ -333,6 +333,9 @@ every array start.
 
 ## 5. Ports and players
 
+Sharing a server with friends (the Share card, the Discord bot, a Friend account in the panel):
+[FRIENDS.md](FRIENDS.md). The ports and the firewall:
+
 * Every server gets a host port from `MCPANEL_PORT_RANGE_START`–`END` (default 25565–25665). LAN
   players connect to `192.168.1.10:<port>`.
 * For internet players, forward that TCP port on your router to the Unraid IP. The panel never changes
@@ -597,7 +600,11 @@ managed from this panel over HTTPS with a pinned certificate. See DEPLOYMENT.md,
 ## 8. Updating
 
 With the plugin: its page, **Check for updates**, then **Update...** (section 4, "The Unraid plugin"):
-the same commands as below, with the dry run shown before anything is switched. In the terminal:
+the same commands as below, with the dry run shown before anything is switched. **The upgrade to the
+version with the friends features ([FRIENDS.md](FRIENDS.md)) changes the database**: the dry run lists
+the migration and the page shows the box "Allow the database migrations of this version": tick it (in
+the terminal: `run --with-migrations`). DEPLOYMENT.md, "Upgrading", says what a rollback loses. In the
+terminal:
 
 ```bash
 cd /mnt/user/appdata/mcpanel-src && (umask 022 && git pull)

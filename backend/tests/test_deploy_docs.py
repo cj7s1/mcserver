@@ -330,3 +330,87 @@ def test_the_plugin_is_in_security_deployment_status_roadmap_and_the_map():
     claude = read("CLAUDE.md")
     assert "deploy/unraid/plugin/src/" in claude and "tests/test_deploy_unraid_plugin.py" in claude
     assert "The MCPanel plugin (recommended)" in words("docs/UNRAID-SHUTDOWN.md")
+
+
+# --- friends (feature plan 2026-11-12, section B) --------------------------------------------------------------
+def test_friends_md_covers_sharing_idle_stop_the_discord_bot_and_friend_accounts():
+    friends = words("docs/FRIENDS.md")
+    for needle in (
+        "**not tried with real players yet**",
+        "`./scripts/upgrade.sh run --with-migrations`",
+        "**Only users who may change the server's settings see the join password**",
+        "**System** (left sidebar) → **Public address**",
+        '[GAMES.md](GAMES.md), "Who can join by default"',
+        '"The game servers\' firewall"',
+        "**Add a friend** takes a Minecraft name",
+        "**join code**",
+        "Valheim cannot use it",
+        "**connects out to Discord only**: no port to open",
+        "Leave every **Privileged Gateway Intent** off",
+        "`bot` and `applications.commands`",
+        "**Switch servers on one by one:**",
+        "### What the bot can never do",
+        "### When the page shows an error",
+        "4 times in 10 minutes",
+        "**`discord-bot`**",
+        "**once, for 24 hours**",
+        "**Never forward the panel's port on your router.**",
+        "**Tailscale:**",
+        "**Cloudflare Access:**",
+        "MCPANEL_FORWARDED_ALLOW_IPS",
+    ):
+        assert needle in friends, needle
+    # every game whose join steps were written from general knowledge carries the visible note
+    rows = [line for line in read("docs/FRIENDS.md").splitlines() if line.startswith("| ") and "|" in line[2:]]
+    flagged = {row.split("|")[1].strip() for row in rows if "**check this for your game version**" in row}
+    assert flagged == {
+        "Factorio",
+        "Satisfactory",
+        "Terraria",
+        "tModLoader",
+        "Palworld",
+        "Valheim",
+        "Project Zomboid",
+        "HKMP",
+        "Counter-Strike 2",
+        "Rust",
+    }
+    for path in ("README.md", "docs/UNRAID.md", "docs/GAMES.md"):
+        assert "FRIENDS.md" in read(path), path
+
+
+def test_the_friends_upgrade_needs_migrations_and_says_what_a_rollback_loses():
+    deployment = words("DEPLOYMENT.md")
+    for needle in (
+        "`instances.0008_unraid_and_friends`",
+        "ends with `./scripts/upgrade.sh run --with-migrations`",
+        'tick "Allow the database migrations of this version"',
+        "**A rollback** undoes the migration",
+        "| `[discord]` |",
+    ):
+        assert needle in deployment, needle
+    assert 'the page shows the box "Allow the database migrations of this version": tick it' in words("docs/UNRAID.md")
+    # the plugin's page uses the same words for its box
+    assert "Allow the database migrations of this version" in read("deploy/unraid/plugin/src/MCPanel.page")
+
+
+def test_security_status_roadmap_and_the_map_know_the_friends_features():
+    security = words("docs/SECURITY.md")
+    assert "## Friends: the Share card, the Discord bot, the Friend role" in read("docs/SECURITY.md")
+    for needle in (
+        "**Outbound only.**",
+        "The API takes it and never returns it",
+        "**One Discord server.**",
+        "4 times in 10 minutes",
+        "the service user `discord-bot`",
+        "only to users with `instance.configure`",
+        "A Friend never gets it from the panel",
+        "`instance.overview` belongs to this role only",
+        "works **once, for 24 hours**",
+    ):
+        assert needle in security, needle
+    assert "## Friends: Share card, stop when empty, Discord bot, Friend role" in read("DEVELOPMENT_STATUS.md")
+    assert "## Friends (docs/FRIENDS.md" in read("ROADMAP.md")
+    claude = read("CLAUDE.md")
+    for needle in ("apps/instances/share.py", "apps/instances/idle.py", "apps/discordbot/", "`instance.overview`", "`discord`"):
+        assert needle in claude, needle

@@ -76,8 +76,8 @@ next start of the Docker daemon. The agent of an additional node (`docker-compos
 the optional `redis` container still use `unless-stopped`.
 
 Inside `panel`, a small supervisor (`backend/container/supervise.py`) starts and watches five
-processes. Every line of `docker compose logs panel` begins with the name of the process that
-wrote it:
+processes, six with the Discord bot. Every line of `docker compose logs panel` begins with the name
+of the process that wrote it:
 
 | Process | What it does |
 |---|---|
@@ -86,6 +86,7 @@ wrote it:
 | `[worker]` | Celery jobs: installs, backups, restores, updates (and periodic tasks when it has a free slot). `MCPANEL_WORKER_CONCURRENCY` jobs at a time. |
 | `[periodic]` | Celery, periodic tasks only (reconcile loop, schedules, job watchdog, metrics, modpack update checks), so they keep running while long jobs fill every `[worker]` slot. Always 2 slots. Never runs jobs. |
 | `[beat]` | Scheduler: queues the periodic tasks above. |
+| `[discord]` | The Discord bot ([docs/FRIENDS.md](docs/FRIENDS.md)), connected out to Discord only. While it is switched off (or has no token or Discord server) it exits at once and is **idle**: healthy, tried again every 5 minutes or at once when its settings change. About 70-90 MB while connected (estimated). Only the `all` command runs it: a setup that starts web, worker and beat as containers of their own needs one more with `manage run_discord_bot`. |
 
 ```bash
 docker compose exec panel python /usr/local/bin/mcpanel-supervise.py status   # state of each process
@@ -100,7 +101,8 @@ What to expect from it:
   `components` in `/api/health`. After three failed checks (about 90 seconds) Docker shows the
   container as **unhealthy**. If Redis dies it is started again and the other four are restarted
   after it.
-* **Healthy** means: the database and the cache answer, all five processes run, both workers
+* **Healthy** means: the database and the cache answer, all five processes run (the Discord bot runs
+  or is idle), both workers
   answered a ping in the last 2 minutes and the reconcile task ran in the last 3 minutes.
 * `docker compose stop panel` / `restart panel` / `down` give running jobs up to 110 seconds to
   finish. A job that is waiting at that moment (for the agent, for a countdown or for a server's
@@ -576,6 +578,17 @@ Notes:
   `MCPANEL_AGENT_TLS_FINGERPRINT` in `.env`.
 
 ## Upgrading
+
+**The upgrade to the version with the friends features** (the Share card, stop when empty, the Discord
+bot, the Friend role; [docs/FRIENDS.md](docs/FRIENDS.md)) has one database migration,
+`instances.0008_unraid_and_friends`: four columns of the servers table, each with a database default. The
+dry run lists it and ends with `./scripts/upgrade.sh run --with-migrations`; a plain `run` refuses
+before it changes anything. On the Unraid plugin's page, tick "Allow the database migrations of this
+version". **A rollback** undoes the migration: the servers' "Stop when empty", "Available in Discord",
+their Discord roles and "Let /join show the password" are lost (nothing else). The Discord settings stay in
+the system settings, unused by the older version (its panel runs no bot); Friend accounts stay and see
+no server there (their grants work again after the next upgrade); the inactive service user
+`discord-bot` stays. The panel image grows by about 15 MB (discord.py and its libraries).
 
 On Unraid the MCPanel plugin's page does the same (docs/UNRAID.md, "The Unraid plugin"): **Check for
 updates** is a `git fetch` of the upstream branch; **Update** is `git pull --ff-only` of a checkout

@@ -586,6 +586,63 @@ change.
   plugin: whoever can change that branch changes what root runs here at the next plugin update. That
   is the trust you already give the branch you `git pull`.
 
+## Friends: the Share card, the Discord bot, the Friend role
+
+docs/FRIENDS.md describes the features. Not tried with real players or a real Discord server yet.
+
+### The Discord bot
+
+* **Outbound only.** The bot is a process of the panel container (`[discord]`) with one connection out
+  to Discord's gateway. Nothing listens for Discord: no port, no webhook endpoint, nothing to forward.
+* **The token** is stored encrypted in the system settings, like the panel's other secrets. The API takes
+  it and never returns it (`token_set` only); it is not logged, not in the bot's status, not in error texts,
+  and the audit log records only `bot_credential: "set"` or `"removed"`. discord.py's own log is set to
+  warnings. Whoever has the token can act as the bot: Reset Token in Discord's developer portal revokes it.
+  The bot asks for no privileged intent.
+* **One Discord server.** The commands are registered for the configured Discord server only, and an
+  interaction from anywhere else gets "This bot only answers in its own Discord server." and nothing else.
+* **What it can do:** list the servers switched to "Available in Discord" (each server is off by default),
+  their state, players and address; the Share card's invite text; start and stop. Starts and stops go
+  through the same functions as the web UI's buttons: the memory check without its override, required
+  secrets, a busy server's refusal, the saving stop. Start and stop need one of the server's Discord roles,
+  else one of the default roles; nobody may when neither is set. Each Discord member may start or stop 4
+  times in 10 minutes and use 20 other commands a minute. It never runs console commands and never shows a
+  secret other than the join password of a server whose "Let /join show the password" is on.
+* **Who it trusts:** Discord decides who has a role. Whoever administers that Discord server can give
+  themselves or others the right to start and stop the available servers, and everyone in it can see the
+  available servers, their state and address. Start and stop are audited as the service user `discord-bot`
+  (inactive, no usable password: it cannot sign in) with `via: "discord"` and the member's Discord name and
+  ID.
+
+### The Share card's password
+
+`GET /api/instances/<id>/share` answers whoever can see the server (and a Friend), but the join password
+only to users with `instance.configure`; the invite text holds it only when such a user asks for it
+(`with_password=true`), and that answer is not cached (`Cache-Control: no-store`). A Friend never gets it
+from the panel. In Discord, `/join` shows it only for a server whose "Let /join show the password" is on, and
+then to **everyone** in that Discord server who asks (the answer is private to the member, the right to ask
+is not).
+
+### The Friend role
+
+A built-in role with two codes: `instance.control` (the power buttons: start, stop, restart, kill) and
+`instance.overview` ("see status": the status and the Share card). `instance.overview` belongs to this role
+only (custom roles cannot use it); `instance.view` includes it. A Friend gets short answers
+(`"limited": true`: status fields only), the Share card without the password, the power buttons without the
+memory check's override, and the status events; everything else about the server answers 403 (properties,
+config, files, console, players, metrics, jobs, backups, schedules, content, saves, access, settings), job
+events are not sent to them, and they see only the servers granted to them. Kill is a power button: a
+Friend can stop a server without saving it. Given as a global role instead of per server, it applies to
+every server.
+
+### Invite links
+
+`POST /api/users/invite` needs `system.users` and, on every server named, the right to grant access there.
+The new account has no usable password and no global role; the answer holds a password-reset link (the
+existing mechanism) that works **once, for 24 hours**: whoever opens it first chooses the password, so send
+it privately. The token is never in the audit log (`user.invited` names the role and the servers; each grant
+is one `instance.access_granted`). A new link: the existing reset link of the Users page.
+
 ## The agent treats the Minecraft process as hostile input
 
 * The instance-network source check also covers WebSocket handshakes (the console log stream),

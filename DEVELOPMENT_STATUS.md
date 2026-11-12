@@ -13,6 +13,33 @@ of session 1)._
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
 
+## Friends: Share card, stop when empty, Discord bot, Friend role (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section B)
+
+The owner's friends use Discord and are not technical. User docs: docs/FRIENDS.md; security: docs/SECURITY.md,
+"Friends". **Upgrading needs `--with-migrations`** (one migration, `instances.0008_unraid_and_friends`: four
+columns of the servers table with database defaults; a rollback loses only their values; DEPLOYMENT.md,
+"Upgrading").
+
+* **Share card** (`GET /api/instances/<id>/share`, `apps/instances/share.py`, `apps/games/joining.py`): address
+  (system setting `public_address`, else the node's), ports with protocols, protection, plain-language join steps
+  and requirements per game, invite text with or without the password (only with `instance.configure`),
+  checklist. Unit-tested (`tests/test_friends_share.py`). The join steps of Factorio, Satisfactory, Terraria,
+  tModLoader, Palworld, Valheim (crossplay join code), Project Zomboid, HKMP, CS2 and Rust were written from
+  general knowledge: **not checked in the games' clients**.
+* **Stop when empty** (`idle_stop_minutes`, `apps/instances/idle.py`, Celery beat `idle-stop` every minute, from
+  the player samples the panel takes anyway; not for Valheim): the ordinary saving stop, audited, notification
+  `instance.idle_stopped`. Unit-tested (`tests/test_friends_idle.py`).
+* **Discord bot** (`apps/discordbot/`, `manage run_discord_bot`, the supervisor's sixth child `discord`: idle
+  while off, wake file; API `/api/system/discord`; per server `discord_available`, `discord_roles`,
+  `discord_share_password`): tested only against fakes of discord.py's objects (`tests/test_friends_discord.py`);
+  **the gateway login, the command sync, autocomplete, follow-ups, announcements and the invite link have not
+  run against Discord.** discord.py 2.7.1 pinned (about 15 MB in the image).
+* **Friend role and invite links** (role `friend` with `instance.control` + `instance.overview`, short answers
+  `limited: true`; `POST /api/users/invite`, a 24-hour one-time link): unit-tested (`tests/test_friends_access.py`).
+* Pages (frontend): the Share card on the Overview and the header's Share button; Settings → Resources → Stop
+  when empty; System → Discord and each server's Settings → General → Discord. The Friend's pages and "Invite a
+  friend": the frontend's next part.
+
 ## Unraid plugin `mcpanel` (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section A)
 
 **Not run on Unraid yet.** Built from the conventions of the plugins on the owner's server (Unraid 7.3.4,

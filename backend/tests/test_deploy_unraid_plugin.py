@@ -514,6 +514,22 @@ def test_update_pulls_shows_the_dry_run_and_runs_only_what_it_proposed(host):
     assert "PLAN_UPDATE" not in host.facts()
 
 
+def test_the_lines_the_plugin_reads_are_the_ones_upgrade_sh_prints():
+    """The plan parsing above feeds stand-in lines; these are the real script's (test_upgrade_script.py runs it)."""
+    script = (REPO / "deploy/scripts/upgrade.sh").read_text()
+    assert 'say "Nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }$(next_command)"' in script
+    assert 'local cmd="./scripts/upgrade.sh run"' in script and 'cmd="$cmd --with-migrations"' in script
+    assert (
+        'say "Nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }./scripts/upgrade.sh rollback'
+        '$([ "$GAMES_ARCHIVE" = 1 ] && printf \' --archive-other-games\')"'
+    ) in script
+    real = (REPO / "backend/tests/test_upgrade_script.py").read_text()
+    # a version with a new migration file (the friends features: instances 0008) ends its dry run so
+    assert 'endswith("Nothing was changed. To do it: ./scripts/upgrade.sh run --with-migrations")' in real
+    assert 'endswith("To do it: ./scripts/upgrade.sh rollback --archive-other-games")' in real
+    assert (REPO / "backend/apps/instances/migrations/0008_unraid_and_friends.py").exists()
+
+
 def test_the_plain_run_is_offered_without_migrations_only(host):
     host.use_checkout()
     host.start_and_wait("update-prepare")
