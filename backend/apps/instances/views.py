@@ -1109,7 +1109,14 @@ class ScheduleListView(APIView):
     @extend_schema(responses={200: ScheduleSerializer(many=True)})
     def get(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.view")
-        return Response(ScheduleSerializer(instance.schedules.all(), many=True).data)
+        rows = ScheduleSerializer(instance.schedules.all(), many=True).data
+        if not request.user.has_panel_perm("instance.console", instance):
+            # what a scheduled command typed and the console answered is the console's to show (D-13)
+            for row in rows:
+                if row.get("action") == "command":
+                    row["last_result"] = None
+                    row["payload"] = {**(row.get("payload") or {}), "command": None}
+        return Response(rows)
 
     @extend_schema(request=ScheduleSerializer, responses={201: ScheduleSerializer})
     def post(self, request: Request, pk: str) -> Response:
@@ -1699,7 +1706,11 @@ class SoftwareUpdateView(APIView):
             if loaders and loader not in loaders:
                 raise ValidationError({"loader_version": [f"{loader} is not available for {mc}"]})
         java = data.get("java_version") or resolve_java(mc, instance.server_type)["java_version"]
-        if int(java) not in (8, 11, 16, 17, 21, 25):
+        try:
+            supported = not isinstance(java, bool) and int(java) in (8, 11, 16, 17, 21, 25)
+        except (TypeError, ValueError):  # (D-12: a non-number was a 500)
+            supported = False
+        if not supported:
             raise ValidationError({"java_version": ["Unsupported Java version"]})
         downgrade = (
             instance.minecraft_version.upper() != "LATEST"
@@ -1825,7 +1836,10 @@ class MigrateView(APIView):
         instance = get_instance_for(request.user, pk, "instance.configure")
         require(request.user, "system.nodes")
         data = request.data if isinstance(request.data, dict) else {}
-        target = Node.objects.filter(pk=data.get("node")).first()
+        node_id = data.get("node")
+        if isinstance(node_id, bool) or not isinstance(node_id, (int, str)) or not str(node_id).isdigit():
+            raise ValidationError({"node": ["Choose a target node"]})  # (D-12: a non-number was a 500)
+        target = Node.objects.filter(pk=int(node_id)).first()
         if target is None:
             raise ValidationError({"node": ["Choose a target node"]})
         if target.pk == instance.node_id:

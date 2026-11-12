@@ -111,6 +111,8 @@ def inspect_mrpack(url: str, sha1: str | None = None) -> dict[str, Any]:
             if index_entry is None:
                 raise InspectError("modrinth.index.json missing from the pack")
             index = json.loads(_read_entry(client, url, index_entry))
+            if not isinstance(index, dict):  # (a list or a scalar was a 500 below)
+                raise InspectError("modrinth.index.json is not an object")
             checker = None
             for path in CHECKER_PATHS:
                 if path in entries:
@@ -124,14 +126,15 @@ def inspect_mrpack(url: str, sha1: str | None = None) -> dict[str, Any]:
         cache.set(key, result, 600)
         return result
 
-    files = index.get("files") or []
-    server_unsupported = [f for f in files if (f.get("env") or {}).get("server") == "unsupported"]
+    # whatever the pack's index holds: only objects count (a malformed pack answers "not available", never a 500)
+    files = [f for f in (index.get("files") or []) if isinstance(f, dict)] if isinstance(index.get("files"), list) else []
+    server_unsupported = [f for f in files if isinstance(f.get("env"), dict) and f["env"].get("server") == "unsupported"]
     override_mods = [n for n in entries if n.startswith(("overrides/mods/", "server-overrides/mods/")) and n.endswith(".jar")]
-    deps = index.get("dependencies") or {}
+    deps = index.get("dependencies") if isinstance(index.get("dependencies"), dict) else {}
     warnings: list[str] = []
     manual = [
         {"name": e.get("displayName") or e.get("pattern"), "filename": e.get("pattern"), "url": e.get("url")}
-        for e in (checker or [])
+        for e in (checker if isinstance(checker, list) else [])
         if isinstance(e, dict)
     ]
     if checker is not None:

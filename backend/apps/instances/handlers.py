@@ -214,6 +214,29 @@ def _drop_resume_mark(instance: Instance) -> None:
     )
 
 
+def _drop_secret_settings(job: Job, definition: Any, instance: Instance) -> None:
+    """The wizard's values of secret fields (Factorio's game password and factorio.com token, Terraria's and
+    Project Zomboid's passwords) are in the server's files now: the job's parameters keep no copy in the
+    database (D-10). Other settings stay (they say what the server was created with)."""
+    settings = (job.params or {}).get("settings")
+    if not isinstance(settings, dict) or not settings:
+        return
+    kept: dict[str, Any] = {}
+    dropped = False
+    for file_id, values in settings.items():
+        cfg = definition.config_file_for(instance, str(file_id)) if hasattr(definition, "config_file_for") else None
+        if cfg is None or not isinstance(values, dict):
+            kept[file_id] = values
+            continue
+        clean = {k: v for k, v in values.items() if not (cfg.field(k) or {}).get("secret")}
+        dropped = dropped or len(clean) != len(values)
+        kept[file_id] = clean
+    if dropped:
+        params = {**job.params, "settings": kept}
+        Job.objects.filter(pk=job.pk).update(params=params)
+        job.params = params
+
+
 @register("install")
 def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     """Create the data directory, write initial config, create the container and optionally start it."""
@@ -225,6 +248,7 @@ def install(job: Job, ctx: JobContext) -> dict[str, Any]:
     files = definition.initial_files(instance, job.params or {})
     ctx.progress(0.02, "Creating instance directory", force=True)
     client.prepare(instance.id, files)
+    _drop_secret_settings(job, definition, instance)
     start = bool(job.params.get("start", True))
     if start:
         _set_desired(instance, DesiredState.RUNNING)

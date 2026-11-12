@@ -9,6 +9,16 @@ def random_secret(length: int = 32) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def parse_uuid(value: object):  # type: ignore[no-untyped-def]
+    """``value`` as a UUID, or None when it is not one (a malformed id from a query string or body, D-12)."""
+    import uuid
+
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def client_ip(request) -> str | None:  # type: ignore[no-untyped-def]
     return request.META.get("REMOTE_ADDR")
 

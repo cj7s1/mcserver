@@ -54,6 +54,10 @@ def get_instance_for(user: Any, pk: Any, code: str = "instance.view") -> Any:
     """Fetch an instance the user may see (404 otherwise) and require ``code`` on it."""
     from apps.instances.models import Instance
 
+    from .utils import parse_uuid
+
+    if parse_uuid(pk) is None:  # a malformed id from a query string or body: not found (D-12; was a 500)
+        raise NotFound("Server not found")
     instance = visible_instances(user, Instance.objects.select_related("node")).filter(pk=pk).first()
     if instance is None:
         raise NotFound("Server not found")

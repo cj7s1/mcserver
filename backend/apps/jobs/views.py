@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 
 from apps.core.errors import ApiError
 from apps.core.permissions import ensure_password_current, visible_instances
+from apps.core.utils import parse_uuid
 
 from .models import Job
 from .serializers import JobSerializer
@@ -58,6 +59,8 @@ class JobListView(APIView):
     def get(self, request: Request) -> Response:
         qs = visible_jobs(request.user)
         if inst := request.query_params.get("instance"):
+            if parse_uuid(inst) is None:
+                raise ApiError("instance must be a server id", code="invalid_instance")  # (D-12: was a 500)
             qs = qs.filter(instance_id=inst)
         if st := request.query_params.get("status"):
             qs = qs.filter(status__in=st.split(","))

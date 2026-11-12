@@ -136,6 +136,8 @@ class BackupListView(APIView):
     @extend_schema(request=dict, responses={202: JobSerializer})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.backup")
+        if not isinstance(request.data, dict):  # (D-12: a JSON list was a 500)
+            raise serializers.ValidationError({"non_field_errors": ["Send a JSON object"]})
         name = str(request.data.get("name") or "").strip()[:120]
         consistency = request.data.get("consistency", "auto")
         if consistency not in ("auto", "require", "none"):

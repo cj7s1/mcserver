@@ -22,6 +22,9 @@ from rest_framework.views import APIView
 from apps.core.asgi import UPLOAD_PATH, RequestBodyLimit
 from apps.core.middleware import UploadLimitMiddleware
 
+from .test_games_phase2 import factorio_versions  # noqa: F401  (fixture)
+from .test_security_audit_authz import ws_env  # noqa: F401  (fixture)
+
 MiB = 1024 * 1024
 
 
@@ -430,3 +433,144 @@ def test_e6_named_ports_are_assigned_under_the_nodes_lock(
         )
     assert resp.status_code == 200, resp.content
     assert locked([q["sql"] for q in queries.captured_queries])
+
+
+# --- D-12 -----------------------------------------------------------------------------------------------------
+@pytest.mark.django_db
+def test_d12_malformed_ids_answer_400_or_404(users: Any, client_for: Any, make_instance: Any, fake_agent: Any) -> None:
+    """Adopted from d-panel-web/poc test_malformed_ids_answer_500 (it counted 500s)."""
+    inst = make_instance()
+    c = client_for(users["owner"])
+
+    def code(resp: Any) -> tuple[int, str]:
+        return resp.status_code, resp.json()["error"]["code"]
+
+    assert code(c.get("/api/jobs?instance=not-a-uuid")) == (400, "invalid_instance")
+    assert code(c.get("/api/audit?instance=not-a-uuid")) == (400, "invalid_instance")
+    assert code(c.get("/api/audit?before=abc")) == (400, "invalid_cursor")
+    assert c.get("/api/audit?before=10").status_code == 200
+    migrate = c.post(f"/api/instances/{inst.id}/migrate", {"node": {"a": 1}, "confirm": True}, format="json")
+    assert code(migrate) == (400, "validation_error") and "node" in migrate.json()["error"]["details"]["fields"]
+    software = c.post(f"/api/instances/{inst.id}/software", {"minecraft_version": "LATEST", "java_version": "abc"}, format="json")
+    assert software.status_code in (400, 409) and software.json()["error"]["code"] != "internal_error"
+    assert code(c.post(f"/api/instances/{inst.id}/backups", [], format="json")) == (400, "validation_error")
+
+
+# --- D-13 -----------------------------------------------------------------------------------------------------
+@pytest.mark.django_db
+def test_d13_console_output_of_schedules_and_addresses_in_the_trail(
+    make_instance: Any, make_user: Any, client_for: Any, users: Any
+) -> None:
+    from apps.audit.models import AuditEvent
+    from apps.instances.models import Schedule
+
+    inst = make_instance()
+    Schedule.objects.create(
+        instance=inst,
+        name="say",
+        action="command",
+        cron="0 * * * *",
+        payload={"command": "op mallory"},
+        last_result="Made mallory a server operator",
+    )
+    Schedule.objects.create(instance=inst, name="b", action="backup", cron="0 3 * * *", payload={}, last_result="Backup done")
+    viewer = client_for(_grant(make_user, inst, "only-view", []))
+    rows = {r["name"]: r for r in viewer.get(f"/api/instances/{inst.id}/schedules").json()}
+    assert rows["say"]["last_result"] is None and rows["say"]["payload"]["command"] is None
+    assert rows["b"]["last_result"] == "Backup done"
+    consoler = client_for(_grant(make_user, inst, "console", ["instance.console"]))
+    rows = {r["name"]: r for r in consoler.get(f"/api/instances/{inst.id}/schedules").json()}
+    assert rows["say"]["payload"]["command"] == "op mallory" and rows["say"]["last_result"]
+    # the trail of a server for a configure-only user: no IP addresses; the global auditor sees them
+    AuditEvent.objects.create(action="instance.updated", instance=inst, ip_address="192.168.1.77", details={})
+    configurer = client_for(_grant(make_user, inst, "cfg", ["instance.configure"]))
+    trail = configurer.get(f"/api/audit?instance={inst.id}").json()
+    assert trail and all(r["ip_address"] is None for r in trail)
+    assert any(r["ip_address"] == "192.168.1.77" for r in client_for(users["owner"]).get(f"/api/audit?instance={inst.id}").json())
+
+
+# --- D-10 -----------------------------------------------------------------------------------------------------
+@pytest.mark.django_db
+def test_d10_wizard_secrets_do_not_stay_in_the_install_jobs_parameters(
+    clients: Any,
+    fake_agent: Any,
+    factorio_versions: Any,  # noqa: F811  (the fixture imported above)
+    django_capture_on_commit_callbacks: Any,
+) -> None:
+    """Adopted from d-panel-web/poc test_wizard_secret_settings_stay_in_clear_in_the_job_parameters."""
+    import json
+
+    from apps.instances.models import Instance
+    from apps.jobs.models import Job, JobStatus
+
+    body = {
+        "game": "factorio",
+        "name": "Factory",
+        "version": "2.1.23",
+        "settings": {
+            "server-settings": {"game_password": "CANARY-join-pw", "token": "CANARY-factorio-com-token", "username": "someone"}
+        },
+    }
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post("/api/instances/", body, format="json")
+    assert resp.status_code == 201, resp.content
+    inst = Instance.objects.get(pk=resp.json()["instance"]["id"])
+    job = Job.objects.get(instance=inst, kind="install")
+    assert job.status == JobStatus.SUCCEEDED
+    stored = json.dumps(job.params)
+    assert "CANARY" not in stored and "someone" in stored  # the other settings stay
+    written = fake_agent.text(inst.id, "config/server-settings.json")
+    assert "CANARY-join-pw" in written and "CANARY-factorio-com-token" in written  # (the server got them)
+
+
+# --- slice D suspicion: job events of a deleted server --------------------------------------------------------
+def _job_event_users() -> tuple[str, str, str, str]:
+    from apps.accounts.models import Role, User
+    from apps.accounts.views import ensure_system_roles
+
+    from .test_security_audit_authz import _session_cookie
+
+    ensure_system_roles()
+    me = User.objects.create_user("wsjob-me", password="Correct-Horse-Battery-42")
+    other = User.objects.create_user("wsjob-other", password="Correct-Horse-Battery-42")
+    admin = User.objects.create_user("wsjob-admin", password="Correct-Horse-Battery-42", role=Role.objects.get(key="operator"))
+    return str(me.pk), str(other.pk), _session_cookie(me), _session_cookie(admin)
+
+
+@pytest.mark.asyncio
+@pytest.mark.django_db(transaction=True)
+async def test_job_events_without_a_server_reach_only_their_user_and_admins(ws_env: Any) -> None:  # noqa: F811
+    from channels.layers import get_channel_layer
+
+    from apps.console.events import EVENTS_GROUP
+
+    from .test_security_audit_authz import _communicator, _db
+
+    me, other, my_key, admin_key = await _db(_job_event_users)
+    mine = _communicator("/ws/events/", my_key)
+    admin = _communicator("/ws/events/", admin_key)
+    assert (await mine.connect())[0] and (await admin.connect())[0]
+    layer = get_channel_layer()
+
+    def event(owner: str) -> dict[str, Any]:
+        return {"type": "panel.event", "event": "job.finished", "payload": {"o": owner}, "instance_id": None, "owner_id": owner}
+
+    await layer.group_send(EVENTS_GROUP, event(other))  # another user's delete job
+    assert await mine.receive_nothing(timeout=0.3)
+    assert (await admin.receive_json_from(timeout=2))["payload"] == {"o": other}
+    await layer.group_send(EVENTS_GROUP, event(me))
+    assert (await mine.receive_json_from(timeout=2))["payload"] == {"o": me}
+    await mine.disconnect()
+    await admin.disconnect()
+
+
+@pytest.mark.django_db
+def test_the_runner_names_the_owner_of_a_job_without_a_server(users: Any, monkeypatch: Any) -> None:
+    from apps.jobs import runner
+    from apps.jobs.models import Job
+
+    sent: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(runner, "broadcast", lambda *a, **k: sent.append((a, k)))
+    job = Job.objects.create(kind="delete", title="Delete x", user=users["manager"], instance=None)
+    runner._broadcast_job("job.finished", job)
+    assert sent[-1][0][2] is None and sent[-1][1] == {"owner_id": str(users["manager"].pk)}

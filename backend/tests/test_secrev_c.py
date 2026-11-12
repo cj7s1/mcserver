@@ -357,3 +357,36 @@ def test_c10_provider_requests_keep_the_api_key_on_its_host() -> None:
         assert not elsewhere.called
         mock.get("https://api.modrinth.com/v2/project/x").respond(200, json={"id": "x"})
         assert _request("GET", "https://api.modrinth.com/v2/project/x", provider="Modrinth") == {"id": "x"}
+
+
+# --- slice C suspicion: a malformed .mrpack index -------------------------------------------------------------
+@pytest.mark.parametrize(
+    "index",
+    [
+        [1, 2, 3],  # a list instead of an object
+        {"files": ["mods/a.jar", 5], "dependencies": ["minecraft"]},  # entries that are no objects
+        {"files": [{"path": "mods/a.jar", "env": "server"}], "dependencies": {"minecraft": "1.20.1"}},
+    ],
+)
+def test_a_malformed_pack_index_is_not_a_500(index: Any, settings: Any) -> None:
+    import io
+    import json
+    import zipfile
+
+    import respx
+
+    from apps.modpacks.mrpack import inspect_mrpack
+
+    from .test_mrpack import URL, range_handler
+
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.dummy.DummyCache"}}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("modrinth.index.json", json.dumps(index))
+        zf.writestr("overrides/config/missing_mods_checker.json", json.dumps({"not": "a list"}))
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get(URL).mock(side_effect=range_handler(buf.getvalue()))
+        result = inspect_mrpack(URL, None)
+    assert isinstance(result, dict) and "available" in result
+    if isinstance(index, dict):
+        assert result["available"] is True and result["manual_downloads"] == []

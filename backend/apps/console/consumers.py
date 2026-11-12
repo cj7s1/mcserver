@@ -422,6 +422,11 @@ def _can_view(user: Any, instance_id: str) -> bool:
     return "instance.view" in user.instance_permissions(instance_id)
 
 
+@database_sync_to_async
+def _sees_every_server(user: Any) -> bool:
+    return "instance.view" in user.global_permissions()
+
+
 # channels_redis forgets a group member after group_expiry (default 86400 s) unless it is added
 # again: a socket open for a day would silently stop getting events. Re-add it well before that.
 GROUP_REFRESH_SECONDS = 3600.0
@@ -500,4 +505,13 @@ class EventsConsumer(_GuardedConsumer):
                 self._cache[instance_id] = cached
             if not cached[1]:
                 return
+        elif "owner_id" in message:
+            # an event without a server (the job of a deleted server): its user and users who see every server
+            if str(getattr(self.user, "pk", "")) != message["owner_id"]:
+                cached = self._cache.get("*")
+                if cached is None or time.monotonic() - cached[0] > REVALIDATE_SECONDS:
+                    cached = (time.monotonic(), await _sees_every_server(self.user))
+                    self._cache["*"] = cached
+                if not cached[1]:
+                    return
         await self.send_json({"type": message["event"], "instance_id": instance_id, "payload": message["payload"]})

@@ -6,7 +6,9 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.errors import ApiError
 from apps.core.permissions import get_instance_for, require
+from apps.core.utils import parse_uuid
 
 from .models import AuditEvent
 
@@ -38,6 +40,8 @@ class AuditListView(APIView):
         qp = request.query_params
         qs = AuditEvent.objects.select_related("instance")
         if inst := qp.get("instance"):
+            if parse_uuid(inst) is None:
+                raise ApiError("instance must be a server id", code="invalid_instance")  # (D-12: was a 500)
             instance = get_instance_for(request.user, inst)
             if not request.user.has_panel_perm("system.audit"):
                 require(request.user, "instance.configure", instance)
@@ -49,9 +53,16 @@ class AuditListView(APIView):
         if actor := qp.get("actor"):
             qs = qs.filter(actor_username=actor)
         if before := qp.get("before"):
-            qs = qs.filter(id__lt=before)
+            if not before.isdigit() or len(before) > 18:
+                raise ApiError("before must be an event id", code="invalid_cursor")  # (D-12: was a 500)
+            qs = qs.filter(id__lt=int(before))
         try:
             limit = max(1, min(int(qp.get("limit", "100")), 500))
         except ValueError:
             limit = 100
-        return Response(AuditEventSerializer(qs[:limit], many=True).data)
+        rows = AuditEventSerializer(qs[:limit], many=True).data
+        if not request.user.has_panel_perm("system.audit"):
+            # a server's trail for its configurers: who did what, not from which address (D-13)
+            for row in rows:
+                row["ip_address"] = None
+        return Response(rows)

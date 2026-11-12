@@ -145,6 +145,15 @@ def register(kind: str) -> Callable[[Handler], Handler]:
     return deco
 
 
+def _broadcast_job(event: str, job: Job) -> None:
+    """A job event: to the users who see its server; a job without one (a deleted server's) only to the user who
+    started it and to users who see every server (the suspicion of slice D: it went to every signed-in user)."""
+    if job.instance_id:
+        broadcast(event, job_payload(job), str(job.instance_id))
+    else:
+        broadcast(event, job_payload(job), None, owner_id=str(job.user_id) if job.user_id else None)
+
+
 def job_payload(job: Job) -> dict[str, Any]:
     return {
         "id": str(job.id),
@@ -180,7 +189,7 @@ class JobContext:
             Job.objects.filter(pk=job.pk).update(
                 progress=job.progress, message=job.message, log=job.log, heartbeat_at=timezone.now()
             )
-            broadcast("job.progress", job_payload(job), str(job.instance_id) if job.instance_id else None)
+            _broadcast_job("job.progress", job)
 
     def log(self, line: str) -> None:
         self.job.append_log(line)
@@ -265,7 +274,7 @@ def enqueue(
         else:
             job = Job.objects.create(kind=kind, title=title, instance=instance, user=user, params=params or {}, exclusive=False)
         transaction.on_commit(lambda: dispatch(job.id))
-    broadcast("job.created", job_payload(job), str(job.instance_id) if job.instance_id else None)
+    _broadcast_job("job.created", job)
     return job
 
 
@@ -358,7 +367,7 @@ def finish(job: Job, status: str, *, error: str = "", error_code: str = "", resu
         log.info("Job %s had ended already; its status is kept", job.pk)
         job.refresh_from_db()
         return False
-    broadcast("job.finished", job_payload(job), str(job.instance_id) if job.instance_id else None)
+    _broadcast_job("job.finished", job)
     _notify_job(job)
     return True
 
