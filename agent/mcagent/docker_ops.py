@@ -486,6 +486,10 @@ def image_volume_plan(
     return binds, tmpfs
 
 
+# controls without a network listener: only those games may use the host network (Minecraft keeps its policy)
+HOST_NETWORK_CONTROLS = frozenset({"none", "console"})
+
+
 def _binds_below_the_folder(profile: RuntimeProfile, volume_binds: dict[str, str]) -> bool:
     """Whether the container mounts a folder below the server folder (not only the folder itself):
     a profile mount of a sub-folder, or a VOLUME of the image that goes to ``.volumes/`` or below a mount."""
@@ -530,6 +534,13 @@ def build_create_kwargs(
         raise AgentError(
             f"{profile.label} servers run only on the agent's instance network "
             f"({settings.instance_network}), not on '{network}'",
+            "network_not_supported",
+            400,
+        )
+    if network == "host" and profile.game != "minecraft" and profile.control not in HOST_NETWORK_CONTROLS:
+        # on the host network every listener of the image is the host's, the control port included (A-6)
+        raise AgentError(
+            f"{profile.label} servers cannot use the host network: their control port would be open there",
             "network_not_supported",
             400,
         )

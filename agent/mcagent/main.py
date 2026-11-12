@@ -108,9 +108,10 @@ class SafeJSONResponse(JSONResponse):
 app = FastAPI(
     title="MCPanel Agent",
     version=__version__,
+    # no schema or docs routes: they would be answered without a token (A-5)
     docs_url=None,
     redoc_url=None,
-    openapi_url="/v1/openapi.json",
+    openapi_url=None,
     default_response_class=SafeJSONResponse,
 )
 TEXT_LIMIT = 5 * 1024 * 1024
@@ -165,6 +166,8 @@ UPLOAD_LIMIT = int(os.environ.get("AGENT_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 
 
 # Subnets of the Minecraft instance network(s); None until they could be read from Docker.
 _blocked_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
+# The gateway addresses (/32, /128) of the other bridges the agent is attached to (A-4); refused as well.
+_blocked_gateways: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
 # Until then: what the guard saw the last time Docker answered, and the subnets this process is
 # attached to now (netguard.provisional_verdict). Set at start-up and by the guard loop.
 _remembered_networks: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]] | None = None
@@ -184,7 +187,7 @@ def _load_blocked_networks(settings: Settings) -> bool:
     the previous list in place and returns False (the caller tries again). What was read is
     stored (``netguard.remember``) for a later start at which Docker does not answer.
     """
-    global _blocked_networks
+    global _blocked_networks, _blocked_gateways
     nets = []
     for name in sorted({settings.instance_network, *settings.allowed_networks} - {"host"}):
         try:
@@ -197,14 +200,59 @@ def _load_blocked_networks(settings: Settings) -> bool:
         for cfg in (net.attrs.get("IPAM") or {}).get("Config") or []:
             with contextlib.suppress(ValueError, TypeError):
                 nets.append(ipaddress.ip_network(cfg.get("Subnet"), strict=False))
-    if _blocked_networks is None or set(nets) != set(_blocked_networks):
+    attached = netguard.attached_subnets()
+    gateways: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    if settings.refuse_bridge_gateways:
+        try:
+            gateways = _bridge_gateways(attached, nets)
+        except Exception as exc:  # Docker not reachable (yet)
+            log.debug("cannot list the networks: %s", exc)
+            return False
+    if (
+        _blocked_networks is None
+        or set(nets) != set(_blocked_networks)
+        or set(gateways) != set(_blocked_gateways)
+    ):
         log.info(
-            "Refusing agent API requests from instance networks: %s",
+            "Refusing agent API requests from instance networks: %s; and from bridge gateways: %s",
             ", ".join(map(str, nets)) or "(none yet)",
+            ", ".join(str(g.network_address) for g in gateways) or "(none)",
         )
     _blocked_networks = nets
-    netguard.remember(settings.state_dir, nets, netguard.attached_subnets())
+    _blocked_gateways = gateways
+    netguard.remember(settings.state_dir, nets, attached, gateways=gateways)
     return True
+
+
+def _bridge_gateways(
+    attached: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+    blocked: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    """The gateway address of every bridge network this process is attached to (A-4), as single-address
+    networks; those inside an instance subnet are refused with it already. A request from such an address
+    comes from the host's side of the bridge (Docker NAT of a published port, docker-proxy, the host
+    itself); a panel is another container or a remote host. Raises when Docker does not answer."""
+    out: set[ipaddress.IPv4Network | ipaddress.IPv6Network] = set()
+    for net in docker_ops.client().networks.list():
+        attrs = getattr(net, "attrs", None) or {}
+        if attrs.get("Driver") != "bridge":
+            continue  # a macvlan/ipvlan "gateway" is the LAN's router, not the host
+        for cfg in (attrs.get("IPAM") or {}).get("Config") or []:
+            try:
+                subnet = ipaddress.ip_network(cfg.get("Subnet"), strict=False)
+                gateway = (
+                    ipaddress.ip_address(str(cfg["Gateway"]).split("/")[0])
+                    if cfg.get("Gateway")
+                    else next(subnet.hosts())  # Docker's default: the first address
+                )
+            except (ValueError, TypeError, StopIteration):
+                continue
+            if not any(subnet.version == a.version and subnet.overlaps(a) for a in attached):  # type: ignore[arg-type]
+                continue
+            if any(gateway in b for b in blocked):
+                continue
+            out.add(ipaddress.ip_network(gateway))
+    return sorted(out, key=lambda n: (n.version, n))
 
 
 def _prepare_guard(settings: Settings) -> None:
@@ -251,12 +299,14 @@ def _source_verdict(client: Any, path: str = "") -> str | None:
         ip = None
     if ip is None:  # a Unix socket or an in-process client: not from a container network
         return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped  # ::ffff:a.b.c.d from a dual-stack listener is a.b.c.d (A-4)
     nets = _blocked_networks
     if nets is None:
         if ip.is_loopback or path in _GUARD_EXEMPT_PATHS:
             return None
         return netguard.provisional_verdict(ip, _remembered_networks, _attached_networks)
-    return "blocked" if any(ip in net for net in nets) else None
+    return "blocked" if any(ip in net for net in (*nets, *_blocked_gateways)) else None
 
 
 class _RefuseInstanceNetworks:

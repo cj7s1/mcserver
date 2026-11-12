@@ -96,6 +96,9 @@ PROFILE = RuntimeProfile(
     hostname_prefix="factorio-",
     fetch_hosts=(),
     control="rcon",
+    # its control port is a network listener (A-6): never on the host network or a LAN network, where
+    # never_publish would not hold
+    instance_network_only=True,
     control_options=MappingProxyType({"port": RCON_PORT, "secret_file": SECRET_FILE, "commands": COMMANDS}),
     default_backup_excludes=("temp",),
     tag_pattern=TAG_PATTERN,

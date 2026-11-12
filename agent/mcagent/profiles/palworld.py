@@ -167,6 +167,9 @@ PROFILE = RuntimeProfile(
     hostname_prefix="palworld-",
     fetch_hosts=(),
     control="palworld-api",
+    # its control port is a network listener (A-6): never on the host network or a LAN network, where
+    # never_publish would not hold
+    instance_network_only=True,
     control_options=MappingProxyType({"port": REST_PORT, "secret_env": "ADMIN_PASSWORD"}),
     default_backup_excludes=(
         "Pal/Binaries",

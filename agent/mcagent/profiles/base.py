@@ -166,7 +166,8 @@ class RuntimeProfile:
     env_ports: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     # Only the agent's instance network (AGENT_INSTANCE_NETWORK): no host network, no other network
     # a spec may name (Satisfactory: the driver reaches the API there, and an unclaimed server must
-    # not be reachable from anywhere else).
+    # not be reachable from anywhere else; since the review of 2026-11-11 (A-6) every game but
+    # Minecraft whose control port is a network listener: never_publish holds only there).
     instance_network_only: bool = False
     # The image's own start-up `chown -R` cannot give the files the runtime gid (Satisfactory: when
     # the gid exists in the image, steam keeps its primary group 1000, so files written during a run

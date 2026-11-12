@@ -52,7 +52,7 @@ def guard(monkeypatch, tmp_path):
     settings.state_dir.mkdir(parents=True)
     attached = [INTERNAL, INSTANCES]
     monkeypatch.setattr(netguard, "attached_subnets", lambda *a: list(attached))
-    for name in ("_blocked_networks", "_remembered_networks", "_attached_networks"):
+    for name in ("_blocked_networks", "_blocked_gateways", "_remembered_networks", "_attached_networks"):
         monkeypatch.setattr(main, name, getattr(main, name))
     main.app.dependency_overrides[get_settings] = lambda: settings
     yield settings, attached
@@ -65,20 +65,26 @@ def _get(ip: str, path: str = "/v1/instances") -> int:
 
 
 class _Net:
-    def __init__(self, subnet: str) -> None:
-        self.attrs = {"IPAM": {"Config": [{"Subnet": subnet}]}}
+    def __init__(self, subnet: str, gateway: str | None = None, driver: str = "bridge") -> None:
+        cfg = {"Subnet": subnet, **({"Gateway": gateway} if gateway else {})}
+        self.attrs = {"Driver": driver, "IPAM": {"Config": [cfg]}}
 
 
 class _Docker:
-    def __init__(self, failures: int = 0) -> None:
+    def __init__(self, failures: int = 0, extra: list[_Net] | None = None) -> None:
         self.failures = failures
         self.networks = self
+        self.extra = list(extra or [])
 
     def get(self, name):
         if self.failures > 0:
             self.failures -= 1
             raise ConnectionError("Docker is not reachable")
         return _Net(str(INSTANCES))
+
+    def list(self):
+        # the panel's internal network (gateway by Docker's default: its first address), the instance network
+        return [_Net(str(INTERNAL)), _Net(str(INSTANCES), "172.19.0.1"), *self.extra]
 
 
 def test_first_start_without_docker_only_answers_loopback_and_health(guard, monkeypatch):
@@ -129,7 +135,11 @@ def test_the_guard_retries_until_docker_answers(guard, monkeypatch):
     t.join(5)
     assert main._blocked_networks == [INSTANCES] and fake.failures == 0
     assert _get("172.19.0.5") == 403
-    assert netguard.recall(settings.state_dir) == {"blocked": [INSTANCES], "trusted": [INTERNAL]}
+    # the gateway of the panel's bridge is refused too (A-4); its subnet stays trusted
+    assert netguard.recall(settings.state_dir) == {
+        "blocked": [ipaddress.ip_network("172.18.0.1/32"), INSTANCES],
+        "trusted": [INTERNAL],
+    }
 
 
 def test_a_websocket_is_refused_while_the_networks_are_unknown(guard, monkeypatch):
@@ -178,3 +188,39 @@ def test_attached_subnets_from_the_routing_table(tmp_path):
         ipaddress.ip_network("fd00:1234::/64"),
     ]
     assert netguard.attached_subnets(tmp_path / "missing", tmp_path / "missing6") == []
+
+
+# --- A-4 (security review 2026-11-11): bridge gateways and IPv4-mapped addresses --------------------------
+def test_the_gateway_of_an_attached_bridge_is_refused(guard, monkeypatch):
+    """A game container that calls a published agent port through the host arrives NATed from the gateway
+    of the bridge that carries the port; a panel is never there."""
+    settings, _attached = guard
+    lan = _Net("192.168.1.0/24", "192.168.1.1", driver="macvlan")  # not attached anyway; never a bridge
+    other = _Net("172.40.0.0/16", "172.40.0.1")  # a bridge the agent is not attached to
+    monkeypatch.setattr(docker_ops, "client", lambda: _Docker(extra=[lan, other]))
+    assert main._load_blocked_networks(settings) is True
+    monkeypatch.setattr(docker_ops, "list_managed", lambda: [])
+    assert _get("172.18.0.1") == 403  # the api bridge's gateway
+    assert _get("172.18.0.3") == 200  # the panel on the same bridge
+    assert _get("172.40.0.1") == 200 and _get("192.168.1.1") == 200 and _get("192.168.1.50") == 200
+    # the same while Docker does not answer after a restart
+    main._prepare_guard(settings)
+    assert _get("172.18.0.1") == 403 and _get("172.18.0.3") == 200
+
+
+def test_the_gateway_rule_can_be_switched_off(guard, monkeypatch):
+    settings, _attached = guard
+    settings = settings.model_copy(update={"refuse_bridge_gateways": False})
+    main.app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(docker_ops, "client", lambda: _Docker())
+    assert main._load_blocked_networks(settings) is True
+    monkeypatch.setattr(docker_ops, "list_managed", lambda: [])
+    assert _get("172.18.0.1") == 200 and _get("172.19.0.5") == 403
+
+
+def test_an_ipv4_mapped_address_is_judged_as_ipv4(monkeypatch):
+    monkeypatch.setattr(main, "_blocked_networks", [INSTANCES])
+    monkeypatch.setattr(main, "_blocked_gateways", [ipaddress.ip_network("172.18.0.1/32")])
+    assert main._source_verdict(("::ffff:172.19.0.5", 1)) == "blocked"
+    assert main._source_verdict(("::ffff:172.18.0.1", 1)) == "blocked"
+    assert main._source_verdict(("::ffff:172.18.0.3", 1)) is None

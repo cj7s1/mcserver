@@ -39,6 +39,12 @@ class Settings(BaseSettings):
     instance_network: str = "mcpanel_instances"
     allowed_networks: Annotated[list[str], NoDecode] = Field(default_factory=list)
     allow_host_network: bool = False
+    # Refuse API requests from the gateway address of every bridge network the agent is attached to
+    # (AGENT_REFUSE_BRIDGE_GATEWAYS). A game container that calls a published agent port through the
+    # host is NATed to such a gateway (A-4). Switch it off only when the agent is called from the
+    # host itself through a bridge address, or when Docker's userland proxy (rootless Docker,
+    # iptables off) hands remote clients to the agent from the gateway.
+    refuse_bridge_gateways: bool = True
     port_min: int = 1024
     port_max: int = 65535
     max_memory_mb: int = 65536

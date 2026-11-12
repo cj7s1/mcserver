@@ -69,10 +69,18 @@ def _overlaps(net: Network, others: list[Network]) -> bool:
     return any(net.version == o.version and net.overlaps(o) for o in others)  # type: ignore[arg-type]
 
 
-def remember(state_dir: Path, blocked: list[Network], attached: list[Network]) -> None:
-    """Store the instance subnets just read from Docker and the attached subnets that are not one."""
+def remember(
+    state_dir: Path,
+    blocked: list[Network],
+    attached: list[Network],
+    *,
+    gateways: list[Network] | tuple[Network, ...] = (),
+) -> None:
+    """Store the instance subnets just read from Docker and the attached subnets that are not one;
+    ``gateways`` (single addresses of bridge gateways the guard refuses) are stored as blocked too, without
+    making their subnet untrusted."""
     record = {
-        "blocked": sorted({str(n) for n in blocked}),
+        "blocked": sorted({str(n) for n in [*blocked, *gateways]}),
         "trusted": sorted({str(n) for n in attached if not _overlaps(n, blocked)}),
     }
     path = state_dir / STATE_FILE
