@@ -38,6 +38,7 @@ from uuid import UUID
 
 from .. import claimmarker
 from ..errors import AgentError, game_text
+from ..slp import count_or_none
 from .base import QueryTarget, Report, Send, WaitLog
 from .http_api import GameApiError, HttpApiDriver, _ops
 
@@ -363,8 +364,8 @@ class SatisfactoryDriver(HttpApiDriver):
         if token and info["state"] != 2:  # the HTTPS API is down while a map loads
             state = self.state(settings, c, token)
             answer.update(
-                online=_key(state, "numConnectedPlayers"),
-                max=_key(state, "playerLimit"),
+                online=count_or_none(_key(state, "numConnectedPlayers")),  # None when not a count (F-2)
+                max=count_or_none(_key(state, "playerLimit")),
                 session=_key(state, "activeSessionName"),
                 game_running=_key(state, "isGameRunning"),
                 tick_rate=_key(state, "averageTickRate"),

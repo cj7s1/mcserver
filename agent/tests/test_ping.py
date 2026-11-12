@@ -203,7 +203,9 @@ def test_status_parsing_is_bounded_and_defensive():
         "description": [{"text": "a"}, {"translate": "b", "extra": [{"text": "§lc"}]}],
     }
     parsed = slp.parse_status(json.dumps(huge))
-    assert parsed["online"] == 0 and parsed["max"] == 0 and parsed["version"] == ""
+    assert (
+        parsed["online"] is None and parsed["max"] is None and parsed["version"] == ""
+    )  # unknown, not 0 (F-2)
     assert len(parsed["sample"]) == slp.MAX_SAMPLE and len(parsed["sample"][0]) == slp.MAX_NAME
     assert parsed["motd"] == "abc"
     with pytest.raises(slp.SlpError):
@@ -214,10 +216,10 @@ def test_status_parsing_is_bounded_and_defensive():
 
 def test_a_lying_player_count_is_not_passed_on():
     """C-1 (security review 2026-11-11): counts above 100,000 (and beyond the panel's integer column) are
-    not believable; they read as 0 like any other value that is not a count."""
+    not believable; like any other value that is not a count they are unknown (None, never 0: F-2)."""
     reply = json.dumps({"players": {"online": 10**12, "max": 2**40, "sample": []}, "version": {"name": "x"}})
     status = slp.parse_status(reply)
-    assert status["online"] == 0 and status["max"] == 0
+    assert status["online"] is None and status["max"] is None
     ok = slp.parse_status(json.dumps({"players": {"online": 100_000, "max": 20}}))
     assert ok["online"] == 100_000 and ok["max"] == 20
 
@@ -226,3 +228,29 @@ def test_a_lying_player_count_is_not_passed_on():
 def test_varint_round_trip(value):
     encoded = slp.varint(value)
     assert len(encoded) <= 5 and slp._decode_varint(encoded, 0) == (value, len(encoded))
+
+
+def test_a_driver_never_turns_an_unreadable_count_into_zero(agent_settings, monkeypatch):
+    """F-2 (review of the network repair): TShock's status without a count is unknown, not 0 players."""
+    from types import SimpleNamespace
+
+    from mcagent.drivers import tshock
+    from mcagent.drivers.http_api import ApiResponse
+
+    driver = tshock.TShockDriver(port=7878, config_file="config.json", username="mcpanel")
+    monkeypatch.setattr(driver, "address", lambda *_a: ("10.0.0.2", 7878), raising=False)
+    c = SimpleNamespace(labels={}, name="t", attrs={"State": {"Running": True}})
+
+    def answer(body):
+        monkeypatch.setattr(
+            tshock, "http_request", lambda *a, **k: ApiResponse(200, {}, json.dumps(body).encode())
+        )
+        return driver.status(agent_settings, c)
+
+    unread = answer({"status": "200", "name": "w"})
+    assert unread["online"] is None and unread["max"] is None
+    counted = answer({"status": "200", "playercount": 3, "maxplayers": 8, "players": []})
+    assert counted["online"] == 3 and counted["max"] == 8
+    listed = answer({"status": "200", "players": [{"nickname": "a"}, {"nickname": "b"}]})
+    assert listed["online"] == 2
+    assert slp.count_or_none(True) is None and slp.count_or_none("4") is None and slp.count_or_none(0) == 0

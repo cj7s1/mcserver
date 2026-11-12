@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from ..errors import AgentError, game_text
+from ..slp import count_or_none
 from .base import ControlDriver, Report, Send, WaitLog
 from .console import ConsoleDriver
 from .http_api import GameApiError, http_request
@@ -276,9 +277,13 @@ class TShockDriver(ControlDriver):
             name = p.get("nickname") or p.get("username") if isinstance(p, dict) else p
             if name:
                 players.append(str(name))
+        # unknown (None) unless the answer has a count, never 0 for an answer that could not be read (F-2)
+        online = count_or_none(data.get("playercount"))
+        if online is None and isinstance(data.get("players"), list):
+            online = len(players)
         return {
-            "online": int(data.get("playercount") or len(players)),
-            "max": int(data.get("maxplayers") or 0),
+            "online": online,
+            "max": count_or_none(data.get("maxplayers")),
             "sample": players,
             "version": f"TShock {data.get('tshockversion', '?')} (Terraria {str(data.get('serverversion', '?')).lstrip('v')})",
             "motd": str(data.get("name") or ""),

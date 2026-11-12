@@ -110,12 +110,15 @@ def _plain_text(component: Any, depth: int = 0) -> str:
 MAX_COUNT = 100_000
 
 
-def _count(value: Any) -> int:
-    """A player count the server reported: an int in 0..MAX_COUNT, anything else 0 (as before for a
-    value that is not a count)."""
+def count_or_none(value: Any) -> int | None:
+    """A player count a server reported: an int in 0..MAX_COUNT; None ("unknown") for anything else - a
+    missing or unreadable value is never shown as 0 players (F-2)."""
     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_COUNT:
         return value
-    return 0
+    return None
+
+
+_count = count_or_none
 
 
 def parse_status(text: str) -> dict[str, Any]:

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from uuid import UUID
 
 from ..errors import AgentError, game_text
+from ..slp import count_or_none
 from .base import QueryTarget, Report, Send, WaitLog
 from .http_api import GameApiError, HttpApiDriver
 
@@ -209,8 +210,8 @@ class PalworldDriver(HttpApiDriver):
         started = time.monotonic()
         metrics = self.call(settings, c, "GET", "metrics", timeout=timeout) or {}
         return {
-            "online": metrics.get("currentplayernum"),
-            "max": metrics.get("maxplayernum"),
+            "online": count_or_none(metrics.get("currentplayernum")),  # None when not a count (F-2)
+            "max": count_or_none(metrics.get("maxplayernum")),
             "sample": [],
             "version": None,
             "motd": None,
