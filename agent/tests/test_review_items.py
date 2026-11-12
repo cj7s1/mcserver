@@ -485,3 +485,59 @@ def test_a_hanging_exec_times_out_and_frees_the_console(monkeypatch):
             pass
     finally:
         api.release.set()
+
+
+# --- B-12 (security review 2026-11-11): the exec console's read is closed at the timeout and capped ---------
+class _StreamingApi:
+    """exec_start(stream=True) like docker-py: an iterator over the exec's output that blocks until the
+    program prints more, and ends when its connection is closed."""
+
+    def __init__(self, chunks=(), hang=True):
+        self.chunks = list(chunks)
+        self.hang = hang
+        self.closed = threading.Event()
+        self.reader_done = threading.Event()
+
+    def exec_create(self, container, cmd, **kw):
+        return {"Id": "e1"}
+
+    def exec_start(self, exec_id, **kw):
+        assert kw.get("stream") is True
+        api = self
+
+        class Stream:
+            def __iter__(self):
+                try:
+                    yield from api.chunks
+                    if api.hang:
+                        api.closed.wait(30)  # a program that holds its output open
+                        if api.closed.is_set():
+                            raise OSError("connection closed")
+                finally:
+                    api.reader_done.set()
+
+            def close(self):
+                api.closed.set()
+
+        return Stream()
+
+    def exec_inspect(self, exec_id):
+        return {"ExitCode": 0}
+
+
+def test_a_timed_out_exec_leaves_no_thread_behind(monkeypatch):
+    api = _StreamingApi([b"partial"])
+    monkeypatch.setattr(console_io, "_docker_api", lambda: api)
+    monkeypatch.setattr(console_io, "EXEC_TIMEOUT", 0.3)
+    with pytest.raises(AgentError) as exc:
+        console_io.exec_line(SimpleNamespace(id="c1"), ("inject", "{line}"), "say hi", user="1:1")
+    assert exc.value.code == "console_timeout"
+    assert api.closed.is_set() and api.reader_done.wait(2), "the worker's read must end with the request"
+
+
+def test_exec_output_is_capped_while_it_is_read(monkeypatch):
+    monkeypatch.setattr(console_io, "EXEC_OUTPUT_MAX", 1000)
+    api = _StreamingApi([b"a" * 600] * 20 + [b"END"], hang=False)
+    monkeypatch.setattr(console_io, "_docker_api", lambda: api)
+    out = console_io.exec_line(SimpleNamespace(id="c1"), ("inject", "{line}"), "say hi", user="1:1")
+    assert len(out) == 1000 and out.endswith("END")

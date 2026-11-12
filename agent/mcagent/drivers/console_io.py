@@ -28,6 +28,7 @@ to the console). The reply of a game console is read from the container log afte
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import threading
 import time
@@ -36,6 +37,8 @@ from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..errors import AgentError
+
+log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from docker.models.containers import Container
@@ -148,18 +151,34 @@ def _docker_api() -> Any:
     return docker_ops.client().api
 
 
+# after a timeout: how long the caller waits for the worker once its connection is closed
+EXEC_CLOSE_WAIT = 1.0
+
+
+def _close(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception as exc:  # already closed, or a transport without a cancellable stream
+            log.debug("closing a console exec stream failed: %s", exc)
+
+
 def exec_line(
     c: Container, template: Sequence[str], line: str, *, user: str | None, timeout: float | None = None
 ) -> str:
     """Run the profile's argv with ``line`` through Docker's exec API (no TTY, no stdin, not
     privileged) and wait for it, at most ``timeout`` seconds (default EXEC_TIMEOUT): 504
     ``console_timeout`` after that (the request ends, and the caller's console lock with it; the
-    program may still finish inside the container), 502 ``console_failed`` when it exits non-zero.
-    Returns what the program printed (stdout and stderr, at most EXEC_OUTPUT_MAX bytes)."""
+    connection to the exec is closed, so no thread stays behind; the program may still finish inside
+    the container), 502 ``console_failed`` when it exits non-zero. Returns what the program printed
+    (stdout and stderr, its last EXEC_OUTPUT_MAX bytes; the output is read as it comes, never more
+    than twice that is held)."""
     api = _docker_api()
     argv = exec_argv(template, line)
     limit = EXEC_TIMEOUT if timeout is None else timeout
     box: dict[str, Any] = {}
+    timed_out = threading.Event()
 
     def run() -> None:
         try:
@@ -173,7 +192,17 @@ def exec_line(
                 privileged=False,
                 user=user or "",
             )
-            box["output"] = api.exec_start(created["Id"], detach=False, tty=False, stream=False)
+            stream = api.exec_start(created["Id"], detach=False, tty=False, stream=True)
+            box["stream"] = stream
+            if timed_out.is_set():  # the caller gave up while the exec started
+                _close(stream)
+                return
+            data = bytearray()
+            for chunk in [stream] if isinstance(stream, bytes | str) else stream:
+                data += chunk.encode() if isinstance(chunk, str) else chunk
+                if len(data) > 2 * EXEC_OUTPUT_MAX:
+                    del data[: len(data) - EXEC_OUTPUT_MAX]  # keep the end (B-12)
+            box["output"] = bytes(data[-EXEC_OUTPUT_MAX:])
             box["code"] = (api.exec_inspect(created["Id"]) or {}).get("ExitCode")
         except BaseException as exc:
             box["error"] = exc
@@ -182,6 +211,9 @@ def exec_line(
     worker.start()
     worker.join(limit)
     if worker.is_alive():
+        timed_out.set()
+        _close(box.get("stream"))  # ends the worker's read (B-12)
+        worker.join(EXEC_CLOSE_WAIT)
         raise AgentError(
             f"The server's console did not take the line within {limit:g} s", "console_timeout", 504
         )
