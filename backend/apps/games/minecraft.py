@@ -11,14 +11,12 @@ that are not modpack servers (``Instance.is_modpack``).
 
 from __future__ import annotations
 
-import re
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from .base import CAPABILITIES, ConfigFile, GameDefinition, Variant
 
 MASK = "********"
-_RCON_LINE = re.compile(r"(?m)^(rcon\.password\s*[=:]\s*)(.*?)\r?$")
 
 if TYPE_CHECKING:
     from apps.instances.models import Instance
@@ -162,15 +160,15 @@ class MinecraftDefinition(GameDefinition):
         return content.replace(secret, MASK) if secret and len(secret) >= 8 else content
 
     def unmask_text(self, instance: Instance, path: str, content: str, current: str) -> str:
-        """server.properties saved from the editor keeps its RCON password where the editor showed the mask."""
-        if path.strip("/") != "server.properties" or MASK not in content:
+        """A file saved from the editor keeps the RCON password where the editor showed the mask: any file the
+        editor masked (R-15: a plugin config or .rcon-cli.env, not only server.properties), by value, as it
+        masked it. A file that did not hold the password is saved as it is (a typed "********" stays)."""
+        from apps.instances.spec import rcon_password
+
+        secret = rcon_password(instance)
+        if MASK not in content or not secret or len(secret) < 8 or secret not in (current or ""):
             return content
-        values = dict(_RCON_LINE.findall(current or ""))
-
-        def restore(m: re.Match[str]) -> str:
-            return f"{m.group(1)}{values[m.group(1)]}" if m.group(2) == MASK and m.group(1) in values else m.group(0)
-
-        return _RCON_LINE.sub(restore, content)
+        return content.replace(MASK, secret)
 
     # -- worlds and players ----------------------------------------------------------------------
     @property

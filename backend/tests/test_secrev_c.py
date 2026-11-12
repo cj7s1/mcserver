@@ -484,3 +484,27 @@ def test_c2_minecraft_rcon_password_is_masked_in_the_file_manager(make_instance:
     assert resp.status_code == 200, resp.content
     written = fake_agent.text(inst.id, "server.properties")
     assert f"rcon.password={secret}" in written and "motd=yo" in written
+
+
+def test_r15_saving_any_file_the_editor_masked_keeps_the_rcon_password(make_instance: Any, fake_agent: Any, clients: Any) -> None:
+    """R-15 of the branch review: only server.properties got the password back; a plugin config or .rcon-cli.env
+    saved from the editor was written with ********."""
+    from apps.instances.spec import rcon_password
+
+    inst = make_instance()
+    secret = rcon_password(inst)
+    fake_agent.put_file(inst.id, "plugins/Votifier/config.yml", f"host: 0.0.0.0\nrcon-pass: {secret}\nport: 8192\n")
+    fake_agent.put_file(inst.id, ".rcon-cli.env", f"password={secret}\n")
+    fake_agent.put_file(inst.id, "notes.txt", "a typed mask: ********\n")
+    base = f"/api/instances/{inst.id}/files"
+    owner = clients["owner"]
+    for path, edit in (("plugins/Votifier/config.yml", ("8192", "8193")), (".rcon-cli.env", ("password", "password"))):
+        shown = owner.get(f"{base}/text", {"path": path}).json()["content"]
+        assert secret not in shown and "********" in shown
+        resp = owner.put(f"{base}/text", {"path": path, "content": shown.replace(*edit)}, format="json")
+        assert resp.status_code == 200, resp.content
+        assert secret in fake_agent.text(inst.id, path) and "********" not in fake_agent.text(inst.id, path), path
+    assert "8193" in fake_agent.text(inst.id, "plugins/Votifier/config.yml")
+    # a file that never held the password keeps a typed mask as it is
+    owner.put(f"{base}/text", {"path": "notes.txt", "content": "a typed mask: ********\nmore\n"}, format="json")
+    assert fake_agent.text(inst.id, "notes.txt") == "a typed mask: ********\nmore\n"
