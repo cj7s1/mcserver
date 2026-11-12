@@ -78,6 +78,10 @@ def due(instance: Instance, now: datetime) -> bool:
         return False
     if unavailable_reason(instance) is not None:
         return False
+    from .power_warnings import pending_countdown
+
+    if pending_countdown(instance) is not None:
+        return False  # the owner's restart or stop is counting down: never superseded by an idle stop (F-16)
     return empty_since_window(instance, now)
 
 

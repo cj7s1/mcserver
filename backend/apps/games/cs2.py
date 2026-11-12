@@ -152,6 +152,14 @@ CONFIGS = (
 )
 
 _STATUS_PLAYER = re.compile(r"^\s*\d+\s+.*?'(.+)'\s*$")
+_STATUS_HUMANS = re.compile(r"players\s*:\s*(\d+)\s+humans?", re.IGNORECASE)
+
+
+def status_count(out: str, names: list[str]) -> int | None:
+    """The number of people in RCON ``status`` (``players : N humans``), else the names found, else None."""
+    if m := _STATUS_HUMANS.search(out or ""):
+        return int(m.group(1))
+    return len(names) if names else None
 
 
 def parse_status(out: str) -> list[str]:
@@ -331,10 +339,18 @@ class Cs2Definition(SteamGameDefinition):
             if exc.error_code != "ping_unavailable":
                 raise
             # an agent without the status query for CS2: RCON's status
-            names = parse_status(client.command(instance.id, "status", timeout=15))
-            answer = {"online": len(names), "max": self.config_values(instance, "server")["max_players"], "sample": names}
+            out = client.command(instance.id, "status", timeout=15)
+            names = parse_status(out)
+            answer = {
+                "online": status_count(out, names),
+                "max": self.config_values(instance, "server")["max_players"],
+                "sample": names,
+            }
         names = [str(n)[:64] for n in answer.get("sample") or [] if isinstance(n, str) and n.strip()]
-        result = {"online": answer.get("online", len(names)), "max": answer.get("max"), "players": names}
+        online = answer.get("online")
+        if not isinstance(online, int) or isinstance(online, bool):
+            online = len(names) if names else None  # (unknown: never "empty")
+        result = {"online": online, "max": answer.get("max"), "players": names}
         cache.set(key, result, max_age or 1)
         return result
 

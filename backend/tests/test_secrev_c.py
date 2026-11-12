@@ -76,8 +76,8 @@ def test_c1_terraria_chat_lines_are_neither_players_nor_counts() -> None:
     # the game's own lines still parse
     assert terraria.parse_playing(": Ann (172.18.0.1:52344)\n: Bob Two (10.0.0.5:1)\n2 players connected.\n")["online"] == 2
     assert terraria.parse_playing(": No players connected.")["online"] == 0
-    # an unchecked number is never taken as the count
-    assert terraria.parse_playing("1234 players connected.")["online"] == 0
+    # an unchecked number is never taken as the count (and nothing else was recognised: unknown, review F-2)
+    assert terraria.parse_playing("1234 players connected.")["online"] is None
 
 
 def test_c1_bounded_count() -> None:

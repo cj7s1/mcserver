@@ -241,6 +241,11 @@ def stop_check(caller: Caller, name: str, settings: config.BotSettings, *, confi
     if instance.status in ("stopped", "created", "stopping", "failed"):
         return None, Reply(f"{instance.name} is {STATE_WORDS.get(instance.status, instance.status)} already.")
     count = players(instance)
+    if count is None and not confirm:  # (unknown is never "empty": Valheim, an old or unread count)
+        return None, Reply(
+            f"The panel cannot tell whether anyone is playing on {instance.name} right now. "
+            f"To stop it anyway, run /stop again with confirm: True."
+        )
     if count and not confirm:
         return None, Reply(
             f"{count} player{'' if count == 1 else 's'} {'is' if count == 1 else 'are'} online on {instance.name}. "

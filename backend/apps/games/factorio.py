@@ -661,7 +661,7 @@ def parse_players(out: str) -> dict[str, Any]:
     for line in (out or "").splitlines():
         if (pm := ONLINE_LINE.match(line)) and re.fullmatch(PLAYER_NAME, pm.group(1)) and pm.group(1) not in names:
             names.append(pm.group(1))
-    online = int(m.group(1)) if m else len(names)
+    online = int(m.group(1)) if m else (len(names) if names else None)  # (None: nothing recognised, unknown)
     return {"online": online, "max": None, "players": names}
 
 

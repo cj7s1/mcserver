@@ -254,9 +254,17 @@ def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", str(version)))
 
 
+def known_count(value: Any, names: list[str]) -> int | None:
+    """A status answer's player count: its number, else the names it listed, else None (unknown)."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return len(names) if names else None
+
+
 def parse_playing(out: str) -> dict[str, Any]:
     """Terraria's ``playing``: one ``name (ip:port)`` line per player, then ``N players connected.``
-    (or ``No players connected.``). Lines of other output in between are ignored."""
+    (or ``No players connected.``). Lines of other output in between are ignored. ``online`` is None (unknown,
+    never "empty") when neither a count line nor a player line was recognised (an empty or cut-off answer)."""
     names: list[str] = []
     count = None
     for raw in (out or "").splitlines():
@@ -271,7 +279,8 @@ def parse_playing(out: str) -> dict[str, Any]:
             continue
         if (m := _PLAYING_LINE.match(line)) and re.fullmatch(PLAYER_NAME, m.group(1)) and m.group(1) not in names:
             names.append(m.group(1))
-    return {"online": len(names) if count is None else count, "max": None, "players": names}
+    online = count if count is not None else (len(names) if names else None)
+    return {"online": online, "max": None, "players": names}
 
 
 def parse_banlist(text: str) -> list[str]:
@@ -752,7 +761,7 @@ class TerrariaDefinition(GameDefinition):
         if self.variant(instance) == TSHOCK:
             answer = client.ping(instance.id)
             names = [str(n) for n in answer.get("sample") or [] if isinstance(n, str)]
-            result = {"online": answer.get("online", len(names)), "max": answer.get("max"), "players": names}
+            result = {"online": known_count(answer.get("online"), names), "max": answer.get("max"), "players": names}
         else:
             result = parse_playing(client.command(instance.id, "playing", timeout=10))
         cache.set(key, result, max_age or 1)

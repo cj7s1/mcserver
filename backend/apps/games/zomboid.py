@@ -156,7 +156,8 @@ def parse_players(out: str) -> dict[str, Any]:
         if line.startswith("-") and line[1:].strip() and line[1:].strip() not in names:
             names.append(line[1:].strip()[:64])
     m = _PLAYERS_COUNT.search(out or "")
-    return {"online": int(m.group(1)) if m else len(names), "max": None, "players": names}
+    online = int(m.group(1)) if m else (len(names) if names else None)  # (None: nothing recognised, unknown)
+    return {"online": online, "max": None, "players": names}
 
 
 class ZomboidDefinition(SteamGameDefinition):

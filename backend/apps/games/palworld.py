@@ -421,8 +421,10 @@ class PalworldDefinition(SteamGameDefinition):
     def _players(self, client: AgentClient, instance: Instance) -> list[dict[str, Any]]:
         answer = client.game_action(instance.id, "players", {}, timeout=30)
         raw = answer.get("players") if isinstance(answer, dict) else None
+        if not isinstance(raw, list):  # (an answer without a list: unknown, never "nobody is online")
+            raise ApiError("The server's player list could not be read", code="unexpected_reply", status_code=502)
         out = []
-        for entry in raw or []:
+        for entry in raw:
             if not isinstance(entry, dict):
                 continue
             name = str(entry.get("name") or entry.get("accountName") or "").strip()
