@@ -58,6 +58,8 @@ TSHOCK_CONFIG = "config.json"
 # TShock's one-time /setup system: off for good while setup.lock exists at a start; its code file
 SETUP_LOCK = "setup.lock"
 SETUP_CODE = "setup-code.txt"
+# the flags of TShock's `ban add` (a reason that is exactly one of them would be read as the flag)
+TSHOCK_BAN_FLAGS = frozenset({"-a", "-u", "-n", "-ip", "-e"})
 # tModLoader keeps the mods' data of a world in <world>.twld next to the .wld; the saves page moves
 # both aside but downloads and imports the .wld only
 TMODLOADER_TWLD_NOTE = (
@@ -820,7 +822,17 @@ class TerrariaDefinition(GameDefinition):
                 "The server is not running: Terraria bans and kicks players who are online", code="not_running", status_code=409
             )
         if tshock:
-            command = f'kick "{name}" {reason}' if action == "kick" else f'ban add "{name}" {reason}'
+            # "tsn:" = exactly this name: TShock otherwise takes a slot number or any name that starts with the
+            # text (C-5). A ban's reason is one quoted argument: TShock reads the word after it as the duration
+            # (C-9). Names and reasons have no double quotes (PLAYER_NAME; removed from the reason).
+            target = f'"tsn:{name}"'
+            if action == "kick":
+                command = f"kick {target} {reason}"
+            else:
+                why = reason.replace('"', "'").strip()
+                if why in TSHOCK_BAN_FLAGS:
+                    why += "."  # never read as one of ban add's flags
+                command = f'ban add {target} "{why}"' if why else f"ban add {target}"
         else:
             command = f"{action} {name}"
         output = client.command(instance.id, command.strip())

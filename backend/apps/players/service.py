@@ -32,7 +32,10 @@ COUNT_RE = re.compile(r"There (?:are|is) (\d+)(?:/(\d+))? (?:of a max(?: of)?|ou
 LEGACY_COUNT_RE = re.compile(r"There (?:are|is) (\d+)/(\d+) players? online[:.]?", re.I)
 # EssentialsX lists players by group, one "group: names" line each, and marks names ("[AFK]Bob")
 _GROUP_LABEL = re.compile(r"^[^:,\[\]]{1,48}:\s*")
-_NAME_TAGS = re.compile(r"^(?:\[[^\]]{0,24}\]\s*|[~*+]\s*)+")
+# (EssentialsX's nickname marker "~" is not a tag: a nickname is no account name, C-5)
+_NAME_TAGS = re.compile(r"^(?:\[[^\]]{0,24}\]\s*|[*+]\s*)+")
+NICKNAME_MARKER = "~"
+_OTHER_NAME = re.compile(r"^[^\s,]{1,64}$")
 FILES = {"whitelist": "whitelist.json", "ops": "ops.json", "bans": "banned-players.json", "ip_bans": "banned-ips.json"}
 COLOR_CODES = re.compile(r"§.")
 
@@ -73,7 +76,10 @@ def parse_list(out: str) -> dict[str, Any]:
     """Online count, maximum and player names from the output of `list` (see COUNT_RE).
 
     Only valid player names are kept: group labels, AFK/vanish markers and nicknames that are no
-    Minecraft names (EssentialsX shows display names) are dropped.
+    Minecraft names (EssentialsX shows display names) are dropped. A name EssentialsX marks as a nickname
+    (``~Notch``) is never taken for the account of that name (C-5); such names, and others the panel cannot act
+    on (Bedrock players through Floodgate: ``.Steve``), are listed in ``other_names`` (only when there are any)
+    for "use the console".
     """
     m = COUNT_RE.search(out)
     if m:
@@ -85,15 +91,22 @@ def parse_list(out: str) -> dict[str, Any]:
             return {"online": None, "max": None, "players": [], "raw": out[:500]}
         online, maximum = int(m.group(1)), int(m.group(2))
     names: list[str] = []
+    other: list[str] = []
     for index, line in enumerate(out[m.end() :].splitlines()):
         line = line.strip()
         if index > 0 or not line[:1].isalnum() or ":" in line.split(",", 1)[0]:
             line = _GROUP_LABEL.sub("", line, count=1)
         for token in line.split(","):
             name = _NAME_TAGS.sub("", token.strip()).strip()
-            if NAME_RE.match(name) and name not in names:
-                names.append(name)
-    return {"online": online, "max": maximum, "players": names}
+            if NAME_RE.match(name):
+                if name not in names:
+                    names.append(name)
+            elif _OTHER_NAME.match(name) and name not in other and len(other) < 100:
+                other.append(name)
+    result: dict[str, Any] = {"online": online, "max": maximum, "players": names}
+    if other:
+        result["other_names"] = other
+    return result
 
 
 def _query_online(instance: Instance) -> dict[str, Any]:

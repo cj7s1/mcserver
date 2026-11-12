@@ -438,7 +438,7 @@ def test_tshock_players(clients, tshock, fake_agent):
     assert data["online"] == {"online": 1, "max": 8, "players": ["Ann"]} and data["labels"] == {}
     url = f"/api/instances/{tshock.id}/players"
     resp = clients["owner"].post(url, {"action": "ban", "name": "Ann Lee", "reason": "grief"}, format="json")
-    assert resp.status_code == 200 and fake_agent.commands[-1] == (str(tshock.id), 'ban add "Ann Lee" grief')
+    assert resp.status_code == 200 and fake_agent.commands[-1] == (str(tshock.id), 'ban add "tsn:Ann Lee" "grief"')
     assert clients["owner"].post(url, {"action": "pardon", "name": "Ann"}, format="json").status_code == 400
 
 

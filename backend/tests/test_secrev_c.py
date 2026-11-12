@@ -182,3 +182,104 @@ def test_c1_player_history_names_and_clean_up(make_instance: Any) -> None:
     PlayerSeen.objects.filter(name=long_names[0]).update(last_seen=now - timedelta(days=91))
     cleanup()
     assert list(PlayerSeen.objects.filter(instance=inst).values_list("name", flat=True)) == [long_names[1]]
+
+
+# --- C-5 (I-4) and C-9 ----------------------------------------------------------------------------------------
+@pytest.fixture
+def six_actions(fake_agent: Any, monkeypatch: Any) -> Any:
+    from .test_games_six import FakeActions
+
+    fake = FakeActions(fake_agent)
+    monkeypatch.setattr(AgentClient, "game_action", lambda client, *a, **k: fake(client, *a, **k))
+    return fake
+
+
+def _post_player(clients: Any, inst: Any, **body: Any) -> Any:
+    return clients["owner"].post(f"/api/instances/{inst.id}/players", body, format="json")
+
+
+def test_c5_rust_owner_by_a_name_two_players_share_is_refused_with_the_candidates(
+    clients: Any, fake_agent: Any, six_actions: Any, django_capture_on_commit_callbacks: Any
+) -> None:
+    """The PoC: an impostor named like the admin's friend joined first and got ``ownerid``."""
+    from .test_games_six import create
+    from .test_games_six import start as start_six
+
+    inst = create(clients, django_capture_on_commit_callbacks, "rust")
+    start_six(fake_agent, inst)
+    six_actions.players = [
+        {"SteamID": "76561190000000666", "DisplayName": "Colton", "Ping": 40},
+        {"SteamID": "76561190000000001", "DisplayName": "colton", "Ping": 12},
+    ]
+    for action in ("op", "kick", "ban"):
+        resp = _post_player(clients, inst, action=action, name="colton")
+        assert resp.status_code == 409, resp.json()
+        error = resp.json()["error"]
+        assert error["code"] == "ambiguous_player"
+        assert error["details"]["candidates"] == [
+            {"name": "Colton", "id": "76561190000000666"},
+            {"name": "colton", "id": "76561190000000001"},
+        ]
+    assert not [c for c in six_actions.calls if c[0] != "players"]  # nothing was run
+    # one match: a kick goes to that player's id; owner and ban want the id
+    six_actions.players = six_actions.players[1:]
+    assert _post_player(clients, inst, action="kick", name="colton").status_code == 200
+    assert six_actions.calls[-1] == ("kick", {"steamid": "76561190000000001", "reason": ""})
+    assert _post_player(clients, inst, action="ban", name="colton").json()["error"]["code"] == "ambiguous_player"
+    assert _post_player(clients, inst, action="op", name="76561190000000001").status_code == 200
+    assert six_actions.calls[-1] == ("owner_add", {"steamid": "76561190000000001", "reason": "", "name": "colton"})
+
+
+def test_c5_palworld_ban_by_name_needs_the_id(
+    clients: Any, fake_agent: Any, six_actions: Any, django_capture_on_commit_callbacks: Any
+) -> None:
+    from .test_games_six import create
+    from .test_games_six import start as start_six
+
+    inst = create(clients, django_capture_on_commit_callbacks, "palworld")
+    start_six(fake_agent, inst)
+    six_actions.players = [
+        {"name": "Kiki", "userId": "steam_76561190000000009"},
+        {"name": "kiki", "userId": "steam_76561190000000010"},
+    ]
+    resp = _post_player(clients, inst, action="kick", name="Kiki")
+    assert resp.status_code == 409 and len(resp.json()["error"]["details"]["candidates"]) == 2
+    six_actions.players = six_actions.players[:1]
+    resp = _post_player(clients, inst, action="ban", name="Kiki")
+    assert resp.status_code == 409
+    assert resp.json()["error"]["details"]["candidates"] == [{"name": "Kiki", "id": "steam_76561190000000009"}]
+    assert _post_player(clients, inst, action="kick", name="Kiki").status_code == 200
+    assert six_actions.calls[-1] == ("kick", {"userid": "steam_76561190000000009"})
+    assert _post_player(clients, inst, action="ban", name="steam_76561190000000009", reason="grief").status_code == 200
+    assert six_actions.calls[-1] == ("ban", {"userid": "steam_76561190000000009", "message": "grief"})
+
+
+def test_c5_c9_tshock_names_the_player_exactly_and_quotes_the_ban_reason(
+    clients: Any, make_instance: Any, fake_agent: Any
+) -> None:
+    from .test_terraria import start_container
+
+    inst = make_tr(make_instance, "tshock")
+    start_container(fake_agent, inst)
+    url = f"/api/instances/{inst.id}/players"
+    owner = clients["owner"]
+    assert owner.post(url, {"action": "kick", "name": "Bo", "reason": "go home"}, format="json").status_code == 200
+    assert fake_agent.commands[-1] == (str(inst.id), 'kick "tsn:Bo" go home')
+    assert owner.post(url, {"action": "ban", "name": "3", "reason": "griefing spawn 1d"}, format="json").status_code == 200
+    assert fake_agent.commands[-1] == (str(inst.id), 'ban add "tsn:3" "griefing spawn 1d"')
+    owner.post(url, {"action": "ban", "name": "Bob", "reason": 'say "hi"'}, format="json")
+    assert fake_agent.commands[-1] == (str(inst.id), 'ban add "tsn:Bob" "say \'hi\'"')
+    owner.post(url, {"action": "ban", "name": "Bob", "reason": "-a"}, format="json")
+    assert fake_agent.commands[-1] == (str(inst.id), 'ban add "tsn:Bob" "-a."')
+    owner.post(url, {"action": "ban", "name": "Bob"}, format="json")
+    assert fake_agent.commands[-1] == (str(inst.id), 'ban add "tsn:Bob"')
+
+
+def test_c5_a_minecraft_nickname_is_never_taken_for_an_account() -> None:
+    from apps.players.service import parse_list
+
+    out = "There are 3 out of maximum 20 players online.\ndefault: ~Notch, Alice, [AFK]~Bob, .BedrockSteve"
+    parsed = parse_list(out)
+    assert parsed["players"] == ["Alice"]
+    assert parsed["other_names"] == ["~Notch", "~Bob", ".BedrockSteve"]
+    assert "other_names" not in parse_list("There are 1 of a max of 20 players online: Alice")

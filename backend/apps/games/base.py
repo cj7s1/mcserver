@@ -287,6 +287,31 @@ class CapabilityUnavailable(ConflictError):
     default_code = "unsupported_by_game"
 
 
+def resolve_online_player(players: list[dict[str, Any]], name: str, *, confirm: bool = False) -> dict[str, Any] | None:
+    """The online player (``{"name", "id"}``) a typed display name stands for, for games whose actions take an id
+    (Rust, Palworld; C-5, I-4). Display names are free and not unique, so the action never guesses: more than one
+    match (ignoring case), or one match when ``confirm`` (an action that hands out rights or bans: Rust's owner
+    and ban, Palworld's ban), is 409 ``ambiguous_player`` with ``details.candidates`` (``[{"name", "id"}]``) to
+    send the request again with the id. None: nobody online has that name."""
+    wanted = name.strip().lower()
+    matches = [{"name": p["name"], "id": p["id"]} for p in players if p.get("id") and str(p.get("name", "")).lower() == wanted]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ConflictError(
+            f"More than one online player is called '{name.strip()}': choose one by its id",
+            code="ambiguous_player",
+            details={"candidates": matches},
+        )
+    if confirm:
+        raise ConflictError(
+            f"'{name.strip()}' is a display name, which any player can take: confirm the player by its id ({matches[0]['id']})",
+            code="ambiguous_player",
+            details={"candidates": matches},
+        )
+    return matches[0]
+
+
 class GameDefinition:
     """Base class: a game without any optional feature. Subclasses set the data and override
     what their game supports."""

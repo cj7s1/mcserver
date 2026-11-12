@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from apps.core.errors import ApiError
 
-from .base import ConfigFile, GameOption, PortSpec
+from .base import ConfigFile, GameOption, PortSpec, resolve_online_player
 from .foldersaves import FolderSaves, _entries
 from .steamgame import SteamGameDefinition
 
@@ -400,10 +400,17 @@ class RustDefinition(SteamGameDefinition):
             )
         steam_id, display = name, ""
         if not re.fullmatch(STEAM_ID, name):
-            match = next((p for p in self._players(client, instance) if p["name"].lower() == name.lower() and p["id"]), None)
+            # a display name: only one online player, and owner/ban only by the id (409 ambiguous_player, C-5)
+            match = resolve_online_player(self._players(client, instance), name, confirm=action in ("ban", "op"))
             if match is None:
                 raise ApiError("Use the player's SteamID64, or the name of a player who is online", code="invalid_player_name")
             steam_id, display = match["id"], match["name"]
+        elif action in ("ban", "op"):
+            # the online player's display name goes into the entry, as when the name was typed
+            try:
+                display = next((p["name"] for p in self._players(client, instance) if p["id"] == steam_id), "")
+            except ApiError:
+                display = ""
         params: dict[str, Any] = {"steamid": steam_id}
         text = self.chat_text(reason, limit=120)
         if action in ("kick", "ban", "op"):

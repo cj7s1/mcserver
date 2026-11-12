@@ -642,7 +642,11 @@ def test_rust_players_owners_and_bans(clients, fake_agent, actions, django_captu
     assert data["ops"] == [{"name": "76561190000000001", "display_name": "Boss"}]
     assert data["bans"] == [{"name": "76561190000000002", "display_name": "Cheater", "reason": "aimbot"}]
     assert data["online"]["players"] == ["Naked Guy"]
+    # a display name is confirmed by its id first (C-5: 409 ambiguous_player), the owner is added by the id
     resp = owner.post(f"/api/instances/{inst.id}/players", {"action": "op", "name": "Naked Guy"}, format="json")
+    assert resp.status_code == 409 and resp.json()["error"]["code"] == "ambiguous_player"
+    assert resp.json()["error"]["details"]["candidates"] == [{"name": "Naked Guy", "id": "76561190000000003"}]
+    resp = owner.post(f"/api/instances/{inst.id}/players", {"action": "op", "name": "76561190000000003"}, format="json")
     assert resp.status_code == 200
     assert actions.calls[-1] == ("owner_add", {"steamid": "76561190000000003", "reason": "", "name": "Naked Guy"})
     owner.post(f"/api/instances/{inst.id}/players", {"action": "pardon", "name": "76561190000000002"}, format="json")

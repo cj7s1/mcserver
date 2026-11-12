@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from apps.core.errors import ApiError
 
-from .base import ConfigFile, PortSpec, SecretSpec
+from .base import ConfigFile, PortSpec, SecretSpec, resolve_online_player
 from .foldersaves import FolderSaves
 from .steamgame import SAFE_NAME_HELP, SAFE_NAME_PATTERN, SteamGameDefinition, safe_name
 
@@ -470,15 +470,14 @@ class PalworldDefinition(SteamGameDefinition):
                 result["online"] = {"error": str(exc.detail)}
         return result
 
-    def _user_id(self, client: AgentClient, instance: Instance, name: str, *, running: bool) -> str:
-        """A user id as given, or the id of the online player with that name."""
+    def _user_id(self, client: AgentClient, instance: Instance, name: str, *, running: bool, confirm: bool = False) -> str:
+        """A user id as given, or the id of the one online player with that name (``confirm``: a ban is only run
+        with an id; 409 ``ambiguous_player`` names the candidates, C-5)."""
         name = name.strip()
         if re.fullmatch(USER_ID, name):
             return name
-        if running:
-            for player in self._players(client, instance):
-                if player["name"].lower() == name.lower() and player["id"]:
-                    return player["id"]
+        if running and (match := resolve_online_player(self._players(client, instance), name, confirm=confirm)) is not None:
+            return match["id"]
         raise ApiError(
             "Use the player's user id (steam_<SteamID64>), or the name of a player who is online",
             code="invalid_player_name",
@@ -494,7 +493,7 @@ class PalworldDefinition(SteamGameDefinition):
             )
         client = self._client(instance)
         running = bool(client.status(instance.id).get("running"))
-        user = self._user_id(client, instance, self.validate_player_name(name), running=running)
+        user = self._user_id(client, instance, self.validate_player_name(name), running=running, confirm=action == "ban")
         message = self.chat_text(reason, limit=120)
         if not running:
             if action != "pardon":
