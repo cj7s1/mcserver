@@ -9,6 +9,9 @@
  * `no_online_list` (Valheim cannot list who is online); `lists_unknown` (Project Zomboid keeps its lists in
  * its database: changed by name, never listed); `changes_while_stopped` (false: the game changes its lists
  * only while it runs, the note says so).
+ *
+ * A typed display name the game cannot resolve to one player without guessing (Rust, Palworld: 409
+ * `ambiguous_player`) opens PlayerChoiceDialog, which sends the action again with the chosen id (C-5).
  */
 import { Ban, Loader2, Plus, Trash2, UserX } from "lucide-react";
 import { useId, useState, type FormEvent } from "react";
@@ -22,7 +25,22 @@ import type { Instance, OnlinePlayerEntry, PlayersResponse } from "@/lib/types";
 import { ConfirmAction } from "../content/ConfirmAction";
 import { useGameInfo } from "../game-api";
 import { ACTIONS, gamePlayerNameError, listEntries, listLabels, type GameListEntry, type ListKey } from "./game-players-model";
-import { usePlayerAction, usePlayers } from "./player-utils";
+import { PlayerChoiceDialog } from "./PlayerChoiceDialog";
+import { ambiguousCandidates, usePlayerAction, usePlayers, type AmbiguousPlayer } from "./player-utils";
+
+/** A player action whose 409 `ambiguous_player` opens the choice of the player (rendered as `dialog`). */
+function useChoosingPlayerAction(instanceId: string, onDone?: () => void) {
+  const [choice, setChoice] = useState<AmbiguousPlayer | null>(null);
+  const act = usePlayerAction(instanceId, { onAmbiguous: setChoice });
+  const dialog = (
+    <PlayerChoiceDialog
+      choice={choice}
+      onClose={() => setChoice(null)}
+      onPick={(c) => choice && act.mutate({ ...choice.vars, name: c.id }, { onSuccess: () => onDone?.() })}
+    />
+  );
+  return { act, dialog };
+}
 
 function AddForm({
   instanceId,
@@ -44,24 +62,20 @@ function AddForm({
   withRemove?: boolean;
 }) {
   const id = useId();
-  const act = usePlayerAction(instanceId);
   const [name, setName] = useState("");
   const [reason, setReason] = useState("");
   const [touched, setTouched] = useState(false);
+  const clear = () => {
+    setName("");
+    setReason("");
+    setTouched(false);
+  };
+  const { act, dialog } = useChoosingPlayerAction(instanceId, clear);
   const error = touched ? gamePlayerNameError(name, pattern) : null;
   const run = (action: "add" | "remove") => {
     setTouched(true);
     if (gamePlayerNameError(name, pattern)) return;
-    act.mutate(
-      { action: ACTIONS[list][action], name, reason: list === "bans" && action === "add" ? reason : undefined },
-      {
-        onSuccess: () => {
-          setName("");
-          setReason("");
-          setTouched(false);
-        },
-      },
-    );
+    act.mutate({ action: ACTIONS[list][action], name, reason: list === "bans" && action === "add" ? reason : undefined }, { onSuccess: clear });
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -108,6 +122,7 @@ function AddForm({
           {hint}
         </p>
       ) : null}
+      {dialog}
     </form>
   );
 }
@@ -132,7 +147,7 @@ function PlayerList({
   /** The game keeps this list where the panel cannot read it (Project Zomboid's database). */
   unknown?: boolean;
 }) {
-  const act = usePlayerAction(instanceId);
+  const { act, dialog } = useChoosingPlayerAction(instanceId);
   return (
     <Section title={label} description={unknown ? "Not readable by the panel" : `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`}>
       <div className="grid gap-3">
@@ -170,6 +185,7 @@ function PlayerList({
         {canManage && (
           <AddForm instanceId={instanceId} list={list} label={label} pattern={pattern} disabled={false} hint={hint} withRemove={unknown} />
         )}
+        {dialog}
       </div>
     </Section>
   );
@@ -177,7 +193,7 @@ function PlayerList({
 
 /** An online player with the id the game kicks and bans by (Palworld, Rust): kick, and ban when the game has a ban list. */
 function OnlineEntry({ instanceId, entry, canManage, canBan }: { instanceId: string; entry: OnlinePlayerEntry; canManage: boolean; canBan: boolean }) {
-  const act = usePlayerAction(instanceId);
+  const { act, dialog } = useChoosingPlayerAction(instanceId);
   const target = entry.id || entry.name;
   return (
     <li className="flex min-w-0 flex-wrap items-center gap-2 px-3 py-2 text-sm">
@@ -201,11 +217,17 @@ function OnlineEntry({ instanceId, entry, canManage, canBan }: { instanceId: str
               description={`They are disconnected and cannot join again until they are unbanned${entry.id ? ` (banned by their id ${entry.id})` : ""}.`}
               confirmLabel="Ban player"
               destructive
-              onConfirm={() => act.mutateAsync({ action: "ban", name: target })}
+              onConfirm={() =>
+                // a name the panel would not guess closes this dialog and opens the choice of the player
+                act.mutateAsync({ action: "ban", name: target }).catch((err: unknown) => {
+                  if (!ambiguousCandidates(err)) throw err;
+                })
+              }
             />
           )}
         </span>
       )}
+      {dialog}
     </li>
   );
 }
@@ -225,7 +247,7 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
   const running = ["running", "starting", "unhealthy", "restarting"].includes(instance.status);
   const query = usePlayers(instance.id, running);
   const game = useGameInfo(instance);
-  const kick = usePlayerAction(instance.id);
+  const { act: kick, dialog: kickChoice } = useChoosingPlayerAction(instance.id);
   if (query.isLoading) return <LoadingState label="Loading players…" />;
   if (query.error || !query.data) return <ErrorState error={query.error ?? new Error("No data")} title="Could not load players" onRetry={() => query.refetch()} />;
   const data = query.data as unknown as PlayersResponse;
@@ -275,6 +297,7 @@ export function GamePlayers({ instance, canManage }: { instance: Instance; canMa
         ) : (
           <p className="text-sm text-muted-foreground">Nobody is online.</p>
         )}
+        {kickChoice}
       </Section>
       {lists.length > 0 && (
         <div className="grid gap-4 lg:grid-cols-3">

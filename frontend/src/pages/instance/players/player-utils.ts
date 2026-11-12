@@ -2,7 +2,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { api, errorMessage } from "@/lib/api";
+import { api, ApiError, errorMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
 
 /** Entries of whitelist.json, ops.json, banned-players.json and banned-ips.json. */
@@ -41,6 +41,42 @@ export type PlayerAction = "whitelist_add" | "whitelist_remove" | "op" | "deop" 
 export interface PlayerActionResult {
   via: "rcon" | "file";
   output: string;
+}
+
+export interface PlayerActionVars {
+  action: PlayerAction;
+  name: string;
+  reason?: string;
+}
+
+/** An online player a typed name may stand for (409 `ambiguous_player`, C-5): resend with its `id`. */
+export interface PlayerCandidate {
+  name: string;
+  id: string;
+}
+
+/** A player action the panel answered with 409 `ambiguous_player`: what was sent, and whom it may mean. */
+export interface AmbiguousPlayer {
+  vars: PlayerActionVars;
+  candidates: PlayerCandidate[];
+  /** The panel's message (more than one match, or a display name to confirm by its id). */
+  message: string;
+}
+
+/**
+ * The candidates of a 409 `ambiguous_player` (Rust, Palworld: a typed display name that more than one
+ * online player has, or that an admin/ban action must confirm by the player's id), or null for any other
+ * error. Entries without a text name and id are left out.
+ */
+export function ambiguousCandidates(err: unknown): PlayerCandidate[] | null {
+  if (!(err instanceof ApiError) || err.status !== 409 || err.code !== "ambiguous_player") return null;
+  const raw = err.details?.candidates;
+  if (!Array.isArray(raw)) return null;
+  const out: PlayerCandidate[] = [];
+  for (const c of raw) {
+    if (c && typeof c === "object" && typeof c.id === "string" && c.id && typeof c.name === "string") out.push({ name: c.name, id: c.id });
+  }
+  return out.length ? out : null;
 }
 
 const NAME_RE = /^[A-Za-z0-9_]{1,16}$/;
@@ -93,10 +129,15 @@ const LABELS: Record<PlayerAction, (n: string) => string> = {
 const UNCHANGED =
   /^(nothing changed|that player does not exist|no player was found|could not|unknown or incomplete|unknown command|player is (already|not)\b|\S+ is already in )/i;
 
-export function usePlayerAction(instanceId: string) {
+/**
+ * POST /instances/{id}/players with toast feedback. With `onAmbiguous`, a 409 `ambiguous_player` is handed
+ * to it (to let the user pick the player by id) instead of being shown as an error.
+ */
+export function usePlayerAction(instanceId: string, opts: { onAmbiguous?: (choice: AmbiguousPlayer) => void } = {}) {
   const qc = useQueryClient();
+  const { onAmbiguous } = opts;
   return useMutation({
-    mutationFn: (v: { action: PlayerAction; name: string; reason?: string }) =>
+    mutationFn: (v: PlayerActionVars) =>
       api.post<PlayerActionResult>(`/instances/${instanceId}/players`, {
         action: v.action,
         name: v.name.trim(),
@@ -113,7 +154,11 @@ export function usePlayerAction(instanceId: string) {
       }
       qc.invalidateQueries({ queryKey: qk.players(instanceId) });
     },
-    onError: (err) => toast.error(errorMessage(err)),
+    onError: (err, v) => {
+      const candidates = onAmbiguous ? ambiguousCandidates(err) : null;
+      if (candidates && onAmbiguous) onAmbiguous({ vars: v, candidates, message: errorMessage(err) });
+      else toast.error(errorMessage(err));
+    },
   });
 }
 
