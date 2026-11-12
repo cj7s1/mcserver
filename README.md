@@ -76,7 +76,7 @@ Prism-Launcher-style instance management with game-panel administration, and it 
   warnings before restarts and stops (manual or scheduled, cancellable), Discord/webhook
   notifications, and resource history.
 - **Memory check:** a start that would commit more than the host's RAM minus a reserve is refused
-  with the numbers (or started anyway when you confirm).
+  with the numbers (an administrator can start it anyway).
 - **Keyboard:** a command palette (<kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>⌘</kbd>+<kbd>K</kbd>) to jump to any
   page or server and start/stop/restart servers (stop and restart always ask first), plus shortcuts such as
   `g s` (servers) and `c` (create server); press `?` for the list.

@@ -110,3 +110,94 @@ def test_a2_the_firewall_script_is_documented_as_untested_with_its_checks_and_bo
     security = words("docs/SECURITY.md")
     assert "**It has not run on an Unraid host yet**" in security and "instance-firewall.sh" in security
     assert "instance-firewall.sh install --wait 300" in words("docs/UNRAID-SHUTDOWN.md")
+
+
+# --- round 2: the docs of every fix ------------------------------------------------------------------------
+def test_security_md_describes_the_fixes_of_both_rounds():
+    text = read("docs/SECURITY.md")
+    flat = words("docs/SECURITY.md")
+    for heading in (
+        "## Sessions bound to the tab",
+        "### What users without `instance.configure` see",
+        "### One network per server",
+    ):
+        assert heading in text, heading
+    for needle in (
+        "`X-MCPanel-Session-Token`",
+        "401 `session_token_required`",
+        "`POST /api/auth/download-ticket`",
+        '`{"type": "auth", "token": ...}`',
+        "`mcpanel_known_browser`",
+        "`manage.py unlock_login <username>`",
+        "10 in 10 minutes and 100 a day",
+        "empty `setup.lock`",
+        "409 `image_digest_mismatch`",
+        "`AGENT_REFUSE_BRIDGE_GATEWAYS`",
+        "`/v1/openapi.json`, `/docs` and `/redoc` answer 404",
+        "**Project Zomboid runs as uid 1000 without capabilities**",
+        "`/home/steam/server/rcon.yml`",
+        "The quick stop without a save (15 s) needs all of",
+        "`node.low_disk_space`",
+        "the five upload endpoints",
+    ):
+        assert needle in flat, needle
+    # statements the fixes made wrong
+    for stale in (
+        "`setup-code.txt` stays in the server folder",
+        "**root**: the image never drops privileges",
+        "login throttling (10/min),",
+        "only the four upload endpoints",
+    ):
+        assert stale not in flat, stale
+
+
+def test_unraid_md_games_md_and_deployment_md_follow_the_fixes():
+    unraid = words("docs/UNRAID.md")
+    assert "the others run as root with a few capabilities" not in unraid
+    assert "Counter-Strike 2 and Project Zomboid run as uid 1000:1000 without any capability" in unraid
+    assert "**Low disk space.**" in unraid
+    games = words("docs/GAMES.md")
+    for needle in (
+        "acted on by their id",
+        "**World import and reset:**",
+        "(the image gets 15 s)",
+        "**Copies** (Clone, Restore as a new server)",
+        "`image_digest_mismatch`",
+    ):
+        assert needle in games, needle
+    assert "the name of an online player works too" not in games and "an online player's name works too" not in games
+    deployment = words("DEPLOYMENT.md")
+    for needle in (
+        "**After the upgrade to this version everyone signs in once.**",
+        "### The upgrade with the security review",
+        "`docker compose exec panel python manage.py unlock_login <username>`",
+        "`MCPANEL_HSTS_SECONDS`",
+    ):
+        assert needle in deployment or needle in read("DEPLOYMENT.md"), needle
+    assert "everyone signs in once" in words("docs/QUICKSTART-UNRAID.md")
+
+
+def test_development_status_and_roadmap_record_the_review_and_what_is_open():
+    status = words("DEVELOPMENT_STATUS.md")
+    assert "## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`" in read("DEVELOPMENT_STATUS.md")
+    for needle in ("E-7", "TOTP", "`Instance.env` stored in clear text", "the firewall script (not run on a real host"):
+        assert needle in status, needle
+    assert "Security and bug review of 2026-11-11" in read("ROADMAP.md")
+
+
+def test_the_create_wizards_who_can_join_texts_say_what_games_md_says():
+    """frontend/src/lib/games.ts (WHO_CAN_JOIN) shows GAMES.md's table in the wizard's review step."""
+    games = words("docs/GAMES.md").lower()
+    wizard = " ".join((REPO / "frontend" / "src" / "lib" / "games.ts").read_text().split()).lower()
+    for phrase in (
+        "online mode is on and the whitelist is off",
+        "the game password is optional",
+        "the server password is empty by default",
+        "unless you set a join password",
+        "anyone can create an account",
+        "its whitelist is off",
+        "the panel offers no password or whitelist",
+        "rust servers normally appear in the in-game server list",
+    ):
+        assert phrase in wizard, phrase
+        assert phrase.replace("online mode is on and the whitelist is off", "online mode on, whitelist off") in games, phrase

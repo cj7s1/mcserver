@@ -230,7 +230,7 @@ Better MC comes in several editions. Use a **CurseForge edition**:
   room for the JVM itself, so the *container limit* shown below the slider is what the server can
   really use. The bar below it shows how much of the host's memory the running servers already
   hold. A start that does not fit next to them (the host's RAM minus 4 GB kept free for Unraid,
-  System settings) is refused with the numbers, and the panel offers **Start anyway**.
+  System settings) is refused with the numbers; administrators can still choose **Start anyway**.
 * **Game port:** the panel suggests a free one starting at 25565. Note it down.
 * **Nightly backup:** leave it switched on. It gives the server a backup schedule that runs once
   every night between 03:00 and 05:00 (panel time), also while the server is stopped. Without a
@@ -374,7 +374,8 @@ cd deploy
 ./scripts/upgrade.sh run         # or the exact command the dry run ended with
 ```
 
-`umask 022` keeps the files `git pull` rewrites writable by root only. If group or others can
+After the switch everyone signs in once (since the security review a session belongs to the browser
+tab that signed in). `umask 022` keeps the files `git pull` rewrites writable by root only. If group or others can
 write a file of the source folder, the dry run warns and `run` refuses before it changes anything;
 both print the repair, `chmod -R go-w /mnt/user/appdata/mcpanel-src` (adjust the path to yours).
 A folder installed before this check needs it once.
@@ -444,7 +445,7 @@ logged-in user.
 | A server shows "restart required" after you updated MCPanel | Its container was made by the older version. Restart it when it suits you; the world is kept. |
 | A server shows **No backup yet** | Create one on its Backups page and check that it has a backup schedule (section 10). |
 | Servers did not start after a reboot | See [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md), "How the servers come back". |
-| A start says "Not enough memory" | The running servers plus this one need more than the host's RAM minus the reserve. Stop another server, lower the memory, or press **Start anyway**. |
+| A start says "Not enough memory" | The running servers plus this one need more than the host's RAM minus the reserve. Stop another server, lower the memory, or (administrators only) press **Start anyway**. |
 | You typed `stop` in the console | The panel stops the server the way the Stop button does (typed straight into the server, Docker would only restart it). |
 | A text file opens read-only | It is not UTF-8 text; saving it from the panel would damage it. Use **Download** and edit it on your computer. |
 

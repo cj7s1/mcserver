@@ -135,6 +135,11 @@ Legend: `[x]` implemented · `[~]` partial · `[ ]` not started · `[!]` blocked
 - [ ] Load test of console fan-out
 - [~] Audit round of 2026-11-09 (open findings of four work lists): fixed and unit-tested on branch
       `fix/audit-remaining`; remaining points in DEVELOPMENT_STATUS.md "Audit of 2026-11-09"
+- [~] Security and bug review of 2026-11-11: fixed on branch `fix/security-review` (sessions bound to the tab,
+      one network per server, a host firewall script for the game containers, Project Zomboid unprivileged,
+      root-run scripts checked, stop/start fixes, ...); not yet on Unraid. Open: E-7 (waiting jobs hold a
+      worker), a second factor, `Instance.env` encryption, read-only root filesystems / CPU limit / disk quota
+      for game containers (DEVELOPMENT_STATUS.md)
 
 ## Multi-game (docs/design/GAME-DEFINITIONS.md, section 10)
 - [x] Phase 1: game definitions and runtime profiles, Minecraft as the first game, no behaviour change (pin tests)

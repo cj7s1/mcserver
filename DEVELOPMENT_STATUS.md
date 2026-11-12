@@ -1,6 +1,7 @@
 # Development status
 
-_Last updated: 2026-11-11 (six more games on branch `feature/more-games`, panel side: first section below; then the
+_Last updated: 2026-11-12 (fixes of the security and bug review of 2026-11-11 on branch `fix/security-review`: first
+section below). Before that: 2026-11-11 (six more games on branch `feature/more-games`, panel side; then the
 fixes from the real-container gate of the multi-game branch, second section; before that the fixes from the review of the multi-game branch, second section; Terraria and Satisfactory, see their sections below). Before that: 2026-11-10 (multi-game phases 2 and 3 on branch `feature/multi-game`: the generic
 pieces and Factorio, see the first section below). Before that: 2026-11-10 (fixes for the open findings of the audit of 2026-11-09 on branch
 `fix/audit-remaining`, then the fixes from the review of those fixes and from its real-stack test,
@@ -11,6 +12,59 @@ of session 1)._
 
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
+
+## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`, 2026-11-12)
+
+The review (`audit-2026-11-09/SECURITY-REVIEW-2026-11-11.md` next to the checkout; findings with traces in
+`audit-2026-11-09/security-review/<slice>/FINDINGS.md`; the fix plan in `audit-2026-11-09/fixes/CONTRACT.md`
+and what each layer did in `fixes/NOTES-*.md`) found no way in from the internet with default settings; it
+found weak containment of a compromised game server, a session cookie shared with every port of the host,
+root-run scripts that others could write on the owner's server, and stop/start bugs that could lose data.
+Every fix below has a regression test; the reviewers' proofs of concept were turned into tests.
+
+**Fixed (by id):**
+* Panel and session: D-1 (sessions bound to the tab: header token, WebSocket auth frame, 60-s download
+  tickets; console links ask first), D-3 (per-account sign-in limit, known-browser cookie, `unlock_login`),
+  D-4 (overcommit for `system.settings` only), D-5 (save import up to 2 GiB), D-7/C-4 (JSON-only API, docs
+  off, sandboxed downloads), D-8 (Secure cookies follow the proxy switch, HSTS opt-in), D-9 (setup token
+  generated), D-10 (wizard secrets dropped from job parameters), D-11, D-12, D-13, C-1, C-2 (masking for
+  users without configure), C-5/C-6/C-9 (player actions by id), C-7, C-8 (TShock `setup.lock`), C-10, E-3,
+  E-4 (copies keep their passwords, `secret_required`), E-5, E-6, E-8, A-7 (low disk notification).
+* Agent: E-1/E-2 (the no-save stop only on the panel's word, ready marks on disk, streamed log probe), A-1
+  (one network per server, I-6), A-3 (Project Zomboid as 1000:1000 without capabilities, its `rcon.yml`
+  written and mounted by the agent), A-4 (bridge gateways refused), A-5 (no API description without token),
+  A-6 (host/other networks refused for games with a network control port), A-8 (tag digests), B-1/B-11
+  (mounted folders protected, writes wait, mounts re-checked after the start), B-2, B-3, B-5, B-7..B-10,
+  B-12, B-13, C-3, I-3 (Valheim needs its password).
+* Deploy and docs: D-2 (root-run scripts refuse, or as root unattended tighten, a checkout others can
+  write; umask 022; git without fsmonitor/hooks), A-2 (`deploy/unraid/instance-firewall.sh`), A-4 (node
+  compose `gw_priority`), A-9 and the docs of every fix; the compose files pass the new settings (and no
+  longer override the Secure-cookie default); the upgrade rehearsal sends the session token.
+
+**Verified beyond unit tests:** Project Zomboid as uid 1000 on a real container (Build 41: download, start,
+RCON, save, the agent's stop); one network per server on real Docker (isolation both ways, agent API 403
+from both, internet, recreation, pool exhaustion: `fixes/agent-networks-run.md`); the stop rule on that real
+server after an agent restart; the node compose's `gw_priority` (Docker 29.9, Compose 5.7, both network-name
+orders); the firewall rule set loaded into a real kernel (iptables-nft, a container's own network namespace:
+`fixes/firewall-run.md`).
+
+**Not verified:** anything on Unraid, in particular the firewall script (not run on a real host: check it
+as docs/UNRAID.md says), the at-boot User Script, the scripts' self-tightening as root on the share; a stop
+of Project Zomboid by Docker itself through the image's trap with the agent's `rcon.yml`; legacy iptables;
+the upgrade rehearsal with the session token (CI job "upgrade"); a browser pass over the new dialogs.
+
+**Open (not fixed, by decision or size):** E-7 (a job that waits for a first start holds a worker process:
+advice in `.env.example`); TOTP / a second factor; `Instance.env` stored in clear text; read-only root
+filesystems and a default CPU limit for game containers, and no disk quota per server (A-7's other parts);
+B-11's per-server lock for top-level renames; D-13 for the catalog routes; HSTS is opt-in on purpose (it
+would break other plain-HTTP web UIs under the same host name). Found while fixing: the agent's default
+route moves to a server's network when it joins one (Docker picks the gateway by network name), so with
+the firewall installed its own new connections to the LAN need `--allow` (fixes/NOTES-deploy.md).
+
+**For the owner's server at the upgrade:** no database migration; `chmod -R go-w` on the checkout once
+(`run` refuses until then; the hook installer and the nightly dump do it themselves); everyone signs in
+once; decide on `appdata`'s SMB export (docs/SECURITY.md, "The source folder"); install and check the
+firewall script; Project Zomboid servers change to uid 1000 at their next start.
 
 ## Six more games, panel side (branch `feature/more-games`, 2026-11-11)
 
@@ -1193,6 +1247,11 @@ the compose stack in its three-container layout were run, see the top of this fi
 backup-browse, import and btrfs-snapshot integration files were not.
 
 ## Next recommended tasks (in order)
+
+00. Branch `fix/security-review`: run the full suites and the CI jobs (shellcheck, the upgrade rehearsal
+    with the session token), a browser pass over sign-in, downloads (tickets), the console (auth frame,
+    link dialog) and the new dialogs; then on Unraid: the upgrade, the firewall script with the checks of
+    docs/UNRAID.md, the array-start User Script, and one Project Zomboid stop through `docker stop`.
 
 0. The audit fixes of 2026-11-09 (branch `fix/audit-remaining`): run the integration tests and
    `panel-acceptance.sh` on the final tree, a browser pass over the changed screens (memory dialog

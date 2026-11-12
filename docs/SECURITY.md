@@ -6,11 +6,50 @@ MCPanel manages Docker on a machine you care about. Read this before exposing it
 
 | Boundary | What protects it |
 |---|---|
-| Browser → panel | Session cookie (HttpOnly, SameSite=Lax), CSRF token on every unsafe request, WebSocket origin validation (scheme, host **and port** must be the panel's own origin or one of `MCPANEL_CSRF_TRUSTED_ORIGINS`, so another web app on the same machine cannot open the console with your cookies), `X-Frame-Options: DENY` and a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`) on every page, login throttling (10/min), scrypt password hashing. Request bodies are limited before Django reads them, so before any login check (see "Request size limits"). |
+| Browser → panel | Session cookie (HttpOnly, SameSite=Lax) **and the token of the tab that signed in** on every `/api/` request and WebSocket (see "Sessions bound to the tab"), CSRF token on every unsafe request, WebSocket origin validation (scheme, host **and port** must be the panel's own origin or one of `MCPANEL_CSRF_TRUSTED_ORIGINS`, so another web app on the same machine cannot open the console with your cookies), `X-Frame-Options: DENY` and a Content-Security-Policy (`script-src 'self'`, `frame-ancestors 'none'`) on every page and `default-src 'none'` on every API answer, downloads as `application/octet-stream` with a sandboxing CSP, a JSON-only API, sign-in limits per address (10/min) and per account (10 in 10 min, 100 a day), scrypt password hashing. Request bodies are limited before Django reads them, so before any login check (see "Request size limits"). |
 | Panel → agent | Shared bearer token (`MCPANEL_AGENT_TOKEN` = `AGENT_TOKEN`), constant-time comparison. On the single host the agent is reachable only on the internal Compose network (no published port). Additional nodes serve HTTPS (`AGENT_TLS=auto`) and the panel **pins** their certificate by SHA-256 fingerprint, so the token is only sent after the handshake proved the agent's identity (`backend/apps/nodes/tls.py`). |
 | Agent → Docker | The agent validates every container spec on its own: image allow-list, no privileged mode, `cap_drop: ALL` + `CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID, KILL` (needed by the itzg entrypoint to fix ownership and drop to the runtime UID), `no-new-privileges`, PID limit, memory limit, only the instance directory mounted, allowed networks, port range. |
 | Agent → host files | All file operations are confined to `<data root>/instances/<id>` using fd-based traversal with `O_NOFOLLOW`; symlinks are never followed; `..` is rejected; writes are atomic. The data root and its `instances` folder are mode 0750, owner root (set at every agent start), so other host users and guest SMB logins cannot read server folders. Downloads only from allow-listed provider CDNs over HTTPS and must match a published SHA-1/SHA-256/SHA-512. SpigotMC jars (no published hash) are downloaded by the panel instead and uploaded with a SHA-256 the agent verifies (see below). |
 | Panel users → servers | Permission matrix (see `backend/apps/accounts/permissions.py`). Global roles apply everywhere; per-server grants apply to one server. All checks are enforced in the backend; the UI only hides what you cannot do. Every state-changing action is written to the audit log (secrets redacted). Resetting a world needs two permissions (`instance.restore` and `instance.files.write`) and the server's name typed exactly; the seed is not written to the audit log. |
+
+## Sessions bound to the tab
+
+A browser sends a host's cookies to every port of that host name (they are not per port), so the
+session cookie could reach a game server's port or another web UI on the same machine (security
+review of 2026-11-11, D-1). The cookie alone is therefore no longer enough
+(`MCPANEL_SESSION_BINDING`, default on):
+
+* The login (and the first-run setup) answers a random `session_token` (32 bytes) once; the server
+  keeps only its SHA-256 in the session. The tab keeps it in `localStorage` (per scheme, host and
+  port) and sends it as `X-MCPanel-Session-Token` with every `/api/` request, GET included (constant
+  time compare). Without it: 401 `session_token_required`, and the sign-in page. Exempt: the
+  state, login, setup, logout, reset and health routes.
+* Link downloads cannot carry a header: the tab asks `POST /api/auth/download-ticket` for a signed
+  ticket bound to the session, the exact path and query, for 60 seconds, and only for the four
+  download routes (file, folder zip, saves export, backup file).
+* WebSockets: the first message must be `{"type": "auth", "token": ...}` within 10 s; until then the
+  server sends nothing, and anything else closes the socket (4401).
+* What is left: script running in the panel's own origin could read the token (the CSP allows only
+  the panel's own scripts). A link in console output opens only after a dialog with the whole URL,
+  and a link to the panel's own host name on another port or scheme gets a warning. Serving the
+  panel over HTTPS under a host name of its own keeps its Secure cookies off plain-HTTP ports
+  altogether (DEPLOYMENT.md, "HTTPS / remote access").
+
+**Sign-in limits.** 10 failed sign-ins a minute per address, and per account (the user name typed,
+from any address) 10 in 10 minutes and 100 a day; the current-password check of a password change
+has the same limit. While an account is limited even the right password is refused (someone who
+guesses can keep an account locked: the price of the limit). A browser that signed in to the
+account before carries an HttpOnly cookie (`mcpanel_known_browser`, `mcpanel_known_browser_pw`:
+signed, bound to the user id, a year, path-scoped to the login and password routes) that skips the
+per-account limit (the per-address limit stays). `manage.py unlock_login <username>` in the panel
+container ends a lock at once (audited as `auth.login_unlocked`). `auth.login_failed` audit rows are
+deleted after 90 days. There is no second factor yet.
+
+**API pages.** The API answers JSON only (no browsable HTML API; a request that accepts only HTML
+gets 406); the Swagger page `/api/docs` is gone, and the OpenAPI schema `/api/schema` exists only with
+`MCPANEL_API_DOCS=true`. `Strict-Transport-Security` only with `MCPANEL_HSTS_SECONDS` (off by
+default: browsers apply it to the host name on every port, which would break other plain-HTTP web
+UIs under the same name); Secure cookies follow `MCPANEL_BEHIND_TLS_PROXY` unless set otherwise.
 
 ## What Docker does **not** protect you from
 
@@ -136,7 +175,8 @@ front of Django (`backend/apps/core/asgi.py`, `RequestBodyLimit`):
 
 * every request may carry at most 25 MB; a declared `Content-Length` above that is answered 413
   without reading the body, and a chunked body is cut off as soon as it passes the limit;
-* only the four upload endpoints (file upload, import, content upload, world replace) accept more,
+* only the five upload endpoints (file upload, import, content upload, world replace, save import)
+  accept more,
   up to `MCPANEL_MAX_UPLOAD_BYTES` (default 2 GiB), they must declare the length (411
   otherwise), and above 25 MB the request must carry a session cookie of a signed-in user (one
   database read; permissions and CSRF are checked by Django afterwards, as for every request);
@@ -312,6 +352,28 @@ example) contains these files. Treat such a backup like the console logs themsel
   redirects are not followed and delivery errors are generic. Through an egress proxy
   (`HTTPS_PROXY`) the proxy makes the connection, so the address check is the only protection.
 
+### What users without `instance.configure` see
+
+* Files that hold a secret (Factorio's `config/rconpw`, TShock's `config.json`, the files of the six
+  Steam games that hold their passwords, Minecraft's `server.properties`, `.rcon-cli.env` and
+  `.rcon-cli.yaml`) are masked by value (`********`) in every download, the file manager's and the
+  backup browser's, so their length may differ (no `Content-Length`); search returns no hit in such a
+  file and no line that holds a secret; renaming such a file, or a folder that holds one, is refused
+  (403 `managed_file`); a zip leaves them out. Minecraft's RCON password is masked in the editor,
+  downloads and search for everyone, and saving `server.properties` from the editor keeps the real one.
+* A schedule that runs a console command shows neither the command nor its last result to users
+  without `instance.console`, in every answer and in the audit trail; a server's audit trail shows
+  client addresses only to users with the global `system.audit`.
+* The install job of a new server keeps the wizard's secret settings (Factorio's game password and
+  factorio.com token, Terraria/TShock and Project Zomboid passwords) only until it has written the
+  files; jobs from before this version keep theirs. `Instance.env` (custom variables) is still stored
+  in clear text in the database.
+* Clones and restores as a new server copy the source's passwords (not Counter-Strike 2's GSLT), and
+  their maker gets the role they hold on the source; a start of a server whose required secret is
+  missing (Valheim's join password) is refused (409 `secret_required`).
+* "Start anyway" past the memory check is honoured only for users with the global permission
+  `system.settings` (403 `overcommit_not_allowed` otherwise).
+
 ### Rotating the secret key
 
 1. Put the current key into `MCPANEL_SECRET_KEY_FALLBACKS` and a new random key (`openssl rand -hex 48`)
@@ -330,6 +392,12 @@ example) contains these files. Treat such a backup like the console logs themsel
 * The CurseForge API key is checked against CurseForge before it is saved: a key CurseForge
   refuses (401/403) is not stored. When CurseForge cannot be reached the key is saved with a
   warning.
+* Catalog and provider requests (versions, modpacks, mods) follow a redirect only to the same host
+  (the catalog: its known upstream hosts) and read at most 32 MB of an answer.
+* **Low disk space:** every 15 minutes the panel reads each node's free space for server and backup
+  storage and sends the notification `node.low_disk_space` (to the channels that subscribe to it)
+  once when it drops below the system setting `low_disk_space_gb` (default 20, 0 = off), again
+  after it was above it in between or a day later. A server still has no disk quota of its own.
 
 ## Files the upgrade script writes
 
@@ -406,6 +474,15 @@ the compose file 666, in the `appdata` share, which is exported over SMB.
   binary is not a 7.4 release.
 * These are tags, not digests: what a rebuild fetches is decided by Docker Hub. Rebuild at least
   monthly (DEPLOYMENT.md, "Upgrading").
+* **Game server images.** A runtime profile allows only its own repositories and tag pattern. Rust's
+  image (only `latest` exists) is pinned by digest; Palworld `v2.8.1`, Valheim `1.4.1`, HKMP
+  `v2.4.3-2` and Project Zomboid `v1.2.0` are pinned to the digest of their tag as checked for this
+  release: when the image of such a tag is not that digest (the maintainer pushed the tag again),
+  creating the container fails with 409 `image_digest_mismatch`, naming both digests
+  (`AGENT_IMAGE_DIGEST_CHECK=false` switches the check off; only after checking the new image). The
+  other tags of the other games are exact versions, which their maintainers can still move.
+  Minecraft's `itzg/minecraft-server` tag follows the server's image channel and is pulled again at
+  a start at most once a day; the `pinned:<version>` channel stops that.
 
 ## The Unraid shutdown hook
 
@@ -459,6 +536,34 @@ would stop that server itself at array stop and count it as stopped by hand.
   or cut-off HTTP 200. Single-file restores escape `[ ] * ?` before passing a name to restic.
 * World saving that a backup switched off (`save-off`) is switched on again even if the agent
   process ends during the pause (a marker file; `save-on` at shutdown, at start and every 30 s).
+* **Stops.** A stop always reaches `docker stop`, whatever the game's API or console answers (a
+  failed save is a warning in the stop's result). The quick stop without a save (15 s) needs all of:
+  the panel says the server never became ready in this run (it ended the wait of a first start),
+  the agent has no ready mark for the run (kept on disk, `<data root>/state/ready-marks.json`, so an
+  agent restart does not forget a ready server), and the readiness probe does not succeed at the
+  stop. Every other stop is the normal saving one. A `log` readiness probe streams the log from the
+  run's start instead of reading a 5,000-line tail.
+* **Text from a game** in an error message is one line of at most 300 characters; replies to console
+  commands are redacted like the console log for every game with a redactor; a backup's "save
+  finished" is the game's own anchored line (Factorio, Terraria, Project Zomboid), never a chat
+  line, and diagnoses are never made from chat lines. Player counts are kept only in 0..100,000,
+  names at most 64 characters, 200 per sample; players not seen for 90 days are dropped.
+* **A request to a game's HTTP API** (Satisfactory, Palworld, TShock, Rust's WebRCON) has one deadline
+  for the whole request, also for an answer that trickles in.
+* **Player actions run with an id only.** On Rust and Palworld a typed name that matches more than one
+  online player, or (`op`/`ban` on Rust, `ban` on Palworld) a display name at all, answers 409
+  `ambiguous_player` with the candidates to pick from; TShock kicks and bans the exact name; a
+  Minecraft nickname (EssentialsX `~`) or Bedrock name is listed as a name the panel cannot act on.
+* **Folders the container mounts.** A rename, delete or replace of a folder the container mounts
+  (Valheim `config`, `opt`; Project Zomboid `game`, `data`; image-volume folders), of a folder above
+  one, or of `.volumes` is refused (403 `managed_file`), as is a folder that holds a protected path
+  (CS2's `server.cfg`, `pre.sh`, `post.sh`). File writes wait (409 `instance_busy`) while a restore,
+  import, apply, world replace or reset, delete or clone runs for that server. The mount sources are
+  checked again right after the container started: a swapped source kills it (409
+  `volume_source_invalid`). A container that mounts a sub-folder gets restart policy `no`, so Docker
+  never restarts it past that check.
+* The RCON password of a spec must be letters, digits, `_` and `-` (8-128 characters); a zip export
+  with entries deeper than 64 folders is refused (413) rather than cut short.
 
 ## Games other than Minecraft (Factorio, Satisfactory, Terraria, and six Steam games)
 
@@ -566,16 +671,18 @@ Games that take commands on their console only (Terraria) get one line at a time
   apply. The agent's driver reads the token from that file (no symbolic link followed, size-capped);
   it travels only in the query string of requests to the container (TShock's design) and never appears
   in an error message or log line of the agent; the agent also masks it in console text. The text
-  editor, downloads (also from the backup browser) and search results show `config.json`, and any
-  file the token was copied into, with the token masked; a zip leaves `config.json` out for users
-  without `instance.configure`. It is in backups (restic, encrypted). It grants superadmin over that TShock
-  server only.
+  editor shows `config.json` with the token masked. For users without `instance.configure` the
+  downloads (also from the backup browser) mask it in `config.json` and in any file it was copied
+  into, search shows no line that holds it, and a zip leaves the secret-bearing files out; a copy
+  inside a zip a configure user downloads is not masked ("What users without configure see"). It
+  is in backups (restic, encrypted). It grants superadmin over that TShock server only.
 * **The one-time `/setup` code** TShock prints at its first start (it makes whoever types it in game an
   admin) is masked in every console text the agent hands out. The panel creates the owner account itself
   (setup step `owner_account`: password from the secret `owner_password`, sent to the agent in the
-  request only, never logged or stored in a file by the panel), and TShock switches the code off at its
-  next start. `docker logs` on the host still shows it, and `setup-code.txt` stays in the server folder
-  until that restart.
+  request only, never logged or stored in a file by the panel). The code itself is never usable: the
+  panel writes an empty `setup.lock` (TShock's switch for it) at create and before every start and
+  deletes `setup-code.txt`, which the file API treats as a secret file (403 like `config/rconpw`).
+  Without an owner password, administer TShock from the panel's console.
 
 ### Satisfactory: claiming, the API token, internal-only TLS
 
@@ -659,22 +766,30 @@ an environment allow-list with a pattern for every value (the panel checks it, t
 the control ports in `never_publish`, `no-new-privileges`, only folders inside the server's own
 folder mounted, and `restart_policy: no` (Docker never starts these servers by itself). Their images download the game
 from Steam at every start (HKMP's server is in its image): code from the internet, into the server
-folder. Rust's image is pinned by digest; the others are exact version tags, which whoever controls
-the image's repository can still move.
+folder. Rust's image is pinned by digest, and the tags of Palworld, Valheim, HKMP and Project Zomboid
+to the digests checked for this release ("Images"). Each runs on a network of its own; Palworld,
+Project Zomboid, Counter-Strike 2 and Rust never on another one, Valheim and HKMP only as the agent's
+policy allows (never the host network for a game with a network control port).
 
 | Game | Who runs the game | Capabilities | Control port (never published) |
 |---|---|---|---|
 | Palworld | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE FOWNER SETUID SETGID | REST API 8212/tcp (HTTP Basic with the admin password); RCON 25575/tcp is off |
 | Valheim | root at start; supervisord stays root and runs the game as `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE SETUID SETGID KILL | none (no remote console); the image's ports 80 and 9001 are off |
-| Project Zomboid | **root**: the image never drops privileges | CHOWN DAC_OVERRIDE FOWNER | RCON 27015/tcp |
+| Project Zomboid | uid 1000:1000 from the start (the agent's choice; the image would run the game as root) | none | RCON 27015/tcp |
 | HKMP | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE FOWNER SETUID SETGID | none (console input through the one exec) |
 | Counter-Strike 2 | uid 1000:1000 from the start (the image's user) | none (Docker's init as PID 1) | RCON on the game port's number over TCP |
 | Rust | the image starts as root and drops to `MC_UID`/`MC_GID` | CHOWN DAC_OVERRIDE SETUID SETGID | WebRCON 28016/tcp and its web page 8080/tcp |
 
-* **Project Zomboid's game runs as root** with three capabilities: the process that reads packets
-  from the internet on its UDP ports is uid 0. Unraid has no user namespaces, so uid 0 in the
-  container is uid 0 of the host, held back only by the namespaces, the capability set and Docker's
-  seccomp profile. Treat a Project Zomboid server (and its mods) as the most privileged of the six.
+* **Project Zomboid runs as uid 1000 without capabilities** (security review A-3: its image never
+  drops privileges, so the game used to run as uid 0, which on Unraid, without user namespaces, is
+  uid 0 of the host). The agent gives the server folder to 1000:1000 before every create and start
+  (like Counter-Strike 2's), and writes the image's `rcon.yml` itself (into
+  `<data root>/agent/container-files/<id>/`, mode 0400, mounted read-only at
+  `/home/steam/server/rcon.yml`), because the image's start script cannot write it as uid 1000; its
+  stop trap reads it to save and quit. Verified on a real container (Build 41): download, start,
+  RCON, save and the agent's stop as uid 1000, and the mounted file readable; a stop by Docker itself
+  through the image's trap with that file was not run yet. A running server keeps root until its
+  container is made again (its next start).
 * **Secrets on the command line.** Project Zomboid's image passes the admin password as
   `-adminpassword`, and Rust's start line carries the RCON password: anything that can list the
   host's processes (`ps`) reads them, and the launchers print them into the container log. The
@@ -687,8 +802,9 @@ the image's repository can still move.
   replaces the images' defaults (CS2's `changeme`, Rust's `docker`, Project Zomboid's `admin`); an
   injected value must match the variable's pattern.
 * **Who owns the files.** `MC_UID`/`MC_GID` is 99:100 on Unraid (`nobody:users`), the owner of all
-  share data, and Counter-Strike 2's fixed 1000 is normally the first Unraid user account. A game
-  that breaks out of its container as that uid, even without root, reaches what that uid owns.
+  share data, and the fixed 1000 of Counter-Strike 2 and Project Zomboid is normally the first Unraid
+  user account. A game that breaks out of its container as that uid, even without root, reaches what
+  that uid owns.
 * **Who can join** once a port is forwarded: docs/GAMES.md, "Who can join by default". Rust has no
   password or whitelist in the panel, and Project Zomboid lets anyone create an account by default.
 

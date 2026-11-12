@@ -230,9 +230,17 @@ bash /mnt/user/appdata/mcpanel-src/deploy/unraid/instance-firewall.sh install --
   CSTV; never forward its TCP port: that is RCON), Rust 28015 + 28017 (+ TCP 28082 for Rust+). Except
   HKMP, their images download the game into the server folder on the first start (Palworld 4.6 GB,
   Valheim 4 GB, Project Zomboid 7 GB, Rust 10 GB, Counter-Strike 2 about **60 GB**) and leave it out of
-  backups; check the free space of the share first. Counter-Strike 2's image runs as uid 1000:1000
-  (its files belong to 1000:1000, not `nobody:users`); the others run as root with a few capabilities
-  and drop to `MC_UID`/`MC_GID`. Per-game notes (memory, passwords, tokens): [GAMES.md](GAMES.md).
+  backups; check the free space of the share first (the panel warns about low disk space, below).
+  Counter-Strike 2 and Project Zomboid run as uid 1000:1000 without any capability (their files
+  belong to 1000:1000, not `nobody:users`; on Unraid uid 1000 is normally the first user account you
+  made); the other four start as root with a few capabilities and drop to `MC_UID`/`MC_GID`. A
+  Project Zomboid server made before this version runs as root until its next start. Per-game notes
+  (memory, passwords, tokens): [GAMES.md](GAMES.md).
+* **Low disk space.** Every 15 minutes the panel checks the free space of each node's server and
+  backup storage and sends the notification "Low disk space on a node" once when it drops below the
+  level in System settings (20 GB by default, 0 = off), again when it went above and below it once
+  more, or a day later. Subscribe a notification channel to it (System -> Notifications). Nothing
+  limits the disk space of one server.
 
 ### The game servers' firewall (`instance-firewall.sh`)
 

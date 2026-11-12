@@ -45,9 +45,28 @@ server can reach".
 * Docker never restarts these servers by itself: a crash leaves the server stopped, and its Diagnostics
   name the usual causes (the game download failed, the disk is full, not enough memory).
 * **Stop works while the first start downloads the game** (Counter-Strike 2, Rust, Project Zomboid): it ends
-  the job that waits for the server and stops the container at once. A server that has not become ready in
-  its run (Palworld, Valheim, Project Zomboid, Counter-Strike 2, Rust) has nothing to save yet, so it is not
-  given its usual time to save.
+  the job that waits for the first start and stops the container quickly, without a save (the image gets
+  15 s), because there is nothing to save yet. That quick stop happens only when the stop ended the panel's
+  wait for a first start and the server never became ready in this run (the agent remembers a ready run,
+  also across its own restarts); every other stop is the normal one that saves first.
+* **Copies** (Clone, Restore as a new server) take the source's passwords with them, except Counter-Strike
+  2's Game Server Login Token (one token per server: set a new one on the copy). A server whose required
+  password is missing (Valheim's join password) is not started: the panel says so and links to Secrets.
+* **Players** are acted on by their id: a typed name that fits more than one online player (or, for a
+  ban, a display name at all) opens a list to pick the player from. Names the panel cannot pass to the
+  game safely (a Counter-Strike 2 name with quotes or `;`) are shown with "use the console".
+* **World import and reset:** an import may be as large as the other uploads (`MCPANEL_MAX_UPLOAD_BYTES`,
+  2 GiB by default). The panel checks the upload and the new world's settings before it moves anything
+  (Rust's seed 0 to 2147483647; an old-format Valheim world whose name has spaces is refused); if the
+  import or reset fails anyway, the previous world is put back and a server that was running is started
+  again. A backup remembers the world it was made with (Valheim's world name, Rust's identity, seed and
+  size, Project Zomboid's server name), and restoring it sets them back.
+* **Images:** Palworld, Valheim, HKMP and Project Zomboid run exact image tags pinned to the digest checked
+  for this release, Rust its image's digest: if a maintainer pushes a tag again, the server does not start
+  (`image_digest_mismatch`) until a release of the panel has checked the new image (or you switch the
+  check off after checking it yourself: `AGENT_IMAGE_DIGEST_CHECK`, DEPLOYMENT.md).
+* **Network:** every server has a Docker network of its own; the other servers cannot reach its ports.
+  Palworld, Project Zomboid, Counter-Strike 2 and Rust refuse host networking and other networks.
 * Files that may hold the server's passwords (Project Zomboid's logs and ini, Counter-Strike 2's
   `server.cfg` and logs, Rust's logs, Palworld's settings) are masked in the editor and in downloads and
   are never put into a zip; Project Zomboid's own backup zips are not handed out at all (the panel switches
@@ -65,7 +84,8 @@ server can reach".
   password for its own access to the server, so it cannot be empty).
 * **Join password:** optional (Secrets). "List on the community server browser" is off by default.
 * **Players:** the online list, kick and ban by the player's user id (`steam_<SteamID64>`, shown next to
-  online players; the name of an online player works too), unban while stopped or running.
+  online players), unban while stopped or running. A kick by the name of one online player works; a ban by
+  name asks you to confirm that player's id first.
 * **World:** Saves shows the world folder; reset starts a new world, import takes a zip of a world folder
   from `Pal/Saved/SaveGames/0/` (with `Level.sav`), download gives you a zip of the current world (the
   game's own rolling backups left out).
@@ -88,7 +108,9 @@ server can reach".
 ## Project Zomboid
 
 * **Ports:** forward both UDP ports, 16261 and 16262 by default. RCON (27015/tcp) is never published.
-* **Privileges:** the image runs the game as root (it never drops to `MC_UID`): docs/SECURITY.md.
+* **Privileges:** the server runs as uid 1000:1000 without any capability (its image would run the game as
+  root), so its files belong to 1000:1000, like Counter-Strike 2's. A server made before this version
+  switches at its next start: docs/SECURITY.md.
 * **First start:** a few minutes; the game takes about 7 GB on disk (left out of backups). Every start
   validates the game files (about half a minute).
 * **Memory:** at least 4 GB, 8 GB by default. The Java heap is the server's memory minus 2 GB.
@@ -139,5 +161,6 @@ server can reach".
   the same. A world reset is a map wipe: the map, the saves and the world's databases are moved aside
   (blueprints only when you choose so), owners and bans stay, and the new map gets the seed you enter or a
   random one. Import takes a zip of a server identity folder (`server/<identity>/`).
-* **Players:** the online list, kick, ban/unban and owners (admins) by SteamID64 (an online player's name
-  works too).
+* **Players:** the online list, kick, ban/unban and owners (admins) by SteamID64. A kick by the name of one
+  online player works; making a player owner or banning them by name asks you to confirm the SteamID64
+  first.
