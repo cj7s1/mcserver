@@ -959,7 +959,11 @@ class FakeAgent:
             raise self._err(f"'{parts[-1]}' does not exist", "not_found", 404)
         if kind != "directory":
             raise self._err(f"'{parts[-1]}' is not a directory", "not_a_directory", 400)
-        return {"path": rel, "entries": [self._entry(root, p) for p in self._children(root, rel)]}
+        entries = [self._entry(root, p) for p in self._children(root, rel)]
+        cap = getattr(self, "list_cap", None)  # (tests: the agent's cap of one listing, B-6)
+        if cap is not None and len(entries) > cap:
+            return {"path": rel, "entries": entries[:cap], "truncated": True}
+        return {"path": rel, "entries": entries}
 
     def stat_file(self, instance_id: Any, path: str) -> dict[str, Any]:
         root = self._root(str(instance_id))
@@ -1136,7 +1140,7 @@ class FakeAgent:
             deleted.append(path)
         return {"deleted": deleted}
 
-    def search_files(self, instance_id: Any, query: str, path: str = "") -> list[dict[str, Any]]:
+    def search_files(self, instance_id: Any, query: str, path: str = "") -> dict[str, Any]:
         root = self._root(str(instance_id))
         prefix = "/".join(self._parts(path))
         needle = query.lower()
@@ -1149,13 +1153,19 @@ class FakeAgent:
             for lineno, line in enumerate(data.decode("utf-8", errors="replace").splitlines(), start=1):
                 if needle in line.lower():
                     results.append({"path": rel, "line": lineno, "text": line.strip()[:300]})
-        return results
+        cap = getattr(self, "search_cap", None)  # (tests: the agent stopped early, B-6)
+        if cap is not None and len(results) > cap:
+            return {"results": results[:cap], "truncated": True}
+        return {"results": results}
 
     def hash_files(
         self, instance_id: Any, path: str, algorithm: str = "sha1", *, suffixes: tuple[str, ...] = ()
     ) -> list[dict[str, Any]]:
         """files/hashes: files in ``too_large_files`` (paths) get ``hash: None, too_large: True``;
-        ``suffixes`` filters the names (the current agent's ``suffix``)."""
+        ``suffixes`` filters the names (the current agent's ``suffix``). ``hash_pending`` (tests): files the agent's
+        capped pass left out (B-6): AgentClient.hash_files answers 503 ``hashing_busy`` for such an answer."""
+        if getattr(self, "hash_pending", 0):
+            raise self._err("The node is still reading this folder; try again shortly", "hashing_busy", 503)
         try:
             listing = self.list_files(instance_id, path)
         except Exception as exc:
@@ -1177,6 +1187,14 @@ class FakeAgent:
     def hash_files_partial(
         self, instance_id: Any, path: str, algorithm: str = "sha1", *, wait: float, suffixes: tuple[str, ...] = ()
     ) -> dict[str, Any]:
+        pending = int(getattr(self, "hash_pending", 0) or 0)
+        if pending:
+            saved, self.hash_pending = self.hash_pending, 0
+            try:
+                files = self.hash_files(instance_id, path, algorithm, suffixes=suffixes)
+            finally:
+                self.hash_pending = saved
+            return {"files": files[:-pending] if pending < len(files) else [], "complete": False, "pending": pending}
         files = self.hash_files(instance_id, path, algorithm, suffixes=suffixes)
         return {"files": files, "complete": True, "pending": 0}
 
@@ -1799,6 +1817,9 @@ class FakeAgent:
                         "modified": None,
                     }
                 )
+        cap = getattr(self, "list_cap", None)  # (tests: the agent's cap of one listing, B-6)
+        if cap is not None and len(entries) > cap:
+            return {"path": rel, "entries": entries[:cap], "truncated": True}
         return {"path": rel, "entries": entries}
 
     def backup_restore_path(self, instance_id: Any, snapshot_id: str, path: str) -> dict[str, Any]:

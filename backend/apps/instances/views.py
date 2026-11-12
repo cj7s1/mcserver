@@ -993,8 +993,11 @@ class FilesOpView(APIView):
             query = str(data.get("query", ""))
             if len(query) < 2:
                 raise ValidationError({"query": ["Enter at least 2 characters"]})
-            results = client.search_files(instance.id, query, str(data.get("path", "")))
-            return Response({"results": secret_files.mask_search_results(instance, results, request.user)})
+            answer = client.search_files(instance.id, query, str(data.get("path", "")))
+            found = {"results": secret_files.mask_search_results(instance, answer["results"], request.user)}
+            if answer.get("truncated"):
+                found["truncated"] = True  # (B-6: the agent stopped early; not every match is listed)
+            return Response(found)
         else:
             raise ApiError("Unknown file operation", code="invalid_action", status_code=404)
         audit.record(f"files.{op}", request=request, instance=instance, target=instance, details=data)

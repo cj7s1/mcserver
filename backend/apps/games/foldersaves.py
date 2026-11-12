@@ -133,7 +133,15 @@ class FolderSaves:
                 break
             current = pending.pop()
             listings += 1
-            for entry in _entries(client, instance, current):
+            try:
+                listing = client.list_files(instance.id, current)
+            except ApiError as exc:
+                if exc.error_code not in ("not_found", "not_a_directory"):
+                    raise
+                listing = {}
+            if listing.get("truncated"):
+                complete = False  # (B-6: a folder with more entries than one listing holds: a lower bound)
+            for entry in listing.get("entries") or []:
                 if entry.get("type") == "directory":
                     pending.append(f"{current}/{entry.get('name')}")
                 elif entry.get("type") == "file":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import ssl
 import time
 from collections.abc import Callable, Iterator
@@ -50,12 +51,21 @@ FEATURES_MISSING_TTL = 60
 STOP_EXTRA_SECONDS = 120
 
 
+_AGENT_BUSY = re.compile(r"^Instance is busy with an? '([a-z_]{1,40})' operation$")
+
+
 class AgentError(ApiError):
     """An error reported by the agent, with its machine-readable code."""
 
     def __init__(self, message: str, code: str, status_code: int) -> None:
         # Map agent HTTP statuses to sensible API statuses (agent 5xx => 502)
         api_status = status_code if 400 <= status_code < 500 else 502
+        busy = _AGENT_BUSY.match(message or "") if code == "instance_busy" else None
+        if busy:  # (I-2: also a file write while a restore, import ... runs: say it in the user's words)
+            message = (
+                f"The server is busy with another operation on its node ({busy.group(1)}); try again when it has "
+                "finished"
+            )
         super().__init__(message, code=code, status_code=api_status)
         self.agent_status = status_code
 
@@ -439,10 +449,14 @@ class AgentClient:
             timeout=timeout,
         )
 
-    def search_files(self, instance_id: UUID, query: str, path: str = "") -> list[dict[str, Any]]:
-        return self._json("GET", f"/v1/instances/{instance_id}/files/search", params={"q": query, "path": path}, timeout=120)[
-            "results"
-        ]
+    def search_files(self, instance_id: UUID, query: str, path: str = "") -> dict[str, Any]:
+        """``{"results": [...]}``, plus ``"truncated": true`` when the agent stopped early (B-6: 50,000 files looked
+        at, or 30 s): the results are then not all there are."""
+        data = self._json("GET", f"/v1/instances/{instance_id}/files/search", params={"q": query, "path": path}, timeout=120)
+        answer: dict[str, Any] = {"results": data.get("results") or []}
+        if data.get("truncated"):
+            answer["truncated"] = True
+        return answer
 
     def hash_files(
         self, instance_id: UUID, path: str, algorithm: str = "sha1", *, suffixes: tuple[str, ...] = ()
@@ -454,7 +468,16 @@ class AgentClient:
         params: dict[str, Any] = {"path": path, "algorithm": algorithm}
         if suffixes:
             params["suffix"] = list(suffixes)
-        return self._json("GET", f"/v1/instances/{instance_id}/files/hashes", params=params, timeout=300)["files"]
+        data = self._json("GET", f"/v1/instances/{instance_id}/files/hashes", params=params, timeout=300)
+        if data.get("complete") is False:
+            # B-6: one pass reads at most 64 GiB; a list with files left out must never pass for the folder's
+            # content (the callers compare it with what should be there): the same answer as a busy agent
+            raise AgentError(
+                f"The node is still reading this folder ({int(data.get('pending') or 0)} file(s) left); try again shortly",
+                "hashing_busy",
+                503,
+            )
+        return data["files"]
 
     def hash_files_partial(
         self, instance_id: UUID, path: str, algorithm: str = "sha1", *, wait: float, suffixes: tuple[str, ...] = ()
@@ -472,7 +495,11 @@ class AgentClient:
         data = self._json("GET", f"/v1/instances/{instance_id}/files/hashes", params=params, timeout=300)
         files = data.get("files") or []
         pending = sum(1 for f in files if f.get("hash") is None and not f.get("too_large"))
-        return {"files": files, "complete": pending == 0, "pending": pending}
+        # (the agent's own word wins: B-6 caps a pass and may leave files out of the list)
+        reported = data.get("pending")
+        if isinstance(reported, int) and not isinstance(reported, bool):
+            pending = max(pending, reported)
+        return {"files": files, "complete": pending == 0 and data.get("complete") is not False, "pending": pending}
 
     def fetch_file(
         self,

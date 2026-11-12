@@ -187,7 +187,7 @@ def test_one_refused_stop_does_not_fail_the_command(server, fake_agent):
     fake_agent.hooks["stop"] = refuse
     out = shutdown()  # exit status 0: the agent was reached
     assert f"stopped   {ok.name}" in out
-    assert f"FAILED    {busy.name}: Instance is busy with a 'backup' operation" in out
+    assert f"FAILED    {busy.name}: The server is busy with another operation on its node (backup)" in out
     assert "1 stopped, 1 failed" in out
     assert not is_running(fake_agent, ok) and is_running(fake_agent, busy)
     # both were running, so both come back after the next boot

@@ -102,9 +102,18 @@ def install(instance: Instance, slug: str, version: str | None) -> dict[str, Any
     filename = validate_filename(chosen["file"]["filename"], allow_disabled=False)
     client = AgentClient(instance.node)
     try:
-        existing = {e["name"] for e in client.list_files(instance.id, "plugins")["entries"]}
+        listing = client.list_files(instance.id, "plugins")
+        existing = {e["name"] for e in listing["entries"]}
     except ApiError:
-        existing = set()
+        listing, existing = {}, set()
+    if listing.get("truncated"):
+        # (B-6: the listing was cut off: ask for the two names that matter instead of trusting it)
+        for name in (filename, f"{filename}.disabled"):
+            try:
+                client.stat_file(instance.id, f"plugins/{name}")
+                existing.add(name)
+            except ApiError:
+                pass
     # the jar the panel installed of this plugin before, if it is still there (enabled or disabled)
     previous = next(
         (

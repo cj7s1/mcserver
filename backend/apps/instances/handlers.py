@@ -1194,16 +1194,23 @@ def _empty_target_folder(instance: Instance, source: AgentClient, target: AgentC
     if target.status(instance.id).get("exists"):
         ctx.log(f"Removing a leftover container of this server on {target.node.name}")
         target.remove_container(instance.id, timeout=30)
-    names = [e["name"] for e in target.list_files(instance.id, "")["entries"]]
-    if not names:
-        return 0
-    ctx.progress(None, f"Removing {len(names)} leftover item(s) of an earlier copy on {target.node.name}", force=True)
     slow = AgentClient(target.node, timeout=3600)  # deleting a big stale world can take a while
-    for i in range(0, len(names), 500):
-        slow.delete_files(instance.id, names[i : i + 500], recursive=True)
+    removed = 0
+    # (B-6: a listing holds at most 20,000 entries and says ``truncated``: list again until it is empty)
+    for _pass in range(64):
+        listing = target.list_files(instance.id, "")
+        names = [e["name"] for e in listing["entries"]]
+        if not names:
+            return removed
+        ctx.progress(None, f"Removing {len(names)} leftover item(s) of an earlier copy on {target.node.name}", force=True)
+        for i in range(0, len(names), 500):
+            slow.delete_files(instance.id, names[i : i + 500], recursive=True)
+        removed += len(names)
+        if not listing.get("truncated"):
+            break
     if target.list_files(instance.id, "")["entries"]:
         raise ApiError(f"Could not empty the server folder on {target.node.name}", code="target_not_empty", status_code=409)
-    return len(names)
+    return removed
 
 
 @register("migrate")
