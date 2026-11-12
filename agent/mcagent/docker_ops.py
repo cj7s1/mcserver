@@ -842,6 +842,7 @@ def remove_container(
         c.remove(v=False)
     except NotFound:
         pass  # removed by someone else meanwhile: the result is the same
+    forget_ready(str(c.id))
     return True
 
 
@@ -992,6 +993,7 @@ def retire(settings: Settings, instance_id: UUID, settle_seconds: float = 0.0) -
             ) from exc
         if not (exc.status_code == 409 and "removal" in text and "in progress" in text):
             raise
+    forget_ready(str(c.id))
     log.info(
         "Retired the container of %s (%s, exit code %s%s)",
         instance_id,
@@ -1335,9 +1337,9 @@ def graceful_stop(
 
     A server that has not become ready in this run (``never_ready``: the image still downloads or
     installs the game) of a profile with ``not_ready_stop_timeout`` is stopped at once instead: no
-    save, ``docker stop`` with that short timeout. ``not_ready``: the panel says it never saw the
-    server ready in this run (it was still waiting for its first start), needed when this agent did
-    not watch the whole run.
+    save, ``docker stop`` with that short timeout. Only when the panel says so (``not_ready``: the
+    job it ended was the wait of a first start and it never saw this run ready) and the agent has
+    no sign of the run being ready either; without the panel's word the stop is the ordinary one.
 
     A container that is not running is left alone. Docker errors of ``docker stop`` propagate.
     """
@@ -1500,8 +1502,14 @@ def describe(c: Container) -> dict[str, Any]:
 # --- agent-side readiness probes (profiles' health kinds "tcp" and "log") ----------------------------
 HEALTH_TCP_CACHE_SECONDS = 5.0
 HEALTH_TCP_TIMEOUT = 1.0
-HEALTH_LOG_TAIL = 5000  # lines read per look at the log (only what is new since the last look)
+HEALTH_LOG_TAIL = 5000  # lines read per look of wait_for_log (only what is new since `since`)
 HEALTH_LOG_OVERLAP = 2.0  # seconds read again at every look (Docker's `since` is a timestamp)
+# A look of the `log` probe streams the whole log since where the last look ended (the first look of a run:
+# since StartedAt) and stops at the first match; one look reads for at most this long, the next one goes on
+# from the last line it read.
+HEALTH_LOG_SCAN_SECONDS = 3.0
+HEALTH_LOG_MAX_LINE = 1 << 20  # a "line" without a newline longer than this is searched and dropped
+_LOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) ")
 _health_lock = threading.Lock()
 # (container id, StartedAt) -> state of the probe for that run
 _health_state: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1509,43 +1517,134 @@ _HEALTH_STATE_MAX = 512
 
 
 # runs (container id, StartedAt) whose readiness probe succeeded at least once: a later failing probe (a
-# hiccup of A2S) does not make them "never ready". Kept apart from _health_state (which is cleared when full).
+# hiccup of A2S) does not make them "never ready". Kept apart from _health_state (which is cleared when full),
+# one run per container (its latest), and on disk (READY_MARKS_FILE in the state folder, loaded at start by
+# load_ready_marks) so that an agent restart does not forget them.
 _ready_runs: dict[tuple[str, str], float] = {}
+# when this many are kept, the marks of containers that no longer exist are dropped (never a live one)
 _READY_RUNS_MAX = 4096
-# when this agent process started: of a run that started before, it may have missed the ready moment
-AGENT_STARTED = time.time()
+READY_MARKS_FILE = "ready-marks.json"
+_ready_file: Path | None = None  # set by load_ready_marks (agent start); None = memory only (tests)
+
+
+def _existing_container_ids() -> set[str] | None:
+    """Ids of every container Docker knows (running or not); None when Docker does not answer."""
+    try:
+        return {str(c.id) for c in client().containers.list(all=True, ignore_removed=True)}
+    except Exception as exc:
+        log.debug("could not list the containers to prune the ready marks: %s", exc)
+        return None
+
+
+def _save_ready_marks_locked() -> None:
+    """Write the ready marks to their file (caller holds _health_lock). Never raises."""
+    path = _ready_file
+    if path is None:
+        return
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w") as fh:
+            json.dump([[cid, started, at] for (cid, started), at in _ready_runs.items()], fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.warning("Could not record the ready marks in %s: %s", path, exc)
+
+
+def _prune_ready_marks_locked(existing: set[str]) -> bool:
+    gone = [key for key in _ready_runs if key[0] not in existing]
+    for key in gone:
+        del _ready_runs[key]
+    return bool(gone)
+
+
+def load_ready_marks(settings: Settings) -> int:
+    """Load the ready marks kept in the state folder and keep them there from now on (agent start).
+    Marks of containers Docker no longer knows are dropped (all kept when Docker does not answer).
+    Returns how many were loaded. Never raises."""
+    global _ready_file
+    path = settings.state_dir / READY_MARKS_FILE
+    loaded: dict[tuple[str, str], float] = {}
+    try:
+        data: Any = json.loads(path.read_text())
+    except FileNotFoundError:
+        data = []
+    except (OSError, ValueError) as exc:
+        log.warning("Could not read the ready marks in %s: %s", path, exc)
+        data = []
+    for item in data if isinstance(data, list) else []:
+        if (
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and isinstance(item[2], int | float)
+        ):
+            loaded[(item[0], item[1])] = float(item[2])
+    existing = _existing_container_ids() if loaded else None
+    with _health_lock:
+        _ready_file = path
+        for key, at in loaded.items():
+            _ready_runs.setdefault(key, at)
+        if existing is not None:
+            _prune_ready_marks_locked(existing)
+        _save_ready_marks_locked()
+        return len(_ready_runs)
+
+
+def forget_ready(container_id: str) -> None:
+    """Drop the ready marks of a container that was removed. Never raises."""
+    with _health_lock:
+        keys = [key for key in _ready_runs if key[0] == container_id]
+        for key in keys:
+            del _ready_runs[key]
+        if keys:
+            _save_ready_marks_locked()
 
 
 def _mark_ready(key: tuple[str, str], now: float) -> None:
     with _health_lock:
         if key in _ready_runs:
             return
-        if len(_ready_runs) >= _READY_RUNS_MAX:
-            _ready_runs.pop(next(iter(_ready_runs)))  # the oldest run
+        # a container's older runs are over: only its current one counts
+        for old in [k for k in _ready_runs if k[0] == key[0]]:
+            del _ready_runs[old]
         _ready_runs[key] = now
+        full = len(_ready_runs) > _READY_RUNS_MAX
+    existing = _existing_container_ids() if full else None
+    with _health_lock:
+        if existing is not None:
+            existing.add(key[0])
+            _prune_ready_marks_locked(existing)
+        _save_ready_marks_locked()
 
 
 def never_ready(c: Container, profile: RuntimeProfile, *, panel_says: bool = False) -> bool:
-    """Whether the container's current run has not become ready (``not_ready_stop_timeout`` profiles only):
-    its readiness probe never succeeded in this run, also not now (probed again). For a run that started
-    before this agent process, the agent may have missed the ready moment: then only when the panel says
-    so (``panel_says``: its job was still waiting for the first start). Never raises (False on doubt)."""
+    """Whether a stop may skip the save because the container's current run never became ready
+    (``not_ready_stop_timeout`` profiles only). All three must hold: the panel says so (``panel_says``:
+    the job it ended was the wait of a first start and it never saw this run ready), the agent has no
+    ready mark for the run, and the readiness probe does not succeed now either. Never raises (False
+    on doubt)."""
+    if not panel_says:
+        return False
     if profile.not_ready_stop_timeout is None or profile.health.kind not in profiles.AGENT_SIDE_HEALTH:
         return False
     try:
-        described = describe(c)
-        started_raw = str(described.get("started_at") or "")
-        if (str(c.id), started_raw) in _ready_runs:
+        started_raw = str(_parse_ts(((c.attrs or {}).get("State") or {}).get("StartedAt")) or "")
+        key = (str(c.id), started_raw)
+        if key in _ready_runs:
             return False
-        health, _output = agent_health(c, profile, described)
-        if health == "healthy" or health is None:
+        with _health_lock:
+            entry = _health_state.get(key)
+            if entry is not None:
+                entry.pop("at", None)  # probe now, not the answer of a few seconds ago
+        health, _output = agent_health(c, profile, describe(c))
+        if health == "healthy" or health is None or key in _ready_runs:
             return False
-        started = _timestamp(started_raw)
     except Exception as exc:
         log.debug("readiness of %s before its stop not known: %s", getattr(c, "name", "?"), exc)
         return False
-    if started is None or started.timestamp() < AGENT_STARTED:
-        return panel_says
     return True
 
 
@@ -1674,6 +1773,67 @@ def _log_matches(c: Container, pattern: re.Pattern[str], since: float | None) ->
     return any(pattern.search(line) for line in re.split(r"[\r\n]+", text))
 
 
+def _split_log_timestamp(line: str) -> tuple[float | None, str]:
+    """(epoch seconds of Docker's timestamp prefix, the rest) of a log line read with timestamps."""
+    m = _LOG_TS_RE.match(line)
+    if m is None:
+        return None, line
+    ts = _timestamp(m.group(1))
+    return (None if ts is None else ts.timestamp()), line[m.end() :]
+
+
+def _scan_log(
+    c: Container, pattern: re.Pattern[str], since: float | None, budget: float | None = None
+) -> tuple[bool, bool, float | None]:
+    """Search the log of ``c`` since ``since`` (epoch seconds; None = all of it) for ``pattern``,
+    streamed, line by line, until the first match or ``budget`` seconds.
+
+    Returns (found, complete, last): ``complete`` when the whole log was read, ``last`` the Docker
+    timestamp of the last line read (None when no line carried one)."""
+    kwargs: dict[str, Any] = {
+        "stdout": True,
+        "stderr": True,
+        "stream": True,
+        "follow": False,
+        "timestamps": True,
+    }
+    if since is not None:
+        kwargs["since"] = since
+    deadline = time.monotonic() + (HEALTH_LOG_SCAN_SECONDS if budget is None else budget)
+    out = c.logs(**kwargs)
+    chunks: Any = [out] if isinstance(out, bytes | str) else out
+    last: float | None = None
+    rest = ""
+
+    def matches(line: str) -> bool:
+        nonlocal last
+        ts, body = _split_log_timestamp(line)
+        if ts is not None:
+            last = ts
+        return any(pattern.search(part) for part in body.split("\r"))
+
+    try:
+        for chunk in chunks:
+            rest += chunk.decode("utf-8", errors="replace") if isinstance(chunk, bytes) else str(chunk)
+            *lines, rest = rest.split("\n")
+            if any(matches(line) for line in lines):
+                return True, False, last
+            if len(rest) > HEALTH_LOG_MAX_LINE:
+                if matches(rest):
+                    return True, False, last
+                rest = ""
+            # out of time; but not before a line newer than `since` was read, so that the next look,
+            # which goes on from `last`, always gets further than this one
+            if time.monotonic() >= deadline and (last is None or since is None or last > since):
+                return False, False, last
+        return (bool(rest) and matches(rest)), True, last
+    finally:
+        close = getattr(out, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+
+
 def agent_health(
     c: Container, profile: RuntimeProfile, described: dict[str, Any], now: float | None = None
 ) -> tuple[str | None, str | None]:
@@ -1695,15 +1855,22 @@ def agent_health(
     ok = False
     try:
         if health.kind == "log":
-            if entry.get("ok"):
-                ok = True
+            if entry.get("ok") or key in _ready_runs:
+                ok = True  # the line was printed in this run (also seen before an agent restart)
             else:
-                look_from = entry.get("checked")
-                if look_from is None and started is not None:
-                    look_from = started.timestamp()
-                since = None if look_from is None else max(0.0, look_from - HEALTH_LOG_OVERLAP)
-                ok = _log_matches(c, re.compile(str(health.pattern)), since)
-                entry["checked"] = now
+                since = entry.get("since")
+                if since is None and started is not None:
+                    since = max(
+                        0.0, started.timestamp() - HEALTH_LOG_OVERLAP
+                    )  # the first look: since StartedAt
+                asked_at = time.time()
+                ok, complete, last = _scan_log(c, re.compile(str(health.pattern)), since)
+                # the next look goes on where this one ended: after a whole read, from the time it was
+                # asked (or `now` when a caller gives one); after a read cut by the budget, from its last line
+                if complete:
+                    entry["since"] = max(0.0, min(now, asked_at) - HEALTH_LOG_OVERLAP)
+                elif last is not None:
+                    entry["since"] = last
                 entry["ok"] = ok
         elif health.kind in ("tcp", "udp-query", "driver", "a2s"):
             at = entry.get("at")

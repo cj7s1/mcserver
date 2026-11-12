@@ -87,3 +87,13 @@ def _claim_marker_state(monkeypatch):
     monkeypatch.setattr(claimmarker, "_changing", {})
     monkeypatch.setattr(claimmarker, "SETTLE_STABLE", 0.05)
     monkeypatch.setattr(claimmarker, "SETTLE_MAX", 2.0)
+
+
+@pytest.fixture(autouse=True)
+def _readiness_state(monkeypatch):
+    """The readiness probes' per-process state (and the ready marks' file) starts empty in every test."""
+    from mcagent import docker_ops
+
+    monkeypatch.setattr(docker_ops, "_health_state", {})
+    monkeypatch.setattr(docker_ops, "_ready_runs", {})
+    monkeypatch.setattr(docker_ops, "_ready_file", None)

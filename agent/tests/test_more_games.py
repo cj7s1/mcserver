@@ -1044,15 +1044,16 @@ def no_driver_stop(monkeypatch):
 
 
 def test_a_server_still_downloading_is_stopped_at_once(settings, no_driver_stop):
+    # the panel's first-start wait was ended (not_ready) and the probe never succeeded: no save, 15 s
     c = RunContainer("project-zomboid", log="Downloading depot 380871\n 45.2% ...\n")
-    result = docker_ops.graceful_stop(settings, c, 120)
-    assert c.stopped_with == zomboid.PROFILE.not_ready_stop_timeout == 5 and no_driver_stop == []
+    result = docker_ops.graceful_stop(settings, c, 120, not_ready=True)
+    assert c.stopped_with == zomboid.PROFILE.not_ready_stop_timeout == 15 and no_driver_stop == []
     assert result.not_ready and result.as_dict()["not_ready"] is True and result.exit_code == 137
 
 
 def test_a_ready_server_keeps_its_usual_stop(settings, no_driver_stop):
     c = RunContainer("project-zomboid", log="LOG : General , 1> *** SERVER STARTED ****\n")
-    result = docker_ops.graceful_stop(settings, c, 120)
+    result = docker_ops.graceful_stop(settings, c, 120, not_ready=True)
     assert no_driver_stop == [120] and not result.not_ready and "not_ready" not in result.as_dict()
 
 
@@ -1063,20 +1064,20 @@ def test_a_server_once_ready_is_never_taken_for_installing(settings, no_driver_s
     assert docker_ops.describe(c)["health"] == "healthy"
     monkeypatch.setattr(docker_ops, "_probe_a2s", lambda *a: False)
     docker_ops._health_state.clear()  # (the probe's cache: the next look probes again)
-    docker_ops.graceful_stop(settings, c, 180)
+    docker_ops.graceful_stop(settings, c, 180, not_ready=True)
     assert no_driver_stop == [180]
 
 
-def test_a_run_from_before_the_agent_needs_the_panels_word(settings, no_driver_stop, monkeypatch):
+def test_only_the_panels_word_skips_the_save(settings, no_driver_stop):
+    # E-1: the agent alone never decides that a run was not ready (its probe may have missed the moment)
     import time as _time
 
-    monkeypatch.setattr(docker_ops, "AGENT_STARTED", _time.time())  # the agent restarted during the run
     c = RunContainer("palworld", log="Downloading update (4.6 GB)\n", started=_time.time() - 600)
-    docker_ops.graceful_stop(settings, c, 60)
-    assert no_driver_stop == [60]  # it may have missed the ready moment: the usual stop
+    result = docker_ops.graceful_stop(settings, c, 60)
+    assert no_driver_stop == [60] and not result.not_ready
     c = RunContainer("palworld", log="Downloading update (4.6 GB)\n", started=_time.time() - 600)
     result = docker_ops.graceful_stop(settings, c, 60, not_ready=True)  # the panel still waited for it
-    assert c.stopped_with == 5 and result.not_ready
+    assert c.stopped_with == 15 and result.not_ready
 
 
 def test_games_without_the_rule_keep_their_stop(settings, no_driver_stop):

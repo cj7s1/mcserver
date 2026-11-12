@@ -31,7 +31,7 @@ TZ = r"[A-Za-z][A-Za-z0-9_+-]{0,31}(?:/[A-Za-z0-9_+-]{1,32}){0,2}"
 # passwords and tokens that end up in a URL path, a shell line or a sed expression
 ALNUM_SECRET = r"[A-Za-z0-9]{16,64}"  # noqa: S105 - a value pattern
 # Docker's stop timeout while a server has not become ready in its run (``RuntimeProfile.not_ready_stop_timeout``)
-NOT_READY_STOP_TIMEOUT = 5
+NOT_READY_STOP_TIMEOUT = 15  # above the ~10 s the images' stop traps took in the end-to-end runs
 
 
 def allow_list(label: str, allowed: frozenset[str], why: str) -> EnvPolicy:

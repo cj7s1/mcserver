@@ -371,6 +371,8 @@ async def _startup() -> None:
         d.mkdir(parents=True, exist_ok=True)
     # nobody but root traverses the data root (server folders hold RCON passwords)
     await run_in_threadpool(maintenance.restrict_data_root, settings)
+    # runs seen ready before a restart stay ready (stops keep their save, the log probe needs no new look)
+    await run_in_threadpool(docker_ops.load_ready_marks, settings)
     if not settings.resolve_token():
         log.error("AGENT_TOKEN is not configured; all requests will be rejected")
     # Before the first request: restic commands wait until their repository has been unlocked.
