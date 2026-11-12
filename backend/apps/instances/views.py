@@ -901,6 +901,18 @@ class FilesDownloadView(APIView):
                 "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
             )
             return response  # type: ignore[return-value]
+        values = [] if secret_files.reads_secrets(instance, request.user) else secret_files.mask_values(instance)
+        if values:
+            # a user who may not see the server's secrets: masked by value whatever the file is called (C-2; its
+            # length changes, so none is sent)
+            response = AgentStreamingResponse(
+                secret_files.value_masked_stream(values, chunks), upstream, content_type=content_type
+            )
+            as_attachment(response, filename)
+            audit.record(
+                "files.download", request=request, instance=instance, target=instance, details={"path": path, "masked": True}
+            )
+            return response
         response = AgentStreamingResponse(chunks, upstream, content_type=content_type)
         as_attachment(response, filename)
         if length is not None:
@@ -979,7 +991,7 @@ class FilesOpView(APIView):
             if len(query) < 2:
                 raise ValidationError({"query": ["Enter at least 2 characters"]})
             results = client.search_files(instance.id, query, str(data.get("path", "")))
-            return Response({"results": secret_files.mask_search_results(instance, results)})
+            return Response({"results": secret_files.mask_search_results(instance, results, request.user)})
         else:
             raise ApiError("Unknown file operation", code="invalid_action", status_code=404)
         audit.record(f"files.{op}", request=request, instance=instance, target=instance, details=data)
@@ -1002,6 +1014,7 @@ class FilesOpView(APIView):
             secret_files.require_no_secret_inside(instance, destination)
             secret_files.require_not_moved_out(instance, source)
             secret_files.require_not_secret(instance, destination)  # (nothing is moved into one either)
+            secret_files.require_bearing_kept(instance, source, request.user)  # (C-2)
             _files_touched(instance, [source, destination], "files were renamed")
             removed = [source]
             details: dict[str, Any] = {"source": source, "destination": destination, "overwrite": bool(data.get("overwrite"))}

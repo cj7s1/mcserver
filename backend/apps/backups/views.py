@@ -405,6 +405,9 @@ class BackupFileDownloadView(APIView):
                 "backup.file_download", request=request, instance=instance, target=backup, details={"path": path, "masked": True}
             )
             return masked
+        values = [] if secret_files.reads_secrets(instance, request.user) else secret_files.mask_values(instance)
+        if values:  # (C-2: masked by value for a user who may not see the server's secrets)
+            chunks = secret_files.value_masked_stream(values, chunks)
         # streamed chunk by chunk under ASGI; the agent's response is closed when the browser goes away
         response = AgentStreamingResponse(chunks, upstream, content_type="application/octet-stream")
         as_attachment(response, filename)

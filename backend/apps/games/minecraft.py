@@ -11,10 +11,14 @@ that are not modpack servers (``Instance.is_modpack``).
 
 from __future__ import annotations
 
+import re
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from .base import CAPABILITIES, ConfigFile, GameDefinition, Variant
+
+MASK = "********"
+_RCON_LINE = re.compile(r"(?m)^(rcon\.password\s*[=:]\s*)(.*?)\r?$")
 
 if TYPE_CHECKING:
     from apps.instances.models import Instance
@@ -142,6 +146,31 @@ class MinecraftDefinition(GameDefinition):
         from apps.instances.diagnostics import analyze_logs
 
         return analyze_logs(instance, lines)
+
+    # -- files that hold the RCON password (C-2) ------------------------------------------------------------------
+    # itzg writes the RCON password (the control secret) into server.properties and the rcon-cli config: the
+    # Properties tab masked it, the file manager showed it to anyone with instance.files.read
+    masks_by_line = True
+
+    def secret_bearing_paths(self, instance: Instance) -> tuple[str, ...]:
+        return ("server.properties", ".rcon-cli.env", ".rcon-cli.yaml")
+
+    def masked_text(self, instance: Instance, path: str, content: str) -> str:
+        from apps.instances.spec import rcon_password
+
+        secret = rcon_password(instance)
+        return content.replace(secret, MASK) if secret and len(secret) >= 8 else content
+
+    def unmask_text(self, instance: Instance, path: str, content: str, current: str) -> str:
+        """server.properties saved from the editor keeps its RCON password where the editor showed the mask."""
+        if path.strip("/") != "server.properties" or MASK not in content:
+            return content
+        values = dict(_RCON_LINE.findall(current or ""))
+
+        def restore(m: re.Match[str]) -> str:
+            return f"{m.group(1)}{values[m.group(1)]}" if m.group(2) == MASK and m.group(1) in values else m.group(0)
+
+        return _RCON_LINE.sub(restore, content)
 
     # -- worlds and players ----------------------------------------------------------------------
     @property

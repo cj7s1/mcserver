@@ -390,3 +390,97 @@ def test_a_malformed_pack_index_is_not_a_500(index: Any, settings: Any) -> None:
     assert isinstance(result, dict) and "available" in result
     if isinstance(index, dict):
         assert result["available"] is True and result["manual_downloads"] == []
+
+
+# --- C-2 ------------------------------------------------------------------------------------------------------
+def _tshock_with_config(make_instance: Any, fake_agent: Any) -> tuple[Any, str]:
+    from apps.instances.spec import rcon_password
+
+    inst = make_tr(
+        make_instance,
+        "tshock",
+        game_port=7778,
+        ports=[{"name": "game", "container_port": 7777, "protocol": "tcp", "host_port": 7778}],
+    )
+    token = rcon_password(inst)
+    config = (
+        '{\n  "Settings": {\n    "RestApiEnabled": true,\n    "ApplicationRestTokens": {\n'
+        f'      "{token}": {{\n        "Username": "mcpanel",\n        "UserGroupName": "superadmin"\n      }}\n'
+        "    }\n  }\n}\n"
+    )
+    fake_agent.put_file(inst.id, "config.json", config)
+    return inst, token
+
+
+def _body(resp: Any) -> bytes:
+    return b"".join(resp.streaming_content) if getattr(resp, "streaming", False) else resp.content
+
+
+def test_c2_search_is_no_oracle_without_configure(make_instance: Any, fake_agent: Any, clients: Any) -> None:
+    """Adopted from c-untrusted-data/poc test_c2b_search_is_an_oracle_for_masked_secrets: the Operator recovered the
+    32-character token with 676 searches. Now no hit of a secret-bearing file, nor any line with the secret."""
+    inst, token = _tshock_with_config(make_instance, fake_agent)
+    fake_agent.put_file(inst.id, "notes.txt", f"copied: {token}\nnothing here\n")
+    url = f"/api/instances/{inst.id}/files/search"
+
+    def hits(client: Any, query: str) -> list[dict[str, Any]]:
+        resp = client.post(url, {"query": query, "path": ""}, format="json")
+        assert resp.status_code == 200, resp.content
+        return resp.json()["results"]
+
+    operator = clients["operator"]
+    assert not [r for r in hits(operator, '": {') if r["path"] == "config.json"]
+    for query in (token[-6:].lower(), token[:4].lower(), "copied"):
+        assert hits(operator, query) == [], query
+    assert [r["path"] for r in hits(operator, "nothing")] == ["notes.txt"]
+    # the owner (configure) still finds them, masked
+    owner_hits = hits(clients["owner"], '": {')
+    assert any(r["path"] == "config.json" and r["text"].startswith('"********"') for r in owner_hits)
+    assert token not in str(owner_hits)
+
+
+def test_c2_a_secret_bearing_file_is_not_renamed_without_configure(
+    make_instance: Any, fake_agent: Any, make_user: Any, client_for: Any, clients: Any
+) -> None:
+    """Adopted from test_c2a_rename_then_download_returns_the_token (a custom role with files.write)."""
+    from apps.accounts.models import Role
+
+    inst, token = _tshock_with_config(make_instance, fake_agent)
+    role = Role.objects.create(
+        key="file-editor", name="File editor", permissions=["instance.view", "instance.files.read", "instance.files.write"]
+    )
+    friend = client_for(make_user("friend", role=role))
+    base = f"/api/instances/{inst.id}/files"
+    resp = friend.post(f"{base}/rename", {"source": "config.json", "destination": "notes.txt"}, format="json")
+    assert resp.status_code == 403 and resp.json()["error"]["code"] == "managed_file"
+    # a copy of the token in any file (here written by hand) is masked in this user's downloads, by value
+    fake_agent.put_file(inst.id, "elsewhere/copy.txt", f"x {token} y\n")
+    assert token.encode() not in _body(friend.get(f"{base}/download", {"path": "elsewhere/copy.txt"}))
+    # the owner may rename it (he can read and change the token anyway)
+    resp = clients["owner"].post(f"{base}/rename", {"source": "config.json", "destination": "config.old"}, format="json")
+    assert resp.status_code == 200, resp.content
+
+
+def test_c2_minecraft_rcon_password_is_masked_in_the_file_manager(make_instance: Any, fake_agent: Any, clients: Any) -> None:
+    """Adopted from test_c2c_minecraft_rcon_password_is_masked_in_the_properties_tab_only."""
+    from apps.instances.spec import rcon_password
+
+    inst = make_instance()
+    secret = rcon_password(inst)
+    fake_agent.put_file(inst.id, "server.properties", f"motd=hi\nenable-rcon=true\nrcon.password={secret}\n")
+    fake_agent.put_file(inst.id, ".rcon-cli.env", f"password={secret}\n")
+    operator = clients["operator"]
+    base = f"/api/instances/{inst.id}/files"
+    assert secret not in str(operator.get(f"/api/instances/{inst.id}/properties").json())
+    assert secret not in operator.get(f"{base}/text", {"path": "server.properties"}).json()["content"]
+    assert secret.encode() not in _body(operator.get(f"{base}/download", {"path": ".rcon-cli.env"}))
+    assert operator.post(f"{base}/search", {"query": "rcon", "path": ""}, format="json").json()["results"] == []
+    # saving server.properties from the editor (masked) keeps the password
+    shown = clients["owner"].get(f"{base}/text", {"path": "server.properties"}).json()["content"]
+    assert "rcon.password=********" in shown
+    resp = clients["owner"].put(
+        f"{base}/text", {"path": "server.properties", "content": shown.replace("motd=hi", "motd=yo")}, format="json"
+    )
+    assert resp.status_code == 200, resp.content
+    written = fake_agent.text(inst.id, "server.properties")
+    assert f"rcon.password={secret}" in written and "motd=yo" in written

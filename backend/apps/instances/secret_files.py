@@ -16,6 +16,13 @@
 
 Paths are compared after normalising (no leading ``/``, no ``.`` parts, ``\\`` as ``/``).
 
+* **Users without ``instance.configure``** (C-2; they may not read the server's secrets: the built-in Operator
+  role reads files): a search drops every hit in a secret-bearing file and every line the masking would change
+  (no oracle: whether a line with the secret matches tells nothing); a secret-bearing file, or a folder holding
+  one, cannot be renamed or moved (it would no longer be masked by its path); and for games that mask their
+  files (``masked_text``) every download of theirs is masked by value (the control secret and the server's
+  secrets of 8 characters or more), whatever the file is called.
+
 * **Archive extracts and imports** (job ``extract_archive``: the file manager's Extract and the
   Import of a server archive) never write a secret file: the agent skips every entry that lands on
   one of ``extract_protected`` (after its own path normalisation and the strip of a common folder;
@@ -224,15 +231,93 @@ def masked_by_line(instance: Instance) -> bool:
     return bool(definition is not None and definition.masks_by_line)
 
 
-def mask_search_results(instance: Instance, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Search results without secret files, with lines masked like the editor."""
+def reads_secrets(instance: Instance, user: Any) -> bool:
+    """Whether ``user`` may see the server's secrets (``instance.configure``; None: the panel itself)."""
+    return user is None or bool(user.has_panel_perm("instance.configure", instance))
+
+
+def masks_files(instance: Instance) -> bool:
+    """The game hides secrets inside its files (overrides ``masked_text``: TShock, the six Steam games, Minecraft)."""
+    from apps.games.base import GameDefinition
+
     definition = games.get_or_none(instance.game)
+    return definition is not None and type(definition).masked_text is not GameDefinition.masked_text
+
+
+def mask_values(instance: Instance) -> list[str]:
+    """The values a download of a user without ``instance.configure`` never contains (C-2): the control secret and
+    the server's secrets, 8 characters or more (shorter ones would also match ordinary text), longest first; none
+    for games that do not mask their files."""
+    if not masks_files(instance):
+        return []
+    from apps.instances.spec import rcon_password
+
+    values = {rcon_password(instance), *instance.secret_values.values()}
+    return sorted((v for v in values if isinstance(v, str) and len(v) >= 8), key=len, reverse=True)
+
+
+def _hides(text: str, values: list[str]) -> bool:
+    lowered = text.lower()
+    return any(v.lower() in lowered for v in values)
+
+
+def value_masked_stream(values: list[str], chunks: Any) -> Any:
+    """``chunks`` with every occurrence of ``values`` replaced by the mask, line by line while it is streamed (any
+    size; bytes that are not UTF-8 pass unchanged)."""
+    from apps.games.codecs import MASK
+
+    encoded = [(v.encode("utf-8"), MASK.encode()) for v in values]
+    pending = b""
+
+    def mask(line: bytes) -> bytes:
+        for value, masked in encoded:
+            line = line.replace(value, masked)
+        return line
+
+    for chunk in chunks:
+        pending += chunk
+        if b"\n" not in pending:
+            if len(pending) > MASKED_DOWNLOAD_LIMIT:
+                yield mask(pending)
+                pending = b""
+            continue
+        complete, _, pending = pending.rpartition(b"\n")
+        yield mask(complete) + b"\n"
+    if pending:
+        yield mask(pending)
+
+
+def mask_search_results(instance: Instance, results: list[dict[str, Any]], user: Any = None) -> list[dict[str, Any]]:
+    """Search results without secret files, with lines masked like the editor. For a user without
+    ``instance.configure`` (C-2): no hit in a secret-bearing file and no line the masking would change, so a
+    search cannot tell, letter by letter, what a masked secret is."""
+    definition = games.get_or_none(instance.game)
+    hide = not reads_secrets(instance, user)
+    values = mask_values(instance) if hide else []
     out = []
     for r in results:
         path = str(r.get("path") or "")
-        if is_secret(instance, path):
+        if is_secret(instance, path) or (hide and is_bearing(instance, path)):
             continue
-        if definition is not None and isinstance(r.get("text"), str):
-            r = {**r, "text": definition.masked_text(instance, path, r["text"])}
+        text = r.get("text")
+        if definition is not None and isinstance(text, str):
+            masked = definition.masked_text(instance, path, text)
+            if hide and (masked != text or _hides(text, values)):
+                continue
+            r = {**r, "text": masked}
         out.append(r)
     return out
+
+
+def require_bearing_kept(instance: Instance, source: Any, user: Any) -> None:
+    """A user without ``instance.configure`` cannot rename or move a secret-bearing file, or a folder holding one
+    (C-2: downloads are masked by path; under another name the file would be handed out as it is)."""
+    if reads_secrets(instance, user):
+        return
+    src = norm(source)
+    inside = any(_within(p, src) for p in (*bearing_paths(instance), *bearing_folders(instance)))
+    if is_bearing(instance, src) or inside:
+        raise refuse(
+            "This file (or a file in this folder) may hold the server's passwords; renaming or moving it needs the "
+            "permission to configure the server"
+        )

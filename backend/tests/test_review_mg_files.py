@@ -116,7 +116,9 @@ def test_tshock_token_is_masked_in_downloads_search_and_zips(clients, tshock, fa
         body = b"".join(resp.streaming_content) if hasattr(resp, "streaming_content") else resp.content
         assert secret.encode() not in body and b"********" in body
         resp = clients[who].post(files(None, tshock, "search"), {"query": "ApplicationRestTokens"}, format="json")
-        assert resp.status_code == 200 and resp.json()["results"]
+        # the owner sees the hits masked; a user without instance.configure gets no line with the secret at all
+        # (C-2 of the review of 2026-11-11: masked hits were an oracle for the masked value)
+        assert resp.status_code == 200 and bool(resp.json()["results"]) is (who == "owner")
         assert secret not in str(resp.json())
         resp = clients[who].get(files(None, tshock, "text"), {"path": "copy.json"})
         assert secret not in resp.json()["content"]
