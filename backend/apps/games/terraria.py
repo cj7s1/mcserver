@@ -236,8 +236,14 @@ RESET_FILE = ConfigFile(
 )
 
 # --- players ---------------------------------------------------------------------------------------------
-_PLAYING_COUNT = re.compile(r"(\d+) players? connected", re.IGNORECASE)
-_PLAYING_LINE = re.compile(r"^(?::\s*)?(\S.*?) \((?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-fA-F:]+)(?::\d+)?\)\s*$")
+# the game's own lines of ``playing`` as a whole (C-1: a player's chat line "<name> 99999999999 players
+# connected" or "<name> Admin (10.0.0.1)" is console output in the same window): the count has at most three
+# digits, a player line ends in "(ip:port)", and chat lines ("<name> text") are skipped
+_PLAYING_COUNT = re.compile(r"^(?::\s*)?(\d{1,3}) players? connected\.?$", re.IGNORECASE)
+_PLAYING_NONE = re.compile(r"^(?::\s*)?no players connected\.?$", re.IGNORECASE)
+_PLAYING_LINE = re.compile(
+    r"^(?::\s*)?([^<\s].*?) \((?:\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}|\[?[0-9a-fA-F:]*:[0-9a-fA-F:]*\]?(?::\d{1,5})?)\)$"
+)
 _TSHOCK_EXISTS = re.compile(r"already exists", re.IGNORECASE)
 
 
@@ -253,10 +259,12 @@ def parse_playing(out: str) -> dict[str, Any]:
     count = None
     for raw in (out or "").splitlines():
         line = raw.strip()
-        if "no players connected" in line.lower():
+        if line.lstrip(": ").startswith("<"):
+            continue  # chat
+        if _PLAYING_NONE.match(line):
             count = 0
             continue
-        if m := _PLAYING_COUNT.search(line):
+        if m := _PLAYING_COUNT.match(line):
             count = int(m.group(1))
             continue
         if (m := _PLAYING_LINE.match(line)) and re.fullmatch(PLAYER_NAME, m.group(1)) and m.group(1) not in names:
