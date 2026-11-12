@@ -162,7 +162,11 @@ class LoginView(APIView):
         ser = LoginSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         name = ser.validated_data["username"]
-        account_throttle.check("login", name)  # 429 after too many failures for this account (D-3)
+        # 429 after too many failures for this account (D-3), unless this browser has signed in to it before
+        known_uid = account_throttle.known_browser_user_id(request, "login")
+        known = known_uid is not None and User.objects.filter(pk=known_uid, username=name).exists()
+        if not known:
+            account_throttle.check("login", name)
         user = authenticate(request, username=name, password=ser.validated_data["password"])
         if user is None:
             account_throttle.failed("login", name)
@@ -170,7 +174,9 @@ class LoginView(APIView):
             raise ApiError("Invalid username or password", code="invalid_credentials", status_code=401)
         login(request, user)
         audit.record("auth.login", request=request, actor=user, target=user)
-        return Response(MeSerializer(user).data)
+        response = Response(MeSerializer(user).data)
+        account_throttle.set_known_browser(response, user)
+        return response
 
 
 class LogoutView(APIView):
@@ -207,7 +213,9 @@ class PasswordChangeView(APIView):
         ser = PasswordChangeSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         user = request.user
-        account_throttle.check("password", str(user.pk))  # 429 after too many wrong current passwords (D-3)
+        # 429 after too many wrong current passwords (D-3), unless this browser has signed in to the account before
+        if account_throttle.known_browser_user_id(request, "password") != user.pk:
+            account_throttle.check("password", str(user.pk))
         if not user.check_password(ser.validated_data["old_password"]):
             account_throttle.failed("password", str(user.pk))
             raise ValidationError({"old_password": ["Current password is incorrect"]})

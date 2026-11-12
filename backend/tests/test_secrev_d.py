@@ -574,3 +574,109 @@ def test_the_runner_names_the_owner_of_a_job_without_a_server(users: Any, monkey
     job = Job.objects.create(kind="delete", title="Delete x", user=users["manager"], instance=None)
     runner._broadcast_job("job.finished", job)
     assert sent[-1][0][2] is None and sent[-1][1] == {"owner_id": str(users["manager"].pk)}
+
+
+# --- D-3, refined: a known browser is not locked out --------------------------------------------------------
+def _lock(name: str) -> None:
+    from rest_framework.test import APIClient
+
+    for n in range(10):
+        APIClient(REMOTE_ADDR=f"172.20.0.{n}").post("/api/auth/login", {"username": name, "password": "wrong-password"})
+
+
+def _known_browser(user_name: str, password: str, addr: str = "192.168.1.20") -> tuple[Any, Any]:
+    from rest_framework.test import APIClient
+
+    client = APIClient(REMOTE_ADDR=addr)
+    resp = client.post("/api/auth/login", {"username": user_name, "password": password})
+    assert resp.status_code == 200, resp.content
+    return client, resp
+
+
+@pytest.mark.django_db
+def test_d3_a_known_browser_signs_in_to_a_locked_account(users: Any) -> None:
+    from rest_framework.test import APIClient
+
+    from tests.conftest import PASSWORD
+
+    browser, resp = _known_browser("owner", PASSWORD)
+    cookie = resp.cookies["mcpanel_known_browser"]
+    assert cookie["httponly"] and cookie["samesite"] == "Lax" and cookie["path"] == "/api/auth/login"
+    assert int(cookie["max-age"]) >= 360 * 86400 and not cookie["secure"]  # (Secure like the session cookie)
+    assert resp.cookies["mcpanel_known_browser_pw"]["path"] == "/api/auth/password"
+    _lock("owner")
+    stranger = APIClient(REMOTE_ADDR="10.9.9.9").post("/api/auth/login", {"username": "owner", "password": PASSWORD})
+    assert stranger.status_code == 429 and "unlock_login" in stranger.json()["error"]["message"]
+    again = browser.post("/api/auth/login", {"username": "owner", "password": PASSWORD})
+    assert again.status_code == 200
+    assert again.cookies["mcpanel_known_browser"].value != cookie.value  # rotated at each sign-in
+    # a wrong password from the known browser is still just wrong (and still counted)
+    assert browser.post("/api/auth/login", {"username": "owner", "password": "nope-nope-1"}).status_code == 401
+
+
+@pytest.mark.django_db
+def test_d3_the_cookie_of_one_account_does_not_help_another(users: Any) -> None:
+    from tests.conftest import PASSWORD
+
+    browser, _resp = _known_browser("manager", PASSWORD)
+    _lock("owner")
+    assert browser.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 429
+    assert browser.post("/api/auth/login", {"username": "Manager", "password": PASSWORD}).status_code in (401, 429)
+
+
+@pytest.mark.django_db
+def test_d3_a_forged_or_expired_cookie_does_not_help(users: Any, monkeypatch: Any) -> None:
+    import time as real_time
+    from types import SimpleNamespace
+
+    from django.core import signing
+    from rest_framework.test import APIClient
+
+    from apps.accounts import throttle
+    from tests.conftest import PASSWORD
+
+    _browser, resp = _known_browser("owner", PASSWORD)
+    valid = resp.cookies["mcpanel_known_browser"].value
+    _lock("owner")
+    forged_value = signing.dumps({"u": users["owner"].pk, "n": "x"}, salt="something-else")
+    for value in (forged_value, valid[:-2] + "xx", "garbage"):
+        client = APIClient(REMOTE_ADDR="10.1.1.1")
+        client.cookies["mcpanel_known_browser"] = value
+        assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 429, value
+    # a year and a day later the real cookie no longer counts
+    later = real_time.time() + throttle.KNOWN_BROWSER_AGE + 86400
+    monkeypatch.setattr(signing, "time", SimpleNamespace(time=lambda: later))
+    assert throttle.known_browser_user_id(SimpleNamespace(COOKIES={"mcpanel_known_browser": valid}), "login") is None
+    monkeypatch.undo()
+    assert throttle.known_browser_user_id(SimpleNamespace(COOKIES={"mcpanel_known_browser": valid}), "login") == users["owner"].pk
+
+
+@pytest.mark.django_db
+def test_d3_a_known_browser_may_change_the_password_of_a_locked_account(users: Any) -> None:
+    from tests.conftest import PASSWORD
+
+    browser, _resp = _known_browser("manager", PASSWORD)
+    for _ in range(10):
+        browser.post("/api/auth/password", {"old_password": "wrong-password", "new_password": "A-new-Passphrase-77"})
+    resp = browser.post("/api/auth/password", {"old_password": PASSWORD, "new_password": "A-new-Passphrase-77"})
+    assert resp.status_code == 204, resp.content
+
+
+@pytest.mark.django_db
+def test_d3_unlock_login_clears_the_counters(users: Any) -> None:
+    from io import StringIO
+
+    from django.core.management import call_command
+    from rest_framework.test import APIClient
+
+    from apps.audit.models import AuditEvent
+    from tests.conftest import PASSWORD
+
+    _lock("Owner")
+    client = APIClient(REMOTE_ADDR="10.2.2.2")
+    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 429
+    out = StringIO()
+    call_command("unlock_login", "owner", stdout=out)
+    assert "Unlocked 'owner'" in out.getvalue()
+    assert client.post("/api/auth/login", {"username": "owner", "password": PASSWORD}).status_code == 200
+    assert AuditEvent.objects.filter(action="auth.login_unlocked").exists()
