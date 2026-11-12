@@ -328,8 +328,12 @@ def test_panel_values_are_accepted(settings, game, env):
 )
 def test_the_control_secret_is_injected_and_checked(settings, game, key):
     assert kwargs(settings, make_spec(game))["environment"][key] == PASSWORD
-    # a control secret that does not fit the variable's pattern is refused, never passed on
-    refused(settings, make_spec(game, rcon_password="secret; touch /tmp/x #"))
+    # a control secret that does not fit the variable's pattern is refused, never passed on: by the
+    # spec's own pattern (B-10), and by the profile's check behind it
+    bad = "secret; touch /tmp/x #"
+    with pytest.raises(ValidationError):
+        make_spec(game, rcon_password=bad)
+    refused(settings, make_spec(game).model_copy(update={"rcon_password": bad}))
 
 
 def test_a_panel_password_wins_over_the_control_secret(settings):

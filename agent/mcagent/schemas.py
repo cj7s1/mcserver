@@ -61,7 +61,9 @@ class InstanceSpec(BaseModel):
     network: str | None = None
     restart_policy: Literal["no", "unless-stopped", "on-failure"] = "unless-stopped"
     stop_timeout: int = Field(default=60, ge=5, le=900)
-    rcon_password: str = Field(min_length=8, max_length=128)
+    # the panel generates 32 letters and digits; no blank, quote or shell character can reach a command line,
+    # a config file or the redaction patterns (B-10)
+    rcon_password: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     healthcheck: HealthcheckSpec = Field(default_factory=HealthcheckSpec)
     # The runtime profile (mcagent.profiles): absent = Minecraft, which is what every panel before
     # multi-game support sends, and what a current panel sends for a Minecraft server. Unknown

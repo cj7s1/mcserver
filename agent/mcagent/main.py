@@ -907,6 +907,11 @@ async def command(
         output = await drivers.for_container(c).command(settings, c, body.command, body.timeout)
     except RconError as exc:
         raise AgentError(str(exc), "rcon_failed", 502) from exc
+    # the game's reply may echo its own secrets (RCON, WebRCON, TShock REST as much as the console; B-10)
+    if output and (getattr(c, "labels", None) or {}).get(profiles.LABEL_GAME):
+        redact = await run_in_threadpool(docker_ops.log_redactor, settings, c)
+        if redact is not None:
+            output = redact(output)
     return {"output": output}
 
 
@@ -1198,6 +1203,9 @@ LOG_BUFFER_MAX_BYTES = 4 * 1024 * 1024
 LOG_BATCH_MAX_LINES = 500
 LOG_BATCH_MAX_BYTES = 512 * 1024  # keeps one WebSocket message far below the panel's 8 MiB limit
 LOG_TRUNCATED_SUFFIX = " [mcpanel: line truncated]"
+# bytes read beyond LOG_LINE_MAX_BYTES before a line of a game with a redactor is cut: more than the longest
+# secret, so that a secret that crosses the cut is redacted whole before the line is cut (B-10)
+LOG_REDACT_MARGIN = 1024
 LOG_PING_SECONDS = 15.0  # a ping goes out when nothing else did for this long
 LOG_RETRY_SECONDS = 2.0  # after a Docker error, before the pump tries again
 
@@ -1248,6 +1256,18 @@ class _LineSplitter:
         self._buf.clear()
         self._skipping = False
         return [line] if line is not None else []
+
+
+def _redact_line(line: str, redact: Any) -> str:
+    """``line`` (of a splitter with LOG_REDACT_MARGIN extra bytes) redacted, then cut to LOG_LINE_MAX_BYTES."""
+    if redact is None:
+        return line
+    truncated = line.endswith(LOG_TRUNCATED_SUFFIX)
+    body = redact(line[: -len(LOG_TRUNCATED_SUFFIX)] if truncated else line)
+    data = body.encode("utf-8", errors="replace")
+    if len(data) > LOG_LINE_MAX_BYTES:
+        body, truncated = data[:LOG_LINE_MAX_BYTES].decode("utf-8", errors="ignore"), True
+    return body + LOG_TRUNCATED_SUFFIX if truncated else body
 
 
 class _LogBuffer:
@@ -1443,24 +1463,25 @@ async def stream_logs(websocket: WebSocket, instance_id: UUID, tail: int = 200) 
                 stop_event.wait(2)
                 continue
             current_stream["s"] = stream
-            splitter = _LineSplitter()
             # a game whose image prints its control secret: hidden in every line (None: Minecraft)
             redact = (
                 docker_ops.log_redactor(settings, c)
                 if (getattr(c, "labels", None) or {}).get(profiles.LABEL_GAME)
                 else None
             )
+            # redacted before it is cut: a secret across the cut is hidden whole (B-10)
+            splitter = _LineSplitter(LOG_LINE_MAX_BYTES + (LOG_REDACT_MARGIN if redact is not None else 0))
             try:
                 for chunk in stream:
                     if stop_event.is_set():
                         break
                     for line in splitter.feed(chunk):
-                        emit({"type": "log", "line": redact(line) if redact is not None else line})
+                        emit({"type": "log", "line": _redact_line(line, redact)})
             except Exception as exc:  # stream broke (container stopped / daemon restarted)
                 log.debug("log stream for %s ended: %s", instance_id, exc)
             finally:
                 for line in splitter.flush():
-                    emit({"type": "log", "line": redact(line) if redact is not None else line})
+                    emit({"type": "log", "line": _redact_line(line, redact)})
                 with contextlib.suppress(Exception):
                     stream.close()
                 current_stream.pop("s", None)
