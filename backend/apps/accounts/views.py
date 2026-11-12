@@ -155,7 +155,9 @@ class SetupView(APIView):
         login(request, user)
         token = session_binding.issue(request.session)  # shown once: the tab sends it with every request (D-1)
         audit.record("auth.setup", request=request, actor=user, target=user)
-        return Response({**MeSerializer(user).data, "session_token": token}, status=status.HTTP_201_CREATED)
+        response = Response({**MeSerializer(user).data, "session_token": token}, status=status.HTTP_201_CREATED)
+        account_throttle.set_known_browser(response, user)  # (R-11: the owner's browser is known from the start)
+        return response
 
 
 @method_decorator(csrf_protect, name="dispatch")
@@ -171,7 +173,8 @@ class LoginView(APIView):
         name = ser.validated_data["username"]
         # 429 after too many failures for this account (D-3), unless this browser has signed in to it before
         known_uid = account_throttle.known_browser_user_id(request, "login")
-        known = known_uid is not None and User.objects.filter(pk=known_uid, username=name).exists()
+        candidate = User.objects.filter(pk=known_uid, username=name).first() if known_uid is not None else None
+        known = account_throttle.known_browser_matches(request, "login", candidate)
         if not known:
             account_throttle.check("login", name)
         user = authenticate(request, username=name, password=ser.validated_data["password"])
@@ -222,7 +225,7 @@ class PasswordChangeView(APIView):
         ser.is_valid(raise_exception=True)
         user = request.user
         # 429 after too many wrong current passwords (D-3), unless this browser has signed in to the account before
-        if account_throttle.known_browser_user_id(request, "password") != user.pk:
+        if not account_throttle.known_browser_matches(request, "password", user):
             account_throttle.check("password", str(user.pk))
         if not user.check_password(ser.validated_data["old_password"]):
             account_throttle.failed("password", str(user.pk))
@@ -233,7 +236,10 @@ class PasswordChangeView(APIView):
         user.save(update_fields=["password", "must_change_password"])
         update_session_auth_hash(request, user)
         audit.record("auth.password_changed", request=request, target=user)
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        response = Response(status=status.HTTP_204_NO_CONTENT)
+        # (R-11: the change voids every known-browser cookie made before; the browser that made it stays known)
+        account_throttle.set_known_browser(response, user)
+        return response
 
 
 @method_decorator(csrf_protect, name="dispatch")

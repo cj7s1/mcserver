@@ -767,3 +767,46 @@ def test_a6_the_instance_answer_names_the_agents_own_networks(make_instance: Any
         "shared": "mcpanel_instances",
         "per_server_prefix": None,
     }
+
+
+# --- R-11 of the branch review: the known-browser cookie dies with the password ------------------------------
+@pytest.mark.django_db
+def test_r11_a_password_change_voids_older_known_browser_cookies(users: Any) -> None:
+    """Adopted from fixes/review/session/test_review_session.py::test_known_browser_cookie_survives_a_password_change."""
+    from rest_framework.test import APIClient
+
+    from tests.conftest import PASSWORD
+
+    thief = APIClient(REMOTE_ADDR="10.7.7.7")
+    resp = thief.post("/api/auth/login", {"username": "manager", "password": PASSWORD})
+    known = resp.cookies["mcpanel_known_browser"].value
+    owner = APIClient()
+    resp = owner.post("/api/auth/login", {"username": "manager", "password": PASSWORD})
+    new_pw = "A-new-Passphrase-77"
+    changed = owner.post("/api/auth/password", {"old_password": PASSWORD, "new_password": new_pw})
+    assert changed.status_code == 204
+    assert changed.cookies["mcpanel_known_browser"].value  # the browser that changed it stays known
+    _lock("manager")
+    guesser = APIClient(REMOTE_ADDR="10.6.6.6")
+    guesser.cookies["mcpanel_known_browser"] = known
+    assert guesser.post("/api/auth/login", {"username": "manager", "password": new_pw}).status_code == 429
+    # the owner's own browser (its cookie made with the new password) still gets in
+    assert owner.post("/api/auth/login", {"username": "manager", "password": new_pw}).status_code == 200
+
+
+@pytest.mark.django_db
+def test_r11_first_run_setup_makes_the_owners_browser_known(db: Any, settings: Any) -> None:
+    from rest_framework.test import APIClient
+
+    settings.MCPANEL_SETUP_TOKEN = ""
+    browser = APIClient()
+    resp = browser.post("/api/auth/setup", {"username": "first", "password": "a-Very-long-passphrase"})
+    assert resp.status_code == 201 and resp.cookies["mcpanel_known_browser"].value
+    _lock("first")
+    assert browser.post("/api/auth/login", {"username": "first", "password": "a-Very-long-passphrase"}).status_code == 200
+    assert (
+        APIClient(REMOTE_ADDR="10.5.5.5")
+        .post("/api/auth/login", {"username": "first", "password": "a-Very-long-passphrase"})
+        .status_code
+        == 429
+    )

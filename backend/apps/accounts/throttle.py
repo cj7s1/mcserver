@@ -87,9 +87,19 @@ def unlock(scope: str, account: str) -> int:
 
 
 # --- known browsers ---------------------------------------------------------------------------------------
+def _password_mark(user: Any, nonce: str) -> str:
+    """Ties a known-browser cookie to the account's current password (R-11): ``get_session_auth_hash`` changes with
+    the password, so a password change voids every cookie given out before it."""
+    from django.utils.crypto import salted_hmac
+
+    return salted_hmac(_KNOWN_BROWSER_SALT, f"{nonce}:{user.get_session_auth_hash()}").hexdigest()[:32]
+
+
 def set_known_browser(response: Any, user: Any) -> None:
-    """After a successful sign-in: a new known-browser cookie for each password route (rotated at every sign-in)."""
-    value = signing.dumps({"u": user.pk, "n": secrets.token_urlsafe(12)}, salt=_KNOWN_BROWSER_SALT)
+    """After a successful sign-in (login, first-run setup): a new known-browser cookie for each password route
+    (rotated at every sign-in), bound to the user and to the password it was made with."""
+    nonce = secrets.token_urlsafe(12)
+    value = signing.dumps({"u": user.pk, "n": nonce, "p": _password_mark(user, nonce)}, salt=_KNOWN_BROWSER_SALT)
     for name, path in KNOWN_BROWSER_COOKIES.values():
         response.set_cookie(
             name,
@@ -114,3 +124,19 @@ def known_browser_user_id(request: Any, scope: str) -> Any:
         return None
     uid = data.get("u") if isinstance(data, dict) else None
     return uid if isinstance(uid, int) and not isinstance(uid, bool) else None
+
+
+def known_browser_matches(request: Any, scope: str, user: Any) -> bool:
+    """Whether the request carries a valid known-browser cookie of this route for ``user`` made with the account's
+    current password (R-11)."""
+    from django.utils.crypto import constant_time_compare
+
+    if user is None or known_browser_user_id(request, scope) != user.pk:
+        return False
+    name, _path = KNOWN_BROWSER_COOKIES[scope]
+    try:
+        data = signing.loads(request.COOKIES.get(name) or "", salt=_KNOWN_BROWSER_SALT, max_age=KNOWN_BROWSER_AGE)
+    except signing.BadSignature:
+        return False
+    nonce, mark = str(data.get("n") or ""), str(data.get("p") or "")
+    return bool(nonce and mark) and constant_time_compare(mark, _password_mark(user, nonce))
