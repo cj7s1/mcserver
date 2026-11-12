@@ -4,6 +4,17 @@ Newest first. The first heading is the plugin's version: build.sh writes it into
 Plugins page offers an update when the version of the pluginURL's file is greater (compared as text). Any
 change of src/ gets a new entry: the date, with a letter for a second one on the same day (2026.11.12a).
 
+## 2026.11.12a
+
+- The run folder (lock, task state, plans, logs) is /run/mcpanel instead of /tmp/mcpanel: under a folder only
+  root can write, checked on every use (also by the page's facts and its PHP), new files made with noclobber;
+  at most 10 logs and 32 MB (/run is small).
+- Install Compose and the boot tasks check the SHA-256 of the copy that is moved into place (in RAM, and on the
+  flash drive before it replaces the old one), not only of the file it was copied from.
+- The boot tasks run the checkout's scripts only when nothing of them is writable by others or owned by anyone
+  but root; otherwise "NEEDS YOU" with the repair on the page and in the syslog. A checkout without .git (the
+  ZIP download) works for the boot tasks; updates and rollbacks through the page need a git clone.
+
 ## 2026.11.12
 
 - First version, not run on a real Unraid server yet (docs/UNRAID.md, "The Unraid plugin": the first-run

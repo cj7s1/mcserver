@@ -6,7 +6,7 @@
   Install: Plugins > Install Plugin, with the pluginURL below. See docs/UNRAID.md, "The Unraid plugin".
   NOT RUN ON A REAL UNRAID HOST YET.
 -->
-<PLUGIN name="mcpanel" author="MCPanel" version="2026.11.12" pluginURL="https://raw.githubusercontent.com/cj7s1/mcserver/main/deploy/unraid/plugin/mcpanel.plg" min="7.0.0" launch="Settings/MCPanel" icon="gamepad">
+<PLUGIN name="mcpanel" author="MCPanel" version="2026.11.12a" pluginURL="https://raw.githubusercontent.com/cj7s1/mcserver/main/deploy/unraid/plugin/mcpanel.plg" min="7.0.0" launch="Settings/MCPanel" icon="gamepad">
 
 <CHANGES>
 <![CDATA[
@@ -15,6 +15,17 @@
 Newest first. The first heading is the plugin's version: build.sh writes it into mcpanel.plg, and Unraid's
 Plugins page offers an update when the version of the pluginURL's file is greater (compared as text). Any
 change of src/ gets a new entry: the date, with a letter for a second one on the same day (2026.11.12a).
+
+## 2026.11.12a
+
+- The run folder (lock, task state, plans, logs) is /run/mcpanel instead of /tmp/mcpanel: under a folder only
+  root can write, checked on every use (also by the page's facts and its PHP), new files made with noclobber;
+  at most 10 logs and 32 MB (/run is small).
+- Install Compose and the boot tasks check the SHA-256 of the copy that is moved into place (in RAM, and on the
+  flash drive before it replaces the old one), not only of the file it was copied from.
+- The boot tasks run the checkout's scripts only when nothing of them is writable by others or owned by anyone
+  but root; otherwise "NEEDS YOU" with the repair on the page and in the syslog. A checkout without .git (the
+  ZIP download) works for the boot tasks; updates and rollbacks through the page need a git clone.
 
 ## 2026.11.12
 
@@ -42,7 +53,7 @@ umask 022
 D="${MCPANEL_PLUGIN_ROOT:-}/usr/local/emhttp/plugins/mcpanel"
 KEEP=""
 if [ -f "${D}/event/stopping_docker" ] && [ ! -L "${D}/event/stopping_docker" ]; then
-    KEEP="$(mktemp "${MCPANEL_PLUGIN_ROOT:-}/tmp/mcpanel-hook.XXXXXX")" && cp -p "${D}/event/stopping_docker" "${KEEP}" || KEEP=""
+    KEEP="$(mktemp "${MCPANEL_PLUGIN_ROOT:-}/run/mcpanel-hook.XXXXXX")" && cp -p "${D}/event/stopping_docker" "${KEEP}" || KEEP=""
 fi
 rm -rf "${D}"
 if [ -n "${KEEP}" ]; then
@@ -271,7 +282,9 @@ $mcpanel_v = @filemtime("$mcpanel_dir/mcpanel.js") ?: 0;
     rows.appendChild(row('Shutdown hook', f.HOOK === 'installed' ? 'installed' : 'not installed (the boot tasks install it: at every Docker start, or Boot tasks > Run now)'));
     hint = '';
     if (f.BOOT_RESULT) hint = 'Last run: ' + f.BOOT_RESULT + (f.BOOT_ENDED ? ' at ' + when(f.BOOT_ENDED) : '') + ' (log ' + (f.BOOT_LOG || '').replace(/^.*\//, '') + ')';
+    if (f.BOOT_NEEDS) hint += (hint ? '. ' : '') + 'NEEDS YOU: ' + f.BOOT_NEEDS;
     rows.appendChild(row('Boot tasks', f.BOOT_EVENT === 'yes' ? 'run at every Docker start' : 'the event script is missing: reinstall the plugin', hint));
+    if (f.RUN_DIR_PROBLEM) rows.appendChild(row('Run folder', f.RUN_DIR_PROBLEM));
     if ((f.USER_SCRIPT || []).length || f.GO_FILE === 'yes') {
       rows.appendChild(row('Also at boot', (f.USER_SCRIPT || []).map(function (s) { return 'User Script "' + s + '"'; })
         .concat(f.GO_FILE === 'yes' ? ['/boot/config/go'] : []).join(', '),
@@ -292,7 +305,8 @@ $mcpanel_v = @filemtime("$mcpanel_dir/mcpanel.js") ?: 0;
       rows.appendChild(row('Action', 'running: ' + (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ' since ' + when(f.TASK_STARTED)));
     } else if (f.TASK_TASK) {
       var result = f.TASK_RESULT === 'running' ? 'interrupted (its process is gone; the log shows how far it got)' : f.TASK_RESULT + (f.TASK_EXIT && f.TASK_EXIT !== '0' ? ' (exit ' + f.TASK_EXIT + ')' : '');
-      rows.appendChild(row('Last action', (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ': ' + result + (f.TASK_ENDED ? ' at ' + when(f.TASK_ENDED) : '')));
+      rows.appendChild(row('Last action', (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ': ' + result + (f.TASK_ENDED ? ' at ' + when(f.TASK_ENDED) : ''),
+        f.TASK_NEEDS ? 'NEEDS YOU: ' + f.TASK_NEEDS : ''));
     }
 
     // update
@@ -302,6 +316,7 @@ $mcpanel_v = @filemtime("$mcpanel_dir/mcpanel.js") ?: 0;
         f.BEHIND + ' commit(s) behind ' + f.UPSTREAM + (f.AHEAD && f.AHEAD !== '0' ? ', ' + f.AHEAD + ' ahead (Update cannot fast-forward then: that is for the terminal)' : '') +
         (f.UPDATES_CHECKED ? ' (checked ' + when(f.UPDATES_CHECKED) + ')' : ' (not checked from this page yet)') + '.');
     }
+    if (f.GIT === 'no') info.push('This checkout has no .git folder (a ZIP download): Check for updates, Update and Roll back need a git clone (docs/UNRAID.md, section 3). The boot tasks work without it.');
     $id('mcp-update-info').textContent = info.join(' ');
     var list = $id('mcp-commits');
     list.textContent = '';
@@ -482,7 +497,7 @@ function mcpanel_config(): array
 {
     return [
         'runner' => dirname(__DIR__) . '/bin/mcpanel',
-        'run_dir' => '/tmp/mcpanel',
+        'run_dir' => '/run/mcpanel',
     ];
 }
 
@@ -548,9 +563,34 @@ function mcpanel_task(array $post): ?array
     return $option === '' ? [$task] : [$task, $option];
 }
 
+/* A folder (not a link) of the user this runs as (root on Unraid) that group and others cannot write. */
+function mcpanel_own_dir(string $dir): bool
+{
+    clearstatcache(true, $dir);
+    if (!is_dir($dir) || is_link($dir)) {
+        return false;
+    }
+    $uid = function_exists('posix_geteuid') ? posix_geteuid() : 0;
+    return fileowner($dir) === $uid && (fileperms($dir) & 0022) === 0;
+}
+
+/* The run folder and its logs folder are read only when they are root's own (bin/mcpanel checks the same). */
+function mcpanel_run_dir_ok(array $cfg): bool
+{
+    foreach ([$cfg['run_dir'], $cfg['run_dir'] . '/logs'] as $dir) {
+        if ((file_exists($dir) || is_link($dir)) && !mcpanel_own_dir($dir)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* The log of a task: only files the runner wrote (logs/<time>-<task>.log), read from an offset. */
 function mcpanel_log(array $cfg, array $post): array
 {
+    if (!mcpanel_run_dir_ok($cfg)) {
+        return ['ok' => false, 'error' => 'the run folder is not root\'s own: the page does not read it'];
+    }
     $logs = $cfg['run_dir'] . '/logs';
     $name = mcpanel_field($post, 'name', 128);
     $offset = mcpanel_field($post, 'offset', 12);
@@ -558,9 +598,9 @@ function mcpanel_log(array $cfg, array $post): array
         return ['ok' => false, 'error' => 'bad request'];
     }
     $task = [];
-    if (is_file($cfg['run_dir'] . '/task.env')) {
+    if (is_file($cfg['run_dir'] . '/task.env') && !is_link($cfg['run_dir'] . '/task.env')) {
         foreach (file($cfg['run_dir'] . '/task.env', FILE_IGNORE_NEW_LINES) as $line) {
-            if (preg_match('/^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED)=(.*)$/', $line, $m)) {
+            if (preg_match('/^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED|NEEDS)=(.*)$/', $line, $m)) {
                 $task[$m[1]] = $m[2];
             }
         }
@@ -572,7 +612,7 @@ function mcpanel_log(array $cfg, array $post): array
         return ['ok' => true, 'name' => '', 'data' => '', 'offset' => 0, 'busy' => mcpanel_busy($cfg), 'task' => $task];
     }
     $path = "$logs/$name";
-    $size = is_file($path) ? filesize($path) : 0;
+    $size = is_file($path) && !is_link($path) ? filesize($path) : 0;
     $from = $offset === '' ? 0 : min((int)$offset, $size);
     $data = '';
     if ($size > $from && ($fh = fopen($path, 'rb'))) {
@@ -596,7 +636,7 @@ function mcpanel_log(array $cfg, array $post): array
 function mcpanel_busy(array $cfg): bool
 {
     $lock = $cfg['run_dir'] . '/lock';
-    if (!is_file($lock) || !($fh = @fopen($lock, 'r'))) {
+    if (!mcpanel_run_dir_ok($cfg) || !is_file($lock) || is_link($lock) || !($fh = @fopen($lock, 'r'))) {
         return false;
     }
     $free = flock($fh, LOCK_SH | LOCK_NB);
@@ -673,7 +713,7 @@ echo json_encode(mcpanel_handle($_POST, mcpanel_config()), JSON_INVALID_UTF8_SUB
 #   mcpanel facts                    what the page shows at once (KEY=value lines; no network, changes nothing)
 #   mcpanel describe TASK [OPTION]   the exact commands TASK would run now, or why it refuses (changes nothing)
 #   mcpanel start TASK [OPTION]      check TASK and OPTION, take the lock, run TASK in the background; what it
-#                                    prints goes into a log in /tmp/mcpanel/logs that the page shows live
+#                                    prints goes into a log in /run/mcpanel/logs that the page shows live
 #   mcpanel boot                     the boot tasks (event/docker_started starts it in the background): waits
 #                                    for a running action, then runs the task boot-run
 #   mcpanel detect                   the MCPanel stacks Docker knows: "DETECTED=<project>|<checkout>" lines
@@ -700,7 +740,9 @@ echo json_encode(mcpanel_handle($_POST, mcpanel_config()), JSON_INVALID_UTF8_SUB
 #
 # One action at a time: a lock (flock, held by the running task and everything it started; the kernel
 # lets it go when they are gone, so a killed task never leaves the page stuck). Everything runs with
-# umask 022. The settings file is read line by line, never sourced.
+# umask 022. The settings file is read line by line, never sourced. The run folder (lock, task state,
+# plans, logs) is /run/mcpanel: under /run, which only root can write, and every use checks that it is a
+# folder of root's that only root can write; new files are made with noclobber.
 #
 # ***************************************************************************************************
 # NOT RUN ON A REAL UNRAID HOST YET. Tested against stand-ins (docs/UNRAID.md, "The Unraid plugin", has
@@ -721,7 +763,7 @@ R="${MCPANEL_PLUGIN_ROOT:-}"
 CFG_DIR="${R}/boot/config/plugins/mcpanel"
 CFG="${CFG_DIR}/mcpanel.cfg"
 PLG="${R}/boot/config/plugins/mcpanel.plg"
-RUN_DIR="${R}/tmp/mcpanel"
+RUN_DIR="${R}/run/mcpanel"
 LOGS="${RUN_DIR}/logs"
 LOCK="${RUN_DIR}/lock"
 TASK_FILE="${RUN_DIR}/task.env"
@@ -731,7 +773,8 @@ LIB_DIR="${R}/usr/local/lib/mcpanel"
 CLI_DIR="${R}/usr/local/lib/docker/cli-plugins"
 USER_SCRIPTS="${R}/boot/config/plugins/user.scripts/scripts"
 GO_FILE="${R}/boot/config/go"
-KEEP_LOGS=20
+KEEP_LOGS=10
+LOGS_MAX_KB=32768 # /run is a small tmpfs (128 MB on Unraid 7.3): the logs together stay below 32 MB
 PLAN_HOURS=12
 
 # Docker Compose: the official release, pinned (docs/UNRAID.md, "Compose on Unraid")
@@ -860,11 +903,13 @@ resolve() {
     fi
 }
 
-# checkout_problem DIR [strict]: why DIR cannot be used (nothing when it can). strict: also the rule of the
-# scripts that root runs from it (upgrade.sh, install-hook.sh, ...): nothing they run or git reads may be
-# writable by group or others.
+# checkout_problem DIR [strict] [git]: why DIR cannot be used (nothing when it can). A checkout without .git (the
+# quick start's ZIP download) is fine for everything but the tasks that need git (git). strict: also the rule
+# of the scripts that root runs from it (upgrade.sh, install-hook.sh, ...), plus the owner: nothing they run
+# or git reads may be writable by group or others or belong to anyone but root.
 checkout_problem() {
-    local c="$1" f loose
+    local c="$1" f found repair
+    local -a paths
     [ -d "${c}" ] || {
         say "${c} is not a folder (is its pool mounted?)"
         return
@@ -876,27 +921,39 @@ checkout_problem() {
             return
         }
     done
-    [ -d "${c}/.git" ] || {
-        say "${c} is not a git checkout (it has no .git folder)"
-        return
-    }
-    [ "${2:-}" = strict ] || return 0
-    loose="$(find -L "${c}" "${c}/.git" "${c}/.git/config" "${c}/.git/hooks" "${c}/deploy" "${c}/deploy/scripts" \
-        "${c}/deploy/unraid" "${c}/deploy/scripts/upgrade.sh" "${c}/deploy/unraid/array-start.sh" \
-        "${c}/deploy/unraid/install-hook.sh" "${c}/deploy/unraid/instance-firewall.sh" \
-        "${c}/deploy/unraid/stopping_docker" -maxdepth 0 -perm /022 -printf '%m %p, ' 2>/dev/null)"
-    [ -z "${loose}" ] ||
-        say "group or others can write to what root runs or git reads there (mode, path): ${loose%, }. Repair it in the Unraid terminal, then try again: chmod -R go-w $(printf '%q' "${c}")"
+    case " $* " in *" git "*)
+        [ -d "${c}/.git" ] || {
+            say "${c} has no .git folder (a ZIP download?): this needs a git clone of MCPanel (docs/UNRAID.md, section 3)"
+            return
+        }
+        ;;
+    esac
+    case " $* " in *" strict "*) ;; *) return 0 ;; esac
+    paths=("${c}" "${c}/deploy" "${c}/deploy/scripts" "${c}/deploy/unraid" "${c}/deploy/scripts/upgrade.sh"
+        "${c}/deploy/unraid/array-start.sh" "${c}/deploy/unraid/install-hook.sh" "${c}/deploy/unraid/instance-firewall.sh"
+        "${c}/deploy/unraid/stopping_docker")
+    [ ! -d "${c}/.git" ] || paths+=("${c}/.git" "${c}/.git/config" "${c}/.git/hooks")
+    found="$(find -L "${paths[@]}" -maxdepth 0 \( -perm /022 -o ! -uid "${EUID}" \) -printf '%m %u %p, ' 2>/dev/null)"
+    [ -n "${found}" ] || return 0
+    printf -v repair 'chown -R root:root %q && chmod -R go-w %q' "${c}" "${c}"
+    say "group or others can write, or another user than root owns, what root runs or git reads there (mode, owner, path): ${found%, }. Repair it in the Unraid terminal, then try again: ${repair}"
 }
 
-need_checkout() { # need_checkout [strict]
+need_checkout() { # need_checkout [strict] [git]
     local why
     case "${CHECKOUT_FROM}" in
         none) refused "no MCPanel checkout is known: set its folder under Settings below (no running stack was found to take it from)" || return 1 ;;
         ambiguous) refused "Docker knows several MCPanel stacks: set the checkout under Settings below" || return 1 ;;
     esac
-    why="$(checkout_problem "${CHECKOUT}" "${1:-}")"
+    why="$(checkout_problem "${CHECKOUT}" "$@")"
     [ -z "${why}" ] || refused "${why}"
+}
+
+NEEDS=""
+needs_you() { # needs_you MESSAGE: something only the owner can do; on the page (the task file) and in the syslog
+    say "NEEDS YOU: $*"
+    NEEDS="${NEEDS:+${NEEDS} / }$*"
+    logger -t mcpanel -- "plugin: ${TASK:-boot-run}: NEEDS YOU: $*" 2>/dev/null || true
 }
 
 # --- running and showing commands -------------------------------------------------------------------
@@ -922,8 +979,11 @@ file_value() { # file_value FILE KEY -> the first value
     [ -f "$1" ] || return 1
     sed -n "s/^$2=//p" "$1" | head -n 1 | tr -d '\r'
 }
-write_file() { # write_file FILE LINES...: replace FILE at once
-    printf '%s\n' "${@:2}" >"$1.new" && mv -f "$1.new" "$1"
+write_file() { # write_file FILE LINES...: replace FILE at once (a new file, made with noclobber)
+    rm -f -- "$1.new" && (
+        set -o noclobber
+        printf '%s\n' "${@:2}" >"$1.new"
+    ) && mv -f -- "$1.new" "$1"
 }
 state_value() { # a value of deploy/upgrade-state.env (written by upgrade.sh)
     file_value "${DEPLOY}/upgrade-state.env" "$1"
@@ -936,19 +996,25 @@ plg_version() { # the version attribute of a .plg file
     sed -n 's/.*<PLUGIN [^>]*version="\([0-9A-Za-z.]*\)".*/\1/p' "$1" | head -n 1
 }
 
+own_dir() { # own_dir DIR: a folder (not a link) of this user (root) that group and others cannot write
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -z "$(find "$1" -maxdepth 0 -perm /022 2>/dev/null)" ]
+}
+# run_dir_ok: the run folder and its logs folder, where they exist, are root's own (every reader asks this)
+run_dir_ok() {
+    [ ! -e "${RUN_DIR}" ] && [ ! -L "${RUN_DIR}" ] && return 0
+    own_dir "${RUN_DIR}" || return 1
+    [ ! -e "${LOGS}" ] && [ ! -L "${LOGS}" ] && return 0
+    own_dir "${LOGS}"
+}
+RUN_DIR_PROBLEM="${RUN_DIR} (or its logs folder) is not a folder of root's that only root can write: the plugin does not use it. Move it away; the plugin makes it again"
 ensure_run_dir() {
-    if [ -e "${RUN_DIR}" ] || [ -L "${RUN_DIR}" ]; then
-        [ -d "${RUN_DIR}" ] && [ ! -L "${RUN_DIR}" ] && [ -O "${RUN_DIR}" ] &&
-            [ -z "$(find "${RUN_DIR}" -maxdepth 0 -perm /022 2>/dev/null)" ] ||
-            fail "${RUN_DIR} is not a folder of root's that only root can write: move it away (the plugin makes it again)"
-    else
-        mkdir -p "${RUN_DIR}" || fail "could not create ${RUN_DIR}"
-    fi
-    mkdir -p "${LOGS}" || fail "could not create ${LOGS}"
+    run_dir_ok || fail "${RUN_DIR_PROBLEM}"
+    mkdir -p "${LOGS}" || fail "could not create ${LOGS}" # (umask 022: mode 755)
+    run_dir_ok || fail "${RUN_DIR_PROBLEM}"
 }
 
 busy() { # the lock is held (a task runs)
-    [ -e "${LOCK}" ] || return 1
+    run_dir_ok && [ -f "${LOCK}" ] && [ ! -L "${LOCK}" ] || return 1
     {
         exec 7>>"${LOCK}"
     } 2>/dev/null || return 1
@@ -971,19 +1037,26 @@ task_line() { # "<task> [option] (pid N, since <time>)" of the task file
         "$(date -d "@${started:-0}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '?')"
 }
 
-rotate_logs() { # room for one more log: the newest KEEP_LOGS - 1 stay
-    local old
-    # names begin with the time: the newest last
-    while IFS= read -r old; do
-        rm -f -- "${old}"
-    done < <(find "${LOGS}" -maxdepth 1 -type f -name '*.log' -printf '%f\n' 2>/dev/null | sort | head -n "-$((KEEP_LOGS - 1))" | sed "s|^|${LOGS}/|")
+rotate_logs() { # room for one more log: the newest KEEP_LOGS - 1 stay, together below LOGS_MAX_KB
+    local name kb count=0 total=0
+    # names begin with the time: the newest first
+    while IFS='|' read -r name kb; do
+        [ -n "${name}" ] || continue
+        count=$((count + 1))
+        total=$((total + kb))
+        if [ "${count}" -ge "${KEEP_LOGS}" ] || [ "${total}" -gt "${LOGS_MAX_KB}" ]; then rm -f -- "${LOGS}/${name}"; fi
+    done < <(find "${LOGS}" -maxdepth 1 -type f -name '*.log' -printf '%f|%k\n' 2>/dev/null | sort -r)
 }
 
-new_log() { # new_log TASK -> a path no log has yet
+new_log() { # new_log TASK -> the path of a new, empty log (made with noclobber)
     local log
     while :; do
         log="${LOGS}/$(date +%Y%m%d-%H%M%S)-$1.log"
-        [ -e "${log}" ] || break
+        if (
+            set -o noclobber
+            : >"${log}"
+        ) 2>/dev/null; then break; fi
+        [ -e "${log}" ] || return 1
         sleep 1
     done
     printf '%s' "${log}"
@@ -1014,15 +1087,22 @@ link_own_compose() {
     if [ "${DESCRIBE}" = 1 ]; then
         say "${SHOWN}(check) sha256sum ${COMPOSE_STORE} = ${COMPOSE_SHA256}"
     elif ! own_compose_ok; then
-        say "NEEDS YOU: the plugin's Compose on the flash drive (${COMPOSE_STORE}) is missing or does not have the pinned SHA-256 (damaged or replaced): not used. Install Compose again."
+        needs_you "the plugin's Compose on the flash drive (${COMPOSE_STORE}) is missing or does not have the pinned SHA-256 (damaged or replaced): not used. Install Compose again."
         return 1
     fi
-    if [ "${DESCRIBE}" = 1 ] || [ ! -x "${COMPOSE_RAM}" ] ||
+    if [ "${DESCRIBE}" = 1 ] || [ ! -x "${COMPOSE_RAM}" ] || [ -L "${COMPOSE_RAM}" ] ||
         [ "$(sha256sum "${COMPOSE_RAM}" 2>/dev/null | cut -d' ' -f1)" != "${COMPOSE_SHA256}" ]; then
-        x - mkdir -p "${LIB_DIR}" &&
-            x - cp "${COMPOSE_STORE}" "${COMPOSE_RAM}.new" &&
-            x - chmod 755 "${COMPOSE_RAM}.new" &&
-            x - mv -f "${COMPOSE_RAM}.new" "${COMPOSE_RAM}" || return 1
+        # the copy in RAM is what root runs: it is checked itself, before it is moved into place
+        x - mkdir -p "${LIB_DIR}" && x - rm -f "${COMPOSE_RAM}.new" &&
+            x - cp "${COMPOSE_STORE}" "${COMPOSE_RAM}.new" || return 1
+        if [ "${DESCRIBE}" = 1 ]; then
+            say "${SHOWN}(check) sha256sum ${COMPOSE_RAM}.new = ${COMPOSE_SHA256}"
+        elif [ "$(sha256sum "${COMPOSE_RAM}.new" 2>/dev/null | cut -d' ' -f1)" != "${COMPOSE_SHA256}" ]; then
+            rm -f "${COMPOSE_RAM}.new"
+            needs_you "the copy of the plugin's Compose in ${LIB_DIR} does not have the pinned SHA-256: not used"
+            return 1
+        fi
+        x - chmod 755 "${COMPOSE_RAM}.new" && x - mv -f "${COMPOSE_RAM}.new" "${COMPOSE_RAM}" || return 1
     fi
     if [ "${DESCRIBE}" = 0 ] && compose_answers && [ "$(readlink "${CLI_DIR}/docker-compose")" != "${COMPOSE_RAM}" ]; then
         say "Compose: 'docker compose' answers already ($(readlink -f "${CLI_DIR}/docker-compose" 2>/dev/null || say 'built in')): the plugin's copy stays a fallback and is not linked"
@@ -1096,6 +1176,7 @@ plan_from_dry_run() { # plan_from_dry_run update|rollback
         return 0
     fi
     out="${RUN_DIR}/dry-run.out"
+    rm -f "${out}"
     x "${DEPLOY}" bash scripts/upgrade.sh "${dry[@]}" 2>&1 | tee "${out}"
     rc="${PIPESTATUS[0]}"
     proposed="$(sed -n 's/^Nothing was changed\. To do it: //p' "${out}" | tail -n 1)"
@@ -1124,6 +1205,10 @@ plan_from_dry_run() { # plan_from_dry_run update|rollback
 plan_offer() {
     local file="${RUN_DIR}/plan-$1.env" made
     PLAN_OFFER=""
+    run_dir_ok || {
+        refused "${RUN_DIR_PROBLEM}"
+        return 1
+    }
     [ -f "${file}" ] || {
         refused "first the dry run ('$([ "$1" = update ] && printf 'Update' || printf 'Roll back')'): the page runs only what a dry run showed"
         return 1
@@ -1156,7 +1241,7 @@ boot_args_only() { # BOOT_ARGS without linking anything (status, dry runs)
 
 task_check_updates() {
     local behind ahead changes plugin_new
-    need_checkout strict || return 1
+    need_checkout strict git || return 1
     branch_info || return 1
     x - timeout 120 git -C "${CHECKOUT}" "${GIT_SAFE[@]}" fetch "${REMOTE}" "${REMOTE_BRANCH}" ||
         refused "git fetch failed (above): no network, or the remote needs a login" || return 1
@@ -1183,7 +1268,7 @@ task_check_updates() {
 
 task_update_prepare() {
     local changes
-    need_checkout strict || return 1
+    need_checkout strict git || return 1
     branch_info || return 1
     changes="$(local_changes)"
     [ -z "${changes}" ] ||
@@ -1200,7 +1285,7 @@ task_update_prepare() {
 
 task_update_run() {
     local -a args=()
-    need_checkout strict || return 1
+    need_checkout strict git || return 1
     plan_offer update || return 1
     case "${PLAN_OFFER}:$1" in
         run:) ;;
@@ -1214,13 +1299,13 @@ task_update_run() {
 }
 
 task_rollback_prepare() {
-    need_checkout strict || return 1
+    need_checkout strict git || return 1
     plan_from_dry_run rollback
 }
 
 task_rollback_run() {
     local -a args=()
-    need_checkout strict || return 1
+    need_checkout strict git || return 1
     plan_offer rollback || return 1
     case "${PLAN_OFFER}:$1" in
         rollback:) ;;
@@ -1257,13 +1342,25 @@ task_boot_run() {
     local status=0
     tighten_dirs || status=1
     boot_compose || status=1
-    if [ "${CHECKOUT_FROM}" = none ] || [ "${CHECKOUT_FROM}" = ambiguous ] || [ -n "$(checkout_problem "${CHECKOUT}")" ]; then
-        need_checkout
-        say "The shutdown hook, the firewall and the stack check come from the checkout: not done."
+    # root runs the checkout's scripts unattended: only when nothing of them is writable by others or owned
+    # by anyone but root (this plugin does not repair it: the page and the syslog say what to run)
+    local why=""
+    case "${CHECKOUT_FROM}" in
+        none) why="no MCPanel checkout is known (no settings, and no stack to take it from)" ;;
+        ambiguous) why="Docker knows several MCPanel stacks: set the checkout on the plugin's page" ;;
+        *) why="$(checkout_problem "${CHECKOUT}" strict)" ;;
+    esac
+    if [ -n "${why}" ] && [ "${DESCRIBE}" = 1 ]; then
+        refused "${why}"
+        return 1
+    elif [ -n "${why}" ]; then
+        needs_you "boot tasks of the checkout NOT run (shutdown hook, firewall, stack check${BOOT_ARGS[0]:+, the Compose link}): ${why}"
         return 1
     fi
-    # array-start.sh checks the permissions itself (as root in a checkout it tightens them and says so)
-    x - bash "${UNRAID}/array-start.sh" run --project "${PROJECT}" "${BOOT_ARGS[@]}" || status=1
+    if ! x - bash "${UNRAID}/array-start.sh" run --project "${PROJECT}" "${BOOT_ARGS[@]}"; then
+        needs_you "array-start.sh reported something to do (its NEEDS YOU lines above, and the syslog)"
+        status=1
+    fi
     return "${status}"
 }
 
@@ -1273,8 +1370,14 @@ task_firewall() { # task_firewall status|dry-run|install|remove
 }
 
 task_compose_install() {
-    local tmp="${RUN_DIR}/docker-compose.download" sum
+    # downloaded into the plugin's folder in RAM (root's; /run is too small for 34 MB)
+    local tmp="${LIB_DIR}/docker-compose.download" sum
     say "Docker Compose ${COMPOSE_VERSION} (the official release), SHA-256 ${COMPOSE_SHA256}"
+    if [ "${DESCRIBE}" = 0 ]; then
+        mkdir -p "${LIB_DIR}" && tighten_dirs && own_dir "${LIB_DIR}" ||
+            refused "${LIB_DIR} is not a folder of root's that only root can write" || return 1
+        rm -f "${tmp}"
+    fi
     x - curl -fsSL --proto =https --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 900 -o "${tmp}" "${COMPOSE_URL}" || {
         rm -f "${tmp}"
         refused "the download failed (above): nothing was changed"
@@ -1291,10 +1394,17 @@ task_compose_install() {
             return 1
         fi
     fi
-    x - mkdir -p "${CFG_DIR}" &&
-        x - cp "${tmp}" "${COMPOSE_STORE}.new" &&
-        x - mv -f "${COMPOSE_STORE}.new" "${COMPOSE_STORE}" &&
-        x - rm -f "${tmp}" || refused "could not keep it on the flash drive (above)" || return 1
+    x - mkdir -p "${CFG_DIR}" && x - cp "${tmp}" "${COMPOSE_STORE}.new" ||
+        refused "could not keep it on the flash drive (above)" || return 1
+    if [ "${DESCRIBE}" = 1 ]; then
+        say "(check) sha256sum ${COMPOSE_STORE}.new = ${COMPOSE_SHA256}"
+    elif [ "$(sha256sum "${COMPOSE_STORE}.new" 2>/dev/null | cut -d' ' -f1)" != "${COMPOSE_SHA256}" ]; then
+        rm -f "${tmp}" "${COMPOSE_STORE}.new"
+        refused "the copy on the flash drive does not have the pinned SHA-256 (the flash drive?): nothing was changed"
+        return 1
+    fi
+    x - mv -f "${COMPOSE_STORE}.new" "${COMPOSE_STORE}" && x - rm -f "${tmp}" ||
+        refused "could not keep it on the flash drive (above)" || return 1
     link_own_compose
 }
 
@@ -1341,7 +1451,7 @@ finish_task() { # the EXIT trap of a task
     say ""
     say "Finished: ${result}$([ "${rc}" = 0 ] || printf ' (exit %s)' "${rc}") at $(date '+%Y-%m-%d %H:%M:%S')"
     write_file "${TASK_FILE}" "TASK=${TASK}" "OPTION=${OPTION}" "PID=$$" "STARTED=${STARTED}" "LOG=${TASK_LOG}" \
-        "RESULT=${result}" "EXIT=${rc}" "ENDED=$(date +%s)"
+        "RESULT=${result}" "EXIT=${rc}" "ENDED=$(date +%s)" "NEEDS=${NEEDS//$'\n'/ }"
     if [ "${TASK}" = boot-run ]; then
         cp -f "${TASK_FILE}" "${BOOT_FILE}" 2>/dev/null
         logger -t mcpanel -- "plugin: boot tasks finished: ${result} (log ${TASK_LOG})" 2>/dev/null || true
@@ -1373,8 +1483,7 @@ cmd_start() {
         exit 75
     fi
     rotate_logs
-    log="$(new_log "$1")"
-    : >"${log}" || fail "could not create ${log}"
+    log="$(new_log "$1")" || fail "could not create a log in ${LOGS}"
     write_file "${TASK_FILE}" "TASK=$1" "OPTION=${2:-}" "PID=0" "STARTED=$(date +%s)" "LOG=${log}" "RESULT=running"
     # a session of its own: it outlives the web request; it holds the lock (fd 9) until it and its children end
     # shellcheck disable=SC2094 # the worker gets the log's name for its task file; it does not read it
@@ -1395,7 +1504,10 @@ cmd_boot() {
         }
     fi
     rotate_logs
-    log="$(new_log boot-run)"
+    log="$(new_log boot-run)" || {
+        logger -t mcpanel -- "plugin: boot tasks NOT run: could not create a log in ${LOGS}" 2>/dev/null || true
+        exit 1
+    }
     exec </dev/null >>"${log}" 2>&1
     cmd_worker boot-run "" "${log}"
 }
@@ -1461,24 +1573,27 @@ cmd_facts() {
     if [ -x "${PLUGIN_DIR}/event/stopping_docker" ]; then kv HOOK installed; else kv HOOK missing; fi
     if [ -x "${PLUGIN_DIR}/event/docker_started" ]; then kv BOOT_EVENT yes; else kv BOOT_EVENT no; fi
     if busy; then kv BUSY 1; else kv BUSY 0; fi
+    # the run folder's files only from a folder of root's that only root can write
+    run_dir_ok || kv RUN_DIR_PROBLEM "${RUN_DIR_PROBLEM}"
     for file in "${TASK_FILE}" "${BOOT_FILE}"; do
-        [ -f "${file}" ] || continue
+        run_dir_ok && [ -f "${file}" ] && [ ! -L "${file}" ] || continue
         name=TASK
         [ "${file}" = "${TASK_FILE}" ] || name=BOOT
         while IFS= read -r line; do
-            [[ "${line}" =~ ^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED)=(.*)$ ]] || continue
+            [[ "${line}" =~ ^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED|NEEDS)=(.*)$ ]] || continue
             kv "${name}_${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
         done <"${file}"
     done
     while IFS= read -r task_log; do
         [ -z "${task_log}" ] || kv LOG_FILE "${task_log}"
-    done <<<"$(find "${LOGS}" -maxdepth 1 -type f -name '*.log' -printf '%f\n' 2>/dev/null | sort -r)"
-    [ ! -f "${UPDATES_FILE}" ] || {
+    done <<<"$(run_dir_ok && find "${LOGS}" -maxdepth 1 -type f -name '*.log' -printf '%f\n' 2>/dev/null | sort -r)"
+    ! run_dir_ok || [ ! -f "${UPDATES_FILE}" ] || {
         kv UPDATES_CHECKED "$(file_value "${UPDATES_FILE}" CHECKED)"
         kv PLUGIN_UPSTREAM "$(file_value "${UPDATES_FILE}" PLUGIN_UPSTREAM)"
     }
     # git only in a checkout that only root can change (its config could name commands git runs)
-    if [ -n "${CHECKOUT}" ] && [ -z "$(checkout_problem "${CHECKOUT}" strict)" ]; then
+    if [ -n "${CHECKOUT}" ] && [ -d "${CHECKOUT}/.git" ]; then kv GIT yes; elif [ -n "${CHECKOUT}" ]; then kv GIT no; fi
+    if [ -n "${CHECKOUT}" ] && [ -z "$(checkout_problem "${CHECKOUT}" strict git)" ]; then
         kv HEAD "$(gitc log -1 --format='%h %s' 2>/dev/null)"
         kv LOCAL_CHANGES "$(local_changes | wc -l)"
         if branch_info >/dev/null 2>&1; then
@@ -1574,19 +1689,20 @@ exit 0
 <![CDATA[
 #!/bin/bash
 # MCPanel plugin removal: its page, its programs and its event scripts go, the shutdown hook in its event folder
-# with them. Kept: /boot/config/plugins/mcpanel (the settings, array-start.env, the Compose copy if it was
-# installed), and until the next boot the Compose link and its copy in RAM (docker compose keeps working).
+# with them, and its run folder /run/mcpanel (the action logs). Kept: /boot/config/plugins/mcpanel (the settings,
+# array-start.env, the Compose copy if it was installed), and until the next boot the Compose link and its copy
+# in RAM (docker compose keeps working).
 umask 022
 R="${MCPANEL_PLUGIN_ROOT:-}"
 D="${R}/usr/local/emhttp/plugins/mcpanel"
-LOCK="${R}/tmp/mcpanel/lock"
+LOCK="${R}/run/mcpanel/lock"
 if [ -e "${LOCK}" ] && command -v flock >/dev/null 2>&1 && ! flock -n "${LOCK}" true; then
     echo "An action of the MCPanel page is still running: remove the plugin when it has ended (the page shows it)."
     exit 1
 fi
-rm -rf "${D}" "${R}/tmp/mcpanel"
+rm -rf "${D}" "${R}/run/mcpanel"
 logger -t mcpanel -- "plugin removed: the shutdown hook and the boot tasks at Docker start are gone" 2>/dev/null || true
-echo "MCPanel plugin removed, with the shutdown hook and the boot tasks at Docker start."
+echo "MCPanel plugin removed, with the shutdown hook, the boot tasks at Docker start and the action logs."
 echo "Kept: /boot/config/plugins/mcpanel (settings, array-start.env, the Compose copy if it was installed: delete"
 echo "that folder to remove them). Without the plugin, the User Script of docs/UNRAID.md does the boot tasks."
 exit 0

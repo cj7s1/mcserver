@@ -48,7 +48,6 @@ function args(): array
 $run = "$work/run";
 @mkdir("$run/logs", 0755, true);
 $cfg = ['runner' => "$plugin/bin/mcpanel", 'run_dir' => $run];
-check(mcpanel_config()['run_dir'] === '/tmp/mcpanel', 'the real run folder');
 
 // facts: lists for the keys that repeat, nothing that is not KEY=value
 $r = mcpanel_handle(['action' => 'facts'], $cfg);
@@ -124,6 +123,27 @@ flock($fh, LOCK_EX);
 check(mcpanel_busy($cfg) === true, 'a held lock: busy');
 flock($fh, LOCK_UN);
 check(mcpanel_busy($cfg) === false, 'released: not busy');
+
+// the run folder is read only when it is a folder of this user's that group and others cannot write (F-12)
+check(mcpanel_run_dir_ok($cfg), 'the run folder is ours');
+chmod($run, 0777);
+$r = mcpanel_handle(['action' => 'log', 'name' => '', 'offset' => '0'], $cfg);
+check($r['ok'] === false && str_contains($r['error'], 'not root'), 'a run folder others can write is not read');
+$fh = fopen("$run/lock", 'c');
+flock($fh, LOCK_EX);
+check(mcpanel_busy($cfg) === false, 'nor its lock');
+flock($fh, LOCK_UN);
+chmod($run, 0755);
+chmod("$run/logs", 0777);
+check(!mcpanel_run_dir_ok($cfg), 'nor a logs folder others can write');
+chmod("$run/logs", 0755);
+rename($run, "$work/run-real");
+symlink("$work/run-real", $run);
+check(!mcpanel_run_dir_ok($cfg), 'nor a link');
+unlink($run);
+rename("$work/run-real", $run);
+check(mcpanel_run_dir_ok(['run_dir' => "$work/none"]), 'a run folder that is not there yet is fine');
+check(mcpanel_config()['run_dir'] === '/run/mcpanel', 'the real run folder is /run/mcpanel');
 
 // action.php: POST only; it runs bin/mcpanel next to its folder
 $_SERVER['REQUEST_METHOD'] = 'GET';

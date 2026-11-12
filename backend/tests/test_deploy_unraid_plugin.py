@@ -95,7 +95,7 @@ class Host:
     def __init__(self, tmp: Path) -> None:
         self.tmp = tmp
         self.root = tmp / "root"
-        for sub in ("tmp", "boot/config/plugins", "usr/local/lib"):
+        for sub in ("tmp", "run", "boot/config/plugins", "usr/local/lib"):
             (self.root / sub).mkdir(parents=True)
         self.plugin = self.root / "usr/local/emhttp/plugins/mcpanel"
         for name in ("bin/mcpanel", "event/docker_started"):
@@ -105,7 +105,7 @@ class Host:
         shutil.copy(PLUGIN / "mcpanel.plg", self.root / "boot/config/plugins/mcpanel.plg")
         self.runner = self.plugin / "bin/mcpanel"
         self.cfg = self.root / "boot/config/plugins/mcpanel/mcpanel.cfg"
-        self.run_dir = self.root / "tmp/mcpanel"
+        self.run_dir = self.root / "run/mcpanel"
         self.cli = self.root / "usr/local/lib/docker/cli-plugins"
         self.fake = tmp / "fake"
         self.fake.mkdir()
@@ -398,7 +398,8 @@ def test_a_task_runs_what_it_describes(host, task, call):
         assert calls[0].split("|", 1)[0] == str(host.deploy)
     for line in lines:
         assert f"$ {line}" in log, (line, log)
-    assert log.splitlines()[0].startswith(f"MCPanel plugin 2026.11.12: {task}, started ")
+    version = re.search(r"^## (\S+)$", (PLUGIN / "CHANGES.md").read_text(), re.M).group(1)
+    assert log.splitlines()[0].startswith(f"MCPanel plugin {version}: {task}, started ")
     assert "Everything below runs as root with umask 022." in log
     assert re.search(r"^Finished: ok at ", log, re.M)
 
@@ -449,8 +450,13 @@ def test_old_logs_are_rotated(host):
     for i in range(25):
         (logs / f"20260101-0000{i:02d}-status.log").write_text("old\n")
     host.start_and_wait("firewall-status")
-    assert len(list(logs.glob("*.log"))) == 20
-    assert not (logs / "20260101-000000-status.log").exists()
+    assert len(list(logs.glob("*.log"))) == 10
+    assert not (logs / "20260101-000000-status.log").exists() and (logs / "20260101-000024-status.log").exists()
+    # and together below 32 MB (/run is a small tmpfs): big old logs go first
+    for i in range(3):
+        (logs / f"20260102-0000{i:02d}-status.log").write_bytes(b"x" * (12 * 1024 * 1024))
+    host.start_and_wait("firewall-status")
+    assert sum(path.stat().st_size for path in logs.glob("*.log")) < 32 * 1024 * 1024
 
 
 def test_a_failed_task_is_reported_with_its_exit_status(host):
@@ -470,7 +476,7 @@ def test_check_updates_fetches_and_never_pulls(host):
     assert result["RESULT"] == "ok", log
     assert host.head() == before
     assert "1 commit(s) behind, 0 ahead" in log and "Fix the thing" in log
-    assert "plugin version 2026.12.01 (installed: 2026.11.12): Unraid's Plugins page updates the plugin itself" in log
+    assert "plugin version 2026.12.01 (installed: 2026.11.12a): Unraid's Plugins page updates the plugin itself" in log
     facts = host.facts()
     assert facts["BEHIND"] == "1" and facts["AHEAD"] == "0" and facts["UPSTREAM"] == "origin/main"
     assert [c.split(" ", 1)[1] for c in facts["UPDATE_COMMIT"]] == ["Fix the thing"]
@@ -618,11 +624,13 @@ def test_tasks_that_change_things_refuse_a_checkout_others_can_write(host):
     (host.checkout / ".git/config").chmod(0o666)
     for task in ("check-updates", "update-prepare", "rollback-prepare", "firewall-install", "firewall-remove"):
         line = described(host, task)[0]
-        assert line.startswith("REFUSED: group or others can write to what root runs or git reads"), task
-        assert line.endswith(f"chmod -R go-w {host.checkout}"), line
-    # read-only ones run (the scripts warn themselves); the boot tasks leave it to array-start.sh, which tightens
+        assert line.startswith(
+            "REFUSED: group or others can write, or another user than root owns, what root runs or git reads"
+        ), task
+        assert line.endswith(f"chown -R root:root {host.checkout} && chmod -R go-w {host.checkout}"), line
+    # read-only ones run (the scripts warn themselves); the unattended boot tasks refuse too (F-14)
     assert described(host, "firewall-status") == [f"bash {host.unraid}/instance-firewall.sh status"]
-    assert described(host, "boot-run") == [f"bash {host.unraid}/array-start.sh run --project mcpanel"]
+    assert described(host, "boot-run")[0].startswith("REFUSED: group or others can write")
     assert "HEAD" not in host.facts()  # no git in a checkout others can change
 
 
@@ -736,6 +744,66 @@ def test_a_damaged_copy_on_the_flash_drive_is_not_used(host):
     assert host.calls()[-1].endswith("|array-start.sh run --project mcpanel")  # the rest of the boot tasks still run
 
 
+def test_the_copy_that_is_moved_into_place_is_the_one_that_was_checked(host):
+    # F-13: a copy that differs from the checked file (a flash drive that reads back wrong, a swap in between)
+    pinned_runner(host, b"#!/bin/sh\n")
+    host.start_and_wait("compose-install")
+    (host.cli / "docker-compose").unlink()
+    shutil.rmtree(host.root / "usr/local/lib/mcpanel")
+    cp = host.bin / "cp"
+    cp.write_text('#!/bin/bash\n/bin/cp "$@" && case "${*: -1}" in *docker-compose.new) echo evil >>"${*: -1}" ;; esac\n')
+    cp.chmod(0o755)
+    host.use_checkout()
+    result, log = host.start_and_wait("boot-run")
+    assert result["RESULT"] == "failed"
+    assert "does not have the pinned SHA-256: not used" in log
+    assert not (host.root / "usr/local/lib/mcpanel/docker-compose").exists() and not (host.cli / "docker-compose").exists()
+    assert "NEEDS YOU" in (host.fake / "syslog").read_text()
+
+
+def test_compose_install_checks_the_copy_on_the_flash_drive_too(host):
+    pinned_runner(host, b"#!/bin/sh\n")
+    cp = host.bin / "cp"
+    cp.write_text('#!/bin/bash\n/bin/cp "$@" && case "${*: -1}" in *docker-compose-v5.7.0.new) echo x >>"${*: -1}" ;; esac\n')
+    cp.chmod(0o755)
+    result, log = host.start_and_wait("compose-install")
+    assert result["RESULT"] == "failed" and "the copy on the flash drive does not have the pinned SHA-256" in log
+    assert not list((host.root / "boot/config/plugins/mcpanel").glob("docker-compose*"))
+
+
+def test_the_boot_tasks_refuse_a_checkout_others_can_change_and_say_so(host):
+    # F-14: the unattended run uses the strict check (modes and owner) and says what to do
+    host.use_checkout()
+    (host.unraid / "array-start.sh").chmod(0o777)
+    assert described(host, "boot-run")[0].startswith("REFUSED: group or others can write, or another user than root owns")
+    result, log = host.start_and_wait("boot-run")
+    assert result["RESULT"] == "failed" and host.calls() == []
+    assert f"chown -R root:root {host.checkout} && chmod -R go-w {host.checkout}" in log
+    assert host.facts()["BOOT_NEEDS"].startswith("boot tasks of the checkout NOT run")
+    assert "plugin: boot-run: NEEDS YOU: boot tasks of the checkout NOT run" in (host.fake / "syslog").read_text()
+    (host.unraid / "array-start.sh").chmod(0o755)
+    # a file root runs that belongs to another user (here: one that is not the runner's)
+    target = host.unraid / "stopping_docker"
+    target.unlink()
+    target.symlink_to("/bin/true")
+    if os.stat("/bin/true").st_uid != os.geteuid():
+        assert "another user than root owns" in described(host, "boot-run")[0]
+        assert "another user than root owns" in host.facts()["CHECKOUT_PROBLEM"]
+
+
+def test_the_boot_tasks_work_for_a_checkout_without_git(host):
+    # the quick start's ZIP download: boot tasks yes, updates through the page no
+    shutil.rmtree(host.checkout / ".git")
+    host.use_checkout()
+    result, log = host.start_and_wait("boot-run")
+    assert result["RESULT"] == "ok", log
+    assert host.calls()[-1].endswith("|array-start.sh run --project mcpanel")
+    for task in ("check-updates", "update-prepare", "rollback-prepare"):
+        assert "has no .git folder (a ZIP download?)" in described(host, task)[0], task
+    facts = host.facts()
+    assert facts["GIT"] == "no" and "CHECKOUT_PROBLEM" in facts and facts["CHECKOUT_PROBLEM"] == ""
+
+
 def test_the_event_script_returns_at_once_and_the_boot_tasks_run_in_the_background(host):
     (host.fake / "panels").write_text(f"mcpanel|{host.deploy}\n")  # found from the stack's labels: no settings needed
     (host.fake / "slow_boot").write_text("2\n")
@@ -833,10 +901,35 @@ def test_facts_show_the_panels_address_and_the_hook(host):
     assert host.facts()["HOOK"] == "installed"
 
 
-def test_the_run_folder_must_be_roots_own(host):
+def test_the_run_folder_must_be_roots_own_on_every_use(host):
+    host.use_checkout()
+    host.start_and_wait("firewall-status")
+    assert host.facts()["TASK_RESULT"] == "ok"
+    # F-12: a run folder others can write is neither written nor read (facts, plans, the lock)
+    host.run_dir.chmod(0o777)
+    done = host.run("start", "status")
+    assert done.returncode == 1 and "is not a folder of root's that only root can write" in done.stdout
+    facts = host.facts()
+    assert "RUN_DIR_PROBLEM" in facts and "TASK_RESULT" not in facts and "LOG_FILE" not in facts and facts["BUSY"] == "0"
+    assert (
+        described(host, "update-run")[0].startswith("REFUSED: ")
+        and "is not a folder of root's" in described(host, "update-run")[0]
+    )
+    host.run_dir.chmod(0o755)
+    (host.run_dir / "logs").chmod(0o777)
+    assert "RUN_DIR_PROBLEM" in host.facts()
+    (host.run_dir / "logs").chmod(0o755)
+    shutil.rmtree(host.run_dir)
     host.run_dir.symlink_to(host.tmp)
     done = host.run("start", "status")
     assert done.returncode == 1 and "is not a folder of root's that only root can write" in done.stdout
+
+
+def test_the_run_folder_is_in_run_not_in_tmp():
+    text = (SRC / "bin/mcpanel").read_text()
+    assert 'RUN_DIR="${R}/run/mcpanel"' in text and "/tmp/mcpanel" not in text
+    assert "'run_dir' => '/run/mcpanel'" in (SRC / "include/common.php").read_text()
+    assert '"${R}/run/mcpanel"' in (SRC / "install/remove.sh").read_text()
 
 
 # --- the scripts the plugin manager runs --------------------------------------------------------------------
@@ -882,7 +975,7 @@ def test_removal_waits_for_a_running_action_and_keeps_the_settings(host):
     host.wait()
     done = run_script(host, "remove.sh")
     assert done.returncode == 0, done.stdout
-    assert not host.plugin.exists() and not host.run_dir.exists()
+    assert not host.plugin.exists() and not host.run_dir.exists()  # the action logs go with it
     assert host.cfg.exists()
     assert "plugin removed" in (host.fake / "syslog").read_text()
 

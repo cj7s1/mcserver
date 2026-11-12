@@ -79,7 +79,9 @@
     rows.appendChild(row('Shutdown hook', f.HOOK === 'installed' ? 'installed' : 'not installed (the boot tasks install it: at every Docker start, or Boot tasks > Run now)'));
     hint = '';
     if (f.BOOT_RESULT) hint = 'Last run: ' + f.BOOT_RESULT + (f.BOOT_ENDED ? ' at ' + when(f.BOOT_ENDED) : '') + ' (log ' + (f.BOOT_LOG || '').replace(/^.*\//, '') + ')';
+    if (f.BOOT_NEEDS) hint += (hint ? '. ' : '') + 'NEEDS YOU: ' + f.BOOT_NEEDS;
     rows.appendChild(row('Boot tasks', f.BOOT_EVENT === 'yes' ? 'run at every Docker start' : 'the event script is missing: reinstall the plugin', hint));
+    if (f.RUN_DIR_PROBLEM) rows.appendChild(row('Run folder', f.RUN_DIR_PROBLEM));
     if ((f.USER_SCRIPT || []).length || f.GO_FILE === 'yes') {
       rows.appendChild(row('Also at boot', (f.USER_SCRIPT || []).map(function (s) { return 'User Script "' + s + '"'; })
         .concat(f.GO_FILE === 'yes' ? ['/boot/config/go'] : []).join(', '),
@@ -100,7 +102,8 @@
       rows.appendChild(row('Action', 'running: ' + (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ' since ' + when(f.TASK_STARTED)));
     } else if (f.TASK_TASK) {
       var result = f.TASK_RESULT === 'running' ? 'interrupted (its process is gone; the log shows how far it got)' : f.TASK_RESULT + (f.TASK_EXIT && f.TASK_EXIT !== '0' ? ' (exit ' + f.TASK_EXIT + ')' : '');
-      rows.appendChild(row('Last action', (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ': ' + result + (f.TASK_ENDED ? ' at ' + when(f.TASK_ENDED) : '')));
+      rows.appendChild(row('Last action', (f.TASK_TASK || '') + (f.TASK_OPTION ? ' ' + f.TASK_OPTION : '') + ': ' + result + (f.TASK_ENDED ? ' at ' + when(f.TASK_ENDED) : ''),
+        f.TASK_NEEDS ? 'NEEDS YOU: ' + f.TASK_NEEDS : ''));
     }
 
     // update
@@ -110,6 +113,7 @@
         f.BEHIND + ' commit(s) behind ' + f.UPSTREAM + (f.AHEAD && f.AHEAD !== '0' ? ', ' + f.AHEAD + ' ahead (Update cannot fast-forward then: that is for the terminal)' : '') +
         (f.UPDATES_CHECKED ? ' (checked ' + when(f.UPDATES_CHECKED) + ')' : ' (not checked from this page yet)') + '.');
     }
+    if (f.GIT === 'no') info.push('This checkout has no .git folder (a ZIP download): Check for updates, Update and Roll back need a git clone (docs/UNRAID.md, section 3). The boot tasks work without it.');
     $id('mcp-update-info').textContent = info.join(' ');
     var list = $id('mcp-commits');
     list.textContent = '';

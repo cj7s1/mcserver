@@ -28,7 +28,7 @@ function mcpanel_config(): array
 {
     return [
         'runner' => dirname(__DIR__) . '/bin/mcpanel',
-        'run_dir' => '/tmp/mcpanel',
+        'run_dir' => '/run/mcpanel',
     ];
 }
 
@@ -94,9 +94,34 @@ function mcpanel_task(array $post): ?array
     return $option === '' ? [$task] : [$task, $option];
 }
 
+/* A folder (not a link) of the user this runs as (root on Unraid) that group and others cannot write. */
+function mcpanel_own_dir(string $dir): bool
+{
+    clearstatcache(true, $dir);
+    if (!is_dir($dir) || is_link($dir)) {
+        return false;
+    }
+    $uid = function_exists('posix_geteuid') ? posix_geteuid() : 0;
+    return fileowner($dir) === $uid && (fileperms($dir) & 0022) === 0;
+}
+
+/* The run folder and its logs folder are read only when they are root's own (bin/mcpanel checks the same). */
+function mcpanel_run_dir_ok(array $cfg): bool
+{
+    foreach ([$cfg['run_dir'], $cfg['run_dir'] . '/logs'] as $dir) {
+        if ((file_exists($dir) || is_link($dir)) && !mcpanel_own_dir($dir)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* The log of a task: only files the runner wrote (logs/<time>-<task>.log), read from an offset. */
 function mcpanel_log(array $cfg, array $post): array
 {
+    if (!mcpanel_run_dir_ok($cfg)) {
+        return ['ok' => false, 'error' => 'the run folder is not root\'s own: the page does not read it'];
+    }
     $logs = $cfg['run_dir'] . '/logs';
     $name = mcpanel_field($post, 'name', 128);
     $offset = mcpanel_field($post, 'offset', 12);
@@ -104,9 +129,9 @@ function mcpanel_log(array $cfg, array $post): array
         return ['ok' => false, 'error' => 'bad request'];
     }
     $task = [];
-    if (is_file($cfg['run_dir'] . '/task.env')) {
+    if (is_file($cfg['run_dir'] . '/task.env') && !is_link($cfg['run_dir'] . '/task.env')) {
         foreach (file($cfg['run_dir'] . '/task.env', FILE_IGNORE_NEW_LINES) as $line) {
-            if (preg_match('/^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED)=(.*)$/', $line, $m)) {
+            if (preg_match('/^(TASK|OPTION|PID|STARTED|LOG|RESULT|EXIT|ENDED|NEEDS)=(.*)$/', $line, $m)) {
                 $task[$m[1]] = $m[2];
             }
         }
@@ -118,7 +143,7 @@ function mcpanel_log(array $cfg, array $post): array
         return ['ok' => true, 'name' => '', 'data' => '', 'offset' => 0, 'busy' => mcpanel_busy($cfg), 'task' => $task];
     }
     $path = "$logs/$name";
-    $size = is_file($path) ? filesize($path) : 0;
+    $size = is_file($path) && !is_link($path) ? filesize($path) : 0;
     $from = $offset === '' ? 0 : min((int)$offset, $size);
     $data = '';
     if ($size > $from && ($fh = fopen($path, 'rb'))) {
@@ -142,7 +167,7 @@ function mcpanel_log(array $cfg, array $post): array
 function mcpanel_busy(array $cfg): bool
 {
     $lock = $cfg['run_dir'] . '/lock';
-    if (!is_file($lock) || !($fh = @fopen($lock, 'r'))) {
+    if (!mcpanel_run_dir_ok($cfg) || !is_file($lock) || is_link($lock) || !($fh = @fopen($lock, 'r'))) {
         return false;
     }
     $free = flock($fh, LOCK_SH | LOCK_NB);

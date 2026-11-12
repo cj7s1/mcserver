@@ -6,7 +6,7 @@ umask 022
 D="${MCPANEL_PLUGIN_ROOT:-}/usr/local/emhttp/plugins/mcpanel"
 KEEP=""
 if [ -f "${D}/event/stopping_docker" ] && [ ! -L "${D}/event/stopping_docker" ]; then
-    KEEP="$(mktemp "${MCPANEL_PLUGIN_ROOT:-}/tmp/mcpanel-hook.XXXXXX")" && cp -p "${D}/event/stopping_docker" "${KEEP}" || KEEP=""
+    KEEP="$(mktemp "${MCPANEL_PLUGIN_ROOT:-}/run/mcpanel-hook.XXXXXX")" && cp -p "${D}/event/stopping_docker" "${KEEP}" || KEEP=""
 fi
 rm -rf "${D}"
 if [ -n "${KEEP}" ]; then
