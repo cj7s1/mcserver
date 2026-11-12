@@ -62,9 +62,9 @@ over the new dialogs.
 * `Instance.env` (custom variables) is stored in clear text: not encrypted (D-10's second part).
 * The firewall script (`deploy/unraid/instance-firewall.sh`) has not run on Unraid: check it as
   docs/UNRAID.md says before relying on it.
-* Verify: a Docker-initiated stop of Project Zomboid (`docker stop`, Unraid's Docker tab) through the
-  image's trap with the agent's `rcon.yml` (being tested; until the end-to-end result is in, treat it as
-  unverified).
+* Verified on a real container (2026-11-11, branch `legacy41`): a Docker-initiated stop of Project Zomboid
+  (`docker stop -t 120`, as Unraid's Docker tab does) saves and quits through the image's trap with the
+  agent's `rcon.yml` (exit 143 in 9.4 s). Not run on Build 42.
 * Smaller: B-11's per-server lock for top-level renames; D-13 for the catalog routes; HSTS opt-in on
   purpose (it would break other plain-HTTP web UIs under the same host name).
 

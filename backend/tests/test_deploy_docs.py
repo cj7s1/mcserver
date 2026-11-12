@@ -191,7 +191,7 @@ def test_development_status_and_roadmap_record_the_review_and_what_is_open():
         "TOTP / a second factor",
         "`Instance.env` (custom variables) is stored in clear text",
         "has not run on Unraid",
-        "Verify: a Docker-initiated stop of Project Zomboid",
+        "Verified on a real container (2026-11-11, branch `legacy41`): a Docker-initiated stop of Project Zomboid",
     ):
         assert needle in status, needle
     assert "Security and bug review of 2026-11-11" in read("ROADMAP.md")
