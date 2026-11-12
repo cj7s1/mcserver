@@ -38,6 +38,9 @@ class SystemSetting(models.Model):
         # RAM kept free for the host and everything else on it when servers are admitted
         # (apps/instances/capacity.py, DEFAULT_RESERVE_MB)
         "memory_reserve_mb": 4096,
+        # A-7: a notification (node.low_disk_space) when the free space of a node's server or backup storage
+        # drops below this many GB (0: never); apps/nodes/tasks.py
+        "low_disk_space_gb": 20,
     }
 
     @classmethod

@@ -36,6 +36,7 @@ EDITABLE = {
     "lan_address": str,
     "timezone": str,
     "memory_reserve_mb": int,
+    "low_disk_space_gb": int,
 }
 MEMORY_RESERVE_MAX_MB = 65536
 SECRETS = {"curseforge_api_key"}
@@ -202,6 +203,8 @@ class SystemSettingsView(APIView):
                     "default_bind_ip must be an IPv4 or IPv6 address without a port (0.0.0.0 = all interfaces)",
                     code="invalid_setting",
                 )
+            if key == "low_disk_space_gb" and (value is None or isinstance(value, bool) or not 0 <= value <= 100000):
+                raise ApiError("low_disk_space_gb must be a whole number of GB from 0 (off) to 100000", code="invalid_setting")
             if key == "memory_reserve_mb" and (
                 value is None or isinstance(value, bool) or not 0 <= value <= MEMORY_RESERVE_MAX_MB
             ):

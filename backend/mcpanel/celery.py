@@ -84,7 +84,16 @@ class MCPanelTask(Task):
 app = Celery("mcpanel", task_cls=MCPanelTask)
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks(
-    ["apps.instances", "apps.jobs", "apps.backups", "apps.content", "apps.metrics", "apps.modpacks", "apps.accounts"]
+    [
+        "apps.instances",
+        "apps.jobs",
+        "apps.backups",
+        "apps.content",
+        "apps.metrics",
+        "apps.modpacks",
+        "apps.accounts",
+        "apps.nodes",
+    ]
 )
 app.conf.imports = ("apps.jobs.runner", "apps.notifications.service")
 

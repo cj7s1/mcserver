@@ -329,6 +329,7 @@ CELERY_TASK_ROUTES = {
     "apps.metrics.tasks.*": {"queue": "periodic"},
     "apps.modpacks.tasks.*": {"queue": "periodic"},
     "apps.accounts.tasks.*": {"queue": "periodic"},
+    "apps.nodes.tasks.*": {"queue": "periodic"},
     "apps.notifications.*": {"queue": "periodic"},
 }
 # "expires" drops ticks that waited too long in the queue (no pile-up behind busy workers);
@@ -339,6 +340,8 @@ CELERY_BEAT_SCHEDULE = {
     "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0, "options": {"expires": 110}},
     "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0, "options": {"expires": 50}},
     "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0, "options": {"expires": 3000}},
+    # free space of every node's server and backup storage (A-7)
+    "node-disk-space": {"task": "apps.nodes.tasks.check_disk_space", "schedule": 900.0, "options": {"expires": 840}},
     # failed sign-ins older than 90 days (D-3)
     "auth-prune": {"task": "apps.accounts.tasks.prune_login_failures", "schedule": 86400.0, "options": {"expires": 3600}},
     # hourly tick; each modpack server is checked at most every 6 h (apps/modpacks/updates.py)
