@@ -160,6 +160,8 @@ def parse_players(out: str) -> dict[str, Any]:
 
 
 class ZomboidDefinition(SteamGameDefinition):
+    # its control port listens on the network: the agent runs it on its own network only (A-6, R-8)
+    custom_network = False
     world_option_keys = ("server_name",)  # (E-5: the save folder is named after it)
     id = GAME
     label = "Project Zomboid"

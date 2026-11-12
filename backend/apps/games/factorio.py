@@ -302,6 +302,8 @@ def version_key(version: str) -> tuple[int, ...]:
 
 
 class FactorioDefinition(GameDefinition):
+    # its control port listens on the network: the agent runs it on its own network only (A-6, R-8)
+    custom_network = False
     id = GAME
     label = "Factorio"
     profile = GAME

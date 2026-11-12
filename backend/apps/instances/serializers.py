@@ -109,6 +109,10 @@ class InstanceSerializer(serializers.ModelSerializer):
     container_memory_mb = serializers.IntegerField(read_only=True)
     loader = serializers.CharField(source="effective_loader", read_only=True)
     connection = serializers.SerializerMethodField()
+    custom_network = serializers.SerializerMethodField(
+        help_text="Whether the server may join another Docker network than the node agent's own (R-8: not the games "
+        "whose control port listens on the network)"
+    )
     agent_networks = serializers.SerializerMethodField(
         help_text="The node agent's own networks (A-6): {shared, per_server_prefix} as GET /v1/info reports them; "
         "null when the agent does not report them or was not asked yet"
@@ -212,6 +216,7 @@ class InstanceSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "connection",
+            "custom_network",
             "agent_networks",
             "permissions",
         ]
@@ -273,6 +278,10 @@ class InstanceSerializer(serializers.ModelSerializer):
         if not addresses:
             addresses.update(public=SystemSetting.get("public_address"), lan=SystemSetting.get("lan_address"))
         return connection_info(obj, public=addresses["public"], lan=addresses["lan"])
+
+    def get_custom_network(self, obj: Instance) -> bool:
+        definition = games.get_or_none(obj.game or games.DEFAULT_GAME)
+        return bool(definition.custom_network_for(obj)) if definition is not None else True
 
     def get_agent_networks(self, obj: Instance) -> dict[str, Any] | None:
         from apps.nodes.client import cached_agent_networks
@@ -416,9 +425,14 @@ class InstanceSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"memory_mb": [f"{self._definition().label} needs at least {self._definition().min_memory_mb} MB"]}
                 )
-            if attrs.get("network") and not self._definition().custom_network:
+            if attrs.get("network") and not self._definition().custom_network_for(self.instance):
                 raise serializers.ValidationError(
-                    {"network": [f"{self._definition().label} servers run on the panel's instance network only"]}
+                    {
+                        "network": [
+                            f"{self._definition().label} servers run only on the node agent's own network: the panel "
+                            "controls them over a port on that network, which must not be reachable from another one"
+                        ]
+                    }
                 )
         if self.instance is not None and attrs.keys() & {"memory_mb", "memory_overhead_mb"}:
             probe = Instance(

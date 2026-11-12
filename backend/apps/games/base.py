@@ -359,8 +359,14 @@ class GameDefinition:
     # the save files of the game (non-Minecraft games; Minecraft has instances/world.py)
     saves: Any = None
     # whether a server may join another Docker network than the agent's instance network (Satisfactory:
-    # no, its driver reaches the API there and the claim depends on nobody else reaching it first)
+    # no, its driver reaches the API there and the claim depends on nobody else reaching it first; the games
+    # whose control port is a network listener: no, the agent refuses it, A-6 / R-8)
     custom_network: bool = True
+
+    def custom_network_for(self, instance: Instance | None) -> bool:
+        """``custom_network`` for this server (a game whose variants differ overrides it: TShock)."""
+        return self.custom_network
+
     # environment variables an owner may add (Settings -> Environment) for this game; all others are
     # refused (images of other games have variables that download code or run scripts)
     allowed_user_env: frozenset[str] = frozenset({"TZ"})

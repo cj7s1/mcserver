@@ -164,6 +164,8 @@ def random_seed() -> int:
 
 
 class RustDefinition(SteamGameDefinition):
+    # its control port listens on the network: the agent runs it on its own network only (A-6, R-8)
+    custom_network = False
     world_option_keys = ("identity",)  # (E-5: a restore sets the backup's map back)
     world_server_keys = ("seed", "world_size")
     id = GAME

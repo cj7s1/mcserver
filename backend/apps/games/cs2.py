@@ -166,6 +166,8 @@ def parse_status(out: str) -> list[str]:
 
 
 class Cs2Definition(SteamGameDefinition):
+    # its control port listens on the network: the agent runs it on its own network only (A-6, R-8)
+    custom_network = False
     id = GAME
     label = "Counter-Strike 2"
     profile = GAME

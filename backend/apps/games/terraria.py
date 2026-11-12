@@ -664,6 +664,11 @@ class TerrariaDefinition(GameDefinition):
         base = super().secret_paths(instance)
         return (*base, SETUP_CODE) if self.variant(instance) == TSHOCK else base
 
+    def custom_network_for(self, instance: Instance | None) -> bool:
+        # TShock's REST API (its control port) listens on the network: the agent runs it on its own network only
+        # (A-6, R-8); vanilla and tModLoader take console input and may join another network
+        return instance is None or self.variant(instance) != TSHOCK
+
     def extract_writable_secret_paths(self, instance: Instance) -> tuple[str, ...]:
         # an archive may hold a setup-code.txt: harmless, the panel deletes it before every start
         return (SETUP_CODE,) if self.variant(instance) == TSHOCK else ()
