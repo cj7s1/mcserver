@@ -27,7 +27,15 @@ from apps.core.errors import ApiError
 from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
 
 from .models import InstanceAccess, PasswordResetToken, Role, User
-from .permissions import ALL_CODES, INSTANCE_CODES, OWNER_GRANTED_CODES, PERMISSIONS, SYSTEM_ROLES
+from .permissions import (
+    ALL_CODES,
+    FRIEND_ROLE,
+    INSTANCE_CODES,
+    OWNER_GRANTED_CODES,
+    PERMISSIONS,
+    SYSTEM_ROLES,
+    with_implied,
+)
 from .serializers import (
     LoginSerializer,
     MeSerializer,
@@ -298,7 +306,7 @@ def _outranked(request, target: User) -> str | None:  # type: ignore[no-untyped-
         return "Only the owner can modify the owner account"
     if _is_root(request.user):
         return None
-    if _is_root(target) or not _assignable_perms(target) <= request.user.global_permissions():
+    if _is_root(target) or not _assignable_perms(target) <= with_implied(request.user.global_permissions()):
         return "You cannot manage a user who has permissions you do not have"
     for grant in InstanceAccess.objects.filter(user=target).select_related("role"):
         if not (grant.role.permission_set & INSTANCE_CODES) <= request.user.instance_permissions(grant.instance_id):
@@ -320,7 +328,7 @@ def _guard_permission_grant(request, codes, what: str = "a role") -> None:  # ty
     owner_only = sorted(set(codes) & OWNER_GRANTED_CODES)
     if owner_only:
         raise PermissionDenied(f"Only the owner can grant {what} with these permissions: {', '.join(owner_only)}")
-    missing = sorted(set(codes) - request.user.global_permissions())
+    missing = sorted(set(codes) - with_implied(request.user.global_permissions()))
     if missing:
         raise PermissionDenied(f"You cannot grant {what} with permissions you do not have: {', '.join(missing)}")
 
@@ -330,7 +338,7 @@ def _guard_role_change(request, role: Role) -> None:  # type: ignore[no-untyped-
     standing as managing each of them (and holding everything the role currently grants)."""
     if _is_root(request.user):
         return
-    if not role.permission_set <= request.user.global_permissions():
+    if not role.permission_set <= with_implied(request.user.global_permissions()):
         raise PermissionDenied("You cannot change a role that has permissions you do not have")
     for target in role.users.select_related("role"):
         if _outranked(request, target):
@@ -406,6 +414,71 @@ class UserResetLinkView(APIView):
         # The token travels in the URL fragment: browsers never send it to the server, so it
         # does not end up in the panel's or a reverse proxy's access log.
         return Response({"token": raw, "path": f"/reset-password#token={raw}", "expires_in_hours": 24}, status=201)
+
+
+class UserInviteSerializer(serializers.ModelSerializer):
+    servers = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=100)
+
+    class Meta:
+        model = User
+        fields = ["username", "email", "servers"]
+
+
+class UserInviteView(APIView):
+    """``POST /api/users/invite`` ``{username, email?, servers: [id, ...]}`` (B4 of the feature plan of
+    2026-11-12): a new account with the Friend role on those servers and no usable password, and the one-time
+    link where the friend chooses one (the reset link of ``UserResetLinkView``). Permission ``system.users``,
+    and on every server what granting access there needs (``instance.access`` and the Friend's codes)."""
+
+    permission_classes = [HasGlobalPermission]
+    required_permission = "system.users"
+
+    @extend_schema(request=UserInviteSerializer, responses={201: dict})
+    def post(self, request):  # type: ignore[no-untyped-def]
+        from apps.core.permissions import get_instance_for
+
+        ser = UserInviteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        data = ser.validated_data
+        role = Role.objects.filter(key=FRIEND_ROLE).first()
+        if role is None:
+            ensure_system_roles()
+            role = Role.objects.get(key=FRIEND_ROLE)
+        instances = []
+        for server in dict.fromkeys(data["servers"]):
+            instance = get_instance_for(request.user, str(server), "instance.access")
+            missing = sorted((role.permission_set & INSTANCE_CODES) - request.user.instance_permissions(instance.pk))
+            if missing:
+                raise PermissionDenied(f"You cannot grant permissions you do not have on {instance.name}: {', '.join(missing)}")
+            instances.append(instance)
+        with transaction.atomic():
+            user = User(username=data["username"], email=data.get("email", ""), role=None, is_active=True)
+            user.set_unusable_password()  # (no way in until the friend chose a password through the link)
+            user.save()
+            for instance in instances:
+                InstanceAccess.objects.create(user=user, instance=instance, role=role, created_by=request.user)
+            _token, raw = PasswordResetToken.issue(user, created_by=request.user)
+        servers = [str(i.pk) for i in instances]
+        audit.record("user.invited", request=request, target=user, details={"role": FRIEND_ROLE, "servers": servers})
+        for instance in instances:
+            audit.record(
+                "instance.access_granted",
+                request=request,
+                instance=instance,
+                target=user,
+                details={"role": FRIEND_ROLE, "via": "invite"},
+            )
+        return Response(
+            {
+                "user": UserSerializer(user).data,
+                "servers": [{"id": str(i.pk), "name": i.name} for i in instances],
+                # as the reset link: the token in the URL fragment (never sent to a server, so in no access log)
+                "token": raw,
+                "path": f"/reset-password#token={raw}",
+                "expires_in_hours": 24,
+            },
+            status=201,
+        )
 
 
 class RoleListCreateView(generics.ListCreateAPIView):

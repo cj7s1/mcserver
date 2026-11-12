@@ -482,6 +482,18 @@ def _can_view(user: Any, instance_id: str) -> bool:
 
 
 @database_sync_to_async
+def _sees_status(user: Any, instance_id: str) -> bool:
+    from apps.accounts.permissions import with_implied
+
+    return "instance.overview" in with_implied(user.instance_permissions(instance_id))
+
+
+# events a user with "instance.overview" only (the Friend role) gets; every other event of a server needs
+# "instance.view" (a job's title, progress and error)
+STATUS_EVENTS = frozenset({"instance.status"})
+
+
+@database_sync_to_async
 def _sees_every_server(user: Any) -> bool:
     return "instance.view" in user.global_permissions()
 
@@ -561,10 +573,13 @@ class EventsConsumer(_GuardedConsumer):
             return
         instance_id = message.get("instance_id")
         if instance_id:
-            cached = self._cache.get(instance_id)
+            status_only = message.get("event") in STATUS_EVENTS
+            key = f"{instance_id}:status" if status_only else instance_id
+            cached = self._cache.get(key)
             if cached is None or time.monotonic() - cached[0] > REVALIDATE_SECONDS:
-                cached = (time.monotonic(), await _can_view(self.user, instance_id))
-                self._cache[instance_id] = cached
+                check = _sees_status if status_only else _can_view
+                cached = (time.monotonic(), await check(self.user, instance_id))
+                self._cache[key] = cached
             if not cached[1]:
                 return
         elif "owner_id" in message:

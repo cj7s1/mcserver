@@ -102,6 +102,39 @@ def validate_extra_ports(value: list[Any]) -> list[dict[str, Any]]:
     return out
 
 
+# what a user who holds "instance.overview" but not "instance.view" on a server gets of it (the Friend role)
+LIMITED_FIELDS = (
+    "id",
+    "name",
+    "description",
+    "icon_url",
+    "group",
+    "game",
+    "game_label",
+    "edition",
+    "server_type",
+    "minecraft_version",
+    "loader",
+    "is_modpack",
+    "modpack_name",
+    "modpack_version_name",
+    "capabilities",
+    "desired_state",
+    "status",
+    "status_detail",
+    "health",
+    "started_at",
+    "ready_at",
+    "status_updated_at",
+    "active_job",
+    "power_countdown",
+    "archived_at",
+    "connection",
+    "permissions",
+    "limited",
+)
+
+
 class InstanceSerializer(serializers.ModelSerializer):
     restart_required = serializers.SerializerMethodField()
     content_kind = serializers.CharField(read_only=True)
@@ -122,6 +155,9 @@ class InstanceSerializer(serializers.ModelSerializer):
         "null when the agent does not report them or was not asked yet"
     )
     permissions = serializers.SerializerMethodField()
+    limited = serializers.SerializerMethodField(
+        help_text="true: the caller sees only the status (the Friend role), and only the fields of the short answer"
+    )
     active_job = serializers.SerializerMethodField()
     power_countdown = serializers.SerializerMethodField()
     modpack_update = serializers.SerializerMethodField()
@@ -228,6 +264,7 @@ class InstanceSerializer(serializers.ModelSerializer):
             "custom_network",
             "agent_networks",
             "permissions",
+            "limited",
         ]
         read_only_fields = [
             f
@@ -346,7 +383,22 @@ class InstanceSerializer(serializers.ModelSerializer):
     def get_env_values_hidden(self, obj: Instance) -> bool:
         return bool(obj.env) and not self._may_configure(obj)
 
+    def get_limited(self, obj: Instance) -> bool:
+        return self._limited(obj)
+
+    def _limited(self, obj: Instance) -> bool:
+        """The caller sees only the server's status (a Friend: "instance.overview" without "instance.view")."""
+        return self.context.get("request") is not None and "instance.view" not in self.get_permissions(obj)
+
     def to_representation(self, instance: Instance) -> dict[str, Any]:
+        if self._limited(instance):
+            # the short answer: status and how to reach it, nothing of the configuration (B4)
+            short: dict[str, Any] = {}
+            for name in LIMITED_FIELDS:
+                field = self.fields[name]
+                attribute = field.get_attribute(instance)
+                short[name] = None if attribute is None else field.to_representation(attribute)
+            return short
         data = super().to_representation(instance)
         if data.get("ports"):
             definition = games.get_or_none(instance.game)

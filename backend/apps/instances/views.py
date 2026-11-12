@@ -72,6 +72,7 @@ class InstanceListView(APIView):
             .prefetch_related(*prefetch)
             # last_backup_at / backup_schedules of the serializer, as subqueries of the list query
             .annotate(**services.backup_overview_annotations()),
+            "instance.overview",  # (a Friend's servers too: their rows are the short answer, "limited": true)
         )
         archived = request.query_params.get("archived")
         if archived == "true":
@@ -247,7 +248,7 @@ class InstanceDetailView(APIView):
 
     @extend_schema(responses={200: InstanceSerializer})
     def get(self, request: Request, pk: str) -> Response:
-        return Response(_ser(get_instance_for(request.user, pk), request))
+        return Response(_ser(get_instance_for(request.user, pk, "instance.overview"), request))
 
     @extend_schema(request=InstanceSerializer, responses={200: InstanceSerializer})
     def patch(self, request: Request, pk: str) -> Response:
@@ -1907,7 +1908,7 @@ class ShareView(APIView):
     def get(self, request: Request, pk: str) -> Response:
         from .share import share_card
 
-        instance = get_instance_for(request.user, pk, "instance.view")
+        instance = get_instance_for(request.user, pk, "instance.overview")
         with_password = str(request.query_params.get("with_password") or "").lower() in ("1", "true", "yes")
         if with_password and not request.user.has_panel_perm("instance.configure", instance):
             raise PermissionDenied("Only users who may configure the server see its join password")

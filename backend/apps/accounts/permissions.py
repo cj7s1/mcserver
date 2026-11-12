@@ -65,6 +65,20 @@ ALL_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS)
 INSTANCE_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS if p.scope == "instance")
 SYSTEM_CODES: frozenset[str] = frozenset(p.code for p in PERMISSIONS if p.scope == "system")
 
+# "See status" (B4 of the feature plan of 2026-11-12): the status of a server and how to join it (the Share
+# card), not its configuration. Only the built-in Friend role holds it; "instance.view" includes it. It is not
+# in PERMISSIONS (custom roles cannot use it, and the permission lists of every other account stay as they
+# were): ``has_panel_perm`` and ``with_implied`` know it.
+OVERVIEW = "instance.overview"
+LIMITED_CODES: frozenset[str] = frozenset({OVERVIEW})
+SCOPED_CODES: frozenset[str] = INSTANCE_CODES | LIMITED_CODES  # what a per-server grant can carry
+
+
+def with_implied(codes: frozenset[str]) -> frozenset[str]:
+    """``codes`` with what they include ("instance.view" holds "instance.overview")."""
+    return codes | LIMITED_CODES if "instance.view" in codes else codes
+
+
 # Administration rights only the owner (or a superuser) may hand out, through any role: a user
 # manager could otherwise mint Administrator-equivalent accounts (custom role with every code)
 # or more user managers, which is what "only the owner assigns the Administrator role" forbids.
@@ -101,7 +115,14 @@ SYSTEM_ROLES: dict[str, dict] = {
         "description": "Read-only access to status and console output.",
         "permissions": ["instance.console", "instance.view"],
     },
+    # granted per server (the Users page's "Invite a friend"): no console, files, settings or backups
+    "friend": {
+        "name": "Friend",
+        "description": "Sees, starts and stops the servers it is granted on, and how to join them. Nothing else.",
+        "permissions": ["instance.control", "instance.overview"],
+    },
 }
+FRIEND_ROLE = "friend"
 
 
 def validate_codes(codes: list[str]) -> list[str]:

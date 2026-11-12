@@ -8,7 +8,7 @@ from django.db.models import Q, QuerySet
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.permissions import BasePermission
 
-from apps.accounts.permissions import INSTANCE_CODES
+from apps.accounts.permissions import INSTANCE_CODES, with_implied
 
 from .errors import ApiError
 
@@ -38,16 +38,21 @@ def require(user: Any, code: str, instance: Any = None) -> None:
         raise PermissionDenied(f"You do not have the '{code}' permission" + (" for this server" if instance else ""))
 
 
-def visible_instances(user: Any, qs: QuerySet | None = None) -> QuerySet:
+def visible_instances(user: Any, qs: QuerySet | None = None, code: str = "instance.view") -> QuerySet:
+    """The servers ``user`` holds ``code`` on: "instance.view" (the default), or "instance.overview" (also the
+    servers granted to a Friend, who sees their status but not their configuration)."""
     from apps.instances.models import Instance
 
     qs = qs if qs is not None else Instance.objects.all()
     if not user.is_authenticated or not user.is_active:
         return qs.none()
     ensure_password_current(user)
-    if "instance.view" in user.global_permissions():
+    if code in with_implied(user.global_permissions()):
         return qs
-    return qs.filter(Q(access_grants__user=user, access_grants__role__permissions__contains=["instance.view"])).distinct()
+    holds = Q(access_grants__role__permissions__contains=["instance.view"])
+    if code == "instance.overview":
+        holds |= Q(access_grants__role__permissions__contains=["instance.overview"])
+    return qs.filter(Q(access_grants__user=user) & holds).distinct()
 
 
 def get_instance_for(user: Any, pk: Any, code: str = "instance.view") -> Any:
@@ -58,10 +63,11 @@ def get_instance_for(user: Any, pk: Any, code: str = "instance.view") -> Any:
 
     if parse_uuid(pk) is None:  # a malformed id from a query string or body: not found (D-12; was a 500)
         raise NotFound("Server not found")
-    instance = visible_instances(user, Instance.objects.select_related("node")).filter(pk=pk).first()
+    instance = visible_instances(user, Instance.objects.select_related("node"), "instance.overview").filter(pk=pk).first()
     if instance is None:
         raise NotFound("Server not found")
-    if code != "instance.view":
+    # (a Friend finds the server but holds only "instance.overview" and "instance.control" on it)
+    if code != "instance.overview" and not (code == "instance.view" and code in user.global_permissions()):
         require(user, code, instance)
     return instance
 

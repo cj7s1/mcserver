@@ -10,7 +10,7 @@ from django.db import models
 from django.utils import timezone
 from django.utils.crypto import constant_time_compare, salted_hmac
 
-from .permissions import ALL_CODES, INSTANCE_CODES
+from .permissions import ALL_CODES, INSTANCE_CODES, LIMITED_CODES, SCOPED_CODES, with_implied
 
 
 class Role(models.Model):
@@ -30,7 +30,7 @@ class Role(models.Model):
 
     @property
     def permission_set(self) -> frozenset[str]:
-        return frozenset(self.permissions) & ALL_CODES
+        return frozenset(self.permissions) & (ALL_CODES | LIMITED_CODES)
 
 
 class User(AbstractUser):
@@ -71,21 +71,21 @@ class User(AbstractUser):
         that instance (with ``role`` loaded) when the caller prefetched them (list views)."""
         if not self.is_active:
             return frozenset()
-        perms = set(self.global_permissions() & INSTANCE_CODES)
+        perms = set(self.global_permissions() & SCOPED_CODES)
         if self.is_root:
             return INSTANCE_CODES
         if grants is None:
             grants = InstanceAccess.objects.filter(user=self, instance_id=instance_id).select_related("role")
         for grant in grants:
             if grant.user_id == self.pk:
-                perms |= grant.role.permission_set & INSTANCE_CODES
+                perms |= grant.role.permission_set & SCOPED_CODES
         return frozenset(perms)
 
     def has_panel_perm(self, code: str, instance=None) -> bool:  # type: ignore[no-untyped-def]
-        if code in INSTANCE_CODES and instance is not None:
+        if code in SCOPED_CODES and instance is not None:
             instance_id = getattr(instance, "pk", instance)
-            return code in self.instance_permissions(instance_id)
-        return code in self.global_permissions()
+            return code in with_implied(self.instance_permissions(instance_id))
+        return code in with_implied(self.global_permissions())
 
 
 class InstanceAccess(models.Model):

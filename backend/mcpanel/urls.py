@@ -100,6 +100,7 @@ api_patterns = [
     path("health", core.HealthView.as_view()),
     path("auth/", include(auth_patterns)),
     path("users", accounts.UserListCreateView.as_view()),
+    path("users/invite", accounts.UserInviteView.as_view()),
     path("users/<int:pk>", accounts.UserDetailView.as_view()),
     path("users/<int:pk>/reset-link", accounts.UserResetLinkView.as_view()),
     path("roles", accounts.RoleListCreateView.as_view()),
