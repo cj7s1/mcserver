@@ -353,6 +353,10 @@ class PowerSerializer(serializers.Serializer):
         return attrs
 
 
+# what a caller with "instance.control" but without "instance.view" on the server (a Friend) may ask for
+FRIEND_POWER_ACTIONS = ("start", "stop")
+
+
 class InstancePowerView(APIView):
     @extend_schema(request=PowerSerializer, responses={202: JobSerializer})
     def post(self, request: Request, pk: str) -> Response:
@@ -360,6 +364,12 @@ class InstancePowerView(APIView):
         ser = PowerSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         data = ser.validated_data
+        if not request.user.has_panel_perm("instance.view", instance):
+            # a Friend (status only): start and stop, as the plain buttons; no kill, restart, warning text,
+            # memory override (review F-9)
+            extras = data.get("warn_minutes") or data.get("warn_message") or data.get("allow_overcommit")
+            if data["action"] not in FRIEND_POWER_ACTIONS or extras:
+                raise PermissionDenied("On this server you may only start and stop it")
         result = services.power(
             instance,
             data["action"],
@@ -380,6 +390,7 @@ class InstancePowerCancelView(APIView):
     @extend_schema(request=None, responses={200: JobSerializer})
     def post(self, request: Request, pk: str) -> Response:
         instance = get_instance_for(request.user, pk, "instance.control")
+        require(request.user, "instance.view", instance)  # (a Friend never cancels the owner's countdown, F-9)
         pending = power_warnings.pending_countdown(instance)
         if pending is None:
             raise ConflictError("No restart or stop is counting down on this server", code="no_countdown")
@@ -1914,6 +1925,15 @@ class ShareView(APIView):
         if with_password and not request.user.has_panel_perm("instance.configure", instance):
             raise PermissionDenied("Only users who may configure the server see its join password")
         answer = share_card(instance, request.user, with_password=with_password)
+        if answer.get("password"):
+            # like POST .../secrets/<key>/reveal: who saw the join password, never the value (review F-17)
+            audit.record(
+                "instance.secret_revealed",
+                request=request,
+                instance=instance,
+                target=instance,
+                details={"key": "join_password", "via": "share_card"},
+            )
         response = Response(answer)
         if "password" in answer:
             response["Cache-Control"] = "no-store"

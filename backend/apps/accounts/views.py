@@ -24,8 +24,9 @@ from apps.accounts import throttle as account_throttle
 from apps.audit import service as audit
 from apps.core import session_binding
 from apps.core.errors import ApiError
-from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
+from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced, SeesMoreThanStatus
 
+from . import reserved
 from .models import InstanceAccess, PasswordResetToken, Role, User
 from .permissions import (
     ALL_CODES,
@@ -48,6 +49,7 @@ from .serializers import (
 )
 
 log = logging.getLogger(__name__)
+SERVICE_ACCOUNT_FIXED = "The Discord bot's service account cannot be changed or signed in with"
 
 
 def ensure_system_roles() -> None:
@@ -379,6 +381,10 @@ class UserDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def perform_update(self, serializer):  # type: ignore[no-untyped-def]
         target = serializer.instance
+        if reserved.is_service_account(target):
+            raise PermissionDenied(SERVICE_ACCOUNT_FIXED)
+        if "username" in serializer.validated_data:
+            reserved.validate_username(serializer.validated_data["username"], target.username)
         _guard_owner(self.request, target)
         if target == self.request.user and serializer.validated_data.get("is_active") is False:
             raise ValidationError({"is_active": ["You cannot disable your own account"]})
@@ -409,6 +415,8 @@ class UserResetLinkView(APIView):
     def post(self, request, pk: int):  # type: ignore[no-untyped-def]
         user = generics.get_object_or_404(User, pk=pk)
         _guard_owner(request, user)
+        if reserved.is_service_account(user):
+            raise PermissionDenied(SERVICE_ACCOUNT_FIXED)
         _token, raw = PasswordResetToken.issue(user, created_by=request.user)
         audit.record("user.reset_link_issued", request=request, target=user)
         # The token travels in the URL fragment: browsers never send it to the server, so it
@@ -418,6 +426,9 @@ class UserResetLinkView(APIView):
 
 class UserInviteSerializer(serializers.ModelSerializer):
     servers = serializers.ListField(child=serializers.UUIDField(), min_length=1, max_length=100)
+
+    def validate_username(self, value: str) -> str:
+        return reserved.validate_username(value)
 
     class Meta:
         model = User
@@ -489,7 +500,8 @@ class RoleListCreateView(generics.ListCreateAPIView):
 
     def get_permissions(self):  # type: ignore[no-untyped-def]
         if self.request.method == "GET":
-            return [IsAuthenticated(), PasswordChangeEnforced()]  # role names are needed to display access grants
+            # role names are needed to display access grants; not for a Friend (review F-11)
+            return [IsAuthenticated(), PasswordChangeEnforced(), SeesMoreThanStatus()]
         return super().get_permissions()
 
     def perform_create(self, serializer):  # type: ignore[no-untyped-def]
@@ -523,7 +535,7 @@ class RoleDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class PermissionDefsView(APIView):
-    permission_classes = [IsAuthenticated, PasswordChangeEnforced]
+    permission_classes = [IsAuthenticated, PasswordChangeEnforced, SeesMoreThanStatus]
 
     @extend_schema(responses={200: dict})
     def get(self, request):  # type: ignore[no-untyped-def]
@@ -570,6 +582,15 @@ class DownloadTicketView(APIView):
         view_class = getattr(match.func, "view_class", None) or getattr(match.func, "cls", None)
         if not getattr(view_class, "download_ticket", False):
             raise invalid
+        # only for a download the caller may make: the server's permissions of that route (404/403 otherwise;
+        # FX2-1: a Friend got tickets for files it may not download)
+        from apps.core.permissions import get_instance_for
+
+        server = match.kwargs.get("pk")
+        if server is None:
+            raise invalid
+        for code in getattr(view_class, "download_permissions", ("instance.files.read",)):
+            get_instance_for(request.user, str(server), code)
         ticket = session_binding.make_ticket(request.session, parts.path, parts.query)
         joined = f"{parts.path}?{parts.query}&" if parts.query else f"{parts.path}?"
         return Response(

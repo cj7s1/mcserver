@@ -5,6 +5,7 @@ from rest_framework import serializers
 
 from .models import InstanceAccess, Role, User
 from .permissions import validate_codes
+from .reserved import validate_username as _reserved
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -61,6 +62,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "username", "email", "first_name", "last_name", "password", "role", "must_change_password"]
 
+    def validate_username(self, value: str) -> str:
+        return _reserved(value)
+
     def validate(self, attrs: dict) -> dict:
         user = User(username=attrs.get("username"), email=attrs.get("email", ""))
         password_validation.validate_password(attrs["password"], user)
@@ -114,6 +118,9 @@ class SetupSerializer(serializers.Serializer):
         write_only=True,
         help_text="Required when the server sets MCPANEL_SETUP_TOKEN (see /auth/state setup_token_required)",
     )
+
+    def validate_username(self, value: str) -> str:
+        return _reserved(value)
 
     def validate(self, attrs: dict) -> dict:
         password_validation.validate_password(attrs["password"], User(username=attrs["username"]))

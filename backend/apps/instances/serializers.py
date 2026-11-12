@@ -129,10 +129,14 @@ LIMITED_FIELDS = (
     "active_job",
     "power_countdown",
     "archived_at",
-    "connection",
     "permissions",
     "limited",
 )
+# the short answer's status_detail: a plain sentence per status, never the agent's own text (review F-10)
+LIMITED_STATUS_DETAIL = {
+    "failed": "The server stopped with an error; the owner can see why in the panel.",
+    "unhealthy": "The server is running but does not respond.",
+}
 # and, after them, from the newest metrics sample (no agent call): None when unknown
 LIMITED_PLAYER_FIELDS = ("players_online", "players_max")
 
@@ -400,6 +404,18 @@ class InstanceSerializer(serializers.ModelSerializer):
                 field = self.fields[name]
                 attribute = field.get_attribute(instance)
                 short[name] = None if attribute is None else field.to_representation(attribute)
+            # (review F-10: what a job or a countdown is about, and the agent's error texts, stay with the owner)
+            short["status_detail"] = LIMITED_STATUS_DETAIL.get(str(instance.status), "")
+            job = short.get("active_job")
+            if isinstance(job, dict):
+                short["active_job"] = {"kind": job.get("kind"), "status": job.get("status"), "progress": job.get("progress")}
+            countdown = short.get("power_countdown")
+            if isinstance(countdown, dict):
+                short["power_countdown"] = {
+                    "action": countdown.get("action"),
+                    "phase": countdown.get("phase"),
+                    "action_at": countdown.get("action_at"),
+                }
             from apps.metrics.players import current_players
 
             short["players_online"], short["players_max"] = current_players(instance)

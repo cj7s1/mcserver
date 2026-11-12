@@ -146,15 +146,11 @@ def rate_limited(caller: Caller, kind: str) -> str | None:
 
 
 def service_user() -> Any:
-    """The panel user the bot acts as (the audit log's actor). It cannot sign in: inactive, no usable password."""
-    from apps.accounts.models import User
+    """The panel user the bot acts as (the audit log's actor). It cannot sign in: inactive, no usable password.
+    Found by the id the panel keeps, never by its name alone (apps.accounts.reserved, review F-15)."""
+    from apps.accounts.reserved import service_account
 
-    user, created = User.objects.get_or_create(username=SERVICE_USERNAME, defaults={"is_active": False})
-    if created or user.has_usable_password():
-        user.set_unusable_password()
-        user.is_active = False
-        user.save(update_fields=["password", "is_active"])
-    return user
+    return service_account()
 
 
 def _who(caller: Caller) -> dict[str, str]:
@@ -193,6 +189,16 @@ def join(caller: Caller, name: str) -> Reply:
     from apps.instances.share import share_card
 
     card = share_card(instance, None, with_password=bool(instance.discord_share_password))
+    if card.get("invite_has_password"):
+        from apps.audit import service as audit
+
+        audit.record(
+            "instance.secret_revealed",
+            actor=service_user(),
+            instance=instance,
+            target=instance,
+            details={"key": "join_password", **_who(caller)},
+        )
     return Reply(_clip(card["invite_text"]), ephemeral=True)
 
 

@@ -39,9 +39,15 @@ def test_node_crud_and_validation(owner_client):
 
 
 def test_non_admin_cannot_manage_nodes():
+    from apps.accounts.models import Role
+
     u = User.objects.create_user("u", password="x" * 12)
     c = APIClient()
     c.force_login(u)
+    # an account without any right (a Friend, or nothing at all) gets no node list (review F-11 of 2026-11-12)
+    assert c.get("/api/nodes").status_code == 403
+    u.role = Role.objects.create(key="creators", name="Creators", permissions=["instance.create"])
+    u.save(update_fields=["role"])
     assert c.get("/api/nodes").status_code == 200  # names only, for the wizard
     assert (
         c.post("/api/nodes", {"name": "x", "agent_url": "http://x:1", "agent_token": "t" * 30}, format="json").status_code == 403

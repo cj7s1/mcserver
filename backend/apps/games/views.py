@@ -6,6 +6,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.core.permissions import not_for_friends
+
 from . import MEMORY_MODELS, catalog
 
 
@@ -25,6 +27,7 @@ class GameCatalogEntrySerializer(serializers.Serializer):
 
 
 class GameCatalogView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
     """The games servers can be created for (phase 1: Minecraft only). Any signed-in user."""
 
     @extend_schema(operation_id="catalog_games", responses={200: GameCatalogEntrySerializer(many=True)})
@@ -33,6 +36,7 @@ class GameCatalogView(APIView):
 
 
 class GameVersionsView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
     """``GET /api/catalog/games/<id>/versions``: the exact versions of a game with a version catalog,
     newest first (``stable``/``latest`` flags); 404 for a game without one. Any signed-in user."""
 

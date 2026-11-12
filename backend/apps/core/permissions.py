@@ -55,6 +55,45 @@ def visible_instances(user: Any, qs: QuerySet | None = None, code: str = "instan
     return qs.filter(Q(access_grants__user=user) & holds).distinct()
 
 
+def sees_more_than_status(user: Any) -> bool:
+    """Whether ``user`` sees more than the status of a few servers (a Friend does not): the owner, any global
+    permission beyond start/stop, or "instance.view" on at least one server. The global answers that describe the
+    host (system info, ports, nodes, roles) are for these accounts only (review F-11)."""
+    from apps.accounts.models import InstanceAccess
+    from apps.accounts.permissions import LIMITED_CODES
+
+    if not user or not user.is_authenticated or not user.is_active:
+        return False
+    if getattr(user, "is_root", False):
+        return True
+    if user.global_permissions() - LIMITED_CODES - {"instance.control"}:
+        return True
+    return InstanceAccess.objects.filter(user=user, role__permissions__contains=["instance.view"]).exists()
+
+
+class SeesMoreThanStatus(BasePermission):
+    """DRF permission: ``sees_more_than_status`` (403 for a Friend)."""
+
+    message = "Your account only sees the status of the servers shared with you"
+
+    def has_permission(self, request, view) -> bool:  # type: ignore[no-untyped-def]
+        ensure_password_current(request.user)
+        return sees_more_than_status(request.user)
+
+
+def not_for_friends() -> list[type[BasePermission]]:
+    """The default permission classes plus SeesMoreThanStatus: for the global answers a Friend has no use for."""
+    from rest_framework.permissions import IsAuthenticated
+
+    return [IsAuthenticated, PasswordChangeEnforced, SeesMoreThanStatus]
+
+
+def require_more_than_status(user: Any) -> None:
+    ensure_password_current(user)
+    if not sees_more_than_status(user):
+        raise PermissionDenied(SeesMoreThanStatus.message)
+
+
 def get_instance_for(user: Any, pk: Any, code: str = "instance.view") -> Any:
     """Fetch an instance the user may see (404 otherwise) and require ``code`` on it."""
     from apps.instances.models import Instance

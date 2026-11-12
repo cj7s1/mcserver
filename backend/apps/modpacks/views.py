@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from apps import games
 from apps.core.errors import ApiError
 from apps.core.models import SystemSetting
+from apps.core.permissions import not_for_friends
 
 from .models import ModpackUpdateCheck
 from .providers import PROVIDERS, curseforge_key, get_provider
@@ -24,6 +25,8 @@ def _int(value: str | None, default: int, lo: int, hi: int) -> int:
 
 
 class ProvidersView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         return Response(

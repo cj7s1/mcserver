@@ -640,7 +640,8 @@ def test_jobs_disappear_when_server_access_is_revoked(make_user, client_for, mak
 # --- 11. node list for users without system.nodes --------------------------------------------------------
 def test_node_list_is_minimal_without_system_nodes(clients, node):
     Node.objects.create(name="n2", agent_url="http://10.0.0.2:8700", agent_token=TOKEN, use_settings_token=False)
-    plain = clients["norole"].get("/api/nodes")
+    assert clients["norole"].get("/api/nodes").status_code == 403  # (sees nothing: review F-11 of 2026-11-12)
+    plain = clients["viewer"].get("/api/nodes")
     assert plain.status_code == 200
     assert all(set(n) == {"id", "name", "is_default"} for n in plain.json())
     full = clients["admin"].get("/api/nodes").json()

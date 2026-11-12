@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.audit import service as audit
-from apps.core.permissions import HasGlobalPermission
+from apps.core.permissions import HasGlobalPermission, not_for_friends
 
 from .models import EVENTS, NotificationChannel
 from .service import deliver, validate_url
@@ -95,6 +95,8 @@ class ChannelTestView(APIView):
 
 
 class EventsView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         return Response({"events": [{"id": k, "label": v} for k, v in EVENTS.items()]})

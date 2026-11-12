@@ -111,6 +111,9 @@ class HealthView(APIView):
 class SystemInfoView(APIView):
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
+        from .permissions import require_more_than_status
+
+        require_more_than_status(request.user)
         from apps.instances.models import Instance
         from apps.nodes.client import AgentClient
         from apps.nodes.models import Node
@@ -256,6 +259,10 @@ class PortsView(APIView):
     def get(self, request: Request) -> Response:
         from apps.instances.services import allocate_port, port_range, ports_in_use
         from apps.nodes.models import Node
+
+        from .permissions import require_more_than_status
+
+        require_more_than_status(request.user)
 
         raw = str(request.query_params.get("node") or "").strip()
         if raw and not raw.isdigit():

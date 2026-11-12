@@ -12,7 +12,7 @@ from rest_framework.views import APIView
 
 from apps.audit import service as audit
 from apps.core.errors import ApiError
-from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced
+from apps.core.permissions import HasGlobalPermission, PasswordChangeEnforced, SeesMoreThanStatus
 
 from . import tls
 from .client import AgentClient
@@ -216,8 +216,8 @@ class NodeListView(generics.ListCreateAPIView):
 
     def get_permissions(self):  # type: ignore[no-untyped-def]
         if self.request.method == "GET":
-            # names are needed by the create wizard; everything else needs system.nodes
-            return [IsAuthenticated(), PasswordChangeEnforced()]
+            # names are needed by the create wizard; everything else needs system.nodes; not for a Friend (F-11)
+            return [IsAuthenticated(), PasswordChangeEnforced(), SeesMoreThanStatus()]
         return super().get_permissions()
 
     def perform_create(self, serializer):  # type: ignore[no-untyped-def]

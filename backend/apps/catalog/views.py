@@ -6,17 +6,22 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.core.errors import ApiError
+from apps.core.permissions import not_for_friends
 
 from . import providers
 
 
 class ServerTypesView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         return Response({"server_types": providers.SERVER_TYPES})
 
 
 class GameVersionsView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         st = request.query_params.get("server_type", "VANILLA").upper()
@@ -27,6 +32,8 @@ class GameVersionsView(APIView):
 
 
 class LoaderVersionsView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         st = request.query_params.get("server_type", "").upper()
@@ -37,6 +44,8 @@ class LoaderVersionsView(APIView):
 
 
 class JavaView(APIView):
+    permission_classes = not_for_friends()  # (not for a Friend: review F-11, FX2-1)
+
     @extend_schema(responses={200: dict})
     def get(self, request: Request) -> Response:
         mc = request.query_params.get("minecraft_version", "")
