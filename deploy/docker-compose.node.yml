@@ -14,11 +14,16 @@
 # internet.
 #
 # Networks:
-#   api                carries only the published agent port. It is listed first and has
-#                      the highest priority so Docker publishes the port through it: requests
-#                      arriving via mcpanel_instances are refused by the agent on purpose.
-#   mcpanel_instances  shared with the Minecraft containers this agent creates (RCON via the
-#                      container IP); they cannot use the agent API from it.
+#   api                carries only the published agent port. Docker publishes a port through
+#                      the network that is the container's default gateway: the one with the
+#                      highest gw_priority (Docker 28+), and with equal priorities the one whose
+#                      name sorts first, so without it the project name would decide.
+#                      (`priority` only sets the order in which Compose connects the networks.)
+#   mcpanel_instances  shared with the game server containers this agent creates (RCON via the
+#                      container IP). The agent refuses API requests from its addresses, even
+#                      with a valid token. A game container that goes to this host's published
+#                      address instead arrives from the gateway of `api`, outside that subnet:
+#                      only the token protects that way in (security review 2026-11-11, A-4).
 
 name: mcpanel-node
 
@@ -57,10 +62,11 @@ services:
       # must be chosen (the LAN/VPN IP the panel reaches this host on), never 0.0.0.0 by accident.
       - "${MCPANEL_NODE_BIND:?MCPANEL_NODE_BIND is not set in node.env - set it to the LAN/VPN IP of this host that the panel connects to (not 0.0.0.0 unless a firewall restricts the port)}:${MCPANEL_NODE_PORT:-8700}:8700"
     networks:
+      # gw_priority needs Docker Compose 2.33+ and Docker Engine 28+ (DEPLOYMENT.md, "Additional nodes")
       api:
-        priority: 1000
+        gw_priority: 1
       instances:
-        priority: 0
+        gw_priority: 0
     stop_grace_period: 30s
     logging:
       driver: json-file

@@ -495,6 +495,15 @@ Notes:
   `0.0.0.0` only if a firewall lets nothing but the panel host reach the port.
 * If the node's certificate is regenerated (deleting `agent/tls/`), the panel stops talking to it with
   an `agent_tls` error until you paste the new fingerprint into the node.
+* `docker-compose.node.yml` gives its `api` network the higher `gw_priority`, so Docker publishes
+  the agent port through that network whatever the Compose project is called (Docker publishes a
+  port through the network that is the container's default gateway: the highest gateway priority,
+  then the name that sorts first). That needs **Docker Compose 2.33+ and Docker Engine 28+**; an
+  older Compose refuses the file: then remove the two `gw_priority` lines, and the network names
+  decide. The agent refuses requests from the game servers' network (`mcpanel_instances`) even with
+  a valid token; a game container on the node that goes to the node's published address instead
+  arrives from the gateway of `api`, which only the token protects (security review 2026-11-11,
+  A-4).
 * Using your own certificate instead: set `AGENT_TLS=files`, `AGENT_TLS_CERT_FILE` and
   `AGENT_TLS_KEY_FILE` in a compose override. Pin it the same way, or leave the fingerprint empty and
   let the panel verify it against public CAs plus `MCPANEL_AGENT_CA_BUNDLE` (a PEM file mounted into
