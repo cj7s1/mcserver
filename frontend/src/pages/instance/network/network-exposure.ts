@@ -10,8 +10,11 @@ import type { AgentNetworks, Instance } from "@/lib/types";
 /** The agent's default instance network (agent setting AGENT_INSTANCE_NETWORK): the guess while the agent does not say. */
 export const DEFAULT_INSTANCE_NETWORK = "mcpanel_instances";
 
-/** A network of one server that the agent creates itself (`mcpanel_i_<first 12 hex of the id>`). */
-const PER_SERVER_NETWORK = /^mcpanel_i_[0-9a-f]{12}$/;
+/**
+ * A network of one server that the agent creates itself: `zz_mcpanel_i_<first 12 hex of the id>` (the prefix
+ * sorts after the compose networks, A-1); `mcpanel_i_` is the spelling of the first agents with them.
+ */
+const PER_SERVER_NETWORK = /^(?:zz_)?mcpanel_i_[0-9a-f]{12}$/;
 
 /**
  * Whether a server with this `network` setting runs on a network the agent manages: empty (its default),

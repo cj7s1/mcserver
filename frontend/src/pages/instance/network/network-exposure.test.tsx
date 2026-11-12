@@ -23,26 +23,28 @@ describe("which networks are the agent's own", () => {
     expect(onAgentNetwork("")).toBe(true);
     expect(onAgentNetwork(undefined)).toBe(true);
     expect(onAgentNetwork("mcpanel_instances")).toBe(true);
-    expect(onAgentNetwork("mcpanel_i_0123456789ab")).toBe(true);
+    expect(onAgentNetwork("zz_mcpanel_i_0123456789ab")).toBe(true);
+    expect(onAgentNetwork("mcpanel_i_0123456789ab")).toBe(true); // the first agents' spelling
     expect(onAgentNetwork("host")).toBe(false);
     expect(onAgentNetwork("br0")).toBe(false);
     expect(onAgentNetwork("proxy_net")).toBe(false);
-    expect(onAgentNetwork("mcpanel_i_xyz")).toBe(false);
+    expect(onAgentNetwork("zz_mcpanel_i_xyz")).toBe(false);
+    expect(onAgentNetwork("xx_mcpanel_i_0123456789ab")).toBe(false);
   });
 
   it("uses the agent's own names when the instance answer has them (agent_networks)", () => {
-    const agent = { shared: "panel_net", per_server_prefix: "mcpanel_i_" };
+    const agent = { shared: "panel_net", per_server_prefix: "zz_mcpanel_i_" };
     expect(onAgentNetwork("", agent)).toBe(true);
     expect(onAgentNetwork("panel_net", agent)).toBe(true);
-    expect(onAgentNetwork("mcpanel_i_7f3a", agent)).toBe(true);
+    expect(onAgentNetwork("zz_mcpanel_i_7f3a", agent)).toBe(true);
     // the guessed default is not the agent's network when the agent names another one
     expect(onAgentNetwork("mcpanel_instances", agent)).toBe(false);
     expect(onAgentNetwork("br0", agent)).toBe(false);
     // an agent without per-server networks
-    expect(onAgentNetwork("mcpanel_i_0123456789ab", { shared: "mcpanel_instances", per_server_prefix: null })).toBe(false);
+    expect(onAgentNetwork("zz_mcpanel_i_0123456789ab", { shared: "mcpanel_instances", per_server_prefix: null })).toBe(false);
     // null (older agent, or not asked yet): the guess
     expect(onAgentNetwork("mcpanel_instances", null)).toBe(true);
-    expect(onAgentNetwork("mcpanel_i_0123456789ab", null)).toBe(true);
+    expect(onAgentNetwork("zz_mcpanel_i_0123456789ab", null)).toBe(true);
     const { rerender } = render(<NetworkExposureNotice instance={makeInstance({ network: "panel_net", agent_networks: agent })} />);
     expect(screen.queryByRole("note", { name: "Network exposure" })).not.toBeInTheDocument();
     rerender(<NetworkExposureNotice instance={makeInstance({ network: "mcpanel_instances", agent_networks: agent })} />);
