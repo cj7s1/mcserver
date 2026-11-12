@@ -1377,6 +1377,9 @@ def start(instance_id: UUID, settings: Settings | None = None) -> None:
     start_guard(settings, instance_id, c)
     prepare_start(settings, instance_id, profiles.for_labels(c.labels))
     try:
+        # a start that failed earlier (a port conflict) can have dropped the container's network; repaired
+        # here, or the container is removed and the panel's start creates a new one (404 no_container)
+        _repair_or_remove(settings, instance_id, c)
         reattach_recreated_networks(c, settings)
         c.start()
     except APIError as exc:
@@ -1390,10 +1393,89 @@ def start(instance_id: UUID, settings: Settings | None = None) -> None:
             if ("port is already allocated" in text or "address already in use" in text)
             else "start_failed"
         )
-        raise AgentError(
+        error = AgentError(
             f"Docker could not start the container: {text}", code, 409 if code == "port_conflict" else 502
-        ) from exc
+        )
+        # Docker drops the network of a container whose start failed while it programmed a published port;
+        # the next start would run it without one. Put it back now (the answer stays the same).
+        with contextlib.suppress(Exception):
+            pernet.detach_for(c)
+            _repair_or_remove(settings, instance_id, c, after_failure=True)
+        raise error from exc
     _recheck_bind_sources(settings, instance_id, c)
+
+
+def intended_network(c: Container) -> str | None:
+    """The user-defined network container ``c`` was created for. ``HostConfig.NetworkMode`` names it and
+    survives when Docker drops the attachment itself (``NetworkSettings.Networks`` empty after a start that
+    failed on a published port). None for host/none/bridge/container: modes."""
+    mode = str(((getattr(c, "attrs", None) or {}).get("HostConfig") or {}).get("NetworkMode") or "")
+    if not mode or mode == "default" or mode in _BUILTIN_NETWORKS or mode.startswith("container:"):
+        return None
+    return mode
+
+
+def repair_dropped_network(settings: Settings, c: Container) -> str | None:
+    """Attach the stopped container ``c`` again to the network it was created for when Docker dropped it
+    (boot-network repair). The network is made again first when it is the shared instance network or the
+    server's own one. Returns the network's name, or None when nothing was missing. AgentError 502
+    ``network_repair_failed`` when it cannot be attached."""
+    c.reload()
+    attrs = getattr(c, "attrs", None) or {}
+    if ((attrs.get("NetworkSettings") or {}).get("Networks") or {}) or getattr(c, "status", None) not in (
+        "created",
+        "exited",
+        "dead",
+    ):
+        return None
+    name = intended_network(c)
+    if name is None:
+        return None
+    instance = (c.labels or {}).get(LABEL_INSTANCE)
+    log.warning(
+        "Container %s is not on its network %s any more (Docker drops it when a start fails on a published "
+        "port); attaching it again",
+        c.name,
+        name,
+    )
+    try:
+        if pernet.is_server_network(name) and instance and pernet.network_name(UUID(instance)) == name:
+            pernet.ensure(settings, UUID(instance), attach=False)
+        elif name == settings.instance_network:
+            ensure_network(settings)
+        client().api.connect_container_to_network(c.id, name)
+        c.reload()
+    except (APIError, NotFound, pernet.Unavailable) as exc:
+        raise AgentError(
+            f"The container lost its network {name} and could not be attached to it again: {exc}",
+            "network_repair_failed",
+            502,
+        ) from exc
+    if not ((c.attrs or {}).get("NetworkSettings") or {}).get("Networks"):
+        raise AgentError(
+            f"The container lost its network {name} and is still not on it", "network_repair_failed", 502
+        )
+    return name
+
+
+def _repair_or_remove(
+    settings: Settings, instance_id: UUID, c: Container, *, after_failure: bool = False
+) -> None:
+    """:func:`repair_dropped_network`; a container that cannot be repaired is removed (its last-run record
+    saved first), so the panel's next start creates a new one. Before a start that is 404 ``no_container``
+    (what the panel answers with an apply); after a failed start the caller keeps its own answer."""
+    try:
+        repair_dropped_network(settings, c)
+    except AgentError as exc:
+        log.error("Removing container %s: %s", c.name, exc)
+        with contextlib.suppress(Exception):
+            save_last_run_record(settings, instance_id, c)
+        with contextlib.suppress(NotFound):
+            c.remove(v=False, force=True)
+        forget_ready(str(c.id))
+        pernet.release(settings, instance_id)
+        if not after_failure:
+            raise no_container() from exc
 
 
 def _recheck_bind_sources(settings: Settings, instance_id: UUID, c: Container) -> None:

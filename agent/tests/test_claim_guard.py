@@ -284,6 +284,8 @@ def test_minecraft_start_is_unchanged(settings, monkeypatch):
         labels={docker_ops.LABEL_MANAGED: "true", docker_ops.LABEL_INSTANCE: str(IID)},
         attrs={"HostConfig": {"PortBindings": {"25565/tcp": [{"HostPort": "25565"}]}}},
         start=lambda: calls.append("start"),
+        reload=lambda: None,
+        status="exited",
     )
     monkeypatch.setattr(docker_ops, "get_container", lambda _iid: c)
     monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c, *_a: [])

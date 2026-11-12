@@ -206,6 +206,9 @@ def test_a_mount_replaced_during_the_start_kills_the_container(agent_settings, m
         id="c1",
         name="mcpanel-x",
         labels={},
+        attrs={},
+        status="exited",
+        reload=lambda: None,
         start=lambda: events.append("start"),
         kill=lambda: events.append("kill"),
     )
