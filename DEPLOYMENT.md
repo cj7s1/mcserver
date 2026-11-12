@@ -285,8 +285,9 @@ The wizard asks for the **variant** first; it cannot be changed later.
 * **TShock owner account:** enter an owner password in the wizard (or later in Settings -> Game
   settings -> Secrets); the setup step creates the account (default name `owner`) through TShock's
   REST API once the server is ready. Log in in game with `/login <account> <password>`. TShock's
-  one-time `/setup` code is then not needed (the console shows it masked; TShock switches it off at
-  its next start).
+  one-time `/setup` code is never usable: the panel writes an empty `setup.lock` at create and before
+  every start and deletes `setup-code.txt` (the file manager treats it as a secret file). Without an
+  owner password, administer TShock from the panel's console.
 * `exit` (and TShock's `off`) in the console run the panel's Stop instead. The stop saves:
   PassiveLemon's image on SIGTERM (5 s warning in game, then save; exit code 143, a clean stop for
   this image), TShock on SIGINT (exit 0).
@@ -300,6 +301,29 @@ A registry mirror for PassiveLemon's image is set in System settings (`runtime_i
 `{"terraria": {"repository": "..."}}`; TShock keeps `ryshe/terraria`). The agent allows images per
 variant with `AGENT_GAME_TERRARIA_<VARIANT>_IMAGES` (e.g. `AGENT_GAME_TERRARIA_TSHOCK_IMAGES`), else
 `AGENT_GAME_TERRARIA_IMAGES`, else the profile's own repository.
+
+### Game server networks, images and the agent's source guard
+
+| Setting (`.env`, empty = default) | Default | What it does |
+|---|---|---|
+| `AGENT_PER_SERVER_NETWORKS` | `true` | Every server gets a bridge network of its own, `mcpanel_i_<12 hex>`; `false` puts every server on the shared `mcpanel_instances` network, where the servers reach each other |
+| `AGENT_INSTANCE_POOL` | `10.213.0.0/16` | The private IPv4 range the agent cuts into /29s for those networks (at least a /28); the firewall script reads it too |
+| `AGENT_REFUSE_BRIDGE_GATEWAYS` | `true` | The agent refuses requests from the gateway of every bridge it is attached to (how a game container that goes through the host arrives). Off only when the agent is called from the host itself through a bridge address, or when Docker's userland proxy hands remote clients over from the gateway (rootless Docker, `"iptables": false`): a multi-node panel that suddenly gets 403 from a node agent is that case |
+| `AGENT_IMAGE_DIGEST_CHECK` | `true` | Palworld `v2.8.1`, Valheim `1.4.1`, HKMP `v2.4.3-2`, Project Zomboid `v1.2.0` (and Rust's image) are pinned to the digest checked when the release was made: a re-pushed tag fails with 409 `image_digest_mismatch`, naming both digests. Off only to run such a tag after checking that image yourself |
+
+* An existing server moves to its own network when its container is made again: at its next start
+  (a stopped server has no container) or a change that recreates it. Mixed hosts work. When the agent
+  cannot give a server a network of its own (switched off, an invalid or exhausted pool, an agent that
+  does not run in a container), the server goes on the shared network; the reason is in the agent's
+  log and in `GET /v1/info`. docs/SECURITY.md, "One network per server".
+* Factorio, TShock, Palworld, Project Zomboid, Counter-Strike 2, Rust and Satisfactory refuse the host
+  network and other networks (400 `network_not_supported`); `AGENT_ALLOW_HOST_NETWORK` and
+  `AGENT_ALLOWED_NETWORKS` (an override file) apply to Minecraft, vanilla Terraria, tModLoader,
+  Valheim and HKMP, and never allow the host network to a game with a network control port.
+* The host and the LAN are still reachable from the game containers: on Unraid,
+  `deploy/unraid/instance-firewall.sh` closes that (docs/UNRAID.md, "The game servers' firewall"; not
+  run on Unraid yet). On another Linux host the same script works with iptables and Docker's
+  `DOCKER-USER` chain; run its `install` after every boot.
 
 ### Memory
 
@@ -422,12 +446,22 @@ The panel speaks plain HTTP. For access from outside your LAN, put an HTTPS reve
 
 ```
 MCPANEL_BEHIND_TLS_PROXY=true
-MCPANEL_SECURE_COOKIES=true
 MCPANEL_ALLOWED_HOSTS=panel.example.com
 MCPANEL_CSRF_TRUSTED_ORIGINS=https://panel.example.com
 MCPANEL_FORWARDED_ALLOW_IPS=192.168.1.10      # the proxy's address as the panel sees it
 ```
 
+The cookies are then Secure by themselves: `MCPANEL_SECURE_COOKIES` empty follows
+`MCPANEL_BEHIND_TLS_PROXY`. An `.env` from before this version may still say
+`MCPANEL_SECURE_COOKIES=false`, which keeps them non-Secure behind the proxy: delete that line.
+`MCPANEL_HSTS_SECONDS` (empty or 0 = off) sends Strict-Transport-Security, e.g. `31536000`; set it
+only when the panel has a host name of its own, because browsers then use HTTPS for that name on
+every port, and other plain-HTTP web UIs under the same name (Unraid's own) stop loading.
+
+A browser sends a host's cookies to **every port** of that host name. Serving the panel over HTTPS
+under a name of its own, also on the LAN, keeps its Secure cookies away from the plain-HTTP ports of
+the game servers and of other web UIs on the same machine. Since this version a cookie alone is not
+enough anyway (next section).
 `MCPANEL_FORWARDED_ALLOW_IPS` lists the proxies whose `X-Forwarded-For` header the panel believes.
 It defaults to `127.0.0.1,::1` only: Docker and LAN ranges are not trusted automatically, because the
 Minecraft containers (third-party mod code) and other machines on your network live there and could
@@ -449,6 +483,26 @@ A VPN such as WireGuard or Tailscale is safer than exposing the panel publicly.
 
 Game ports are separate. The panel publishes each server's port on the Docker host only. Players outside
 your LAN need a router port forward for that TCP port, which you configure yourself.
+
+### Sign-in, sessions and the API
+
+* **A session is bound to the browser tab that signed in** (`MCPANEL_SESSION_BINDING`, empty = on).
+  The login answers a `session_token`, which the tab keeps in its `localStorage`; every `/api/` request
+  carries it as `X-MCPanel-Session-Token`, every WebSocket sends it as its first message, and a link
+  download gets a ticket for 60 seconds first. The session cookie alone answers 401
+  `session_token_required`. **After the upgrade to this version everyone signs in once.** A script
+  that calls the API reads `session_token` from the login answer and sends the header with every call
+  (the `api`/`login` helpers of `.github/scripts/upgrade-rehearsal.sh` do it). `false` switches it off;
+  leave it on.
+* **Sign-in limits:** 10 failed attempts a minute per address, and per account 10 in 10 minutes and
+  100 a day from any address, also for the current-password check of a password change. A locked
+  account refuses even the right password until the window ends; a browser that signed in to that
+  account before is not held back by the account limit. To unlock at once:
+  `docker compose exec panel python manage.py unlock_login <username>` (audited). There is no second
+  factor yet.
+* **API pages:** the API answers JSON only; the Swagger page `/api/docs` is gone, and the OpenAPI
+  schema `/api/schema` exists only with `MCPANEL_API_DOCS=true` (for signed-in users). Downloads are
+  `application/octet-stream` with a sandboxing Content-Security-Policy.
 
 ## Additional nodes (more Docker hosts)
 
@@ -799,6 +853,26 @@ they depend on where the last run ended (the state in `upgrade-state.env`):
 | `switching`, `rolling-back` | `./scripts/upgrade.sh rollback` or `./scripts/upgrade.sh run --resume`. Not `docker compose up -d`: the stack is half old, half new. |
 | `rolled-back`, `started` (the version from before the upgrade is deployed) | If the source tree is at that revision: `docker compose up -d`. Otherwise (the usual case, because the script only exists in the newer tree): `cd <source> && git checkout --detach <old revision> && cd deploy && docker compose up -d`. A plain `docker compose up -d` in the newer tree would start the new compose file on the old images. |
 | no state file | `docker compose up -d` |
+
+### The upgrade with the security review (2026-11)
+
+It changes no database schema: `./scripts/upgrade.sh run` (the dry run ends with that command).
+
+* **Once: `chmod -R go-w <checkout>`.** `run` refuses while group or others can write the checkout and
+  prints the command (on Unraid: `chmod -R go-w /mnt/user/appdata/mcpanel-src`); the hook installer
+  and the nightly database dump, which run unattended as root, do it themselves and say so in the
+  syslog. Pull with `(umask 022 && git pull)` from then on.
+* **Everyone signs in once** after the switch: sessions are bound to the browser tab now.
+* Behind an HTTPS proxy, delete a line `MCPANEL_SECURE_COOKIES=false` from `.env` (it would keep the
+  cookies non-Secure).
+* Each server moves to a network of its own at its next start; Project Zomboid servers run as uid
+  1000 without capabilities from their next start (the agent gives their folder to 1000:1000, like
+  Counter-Strike 2's).
+* A Valheim server without its join password is not started (409 `secret_required`; set it under
+  Settings -> Game settings -> Secrets). Clones and restores as a new server copy the source's
+  passwords now (not Counter-Strike 2's GSLT: one token per server).
+* "Start anyway" past the memory check is for users with the global permission `system.settings`.
+* New, optional: the firewall for the game containers (docs/UNRAID.md, "The game servers' firewall").
 
 ### Stopped servers at the first upgrade
 

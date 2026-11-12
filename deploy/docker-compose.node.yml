@@ -53,6 +53,12 @@ services:
       # Longest time Docker itself may wait for a server when the host or the Docker daemon stops.
       AGENT_SHUTDOWN_STOP_TIMEOUT: ${AGENT_SHUTDOWN_STOP_TIMEOUT:-20}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      # One bridge network per server from this pool, the source guard's refusal of bridge gateways,
+      # and the digest check of pinned image tags (docs/SECURITY.md; the agent's defaults when empty)
+      AGENT_PER_SERVER_NETWORKS: ${AGENT_PER_SERVER_NETWORKS:-true}
+      AGENT_INSTANCE_POOL: ${AGENT_INSTANCE_POOL:-10.213.0.0/16}
+      AGENT_REFUSE_BRIDGE_GATEWAYS: ${AGENT_REFUSE_BRIDGE_GATEWAYS:-true}
+      AGENT_IMAGE_DIGEST_CHECK: ${AGENT_IMAGE_DIGEST_CHECK:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}

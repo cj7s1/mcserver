@@ -94,7 +94,13 @@ x-panel-env: &panel-env
   MCPANEL_BEHIND_TLS_PROXY: ${MCPANEL_BEHIND_TLS_PROXY:-false}
   # Empty = loopback only; set it to the reverse proxy's address (backend/container/entrypoint.sh).
   MCPANEL_FORWARDED_ALLOW_IPS: ${MCPANEL_FORWARDED_ALLOW_IPS:-}
-  MCPANEL_SECURE_COOKIES: ${MCPANEL_SECURE_COOKIES:-false}
+  # Empty = follows MCPANEL_BEHIND_TLS_PROXY (backend/mcpanel/settings.py); "false" here would override it.
+  MCPANEL_SECURE_COOKIES: ${MCPANEL_SECURE_COOKIES:-}
+  MCPANEL_HSTS_SECONDS: ${MCPANEL_HSTS_SECONDS:-}
+  # Every /api/ request needs the token of the tab that signed in (empty = true).
+  MCPANEL_SESSION_BINDING: ${MCPANEL_SESSION_BINDING:-}
+  # The OpenAPI schema at /api/schema for signed-in users (empty = off).
+  MCPANEL_API_DOCS: ${MCPANEL_API_DOCS:-}
   MCPANEL_SESSION_AGE_SECONDS: ${MCPANEL_SESSION_AGE_SECONDS:-}
   MCPANEL_PUBLIC_HOSTNAME: ${MCPANEL_PUBLIC_HOSTNAME:-}
   MCPANEL_LAN_ADDRESS: ${MCPANEL_LAN_ADDRESS:-}
@@ -205,6 +211,12 @@ services:
       # Longest time Docker itself may wait for a server when the host or the Docker daemon stops.
       AGENT_SHUTDOWN_STOP_TIMEOUT: ${AGENT_SHUTDOWN_STOP_TIMEOUT:-20}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
+      # One bridge network per server from this pool, the source guard's refusal of bridge gateways,
+      # and the digest check of pinned image tags (docs/SECURITY.md; the agent's defaults when empty)
+      AGENT_PER_SERVER_NETWORKS: ${AGENT_PER_SERVER_NETWORKS:-true}
+      AGENT_INSTANCE_POOL: ${AGENT_INSTANCE_POOL:-10.213.0.0/16}
+      AGENT_REFUSE_BRIDGE_GATEWAYS: ${AGENT_REFUSE_BRIDGE_GATEWAYS:-true}
+      AGENT_IMAGE_DIGEST_CHECK: ${AGENT_IMAGE_DIGEST_CHECK:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}
