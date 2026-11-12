@@ -13,6 +13,7 @@ import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -25,24 +26,26 @@ UNRAID = Path(os.environ.get("MCPANEL_UNRAID_SCRIPTS") or REPO / "deploy" / "unr
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
-# docker stand-in. $FAKE/containers: lines "id|service|running|network mode|networks|name"; the
-# answers of `docker compose version` come from the plugin link in $CLI (like the real CLI) or
-# $FAKE/compose_builtin; $FAKE/daemon_down makes the daemon not answer.
+# docker stand-in. $FAKE/containers: lines "id|service|running|network mode|networks|name|oneoff" (networks
+# space separated); $FAKE/networks: lines "name|compose project|key in the compose file". The answers of
+# `docker compose version` come from the plugin link in $CLI (like the real CLI) or $FAKE/compose_builtin;
+# $FAKE/daemon_down makes the daemon not answer; $FAKE/connect_fails makes every connect fail; a connect to a
+# network the container is on fails like Docker's ("endpoint ... already exists").
 FAKE_DOCKER = r"""#!/bin/bash
 F=$FAKE
 printf '%s\n' "$*" >>"$F/calls.log"
 rows() { cat "$F/containers" 2>/dev/null; }
-set_row() { # set_row ID FIELD VALUE (fields: 1 id 2 service 3 running 4 mode 5 networks 6 name)
+set_row() { # set_row ID FIELD VALUE (fields: 1 id 2 service 3 running 4 mode 5 networks 6 name 7 oneoff)
     local tmp="$F/containers.new"
-    while IFS='|' read -r id service running mode nets name; do
+    while IFS='|' read -r id service running mode nets name oneoff; do
         if [ "$id" = "$1" ]; then
             case "$2" in 3) running=$3 ;; 5) nets=$3 ;; esac
         fi
-        printf '%s|%s|%s|%s|%s|%s\n' "$id" "$service" "$running" "$mode" "$nets" "$name"
+        printf '%s|%s|%s|%s|%s|%s|%s\n' "$id" "$service" "$running" "$mode" "$nets" "$name" "$oneoff"
     done < <(rows) >"$tmp"
     mv "$tmp" "$F/containers"
 }
-field() { rows | while IFS='|' read -r id service running mode nets name; do [ "$id" = "$1" ] && eval "printf '%s' \"\$$2\""; done; }
+field() { rows | while IFS='|' read -r id service running mode nets name oneoff; do [ "$id" = "$1" ] && eval "printf '%s' \"\$$2\""; done; }
 case "$1" in
     compose)
         if [ "$2" = version ] && { [ -x "$CLI/docker-compose" ] || [ -e "$F/compose_builtin" ]; }; then
@@ -54,20 +57,40 @@ case "$1" in
     inspect)
         id=${*: -1}
         line=$(rows | grep "^$id|") || exit 1
-        IFS='|' read -r _ service running mode nets name <<<"$line"
-        printf '%s|%s|%s|%s|/%s\n' "$service" "$running" "$mode" "$nets" "$name" ;;
+        IFS='|' read -r _ service running mode nets name oneoff <<<"$line"
+        case "$*" in
+            *'range $k'*) for n in $nets; do printf '%s ' "$n"; done; echo ;;
+            *) set -- $nets; printf '%s|%s|%s|%s|/%s|%s\n' "$service" "$running" "$mode" "$#" "$name" "$oneoff" ;;
+        esac ;;
     stop) set_row "${*: -1}" 3 false ;;
     start)
         id=${*: -1}
-        [ "$(field "$id" nets)" -gt 0 ] || { echo "failed to set up container networking" >&2; exit 1; }
+        [ -n "$(field "$id" nets)" ] || { echo "failed to set up container networking" >&2; exit 1; }
         set_row "$id" 3 true ;;
     network)
         case "$2" in
-            inspect) grep -qx "${*: -1}" "$F/networks" 2>/dev/null ;;
+            ls)
+                project=""; key=""
+                for a in "$@"; do
+                    case "$a" in
+                        label=com.docker.compose.project=*) project=${a#label=com.docker.compose.project=} ;;
+                        label=com.docker.compose.network=*) key=${a#label=com.docker.compose.network=} ;;
+                    esac
+                done
+                while IFS='|' read -r name p k; do
+                    [ "$p" = "$project" ] && [ "$k" = "$key" ] && echo "$name"
+                done <"$F/networks" ;;
+            inspect) cut -d'|' -f1 "$F/networks" | grep -qx "${*: -1}" ;;
             connect)
-                [ -e "$F/connect_fails" ] && exit 1
                 id=${*: -1}
-                set_row "$id" 5 $(( $(field "$id" nets) + 1 )) ;;
+                net=${*: -2:1}
+                [ ! -e "$F/connect_sleep" ] || sleep "$(cat "$F/connect_sleep")"
+                [ ! -e "$F/connect_fails" ] || { echo "Error response from daemon: connect refused" >&2; exit 1; }
+                nets=$(field "$id" nets)
+                case " $nets " in *" $net "*)
+                    echo "Error response from daemon: endpoint with name $id already exists in network $net" >&2; exit 1 ;;
+                esac
+                set_row "$id" 5 "${nets:+$nets }$net" ;;
             *) exit 1 ;;
         esac ;;
     *) echo "fake docker: unhandled $*" >&2; exit 97 ;;
@@ -82,6 +105,11 @@ case "$1" in
     status) echo "Instance firewall: installed and up to date (config 0123456789abcdef)." ;;
 esac
 """
+
+
+INTERNAL = "mcpanel_internal"
+BOTH = "mcpanel_internal mcpanel_instances"
+NONE = ""
 
 
 class Box:
@@ -104,7 +132,8 @@ class Box:
         self.fake = tmp_path / "fake"
         self.fake.mkdir()
         (self.fake / "uid").write_text("0\n")
-        (self.fake / "networks").write_text("mcpanel_internal\nmcpanel_instances\n")
+        # as Compose makes them: <project>_internal, and instances with the fixed name of the compose file
+        (self.fake / "networks").write_text("mcpanel_internal|mcpanel|internal\nmcpanel_instances|mcpanel|instances\n")
         self.store = tmp_path / "cache" / "system"  # where the owner keeps the Compose binary
         self.store.mkdir(parents=True)
         self.compose_bin = self.store / "docker-compose"
@@ -115,14 +144,17 @@ class Box:
         for name, text in (("docker", FAKE_DOCKER), ("id", FAKE_ID), ("logger", FAKE_LOGGER)):
             (self.bin / name).write_text(text)
             (self.bin / name).chmod(0o755)
+        # the stack as Compose makes it (the owner's server, audit probe/platform.json): the agent's NetworkMode is
+        # the instance network, and it is on the internal one too
         self.containers(
-            ("p1", "panel", "true", "mcpanel_internal", 1, "mcpanel-panel-1"),
-            ("a1", "agent", "true", "mcpanel_internal", 2, "mcpanel-agent-1"),
-            ("d1", "postgres", "true", "mcpanel_internal", 1, "mcpanel-postgres-1"),
+            ("p1", "panel", "true", "mcpanel_internal", INTERNAL, "mcpanel-panel-1"),
+            ("a1", "agent", "true", "mcpanel_instances", BOTH, "mcpanel-agent-1"),
+            ("d1", "postgres", "true", "mcpanel_internal", INTERNAL, "mcpanel-postgres-1"),
         )
 
     def containers(self, *rows: tuple) -> None:
-        (self.fake / "containers").write_text("".join("|".join(str(v) for v in row) + "\n" for row in rows))
+        """Rows (id, service, running, network mode, networks, name[, oneoff])."""
+        (self.fake / "containers").write_text("".join("|".join(map(str, (*row, "")[:7])) + "\n" for row in rows))
 
     def container(self, cid: str) -> list[str]:
         for line in (self.fake / "containers").read_text().splitlines():
@@ -168,9 +200,9 @@ CHANGING = ("stop", "start", "network connect")
 
 def test_first_boot_links_compose_installs_the_hook_and_repairs_the_panel(box):
     box.containers(
-        ("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"),  # the restart loop of the owner's server
-        ("a1", "agent", "true", "mcpanel_internal", 2, "mcpanel-agent-1"),
-        ("d1", "postgres", "true", "mcpanel_internal", 1, "mcpanel-postgres-1"),
+        ("p1", "panel", "false", "mcpanel_internal", NONE, "mcpanel-panel-1"),  # the restart loop of the owner's server
+        ("a1", "agent", "true", "mcpanel_instances", BOTH, "mcpanel-agent-1"),
+        ("d1", "postgres", "true", "mcpanel_internal", INTERNAL, "mcpanel-postgres-1"),
     )
     done = box.run("--compose-bin", str(box.compose_bin))
     assert done.returncode == 0, done.stdout + done.stderr
@@ -189,8 +221,13 @@ def test_first_boot_links_compose_installs_the_hook_and_repairs_the_panel(box):
     assert box.calls("stop") == ["stop -t 30 p1"]
     assert box.calls("network connect") == ["network connect --alias panel mcpanel_internal p1"]
     assert box.calls("start") == ["start p1"]
-    assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "1"]
-    for said in ("Compose: linked", "Shutdown hook: installed", "mcpanel-panel-1 has no network", "repaired and started"):
+    assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "mcpanel_internal"]
+    for said in (
+        "Compose: linked",
+        "Shutdown hook: installed",
+        "mcpanel-panel-1 is not on mcpanel_internal",
+        "repaired and started",
+    ):
         assert said in box.syslog(), said
     assert done.stdout.rstrip().endswith("Done: everything is in place.")
 
@@ -247,20 +284,126 @@ def test_without_docker_only_the_hook_is_installed(box):
     assert box.hook_installed() and box.calls("ps") == []
 
 
-def test_the_agent_gets_its_shared_network_back_too(box):
+def test_the_agent_gets_the_internal_network_back_whatever_its_network_mode_says(box):
+    # F-4 of the review: Compose gives the agent the instance network as NetworkMode; the panel finds it on internal
     (box.fake / "compose_builtin").touch()
-    box.containers(("a1", "agent", "false", "mcpanel_internal", 0, "mcpanel-agent-1"))
+    box.containers(("a1", "agent", "false", "mcpanel_instances", NONE, "mcpanel-agent-1"))
     done = box.run()
     assert done.returncode == 0, done.stdout
     assert box.calls("network connect") == [
         "network connect --alias agent mcpanel_internal a1",
-        "network connect mcpanel_instances a1",
+        "network connect --alias agent mcpanel_instances a1",
     ]
+    assert box.container("a1")[2:5] == ["true", "mcpanel_instances", BOTH]
+    assert "mcpanel-agent-1 repaired and started" in done.stdout
+
+
+def test_only_what_a_container_misses_is_connected(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("a1", "agent", "true", "mcpanel_instances", "mcpanel_instances", "mcpanel-agent-1"))
+    done = box.run()
+    assert done.returncode == 0, done.stdout
+    assert box.calls("network connect") == ["network connect --alias agent mcpanel_internal a1"]
+
+
+def test_the_networks_come_from_composes_labels_for_another_project(box):
+    (box.fake / "compose_builtin").touch()
+    (box.fake / "networks").write_text("games_internal|games|internal\nmcpanel_instances|games|instances\n")
+    box.containers(("a1", "agent", "false", "mcpanel_instances", NONE, "games-agent-1"))
+    done = box.run("--project", "games")
+    assert done.returncode == 0, done.stdout
+    assert box.calls("network connect") == [
+        "network connect --alias agent games_internal a1",
+        "network connect --alias agent mcpanel_instances a1",
+    ]
+
+
+def test_a_repair_by_the_agent_meanwhile_is_left_alone(box):
+    # F-7: the agent repaired the panel between this script's look and its stop: the script's connect then fails
+    # with "already exists", which is what it wanted; it starts what it stopped
+    (box.fake / "compose_builtin").touch()
+    box.containers(("p1", "panel", "true", "mcpanel_internal", NONE, "mcpanel-panel-1"))
+    real = box.bin / "docker-real"
+    (box.bin / "docker").rename(real)
+    (box.bin / "docker").write_text(
+        "#!/bin/bash\n"
+        'R="$(dirname "$0")/docker-real"\n'
+        'if [ "$1" = stop ]; then "$R" "$@"; rc=$?; "$R" network connect --alias panel mcpanel_internal "${*: -1}" >/dev/null; exit $rc; fi\n'
+        'exec "$R" "$@"\n'
+    )
+    (box.bin / "docker").chmod(0o755)
+    done = box.run()
+    assert done.returncode == 0, done.stdout
+    assert box.container("p1")[2:5] == ["true", "mcpanel_internal", "mcpanel_internal"]
+    assert "mcpanel-panel-1 is on mcpanel_internal already" in done.stdout and "NEEDS YOU" not in done.stdout
+
+
+def test_a_container_is_looked_at_again_right_before_the_repair(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("p1", "panel", "true", "mcpanel_internal", NONE, "mcpanel-panel-1"))
+    (box.bin / "docker").rename(box.bin / "docker-real")
+    # the agent repairs the panel after the script's first look and before its second
+    (box.bin / "docker").write_text(
+        "#!/bin/bash\n"
+        'R="$(dirname "$0")/docker-real"\n'
+        'case "$*" in *"range"*) echo x >>"$FAKE/looks"; [ "$(grep -c . "$FAKE/looks")" != 2 ] || '
+        '"$R" network connect --alias panel mcpanel_internal p1 >/dev/null ;; esac\n'
+        'exec "$R" "$@"\n'
+    )
+    (box.bin / "docker").chmod(0o755)
+    done = box.run()
+    assert done.returncode == 0, done.stdout
+    assert "mcpanel-panel-1 is on its networks again (repaired meanwhile): nothing to do" in done.stdout
+    assert box.calls("stop") == [] and box.calls("start") == []
+
+
+def test_what_the_script_stopped_is_started_again_when_it_is_ended(box):
+    (box.fake / "compose_builtin").touch()
+    box.containers(("p1", "panel", "true", "mcpanel_internal", NONE, "mcpanel-panel-1"))
+    (box.fake / "connect_sleep").write_text("3\n")
+    env = {
+        "PATH": f"{box.bin}:/usr/bin:/bin",
+        "FAKE": str(box.fake),
+        "CLI": str(box.cli),
+        "MCPANEL_BOOT_STATE": str(box.boot),
+        "MCPANEL_CLI_PLUGINS": str(box.cli),
+        "MCPANEL_STACK_WAIT": "0",
+        "MCPANEL_HOOK_ROOT": str(box.plugins),
+        "MCPANEL_DISK_CFG": str(box.plugins / "no-disk.cfg"),
+    }
+    run = subprocess.Popen(["bash", str(box.unraid / "array-start.sh")], env=env, stdout=subprocess.PIPE, text=True)
+    end = time.monotonic() + 20
+    while not box.calls("stop") and time.monotonic() < end:
+        time.sleep(0.05)
+    run.terminate()  # the end of a User Script, a shutdown
+    run.wait(timeout=30)
+    assert box.calls("stop") == ["stop -t 30 p1"]
+    assert box.calls("start") == ["start p1"], "the EXIT trap starts what the script stopped"
+
+
+def test_one_off_containers_are_not_part_of_the_stack(box):
+    # F-3: a `docker compose run` leftover (exited) made every boot wait 2 minutes and report "needs you"
+    (box.fake / "compose_builtin").touch()
+    box.containers(
+        ("p1", "panel", "true", "mcpanel_internal", INTERNAL, "mcpanel-panel-1"),
+        ("a1", "agent", "true", "mcpanel_instances", BOTH, "mcpanel-agent-1"),
+        ("d1", "postgres", "true", "mcpanel_internal", INTERNAL, "mcpanel-postgres-1"),
+        ("o1", "panel", "false", "mcpanel_internal", INTERNAL, "mcpanel-panel-run-0123456789ab", "True"),
+        ("o2", "panel", "false", "mcpanel_internal", NONE, "mcpanel-panel-run-ba9876543210"),
+    )
+    began = time.monotonic()
+    done = box.run(wait_stack=30)
+    assert done.returncode == 0, done.stdout
+    assert time.monotonic() - began < 10
+    assert "panel, agent and postgres run with their networks" in done.stdout
+    assert box.calls("stop") == [] and box.calls("network connect") == []
+    status = box.run("status")
+    assert "mcpanel-panel-run" not in status.stdout
 
 
 def test_a_failed_repair_names_the_compose_way(box):
     (box.fake / "compose_builtin").touch()
-    box.containers(("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"))
+    box.containers(("p1", "panel", "false", "mcpanel_internal", NONE, "mcpanel-panel-1"))
     (box.fake / "connect_fails").touch()
     done = box.run()
     assert done.returncode == 1 and "docker compose up -d --force-recreate panel" in done.stdout
@@ -268,14 +411,14 @@ def test_a_failed_repair_names_the_compose_way(box):
 
 def test_a_container_that_stays_down_is_reported(box):
     (box.fake / "compose_builtin").touch()
-    box.containers(("d1", "postgres", "false", "mcpanel_internal", 1, "mcpanel-postgres-1"))
+    box.containers(("d1", "postgres", "false", "mcpanel_internal", INTERNAL, "mcpanel-postgres-1"))
     done = box.run()
     assert done.returncode == 1 and "mcpanel-postgres-1 is not running after 0 s" in done.stdout
     assert box.calls("stop") == []  # it has its network: nothing to repair
 
 
 def test_dry_run_and_status_change_nothing(box):
-    box.containers(("p1", "panel", "false", "mcpanel_internal", 0, "mcpanel-panel-1"))
+    box.containers(("p1", "panel", "false", "mcpanel_internal", NONE, "mcpanel-panel-1"))
     (box.fake / "uid").write_text("1000\n")  # neither needs root
     plan = box.run("dry-run", "--compose-bin", str(box.compose_bin))
     assert plan.returncode == 0, plan.stdout + plan.stderr
@@ -299,7 +442,7 @@ def test_dry_run_and_status_change_nothing(box):
     for said in (
         "MISSING Compose: 'docker compose' does not answer",
         "MISSING Shutdown hook",
-        "REPAIR mcpanel-panel-1: no network although it belongs on mcpanel_internal",
+        "REPAIR mcpanel-panel-1: not on mcpanel_internal (network mode mcpanel_internal; 'run' repairs it)",
         f"User Scripts line (At Startup of Array): bash {box.unraid}/array-start.sh",
     ):
         assert said in status.stdout, said
