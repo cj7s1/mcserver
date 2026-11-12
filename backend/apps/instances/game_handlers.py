@@ -286,14 +286,30 @@ def _stamp() -> str:
 
 
 class _RecordingClient:
-    """The agent client for ``set_aside``: records every rename it made, so they can be undone (E-3)."""
+    """The agent client for ``set_aside``: records every rename it made, so they can be undone (E-3).
 
-    def __init__(self, client: AgentClient) -> None:
+    A rename is recorded before its answer counts (R-1 of the branch review): when the answer is lost (the
+    agent timed out or became unreachable, a 5xx) the rename may have happened on the node anyway, so source
+    and destination are looked at: moved -> recorded; not moved -> not; cannot tell -> recorded as uncertain
+    (the undo then checks it like the others). Only the agent's own refusal (a 4xx) means nothing was moved."""
+
+    def __init__(self, client: AgentClient, instance: Instance) -> None:
         self._client = client
+        self._instance = instance
         self.moves: list[tuple[str, str]] = []
 
     def rename(self, instance_id: Any, source: str, destination: str, *args: Any, **kwargs: Any) -> Any:
-        result = self._client.rename(instance_id, source, destination, *args, **kwargs)
+        try:
+            result = self._client.rename(instance_id, source, destination, *args, **kwargs)
+        except ApiError as exc:
+            agent_status = getattr(exc, "agent_status", None) or exc.status_code
+            if 400 <= int(agent_status) < 500:
+                raise  # refused by the agent: nothing was moved
+            at_source = _exists(self._client, self._instance, source)
+            at_destination = _exists(self._client, self._instance, destination)
+            if not (at_source is True and at_destination is False):
+                self.moves.append((source, destination))  # moved, or cannot tell
+            raise
         self.moves.append((source, destination))
         return result
 
@@ -301,14 +317,44 @@ class _RecordingClient:
         return getattr(self._client, name)
 
 
+def _exists(client: AgentClient, instance: Instance, path: str) -> bool | None:
+    """Whether ``path`` exists in the server folder; None when the agent cannot tell now."""
+    try:
+        client.stat_file(instance.id, path)
+    except ApiError as exc:
+        return False if exc.error_code == "not_found" else None
+    except Exception:
+        return None
+    return True
+
+
 def _undo_set_aside(client: AgentClient, instance: Instance, moves: list[tuple[str, str]], ctx: JobContext) -> bool:
-    """Move the set-aside entries back where they were (newest first). False when one cannot be moved back
-    (``place`` already put something there): the rest stays where it is and the log says so."""
+    """Move the set-aside entries back where they were (newest first) and check that they are: True only when
+    every recorded entry is at its old place again and the set-aside folder holds nothing more (an entry whose
+    move was never recorded would be missing from the server otherwise). False: the rest stays where it is and
+    the log says so (``place`` may already have put something there, or the agent cannot be asked)."""
     for source, destination in reversed(moves):
+        if _exists(client, instance, destination) is False and _exists(client, instance, source) is True:
+            continue  # (an uncertain move that did not happen)
         try:
             client.rename(instance.id, destination, source, timeout=600)
         except Exception as exc:  # (an ApiError of the agent, or the agent unreachable)
             ctx.log(f"warning: could not move {destination} back to {source}: {exc}")
+            return False
+    for source, destination in moves:
+        if _exists(client, instance, source) is not True or _exists(client, instance, destination) is not False:
+            ctx.log(f"warning: {source} could not be confirmed back in place")
+            return False
+    for folder in sorted({d.rsplit("/", 1)[0] for _s, d in moves if "/" in d}):
+        try:
+            left = client.list_files(instance.id, folder).get("entries") or []
+        except ApiError as exc:
+            if exc.error_code == "not_found":
+                continue
+            ctx.log(f"warning: could not check {folder}: {exc}")
+            return False
+        if left:
+            ctx.log(f"warning: {folder} still holds {len(left)} entr{'y' if len(left) == 1 else 'ies'} set aside by this job")
             return False
     return True
 
@@ -352,7 +398,7 @@ def _replace_save(
     moved: list[str] = []
     stamp = _stamp()
     spec_before = current_spec_hash(instance)
-    recorder = _RecordingClient(client)
+    recorder = _RecordingClient(client, instance)
     try:
         if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
             raise ConflictError("This server is archived; unarchive it first", code="archived")

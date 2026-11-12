@@ -431,3 +431,83 @@ def test_e5_a_backup_from_before_this_release_restores_as_before(clients, fake_a
     assert job.status == JobStatus.SUCCEEDED, job.error
     vh.refresh_from_db()
     assert build_spec(vh)["env"]["WORLD_NAME"] == "Asgard"  # (nothing recorded, nothing set back)
+
+
+# --- R-1 of the branch review: the E-3 undo and a rename whose answer was lost --------------------------------
+def _factorio_with_two_saves(make_instance, fake_agent):
+    from apps.instances.spec import build_spec
+
+    inst = make_instance(
+        name="F3",
+        game="factorio",
+        server_type="",
+        minecraft_version="2.1.23",
+        image="factoriotools/factorio:2.1.23-rootless",
+        memory_mb=2048,
+        jvm_flags_preset="none",
+        game_port=34198,
+        ports=[{"name": "game", "container_port": 34197, "protocol": "udp", "host_port": 34198}],
+        game_options={"space_age": False, "save_name": "world"},
+    )
+    fake_agent.put_file(inst.id, "saves/a-older.zip", b"older")
+    fake_agent.put_file(inst.id, "saves/world.zip", b"current")
+    fake_agent.apply(inst.id, build_spec(inst), start=True)
+    Instance.objects.filter(pk=inst.pk).update(desired_state="running")
+    return inst
+
+
+def _lose_the_answer_of_the_second_rename(monkeypatch, *, stat_down: bool = False) -> None:
+    from apps.core.errors import ApiError
+    from apps.games.factorio import FactorioSaves
+    from apps.nodes.client import AgentClient, AgentError
+
+    real = AgentClient.rename
+    calls = {"n": 0}
+
+    def rename(self, instance_id, source, destination, *a, **kw):
+        out = real(self, instance_id, source, destination, *a, **kw)
+        calls["n"] += 1
+        if calls["n"] == 2:  # performed on the node, but the answer never reached the panel
+            raise AgentError("Node agent unreachable", "agent_unreachable", 502)
+        return out
+
+    monkeypatch.setattr(AgentClient, "rename", rename)
+    if stat_down:
+        real_stat = AgentClient.stat_file
+
+        def stat_file(self, instance_id, path):
+            if calls["n"] >= 2:
+                raise ApiError("The node agent is unreachable", code="agent_unavailable", status_code=503)
+            return real_stat(self, instance_id, path)
+
+        monkeypatch.setattr(AgentClient, "stat_file", stat_file)
+    monkeypatch.setattr(FactorioSaves, "write_map_gen", lambda *a, **k: (_ for _ in ()).throw(AssertionError("not reached")))
+
+
+def test_r1_a_rename_whose_answer_was_lost_is_found_and_undone(
+    fake_agent, monkeypatch, django_capture_on_commit_callbacks, make_instance
+):
+    """Adopted from fixes/review/agent-fs/test_e3_partial_undo.py: the undo used to move back only the renames
+    whose answer arrived, say "back in place" and start the server without the other save."""
+    inst = _factorio_with_two_saves(make_instance, fake_agent)
+    _lose_the_answer_of_the_second_rename(monkeypatch)
+    job = run("saves_reset", inst, django_capture_on_commit_callbacks, seed=1, backup=False)
+    assert job.status == JobStatus.FAILED
+    files = set(fake_agent._root(str(inst.id))["files"])
+    assert {"saves/a-older.zip", "saves/world.zip"} <= files
+    assert not any(f.startswith("saves-replaced/") for f in files)
+    assert fake_agent.containers[str(inst.id)]["running"] and "back in place" in "\n".join(job.log)
+
+
+def test_r1_when_the_undo_cannot_be_confirmed_the_server_is_left_stopped(
+    fake_agent, monkeypatch, django_capture_on_commit_callbacks, make_instance
+):
+    inst = _factorio_with_two_saves(make_instance, fake_agent)
+    _lose_the_answer_of_the_second_rename(monkeypatch, stat_down=True)
+    job = run("saves_reset", inst, django_capture_on_commit_callbacks, seed=1, backup=False)
+    assert job.status == JobStatus.FAILED
+    log = "\n".join(job.log)
+    assert not fake_agent.containers[str(inst.id)]["running"]
+    inst.refresh_from_db()
+    assert inst.desired_state == "stopped"
+    assert "left stopped" in log and "saves-replaced/" in log and "moved aside are back in place" not in log
