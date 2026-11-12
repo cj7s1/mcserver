@@ -47,6 +47,7 @@ from . import (
     lastrun,
     maintenance,
     netguard,
+    pernet,
     profiles,
     slp,
     storage,
@@ -155,6 +156,9 @@ FEATURES = [
     "backup_game_hint",
     # a stop may say the server never became ready in this run (StopRequest.not_ready)
     "stop_not_ready",
+    # a spec without a network gets its own bridge (pernet; GET /v1/info "per_server_networks" says
+    # whether it is in use and why not)
+    "per_server_networks",
 ]
 # How long a request waits for the per-server lock (docker_ops.instance_lock) before it answers
 # 409 instance_busy. A retire gives up quickly: the panel simply asks again on its next pass.
@@ -168,6 +172,8 @@ UPLOAD_LIMIT = int(os.environ.get("AGENT_MAX_UPLOAD_BYTES", str(4 * 1024 * 1024 
 _blocked_networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] | None = None
 # The gateway addresses (/32, /128) of the other bridges the agent is attached to (A-4); refused as well.
 _blocked_gateways: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+# The per-server network pool (AGENT_INSTANCE_POOL, A-1): a constant, refused without asking Docker.
+_pool: ipaddress.IPv4Network | None = None
 # Until then: what the guard saw the last time Docker answered, and the subnets this process is
 # attached to now (netguard.provisional_verdict). Set at start-up and by the guard loop.
 _remembered_networks: dict[str, list[ipaddress.IPv4Network | ipaddress.IPv6Network]] | None = None
@@ -201,6 +207,8 @@ def _load_blocked_networks(settings: Settings) -> bool:
             with contextlib.suppress(ValueError, TypeError):
                 nets.append(ipaddress.ip_network(cfg.get("Subnet"), strict=False))
     attached = netguard.attached_subnets()
+    if (pool := pernet.pool_or_none(settings)) is not None:
+        nets.append(pool)  # every server's own network (A-1)
     gateways: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     if settings.refuse_bridge_gateways:
         try:
@@ -257,7 +265,8 @@ def _bridge_gateways(
 
 def _prepare_guard(settings: Settings) -> None:
     """Start-up, before the first request: what the guard goes by until Docker answers."""
-    global _blocked_networks, _remembered_networks, _attached_networks
+    global _blocked_networks, _remembered_networks, _attached_networks, _pool
+    _pool = pernet.pool_or_none(settings)
     _blocked_networks = None
     _remembered_networks = netguard.recall(settings.state_dir)
     _attached_networks = netguard.attached_subnets()
@@ -267,6 +276,7 @@ def _guard_loop(settings: Settings, stop: threading.Event) -> None:
     """Load the instance-network subnets, retrying until Docker answers, then keep them current."""
     global _attached_networks
     warned = False
+    networks_checked = False
     while not stop.is_set():
         try:
             docker_ops.ensure_network(settings)
@@ -285,6 +295,13 @@ def _guard_loop(settings: Settings, stop: threading.Event) -> None:
         if loaded and warned:
             log.info("Docker is reachable again; the instance-network guard is up to date")
             warned = False
+        if loaded and not networks_checked:
+            # once Docker answers: join every server network, create missing ones again, sweep leftovers
+            networks_checked = True
+            try:
+                pernet.startup(settings, lambda iid: docker_ops.instance_lock(iid, wait=LIFECYCLE_LOCK_WAIT))
+            except Exception:
+                log.exception("Checking the server networks at start failed")
         stop.wait(GUARD_REFRESH_SECONDS if _blocked_networks is not None else GUARD_RETRY_SECONDS)
 
 
@@ -301,6 +318,8 @@ def _source_verdict(client: Any, path: str = "") -> str | None:
         return None
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped  # ::ffff:a.b.c.d from a dual-stack listener is a.b.c.d (A-4)
+    if _pool is not None and ip in _pool:
+        return "blocked"  # a server's own network (A-1)
     nets = _blocked_networks
     if nets is None:
         if ip.is_loopback or path in _GUARD_EXEMPT_PATHS:
@@ -520,10 +539,14 @@ async def info(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "docker": docker_info,
         "restic": await run_in_threadpool(restic_available, settings),
         "storage": caps,
+        # {enabled, reason, pool, subnet_prefix}: whether new servers get their own network (A-1)
+        "per_server_networks": await run_in_threadpool(pernet.status, settings),
         "tls": {"mode": settings.tls, "fingerprint": await run_in_threadpool(_tls_fingerprint, settings)},
         "policy": {
             "allowed_images": settings.allowed_images,
             "networks": sorted(settings.effective_networks()),
+            # the shared instance network (servers on it, or on a server network below, are the agent's)
+            "instance_network": settings.instance_network,
             "port_min": settings.port_min,
             "port_max": settings.port_max,
             "max_memory_mb": settings.max_memory_mb,

@@ -200,7 +200,7 @@ def test_the_token_file_is_still_required(settings, fake):
 def one_container(monkeypatch):
     box: dict = {}
     monkeypatch.setattr(docker_ops, "get_container", lambda _iid: box.get("c"))
-    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c: [])
+    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c, *_a: [])
     return box
 
 
@@ -286,7 +286,7 @@ def test_minecraft_start_is_unchanged(settings, monkeypatch):
         start=lambda: calls.append("start"),
     )
     monkeypatch.setattr(docker_ops, "get_container", lambda _iid: c)
-    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c: [])
+    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c, *_a: [])
     monkeypatch.setattr(docker_ops, "get_settings", lambda: settings)
     docker_ops.start(IID)
     assert calls == ["start"]

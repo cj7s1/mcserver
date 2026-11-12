@@ -43,6 +43,7 @@ def test_docker_daemon_down_reported_as_docker_unavailable(monkeypatch):
 TOKEN = "t" * 32
 INTERNAL = ipaddress.ip_network("172.18.0.0/16")  # the panel's network
 INSTANCES = ipaddress.ip_network("172.19.0.0/16")
+POOL = ipaddress.ip_network("10.213.0.0/16")  # AGENT_INSTANCE_POOL's default: every server's own network
 
 
 @pytest.fixture
@@ -52,7 +53,13 @@ def guard(monkeypatch, tmp_path):
     settings.state_dir.mkdir(parents=True)
     attached = [INTERNAL, INSTANCES]
     monkeypatch.setattr(netguard, "attached_subnets", lambda *a: list(attached))
-    for name in ("_blocked_networks", "_blocked_gateways", "_remembered_networks", "_attached_networks"):
+    for name in (
+        "_blocked_networks",
+        "_blocked_gateways",
+        "_remembered_networks",
+        "_attached_networks",
+        "_pool",
+    ):
         monkeypatch.setattr(main, name, getattr(main, name))
     main.app.dependency_overrides[get_settings] = lambda: settings
     yield settings, attached
@@ -133,11 +140,11 @@ def test_the_guard_retries_until_docker_answers(guard, monkeypatch):
         time.sleep(0.01)
     stop.set()
     t.join(5)
-    assert main._blocked_networks == [INSTANCES] and fake.failures == 0
-    assert _get("172.19.0.5") == 403
+    assert main._blocked_networks == [INSTANCES, POOL] and fake.failures == 0
+    assert _get("172.19.0.5") == 403 and _get("10.213.0.3") == 403
     # the gateway of the panel's bridge is refused too (A-4); its subnet stays trusted
     assert netguard.recall(settings.state_dir) == {
-        "blocked": [ipaddress.ip_network("172.18.0.1/32"), INSTANCES],
+        "blocked": [POOL, ipaddress.ip_network("172.18.0.1/32"), INSTANCES],
         "trusted": [INTERNAL],
     }
 

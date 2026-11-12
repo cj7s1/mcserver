@@ -33,7 +33,7 @@ from docker.errors import APIError, ImageNotFound, NotFound
 # arguments to the low-level API call; see create_container() for why it is used directly.
 from docker.models.containers import Container, _create_container_args
 
-from . import claimguard, drivers, lastrun, profiles
+from . import claimguard, drivers, lastrun, pernet, profiles
 from .config import Settings, get_settings
 from .drivers.minecraft import GAME_PORT, RCON_PORT, SAVE_BEFORE_STOP, STOP_COMMAND
 from .errors import AgentError, game_text
@@ -844,6 +844,7 @@ def forget_server_game(settings: Settings, instance_id: UUID) -> None:
     files = settings.state_dir / AGENT_FILES_DIR / str(instance_id)
     if files.is_dir() and not files.is_symlink():
         shutil.rmtree(files, ignore_errors=True)
+    pernet.forget(settings, instance_id)  # its subnet is free again
 
 
 def server_profile(settings: Settings, instance_id: UUID) -> RuntimeProfile | None:
@@ -914,6 +915,12 @@ def create_container(
     if profile.prepare_start is not None or profile.literal_owner is not None:
         prepare_start(settings, instance_id, profile)
     write_agent_files(settings, instance_id, profile, spec)
+    if spec.network is None and kwargs["network"] == settings.instance_network:
+        # a spec without a network (the panel's default): the server's own bridge (A-1, pernet), else
+        # the shared instance network as before
+        own = pernet.prepare(settings, instance_id)
+        if own is not None:
+            kwargs["network"] = own
     if kwargs["network"] == settings.instance_network:
         ensure_network(settings)
     # docker-py's high-level containers.create() cannot set Config.StopTimeout: it rejects a
@@ -967,6 +974,7 @@ def remove_container(
     except NotFound:
         pass  # removed by someone else meanwhile: the result is the same
     forget_ready(str(c.id))
+    pernet.release(settings, instance_id)  # its own network, unless another container still uses it
     return True
 
 
@@ -1118,6 +1126,7 @@ def retire(settings: Settings, instance_id: UUID, settle_seconds: float = 0.0) -
         if not (exc.status_code == 409 and "removal" in text and "in progress" in text):
             raise
     forget_ready(str(c.id))
+    pernet.release(settings, instance_id)
     log.info(
         "Retired the container of %s (%s, exit code %s%s)",
         instance_id,
@@ -1131,7 +1140,7 @@ def retire(settings: Settings, instance_id: UUID, settle_seconds: float = 0.0) -
 _BUILTIN_NETWORKS = frozenset({"host", "none", "bridge"})
 
 
-def reattach_recreated_networks(c: Container) -> list[str]:
+def reattach_recreated_networks(c: Container, settings: Settings | None = None) -> list[str]:
     """Point a stopped container at the current network of every name it is attached to.
 
     Docker lets a network be removed while only *stopped* containers use it (for example
@@ -1145,6 +1154,18 @@ def reattach_recreated_networks(c: Container) -> list[str]:
     if c.status not in ("created", "exited", "dead"):
         return []
     networks = (c.attrs.get("NetworkSettings") or {}).get("Networks") or {}
+    instance = (c.labels or {}).get(LABEL_INSTANCE)
+    for name in networks:
+        # the server's own network (A-1): Unraid deletes user-defined networks at a Docker restart unless
+        # it preserves them, and the agent's container is new after an upgrade. Create it again (same
+        # name and subnet) and join it, so the server comes up through this start.
+        if pernet.is_server_network(name) and instance and pernet.network_name(UUID(instance)) == name:
+            try:
+                pernet.ensure(settings or get_settings(), UUID(instance))
+            except pernet.Unavailable as exc:
+                raise AgentError(
+                    f"The server's network {name} could not be prepared: {exc}", "start_failed", 502
+                ) from exc
     repaired: list[str] = []
     for name, endpoint in networks.items():
         old_id = (endpoint or {}).get("NetworkID") or ""
@@ -1269,7 +1290,7 @@ def start(instance_id: UUID, settings: Settings | None = None) -> None:
     start_guard(settings, instance_id, c)
     prepare_start(settings, instance_id, profiles.for_labels(c.labels))
     try:
-        reattach_recreated_networks(c)
+        reattach_recreated_networks(c, settings)
         c.start()
     except APIError as exc:
         if container_is_gone(exc):

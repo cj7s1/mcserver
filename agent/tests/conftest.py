@@ -97,3 +97,14 @@ def _readiness_state(monkeypatch):
     monkeypatch.setattr(docker_ops, "_health_state", {})
     monkeypatch.setattr(docker_ops, "_ready_runs", {})
     monkeypatch.setattr(docker_ops, "_ready_file", None)
+
+
+@pytest.fixture(autouse=True)
+def _per_server_network_state(monkeypatch):
+    """No test finds the agent's own container unless it says so (pernet falls back to the shared network
+    without asking Docker), and the fallback log/status start empty."""
+    from mcagent import pernet
+
+    monkeypatch.setattr(pernet, "_own", {"id": None})
+    monkeypatch.setattr(pernet, "_status", {"reason": None, "fallbacks": 0})
+    monkeypatch.setattr(pernet, "_logged", set())

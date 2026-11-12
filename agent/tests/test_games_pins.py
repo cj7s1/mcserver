@@ -283,6 +283,8 @@ def test_info_pin(api, auth, agent_settings, monkeypatch):
         "policy": {
             "allowed_images": ["itzg/minecraft-server", "docker.io/itzg/minecraft-server"],
             "networks": ["mcpanel_instances"],
+            # added with one network per server (A-1): the shared network's name, for the panel's warning
+            "instance_network": "mcpanel_instances",
             "port_min": 1024,
             "port_max": 65535,
             "max_memory_mb": 65536,

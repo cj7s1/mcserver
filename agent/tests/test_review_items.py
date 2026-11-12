@@ -385,7 +385,7 @@ class _Stopped:
 
 @pytest.fixture
 def factorio_folder(settings, monkeypatch, tmp_path):
-    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c: [])
+    monkeypatch.setattr(docker_ops, "reattach_recreated_networks", lambda _c, *_a: [])
     host = docker_ops.host_instance_dir(settings, IID)
     folder = settings.instances_dir / str(IID)
     (folder / ".volumes" / "opt_cache").mkdir(parents=True)
