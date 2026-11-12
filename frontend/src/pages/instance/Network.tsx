@@ -11,12 +11,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/hooks/use-auth";
 import { api, ApiError, errorMessage } from "@/lib/api";
-import { gameLabel, isMinecraft } from "@/lib/games";
+import { customNetworkAllowed, gameLabel, isMinecraft } from "@/lib/games";
 import { qk, useInvalidateInstance, useSystemInfo } from "@/lib/queries";
 import type { Instance, PortMapping } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useInstanceContext } from "./InstanceLayout";
 import { usePorts } from "./backups/backup-utils";
+import { useGameInfo } from "./game-api";
 import { AddressList, ConnectionFlow } from "./network/ConnectionPanel";
 import { ExtraPortsEditor } from "./network/ExtraPortsEditor";
 import { GameNetwork } from "./network/GameNetwork";
@@ -159,6 +160,8 @@ function MinecraftNetwork() {
   const canEdit = can("instance.configure") && !instance.archived_at;
   const ports = usePorts(instance.node); // the ports of the node this server runs on
   const system = useSystemInfo();
+  // a game that runs on the panel's own network only (R-8): no network field, unless one is set (to clear it)
+  const networkAllowed = customNetworkAllowed(instance, useGameInfo(instance));
   const [draft, setDraft] = useState<Draft | null>(null);
   const [serverErr, setServerErr] = useState<{ port?: number; message: string } | null>(null);
   const current = draft ?? fromInstance(instance);
@@ -396,49 +399,53 @@ function MinecraftNetwork() {
         </div>
       </Section>
 
-      <Advanced title="Advanced" hint="Docker network">
-        <div className="grid max-w-xl gap-1.5">
-          <Label htmlFor="net-docker-network" className="flex items-center gap-1.5">
-            <NetworkIcon className="size-3.5 text-muted-foreground" aria-hidden /> Docker network
-          </Label>
-          <Input
-            id="net-docker-network"
-            value={current.network}
-            placeholder="Default instance network"
-            list={allowedNetworks ? "net-allowed-networks" : undefined}
-            disabled={disabled}
-            onChange={(e) => edit({ network: e.target.value })}
-            aria-invalid={!!(errors.network ?? fe.network) || undefined}
-            className="font-mono"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          {allowedNetworks && (
-            <datalist id="net-allowed-networks">
-              {allowedNetworks.map((n) => (
-                <option key={n} value={n} />
-              ))}
-            </datalist>
-          )}
-          <p className={cn("text-xs", errors.network || fe.network ? "text-destructive" : "text-muted-foreground")}>
-            {errors.network ??
-              fe.network ??
-              "Leave empty for the agent's default network. A custom network (for example one shared with a Velocity proxy) must be allowed by the host agent's policy (AGENT_ALLOWED_NETWORKS), otherwise the server fails to start."}
-          </p>
-          {allowedNetworks && (
-            <p className="text-xs text-muted-foreground">
-              Allowed by the agent: {allowedNetworks.map((n) => <code key={n} className="mr-1.5 font-mono">{n}</code>)}
+      {(networkAllowed || saved.network) && (
+        <Advanced title="Advanced" hint="Docker network">
+          <div className="grid max-w-xl gap-1.5">
+            <Label htmlFor="net-docker-network" className="flex items-center gap-1.5">
+              <NetworkIcon className="size-3.5 text-muted-foreground" aria-hidden /> Docker network
+            </Label>
+            <Input
+              id="net-docker-network"
+              value={current.network}
+              placeholder="Default instance network"
+              list={allowedNetworks ? "net-allowed-networks" : undefined}
+              disabled={disabled}
+              onChange={(e) => edit({ network: e.target.value })}
+              aria-invalid={!!(errors.network ?? fe.network) || undefined}
+              className="font-mono"
+              autoComplete="off"
+              spellCheck={false}
+            />
+            {allowedNetworks && (
+              <datalist id="net-allowed-networks">
+                {allowedNetworks.map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
+            )}
+            <p className={cn("text-xs", errors.network || fe.network ? "text-destructive" : "text-muted-foreground")}>
+              {errors.network ??
+                fe.network ??
+                (networkAllowed
+                  ? "Leave empty for the agent's default network. A custom network (for example one shared with a Velocity proxy) must be allowed by the host agent's policy (AGENT_ALLOWED_NETWORKS), otherwise the server fails to start."
+                  : `${gameLabel(instance)} servers run on the panel's own network only: clear the field to move this one back.`)}
             </p>
-          )}
-          {normalized.network !== saved.network && <NetworkExposureNotice instance={instance} network={normalized.network} />}
-          {normalized.network === "host" && (
-            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-800 dark:text-amber-200">
-              Host networking skips Docker port mapping: the server listens on the host's port 25565 directly, and the host port
-              and extra ports above are ignored.
-            </p>
-          )}
-        </div>
-      </Advanced>
+            {allowedNetworks && (
+              <p className="text-xs text-muted-foreground">
+                Allowed by the agent: {allowedNetworks.map((n) => <code key={n} className="mr-1.5 font-mono">{n}</code>)}
+              </p>
+            )}
+            {normalized.network !== saved.network && <NetworkExposureNotice instance={instance} network={normalized.network} />}
+            {normalized.network === "host" && (
+              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-800 dark:text-amber-200">
+                Host networking skips Docker port mapping: the server listens on the host's port 25565 directly, and the host port
+                and extra ports above are ignored.
+              </p>
+            )}
+          </div>
+        </Advanced>
+      )}
 
       {canEdit && changeCount > 0 && (
         <div

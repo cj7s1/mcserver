@@ -88,6 +88,17 @@ export function memoryModel(i: Pick<Instance, "memory_model">): MemoryModel {
   return i.memory_model ?? "jvm";
 }
 
+// --- networks -----------------------------------------------------------------------------------------
+
+/**
+ * Whether the server may be given a custom Docker network: not when the instance or its game's catalog entry
+ * says `custom_network: false` (games whose control port listens on the network, R-8; the panel refuses the
+ * setting with 400). Absent on both: allowed, as before.
+ */
+export function customNetworkAllowed(instance: Pick<Instance, "custom_network">, game?: Pick<GameInfo, "custom_network"> | null): boolean {
+  return instance.custom_network !== false && game?.custom_network !== false;
+}
+
 // --- who can join -------------------------------------------------------------------------------------
 
 /**

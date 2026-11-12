@@ -108,6 +108,11 @@ export interface GameInfo {
   player_name_pattern?: string;
   player_list_labels?: Partial<Record<"whitelist" | "ops" | "bans", string>>;
   world?: GameWorldSpec | null;
+  /**
+   * false: servers of this game run only on the agent's own network (no custom Docker network can be set:
+   * Satisfactory, Factorio, TShock, Palworld, Project Zomboid, CS2, Rust; R-8). Absent: they may.
+   */
+  custom_network?: boolean;
 }
 
 /**
@@ -519,6 +524,8 @@ export interface Instance {
    * in the server list, was not asked yet.
    */
   agent_networks?: AgentNetworks | null;
+  /** false: this server cannot be given a custom Docker network (its game's `custom_network`, R-8). */
+  custom_network?: boolean;
   desired_state: "running" | "stopped";
   status: InstanceStatus;
   status_detail: string;
