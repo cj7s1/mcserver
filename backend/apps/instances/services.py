@@ -470,7 +470,7 @@ def power(
     if action in ("start", "restart") and not allow_overcommit:
         from . import capacity
 
-        capacity.admit(instance)
+        capacity.admit(instance, user=user)
     superseded = end_first_start_wait(instance, user) if action == "stop" else None
     if superseded is not None:
         audit.record(

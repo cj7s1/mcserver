@@ -159,16 +159,18 @@ def insufficient(instance: Any, *, client: Any = None) -> Budget | None:
     return found if found is not None and not found.fits else None
 
 
-def admit(instance: Any, *, client: Any = None) -> None:
-    """Raise 409 ``insufficient_memory`` when starting ``instance`` would not fit."""
+def admit(instance: Any, *, client: Any = None, user: Any = None) -> None:
+    """Raise 409 ``insufficient_memory`` when starting ``instance`` would not fit. "Start it anyway" is offered
+    only to who may (``user`` None: the panel itself; else the global OVERCOMMIT_PERMISSION, D-4)."""
     short = insufficient(instance, client=client)
     if short is not None:
-        raise ConflictError(
-            short.message(instance.name)
-            + " Stop another server first, lower the memory of this one, or start it anyway (allow_overcommit).",
-            code="insufficient_memory",
-            details=short.details(),
+        may_override = user is None or OVERCOMMIT_PERMISSION in user.global_permissions()
+        advice = (
+            " Stop another server first, lower the memory of this one, or start it anyway (allow_overcommit)."
+            if may_override
+            else " Stop another server first or lower the memory of this one; starting it anyway needs an administrator."
         )
+        raise ConflictError(short.message(instance.name) + advice, code="insufficient_memory", details=short.details())
 
 
 def runs_now(instance: Any) -> bool:
@@ -214,7 +216,7 @@ def admit_request(instance: Any, *, starts: bool, allow_overcommit: Any, node: A
     if allow_overcommit is True:
         require_overcommit_right(user)
         return {"allow_overcommit": True}
-    admit(instance if node is None else on_node(instance, node))
+    admit(instance if node is None else on_node(instance, node), user=user)
     return {}
 
 

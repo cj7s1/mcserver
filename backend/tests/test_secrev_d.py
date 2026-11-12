@@ -722,3 +722,19 @@ def test_d13_every_answer_with_a_schedule_hides_the_console_fields(
     resp = consoler.patch(f"/api/instances/{inst.id}/schedules/{sched.id}", {"enabled": False}, format="json")
     assert resp.json()["payload"]["command"] == "op mallory" and resp.json()["last_result"] == "Made mallory op"
 
+
+@pytest.mark.django_db
+def test_d4_the_refusal_offers_the_override_only_to_who_may_use_it(
+    make_instance: Any, fake_agent: Any, make_user: Any, client_for: Any, users: Any
+) -> None:
+    _server(make_instance, fake_agent, "Big", running=True, memory_mb=8192)
+    other = _server(make_instance, fake_agent, "Other", running=False, memory_mb=6144)
+    friend = client_for(_grant(make_user, other, "friend3", ["instance.control"]))
+    url = f"/api/instances/{other.id}/power"
+    refused = friend.post(url, {"action": "start"}, format="json").json()["error"]
+    assert refused["code"] == "insufficient_memory"
+    assert (
+        "allow_overcommit" not in refused["message"] and "anyway" in refused["message"] and "administrator" in refused["message"]
+    )
+    owner = client_for(users["owner"]).post(url, {"action": "start"}, format="json").json()["error"]
+    assert owner["code"] == "insufficient_memory" and "start it anyway (allow_overcommit)" in owner["message"]

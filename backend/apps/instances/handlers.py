@@ -169,7 +169,8 @@ def admit_memory(instance: Instance, ctx: JobContext, client: AgentClient | None
         if short is not None:
             ctx.log(f"warning: {short.message(instance.name)} It is started anyway, as requested.")
         return
-    capacity.admit(instance, client=client)
+    # (who asked for the job decides whether the refusal offers "start it anyway", D-4)
+    capacity.admit(instance, client=client, user=ctx.job.user if ctx.job.user_id else None)
 
 
 def _set_desired(instance: Instance, desired: str) -> None:
