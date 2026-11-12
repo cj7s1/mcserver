@@ -14,7 +14,8 @@ import type { Instance } from "@/lib/types";
 import { makeInstance } from "@/test/fixtures";
 import { InstanceLayout } from "../InstanceLayout";
 import Overview from "../Overview";
-import { IdleStopSection, idleStopError, idleStopText } from "./idle-stop";
+import { IdleStopSection } from "./idle-stop";
+import { idleStopError, idleStopText } from "./idle-stop-model";
 
 beforeAll(() => {
   globalThis.ResizeObserver ??= class {
