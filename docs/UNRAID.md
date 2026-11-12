@@ -231,7 +231,9 @@ and the syslog, tag `mcpanel`; a step that cannot be done is reported and the ne
 5. checks the **stack**: it waits up to 2 minutes for `panel`, `agent` and `postgres`, and repairs a
    container that lost its network at the start (Docker 29 can drop it after a failed start; the
    panel then restarts for ever with "failed to resolve host postgres"): it stops it, connects it to
-   its network with its service name as alias, and starts it (section 9).
+   its network with its service name as alias, and starts it (section 9). The agent does this
+   itself within about a minute when it runs (`AGENT_REPAIR_PLATFORM_NETWORKS`): the script's repair
+   is the fallback for when the agent does not run.
 
 `bash .../array-start.sh status` shows what is in place now, `dry-run` what `run` would do; both
 change nothing. Another Compose project name: `--project <name>` once (remembered).
@@ -589,8 +591,11 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
 * **Servers did not come back after a reboot:** see UNRAID-SHUTDOWN.md, "How the servers come back".
 * **The panel does not come back after a reboot; it restarts for ever and its log says "failed to
   resolve host postgres":** Docker dropped its network after a failed start at boot (`docker inspect
-  -f '{{json .NetworkSettings.Networks}}' mcpanel-panel-1` prints `{}`). The array-start script repairs
-  it (section 4); by hand:
+  -f '{{json .NetworkSettings.Networks}}' mcpanel-panel-1` prints `{}`). When the agent runs, it repairs
+  a container of the stack within about a minute (`docker compose logs agent` says so); a game server
+  that lost its network is repaired at its next start. Without a running agent the array-start script
+  repairs it (section 4); `docker compose up -d --force-recreate panel` in `deploy/` makes the container
+  again; or by hand:
 
   ```bash
   docker stop mcpanel-panel-1
@@ -600,7 +605,8 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
 
   The same for `mcpanel-postgres-1` (alias `postgres`) or `mcpanel-agent-1` (alias `agent`; it also
   needs `docker network connect mcpanel_instances mcpanel-agent-1`). With another project name the
-  network is `<project>_internal`.
+  network is `<project>_internal`. When the agent itself does not start:
+  `docker compose up -d --force-recreate agent`.
 * **`upgrade.sh` says "the docker compose plugin is missing" after a reboot:** the link of your
   standalone Compose binary is gone (it is in RAM). Section 1: `array-start.sh --compose-bin <path>`
   once; the array-start User Script links it at every boot.

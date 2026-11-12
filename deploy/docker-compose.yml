@@ -220,6 +220,8 @@ services:
       AGENT_INSTANCE_POOL: ${AGENT_INSTANCE_POOL:-10.213.0.0/16}
       AGENT_REFUSE_BRIDGE_GATEWAYS: ${AGENT_REFUSE_BRIDGE_GATEWAYS:-true}
       AGENT_IMAGE_DIGEST_CHECK: ${AGENT_IMAGE_DIGEST_CHECK:-true}
+      # Repair a container of this compose project that came up without its network (docs/SECURITY.md)
+      AGENT_REPAIR_PLATFORM_NETWORKS: ${AGENT_REPAIR_PLATFORM_NETWORKS:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${MCPANEL_DATA_DIR}:${MCPANEL_DATA_DIR}

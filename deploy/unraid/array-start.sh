@@ -32,8 +32,10 @@
 #      although its NetworkMode names one (Docker 29 can drop the attachment after a failed start at
 #      boot; the panel then restarts for ever with "failed to resolve host postgres") is stopped,
 #      connected to that network with its service name as alias, and started again; the agent also
-#      to the shared instance network. When the agent runs it repairs the other containers of its
-#      project itself (docs/SECURITY.md); this is the fallback for a broken agent container.
+#      to the shared instance network. When the agent runs it repairs the containers of its project
+#      itself within about a minute (AGENT_REPAIR_PLATFORM_NETWORKS, agent/mcagent/platformnet.py;
+#      docs/SECURITY.md): this is the fallback for when the agent does not run (its own container broken,
+#      or an agent without that repair).
 # Exit status: 0 when everything is in place, 1 when something needs you (the last lines say what).
 #
 # Root runs this script. When group or others can write it, its folder or its state file, `run` as

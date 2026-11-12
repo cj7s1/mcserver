@@ -31,8 +31,10 @@ empty; "failed to resolve host postgres"), and the shutdown hook was not install
 * `upgrade.sh`'s "the docker compose plugin is missing" names the script.
 * Docs: UNRAID.md (section 1 Compose, section 4 the User Script, troubleshooting for the restart loop with
   the manual repair), UNRAID-SHUTDOWN.md, the quick start, DEPLOYMENT.md's Compose requirement.
-* Waiting: the agent's own network repair (NOTES-agent.md "Network repair") for SECURITY.md and the env
-  examples, once it is in.
+* The agent repairs it too (`agent/mcagent/platformnet.py`, `AGENT_REPAIR_PLATFORM_NETWORKS`): a game container
+  that lost its network before its next start, a container of its own Compose project within about a minute
+  (stop, reconnect, start; limited and logged; docs/SECURITY.md). `array-start.sh` is the fallback when the
+  agent does not run.
 
 ## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`, 2026-11-12)
 

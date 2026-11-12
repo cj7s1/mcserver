@@ -247,3 +247,23 @@ def test_fx1_the_agent_is_on_a_server_network_only_while_the_server_runs():
     for path in ("docs/UNRAID.md", "DEPLOYMENT.md"):
         assert "killed hard while servers ran" in words(path), path
     assert "only while its server runs" in read("CLAUDE.md")
+
+
+# --- boot-network repair: the agent repairs containers that lost their network ---------------------------
+def test_the_agents_network_repair_is_documented_with_its_scope_and_limits():
+    security = words("docs/SECURITY.md")
+    assert "### The agent repairs containers that lost their network" in read("docs/SECURITY.md")
+    for needle in (
+        "`AGENT_REPAIR_PLATFORM_NETWORKS`, default `true`",
+        "never a container outside the project",
+        "one attempt per container per 5 minutes",
+        "after 3 failed or undone repairs it gives up",
+        "`deploy/unraid/array-start.sh` (Unraid, at every array start) is the fallback",
+    ):
+        assert needle in security, needle
+    unraid = words("docs/UNRAID.md")
+    assert "the script's repair is the fallback for when the agent does not run" in unraid
+    assert "a game server that lost its network is repaired at its next start" in unraid
+    assert "`docker compose up -d --force-recreate agent`" in unraid
+    assert "platformnet.py" in read("CLAUDE.md") and "AGENT_REPAIR_PLATFORM_NETWORKS" in words("DEVELOPMENT_STATUS.md")
+    assert "AGENT_REPAIR_PLATFORM_NETWORKS" in read("deploy/unraid/array-start.sh")

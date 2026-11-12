@@ -293,6 +293,33 @@ server networks never take that route (the agent joins them with gateway priorit
 needs only the internet (downloads); a LAN target it must reach (an HTTPS proxy, a restic server) goes
 in with `--allow`, which opens that target to the game containers as well.
 
+### The agent repairs containers that lost their network
+
+Docker drops a container's network from its configuration when a start fails while it sets up a
+published port (a port conflict, an address that is not there yet at boot); every later start then
+runs the container with loopback only. That is how the owner's panel restarted for hours after a
+reboot ("failed to resolve host postgres"). The agent repairs two kinds of container:
+
+* **Game containers**: before every start (and right after a failed one) it connects a container that
+  lost its network to the network it was created for (`HostConfig.NetworkMode`: its server network,
+  the shared instance network or the allowed custom network), making the network again when it is the
+  agent's. A container that cannot be repaired is removed (its last-run record is kept) and made again
+  by the panel at the next start.
+* **The containers of its own Compose project** (`AGENT_REPAIR_PLATFORM_NETWORKS`, default `true`): at
+  its start and every 60 seconds it looks at the members of its own project (the
+  `com.docker.compose.project` label of its own container; nothing when it does not run in a container
+  or has no such label). A running or restarting member that has no network although its
+  `NetworkMode` names a user-defined network is stopped, connected again to every network it was seen
+  on (`<data root>/agent/platform-networks.json`; aliases: service and container name) and started.
+  It reconnects itself the same way, without a restart. Limits: never a container outside the project,
+  never one that has a network, one attempt per container per 5 minutes, and after 3 failed or undone
+  repairs it gives up (logged). Every action is logged as a warning and reported in `GET /v1/info`
+  (`platform_network_repair`). The agent's Docker socket could do far more; this is the only thing it
+  does to containers that are not game servers.
+
+When the agent itself does not run, `deploy/unraid/array-start.sh` (Unraid, at every array start) is the
+fallback for the same repair, and `docker compose up -d --force-recreate <service>` the manual one.
+
 Not reachable from a game container: the agent's API (it refuses requests from the instance networks
 and the bridge gateways even with a valid token, above), Postgres, the panel's container address,
 Redis, a panel published on `127.0.0.1`, and containers on other Docker networks. No profile grants
