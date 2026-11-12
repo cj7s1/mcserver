@@ -117,6 +117,8 @@ def problems_all(
             problems.append("supervisor: no children in its status")
         for name, child in children.items():
             state = child.get("state") if isinstance(child, dict) else None
+            if isinstance(child, dict) and child.get("optional"):
+                continue  # an optional extra (the Discord bot) never decides the container's health: notes()
             if state not in ("running", "idle"):  # (idle: the Discord bot while it is off)
                 detail = ""
                 if isinstance(child, dict) and child.get("last_exit") is not None:
@@ -150,12 +152,25 @@ def problems_all(
     return problems
 
 
+def notes(status: dict[str, Any] | None) -> list[str]:
+    """The optional children that are not running (reported, never a reason to be unhealthy)."""
+    raw = status.get("children") if isinstance(status, dict) else None
+    out = []
+    for name, child in (raw if isinstance(raw, dict) else {}).items():
+        if isinstance(child, dict) and child.get("optional") and child.get("state") not in ("running", "idle"):
+            last = f", last exit {child['last_exit']}" if child.get("last_exit") is not None else ""
+            out.append(f"{name} (optional): {child.get('state') or 'unknown'}{last}")
+    return out
+
+
 def main(argv: list[str]) -> int:
     health, health_error = fetch_health()
     all_mode = (argv[:1] == ["all"]) or os.path.exists(STATUS_PATH)
     if all_mode:
         status, status_error = read_status()
         problems = problems_all(status, status_error, health, health_error, time.time())
+        for note in notes(status):
+            print(f"note: {note}")  # (in Docker's health log; the container stays healthy)
     elif health is None:
         problems = [str(health_error)]
     elif health.get("status") != "ok":

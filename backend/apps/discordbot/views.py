@@ -60,6 +60,8 @@ def describe() -> dict[str, Any]:
             "guild_roles": list(live.get("roles") or []),
             "guild_channels": list(live.get("channels") or []),
             "application_id": application_id or None,
+            # after a failed connection: when the bot tries again (epoch seconds; sooner when the settings change)
+            "retry_at": live.get("retry_at") if current == "error" else None,
             "invite_url": config.invite_url(application_id, announcements=bool(settings.channel_id)),
         },
     }

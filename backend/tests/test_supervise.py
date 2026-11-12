@@ -419,6 +419,10 @@ def test_5_6_7_the_panel_children():
     discord = by_name["discord"]
     assert discord.argv == ("mcpanel-entrypoint", "manage", "run_discord_bot") and discord.idle_exit == sup.EX_CONFIG
     assert discord.wake_file == "/run/mcpanel/discord.wake" and discord.idle_retry == 300
+    # an optional extra: never the container's health, and not restarted more often than every 5 minutes
+    assert discord.optional is True and discord.backoff_max == 300.0
+    assert not any(spec.optional for spec in specs if spec.name != "discord")
+    assert not any("discord" in spec.after for spec in specs)
     # 5. the periodic worker always has 2 slots (and the entrypoint must not add another value)
     periodic = by_name["periodic"].argv
     assert periodic[periodic.index("-c") + 1] == "2" and periodic[periodic.index("-Q") + 1] == "periodic"
@@ -1125,3 +1129,88 @@ def test_the_wake_file_starts_an_idle_child_at_once(tmp_path):
     procs.die("discord", 1)
     drive(supervisor, procs, 0.5)
     assert states(supervisor)["discord"] == "backoff" and any("discord exited (exit code 1)" in line for line in lines)
+
+
+# --- the Discord bot is optional: it never decides the container's health (follow-up of 2026-11-12) ------------
+def test_an_optional_child_that_keeps_failing_takes_nothing_down(tmp_path):
+    procs = FakeProcs()
+    specs, _ready = plan(redis=False)
+    specs.append(sup.ChildSpec("discord", ("bot",), grace=10, stage=0, idle_exit=78, optional=True, backoff_max=300.0))
+    lines: list[str] = []
+    status_path = tmp_path / "supervisor.json"
+    supervisor = sup.Supervisor(specs, procs, status_path=str(status_path), environ={}, log=lines.append)
+    procs.now += 0.1
+    supervisor.step()
+    procs.die("discord", 1)  # it fails at once: the phase still becomes "running"
+    drive(supervisor, procs, 0.5)
+    assert supervisor.phase == "running" and states(supervisor)["discord"] == "backoff"
+    delays = []
+    for _ in range(12):
+        while states(supervisor)["discord"] != "running":
+            drive(supervisor, procs, 1)
+        procs.die("discord", 1)
+        drive(supervisor, procs, 0.25)
+        child = supervisor.children["discord"]
+        delays.append(round(child.next_start - procs.now))
+    assert max(delays) <= 300 and delays[-1] >= 299  # (an ordinary child is capped at 30 s)
+    # its siblings ran on undisturbed, and the container is healthy with the bot in backoff
+    assert all(procs.started(name) == 1 for name in ("web", "worker", "periodic", "beat"))
+    assert all(state == "running" for name, state in states(supervisor).items() if name != "discord")
+    supervisor.write_status()
+    status, error = healthcheck.read_status(str(status_path))
+    assert error is None and status["children"]["discord"] == {**status["children"]["discord"], "optional": True}
+    assert status["children"]["discord"]["state"] == "backoff"
+    assert not [p for p in healthcheck.problems_all(status, None, good_health(), None, procs.time()) if "discord" in p]
+    assert healthcheck.notes(status) == ["discord (optional): backoff, last exit 1"]
+
+
+def test_the_health_check_with_the_bot_in_backoff():
+    status = good_status()
+    status["children"]["discord"] = {
+        "state": "backoff",
+        "pid": None,
+        "since": NOW - 60,
+        "restarts": 9,
+        "last_exit": 1,
+        "optional": True,
+    }
+    assert problems(status, good_health()) == []
+    assert healthcheck.notes(status) == ["discord (optional): backoff, last exit 1"]
+    # an ordinary child in backoff still makes it unhealthy, and an idle or running bot needs no note
+    status["children"]["beat"]["state"] = "backoff"
+    assert problems(status, good_health()) == ["beat: backoff"]
+    status["children"]["discord"]["state"] = "idle"
+    assert healthcheck.notes(status) == []
+
+
+def test_the_health_answer_reports_the_bot_among_its_components(tmp_path, monkeypatch):
+    import json
+    import time
+
+    from apps.core.views import supervised_components
+
+    status = good_status(time.time())
+    status["children"]["discord"] = {"state": "backoff", "pid": None, "since": 0, "restarts": 2, "last_exit": 1, "optional": True}
+    path = tmp_path / "supervisor.json"
+    path.write_text(json.dumps(status))
+    monkeypatch.setenv("MCPANEL_SUPERVISOR_STATUS", str(path))
+    assert supervised_components()["discord"] == "backoff"
+
+
+def test_the_status_command_ignores_an_optional_child(tmp_path, capsys):
+    import json
+    import time as _time
+
+    data = good_status(_time.time())
+    data["children"]["discord"] = {
+        "state": "backoff",
+        "pid": None,
+        "since": _time.time() - 60,
+        "restarts": 3,
+        "last_exit": 1,
+        "optional": True,
+    }
+    data.pop("workers")
+    (tmp_path / sup.STATUS_FILE).write_text(json.dumps(data))
+    assert sup.status({"MCPANEL_RUN_DIR": str(tmp_path)}) == 0
+    assert "(optional)" in capsys.readouterr().out

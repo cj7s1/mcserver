@@ -1,7 +1,8 @@
 """Run the Discord bot (B3) while its settings say so; the panel container's supervisor runs this.
 
-Exit status 78 means "nothing to do now" (the bot is off, has no token or guild, Discord refused the token, or
-the settings changed): the supervisor keeps the process idle and tries again later, or at once when the panel's
+It stays up through failed connections (no network, Discord down, a refused token: it tries again by itself and
+reports the error to the settings page). Exit status 78 means "nothing to do now" (the bot is off, or has no
+token or guild): the supervisor keeps the process idle and tries again later, or at once when the panel's
 settings page wakes it (backend/container/supervise.py). The token never appears in the output.
 """
 
@@ -15,7 +16,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Connect the Discord bot while it is enabled (exit 78 when there is nothing to do)."
+    help = "Keep the Discord bot connected while it is enabled (exit 78 when there is nothing to do)."
 
     def handle(self, *args: Any, **options: Any) -> None:
         from apps.discordbot import bot

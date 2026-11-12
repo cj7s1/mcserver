@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -337,15 +338,22 @@ def test_the_client_has_the_five_guild_commands_and_no_privileged_intent() -> No
 
 
 class FakeGatewayClient:
-    def __init__(self, error: BaseException | None) -> None:
-        self.error = error
+    """discord.py's client as run() sees it: ``start`` fails with ``error``, or ``then`` runs (a settings change)."""
+
+    def __init__(self, error: BaseException | None = None, *, ready: bool = False, then: Any = None) -> None:
+        self.error, self.then = error, then
         self.closed = False
-        self.exit_code = 0
+        self.was_ready = ready
+        self.settings_changed = False
+        self.tokens: list[str] = []
 
     async def start(self, token: str) -> None:
-        assert token == TOKEN
+        self.tokens.append(token)
+        if self.then is not None:
+            await sync_to_async(self.then)()
         if self.error is not None:
             raise self.error
+        self.settings_changed = True  # (as _watch does before it closes the connection)
 
     def is_closed(self) -> bool:
         return self.closed
@@ -360,6 +368,28 @@ def _configure(enabled: bool = True) -> None:
     SystemSetting.set_secret(config.TOKEN_KEY, TOKEN)
 
 
+def _disable() -> None:
+    SystemSetting.set("discord_enabled", False)
+
+
+@pytest.fixture
+def gateway(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """run() with these fake clients one after the other; the waits between them are recorded, not slept."""
+    plan = SimpleNamespace(clients=[], waits=[], statuses=[])
+
+    def next_client(_settings: Any) -> FakeGatewayClient:
+        return plan.clients.pop(0)
+
+    async def no_wait(_settings: Any, seconds: float) -> bool:
+        plan.waits.append(seconds)
+        plan.statuses.append(await sync_to_async(state.read_status)())
+        return False
+
+    monkeypatch.setattr(bot, "make_client", next_client)
+    monkeypatch.setattr(bot, "wait_for_change", no_wait)
+    return plan
+
+
 def test_run_without_settings_is_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bot, "make_client", lambda _s: pytest.fail("no client without settings"))
     assert async_to_sync(bot.run)() == 78
@@ -367,23 +397,91 @@ def test_run_without_settings_is_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     assert async_to_sync(bot.run)() == 78 and state.read_status()["state"] == "idle"
 
 
-def test_run_errors_never_carry_the_token(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_discord_unreachable_at_start_and_later_never_ends_the_process(gateway: Any) -> None:
+    import discord
+
+    _configure()
+    closed = discord.ConnectionClosed(SimpleNamespace(close_code=1006), shard_id=None)
+    gateway.clients = [
+        FakeGatewayClient(OSError("network is unreachable")),  # no network at the start
+        FakeGatewayClient(TimeoutError()),
+        FakeGatewayClient(discord.GatewayNotFound()),
+        FakeGatewayClient(closed, ready=True),  # connected, then the connection broke for good
+        FakeGatewayClient(OSError("down again")),
+        FakeGatewayClient(then=_disable),  # the owner turns the bot off: only now does the process end
+    ]
+    assert async_to_sync(bot.run)() == 78
+    # growing delays, back to the short one after it had been connected
+    assert gateway.waits == [5.0, 10.0, 20.0, 5.0, 10.0]
+    first = gateway.statuses[0]
+    assert first["state"] == "error" and first["error_kind"] == "network" and first["connected"] is False
+    assert first["last_error"] == "No connection to Discord (OSError)" and first["retry_at"] > 0
+    assert gateway.statuses[2]["last_error"] == "No connection to Discord (GatewayNotFound)"
+    assert state.read_status()["state"] == "idle"
+
+
+def test_the_delay_is_capped(gateway: Any) -> None:
+    _configure()
+    gateway.clients = [FakeGatewayClient(OSError("down")) for _ in range(9)] + [FakeGatewayClient(then=_disable)]
+    assert async_to_sync(bot.run)() == 78
+    assert gateway.waits == [5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 300.0, 300.0, 300.0]
+
+
+def test_a_rejected_token_or_guild_waits_long_and_never_shows_the_token(gateway: Any, caplog: pytest.LogCaptureFixture) -> None:
     import discord
 
     caplog.set_level(logging.DEBUG)
     _configure()
-    cases = [
-        (discord.LoginFailure(f"Improper token has been passed: {TOKEN}"), 78, "Discord refused the bot token"),
-        (OSError("network is unreachable"), 1, "No connection to Discord (OSError)"),
-        (None, 78, ""),  # the connection ended (a settings change): idle until woken
+    forbidden = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), {"code": 50001, "message": "Missing Access"})
+    gateway.clients = [
+        FakeGatewayClient(discord.LoginFailure(f"Improper token has been passed: {TOKEN}")),
+        FakeGatewayClient(forbidden),  # a wrong guild id: the command sync is refused
+        FakeGatewayClient(discord.PrivilegedIntentsRequired(None)),
+        FakeGatewayClient(then=_disable),
     ]
-    for error, code, message in cases:
-        monkeypatch.setattr(bot, "make_client", lambda _s, e=error: FakeGatewayClient(e))
-        assert async_to_sync(bot.run)() == code
-        status = state.read_status()
-        assert status["connected"] is False and status.get("last_error", "") == message
-        assert TOKEN not in json.dumps(status)
-    assert TOKEN not in caplog.text
+    assert async_to_sync(bot.run)() == 78
+    assert gateway.waits == [bot.REJECTED_RETRY] * 3
+    assert [s["last_error"] for s in gateway.statuses] == [
+        "Discord refused the bot token",
+        "Discord answered HTTP 403: is the bot in the Discord server whose id you entered?",
+        "Discord asks for a privileged intent",
+    ]
+    assert all(s["error_kind"] == "rejected" for s in gateway.statuses)
+    assert TOKEN not in caplog.text and TOKEN not in json.dumps(gateway.statuses)
+
+
+def test_a_settings_change_is_picked_up_while_it_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    import discord
+
+    _configure()
+    monkeypatch.setattr(bot, "WAIT_POLL_SECONDS", 0.01)
+    new_token = "MTIzNDU2Nzg5MDEyMzQ1Njc4.Gx-new.another-secret-value"
+    clients = [
+        FakeGatewayClient(
+            discord.LoginFailure("Improper token has been passed."),
+            then=lambda: SystemSetting.set_secret(config.TOKEN_KEY, new_token),  # the owner pastes a new token
+        ),
+        FakeGatewayClient(then=_disable),
+    ]
+    second = clients[1]
+    monkeypatch.setattr(bot, "make_client", lambda _s: clients.pop(0))
+    began = time.monotonic()
+    assert async_to_sync(bot.run)() == 78
+    assert time.monotonic() - began < 5  # not the 30 minutes of a refused token
+    assert second.tokens == [new_token]
+    # nothing changed: the wait ends at its time, and the status stays fresh meanwhile
+    settings = config.load()
+    state.clear_status()
+    assert async_to_sync(bot.wait_for_change)(settings, 0.05) is False
+    assert state.read_status().get("updated_at")
+
+
+def test_a_lost_connection_is_shown_while_discord_py_reconnects() -> None:
+    client = bot.make_client(SETTINGS)
+    async_to_sync(client.on_disconnect)()
+    status = state.read_status()
+    assert status["state"] == "connecting" and status["connected"] is False
+    assert status["last_error"] == "The connection to Discord was lost; reconnecting"
 
 
 # --- the settings API ----------------------------------------------------------------------------------------
@@ -427,6 +525,10 @@ def test_the_settings_api(clients: Any, monkeypatch: pytest.MonkeyPatch, tmp_pat
     status["updated_at"] -= state.STALE_SECONDS + 1
     cache.set(state.STATUS_KEY, status)
     assert clients["owner"].get("/api/system/discord").json()["status"]["state"] == "not_running"
+    # a failed connection: the error and when it tries again
+    state.write_status(connected=False, state="error", last_error="No connection to Discord (OSError)", retry_at=1234.0)
+    failed = clients["owner"].get("/api/system/discord").json()["status"]
+    assert failed["state"] == "error" and failed["retry_at"] == 1234.0 and failed["last_error"].startswith("No connection")
     # bad ids, and removing the token
     assert clients["owner"].patch("/api/system/discord", {"guild_id": "abc"}, format="json").status_code == 400
     assert clients["owner"].patch("/api/system/discord", {"roles": ["12"]}, format="json").status_code == 400

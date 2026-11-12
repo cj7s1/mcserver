@@ -22,6 +22,11 @@ log = logging.getLogger(__name__)
 FOLLOW_POLL_SECONDS = 5.0
 SETTINGS_POLL_SECONDS = 30.0
 STATUS_EVERY_SECONDS = 60.0
+# After a failed connection the process stays up and tries again (it never makes the panel unhealthy):
+RETRY_FIRST = 5.0  # no connection (network, Discord down): 5, 10, 20 ... seconds
+RETRY_MAX = 300.0  # ... at most 5 minutes apart
+REJECTED_RETRY = 1800.0  # Discord refused the token or the guild: every 30 minutes, or at once on a settings change
+WAIT_POLL_SECONDS = 10.0  # while waiting: how often the settings are read (and the status refreshed)
 WRONG_GUILD = "This bot only answers in its own Discord server."
 
 
@@ -152,7 +157,8 @@ def make_client(settings: config.BotSettings) -> Any:
             super().__init__(intents=intents)
             self.settings = settings
             self.tree = app_commands.CommandTree(self)
-            self.exit_code = 0
+            self.settings_changed = False  # (set by _watch before it ends the connection)
+            self.was_ready = False
             self.tasks: set[asyncio.Task] = set()
             guild = discord.Object(id=int(settings.guild_id))
 
@@ -195,8 +201,21 @@ def make_client(settings: config.BotSettings) -> Any:
             self.tasks.add(asyncio.create_task(self._watch()))
 
         async def on_ready(self) -> None:
-            await sync_to_async(state.write_status)(**self.describe(), connected=True, last_error="")
+            self.was_ready = True
+            await sync_to_async(state.write_status)(
+                **self.describe(), connected=True, state="connected", last_error="", retry_at=None
+            )
             log.info("connected to Discord")
+
+        async def on_resumed(self) -> None:
+            await sync_to_async(state.write_status)(connected=True, state="connected", last_error="", retry_at=None)
+
+        async def on_disconnect(self) -> None:
+            # (discord.py itself connects again, with its own growing delay, while the client is not closed)
+            if not self.is_closed():
+                await sync_to_async(state.write_status)(
+                    connected=False, state="connecting", last_error="The connection to Discord was lost; reconnecting"
+                )
 
         async def on_guild_join(self, guild: Any) -> None:
             if str(guild.id) != self.settings.guild_id:
@@ -226,54 +245,100 @@ def make_client(settings: config.BotSettings) -> Any:
             last_status = 0.0
             while not self.is_closed():
                 await asyncio.sleep(SETTINGS_POLL_SECONDS)
+                if self.is_closed():
+                    return  # (the connection ended meanwhile; run() goes on with a new client)
                 current = await sync_to_async(config.load)()
                 if current.fingerprint() != started:
                     log.info("the bot's settings changed; reconnecting")
-                    self.exit_code = 78
-                    if current.usable:
-                        state.wake()
+                    self.settings_changed = True
                     await self.close()
                     return
                 self.settings = current  # roles and channel take effect at once
-                if time.monotonic() - last_status >= STATUS_EVERY_SECONDS and self.is_ready():
+                if not self.is_ready():
+                    await sync_to_async(state.write_status)()  # (reconnecting: still alive)
+                elif time.monotonic() - last_status >= STATUS_EVERY_SECONDS:
                     await sync_to_async(state.write_status)(**self.describe(), connected=True)
                     last_status = time.monotonic()
 
     return PanelBot()
 
 
-async def run() -> int:
-    """Connect while the settings say so. 78: nothing to do now (disabled, no token, the token refused, the
-    settings changed): the supervisor keeps the process idle until its next try or a wake-up."""
-    settings = await sync_to_async(config.load)()
-    if not settings.usable:
-        await sync_to_async(state.write_status)(connected=False, state="idle")
-        return 78
+def _failure(exc: BaseException) -> tuple[str, str]:
+    """("rejected" | "network", the text for the settings page) of a failed connection. Never the token."""
+    import aiohttp
     import discord
 
+    if isinstance(exc, discord.LoginFailure):
+        return "rejected", "Discord refused the bot token"
+    if isinstance(exc, discord.PrivilegedIntentsRequired):
+        return "rejected", "Discord asks for a privileged intent"
+    if isinstance(exc, discord.ConnectionClosed) and getattr(exc, "code", None) == 4004:
+        return "rejected", "Discord refused the bot token"
+    if isinstance(exc, discord.HTTPException):
+        code = getattr(exc, "status", 0)
+        if code in (401, 403, 404):
+            return "rejected", f"Discord answered HTTP {code}: is the bot in the Discord server whose id you entered?"
+        return "network", f"Discord answered HTTP {code or '?'}"
+    if isinstance(exc, (TimeoutError, OSError, aiohttp.ClientError, discord.GatewayNotFound, discord.ConnectionClosed)):
+        return "network", f"No connection to Discord ({type(exc).__name__})"
+    return "network", f"The connection to Discord failed ({type(exc).__name__})"
+
+
+async def connect_once(settings: config.BotSettings) -> tuple[str, str, bool]:
+    """One connection with ``settings`` until it ends: ("changed", "", ready) after a settings change, else
+    ("rejected" | "network", why, whether it had been connected)."""
     client = make_client(settings)
-    await sync_to_async(state.write_status)(connected=False, state="connecting", last_error="")
+    await sync_to_async(state.write_status)(connected=False, state="connecting", retry_at=None)
     try:
         await client.start(settings.token)
-    except discord.LoginFailure:
-        await sync_to_async(state.write_status)(connected=False, state="error", last_error="Discord refused the bot token")
-        return 78
-    except discord.PrivilegedIntentsRequired:
-        await sync_to_async(state.write_status)(connected=False, state="error", last_error="Discord asks for a privileged intent")
-        return 78
-    except discord.HTTPException as exc:
-        message = f"Discord answered HTTP {getattr(exc, 'status', '?')}"
-        if getattr(exc, "status", 0) in (403, 404):
-            message += ": is the bot in the Discord server whose id you entered?"
-        await sync_to_async(state.write_status)(connected=False, state="error", last_error=message)
-        return 78
-    except (TimeoutError, OSError, discord.GatewayNotFound, discord.ConnectionClosed) as exc:
-        await sync_to_async(state.write_status)(
-            connected=False, state="error", last_error=f"No connection to Discord ({type(exc).__name__})"
-        )
-        return 1  # (transient: the supervisor tries again with its backoff)
+    except Exception as exc:
+        kind, message = _failure(exc)
+        return kind, message, bool(getattr(client, "was_ready", False))
     finally:
         if not client.is_closed():
             await client.close()
-    await sync_to_async(state.write_status)(connected=False, state="idle")
-    return client.exit_code or 78
+    if getattr(client, "settings_changed", False):
+        return "changed", "", bool(getattr(client, "was_ready", False))
+    return "network", "The connection to Discord ended", bool(getattr(client, "was_ready", False))
+
+
+async def wait_for_change(settings: config.BotSettings, seconds: float) -> bool:
+    """Wait up to ``seconds``; True as soon as the token, guild or "enabled" changed. The status is refreshed
+    meanwhile, so the settings page can tell a waiting bot from a stopped process."""
+    deadline = time.monotonic() + seconds
+    started = settings.fingerprint()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(min(WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        current = await sync_to_async(config.load)()
+        if current.fingerprint() != started:
+            return True
+        await sync_to_async(state.write_status)()
+    return False
+
+
+async def run() -> int:
+    """Stay connected while the settings say so. A failed connection never ends the process: it tries again
+    (no connection: after 5 s, doubling up to 5 minutes; a refused token or guild: after 30 minutes), and at once
+    when the settings change. 78 only when there is nothing to do (off, no token or no guild): the supervisor
+    keeps the process idle until its next try or a wake-up from the settings page."""
+    delay = RETRY_FIRST
+    while True:
+        settings = await sync_to_async(config.load)()
+        if not settings.usable:
+            await sync_to_async(state.write_status)(connected=False, state="idle", last_error="", retry_at=None)
+            return 78
+        kind, message, was_ready = await connect_once(settings)
+        if kind == "changed":
+            delay = RETRY_FIRST
+            continue
+        if was_ready:
+            delay = RETRY_FIRST  # (it had been connected: a new outage starts with the short delay)
+        wait = REJECTED_RETRY if kind == "rejected" else delay
+        if kind == "network":
+            delay = min(RETRY_MAX, delay * 2)
+        await sync_to_async(state.write_status)(
+            connected=False, state="error", last_error=message, error_kind=kind, retry_at=time.time() + wait
+        )
+        log.warning("%s; trying again in %.0f s, or at once when the bot's settings change", message, wait)
+        if await wait_for_change(settings, wait):
+            delay = RETRY_FIRST

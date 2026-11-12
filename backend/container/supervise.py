@@ -11,6 +11,8 @@ Behaviour (pinned by backend/tests/test_supervise.py and the container tests in 
 
 * It never exits because a child failed. A child that exits is started again after a capped
   backoff (1, 2, 4 ... 30 s); until then the status file names it and the container is unhealthy.
+  Except an optional child (the Discord bot): its state is in the status file, but it never makes
+  the container unhealthy, its backoff goes up to 5 minutes, and no other child waits for it.
 * Start order: Redis first, the others only once Redis answers PING. If Redis dies it is started
   again and, once it answers, the others are restarted so that queue consumers and live-event
   subscriptions are rebuilt and queued jobs are sent again (mcpanel/celery.py). The job worker
@@ -104,6 +106,11 @@ class ChildSpec:
     idle_exit: int | None = None
     idle_retry: float = 300.0
     wake_file: str | None = None
+    # An optional extra (the Discord bot): its state is reported, but it never decides the container's health or
+    # the phase, and nothing else waits for it. A failing one is restarted like any child, at most every
+    # ``backoff_max`` seconds.
+    optional: bool = False
+    backoff_max: float = BACKOFF_MAX
 
 
 @dataclass(frozen=True)
@@ -403,6 +410,7 @@ class Supervisor:
                     "since": c.since,
                     "restarts": max(0, c.starts - 1),
                     "last_exit": c.last_exit,
+                    "optional": c.spec.optional,
                 }
                 for name, c in self.children.items()
             },
@@ -476,7 +484,7 @@ class Supervisor:
     # --- running -------------------------------------------------------------------------------
     def _backoff(self, child: Child, now: float, ran: float) -> float:
         child.failures = 1 if ran >= STABLE_AFTER else child.failures + 1
-        delay = min(BACKOFF_MAX, BACKOFF_FIRST * 2 ** min(child.failures - 1, 16))
+        delay = min(child.spec.backoff_max, BACKOFF_FIRST * 2 ** min(child.failures - 1, 16))
         child.next_start = now + delay
         self._set(child, BACKOFF)
         return delay
@@ -595,7 +603,7 @@ class Supervisor:
                     self._kill(child, f"is not ready after {READY_TIMEOUT:.0f} s")
             elif child.state == STOPPING and not child.killed and child.kill_at is not None and now >= child.kill_at:
                 self._kill(child, f"did not stop within {child.spec.grace:.0f} s")
-        if self.phase == "starting" and all(c.state in HEALTHY_STATES for c in self.children.values()):
+        if self.phase == "starting" and all(c.state in HEALTHY_STATES for c in self.children.values() if not c.spec.optional):
             self.phase = "running"
             self._dirty = True
             self.log("all children are running")
@@ -880,6 +888,9 @@ def panel_plan(environ: Mapping[str, str], run_dir: str) -> tuple[list[ChildSpec
             idle_exit=EX_CONFIG,
             idle_retry=300.0,
             wake_file=discord_wake_path(run_dir),
+            # an optional extra: whatever it does, the panel's health (and an upgrade's wait for it) is not affected
+            optional=True,
+            backoff_max=300.0,
         ),
     ]
     nodes = {f"celery@{host}": "worker", f"periodic@{host}": "periodic"}
@@ -961,10 +972,10 @@ def status(environ: Mapping[str, str]) -> int:
         print(f"phase {data['phase']}, supervisor pid {data['pid']}, status written {_ago(age)} ago")
         ok = data["phase"] == "running" and age < 30
         for name, child in data["children"].items():
-            ok = ok and child["state"] in HEALTHY_STATES
+            ok = ok and (child["state"] in HEALTHY_STATES or bool(child.get("optional")))
             line = f"  {name:<9} {child['state']:<9} for {_ago(now - float(child['since']))}"
             line += f", pid {child['pid']}" if child.get("pid") else f", {describe_exit(child.get('last_exit'))}"
-            print(f"{line}, restarts {child['restarts']}")
+            print(f"{line}, restarts {child['restarts']}" + (" (optional)" if child.get("optional") else ""))
         for node, answered in (data.get("workers") or {}).items():
             print(f"  ping {node}: " + (f"answered {_ago(now - float(answered))} ago" if answered else "no answer yet"))
             ok = ok and bool(answered) and now - float(answered) <= 120
