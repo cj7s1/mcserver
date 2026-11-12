@@ -468,6 +468,16 @@ class RustDefinition(SteamGameDefinition):
     def world_target(self, client: AgentClient, instance: Instance, root_name: str, params: dict[str, Any]) -> str:
         return f"server/{self.identity(instance)}"
 
+    def check_world_reset(self, instance: Instance, values: dict[str, Any], seed: Any) -> None:
+        """The seed's bound, checked before anything is moved (E-3)."""
+        chosen = values.get("seed") if values.get("seed") is not None else seed
+        try:
+            ok = chosen is None or (not isinstance(chosen, bool) and 0 <= int(chosen) <= MAX_SEED)
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ApiError(f"Rust seeds are 0 to {MAX_SEED}", code="invalid_setting")
+
     def prepare_world_reset(self, client: AgentClient, instance: Instance, values: dict[str, Any], seed: Any) -> str:
         """A new map: the chosen seed, else a random one (the world size stays what it is set to)."""
         from apps.instances.models import Instance as InstanceModel

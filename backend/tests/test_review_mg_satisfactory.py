@@ -326,9 +326,10 @@ def test_replace_save_refuses_after_a_safety_backup_with_warnings(fake_agent, dj
     assert fake_agent.containers[str(inst.id)]["running"]  # started again: nothing was changed
 
 
-def test_replace_save_failure_after_moving_aside_leaves_the_server_stopped(
+def test_replace_save_failure_after_moving_aside_moves_the_saves_back_and_starts_the_server(
     fake_agent, monkeypatch, django_capture_on_commit_callbacks, make_instance
 ):
+    """(E-3 of the review of 2026-11-11: before, the server was left stopped with its saves moved aside.)"""
     from apps.games.factorio import FactorioSaves
 
     inst = make_instance(
@@ -353,10 +354,22 @@ def test_replace_save_failure_after_moving_aside_leaves_the_server_stopped(
     monkeypatch.setattr(FactorioSaves, "write_map_gen", broken)
     job = run("saves_reset", inst, django_capture_on_commit_callbacks, seed=1, backup=False)
     assert job.status == JobStatus.FAILED
-    assert not fake_agent.containers[str(inst.id)]["running"]
+    assert fake_agent.get_file(inst.id, "saves/world.zip") == b"current"
+    assert fake_agent.containers[str(inst.id)]["running"]
     inst.refresh_from_db()
-    assert inst.desired_state == "stopped"
-    assert "left stopped" in "\n".join(job.log)
+    assert inst.desired_state == "running"
+    assert "back in place" in "\n".join(job.log)
+
+    # when they cannot be moved back (something took their place), the server is left stopped as before
+    def taken(self, client, instance, values):
+        fake_agent.put_file(instance.id, "saves/world.zip", b"new")
+        raise AgentError("disk full", "write_failed", 500)
+
+    monkeypatch.setattr(FactorioSaves, "write_map_gen", taken)
+    job = run("saves_reset", inst, django_capture_on_commit_callbacks, seed=1, backup=False)
+    assert job.status == JobStatus.FAILED and not fake_agent.containers[str(inst.id)]["running"]
+    inst.refresh_from_db()
+    assert inst.desired_state == "stopped" and "left stopped" in "\n".join(job.log)
 
 
 def test_replace_save_stops_a_restarting_container(fake_agent, django_capture_on_commit_callbacks, make_instance):

@@ -432,6 +432,21 @@ class ValheimDefinition(SteamGameDefinition):
     def world_target(self, client: AgentClient, instance: Instance, root_name: str, params: dict[str, Any]) -> str:
         return f"{WORLDS_DIR}/{self.world_name(instance)}"
 
+    def world_files_problem(self, names: list[str]) -> str | None:
+        """Why the files of an uploaded world cannot be placed (None: they can), checked before anything is moved
+        (E-3): a 1.0 world (``*.fwl2``), or exactly one older world ``<name>.fwl`` with an allowed name."""
+        if any(n.endswith(".fwl2") for n in names):
+            return None
+        stems = sorted({n[: -len(".fwl")] for n in names if n.endswith(".fwl")})
+        if len(stems) != 1 or not re.fullmatch(WORLD_NAME_PATTERN, stems[0]):
+            return "The zip must hold one world: <name>.fwl and <name>.db, with a name of letters, digits, - and _"
+        return None
+
+    def check_world_reset(self, instance: Instance, values: dict[str, Any], seed: Any) -> None:
+        name = str(values.get("world_name") or "").strip()
+        if name and not re.fullmatch(WORLD_NAME_PATTERN, name):
+            raise ApiError("World names use 1 to 32 letters, digits, - and _", code="invalid_setting")
+
     def place_world(self, client: AgentClient, instance: Instance, source: str, target: str) -> str | None:
         """A 1.0 world folder (``*.fwl2``) becomes the world folder; an older world (``<name>.fwl`` +
         ``.db``) goes into worlds_local/ and the world name follows it."""

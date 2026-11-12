@@ -240,6 +240,18 @@ class FolderSaves:
             return f"The zip does not look like a {self.definition.label} world: {self.marker_help}", {}
         if len(candidates) > 1 and "" not in candidates:
             return "The zip holds more than one world folder; upload one world at a time", {}
+        # the game's own rules for the files of a world (Valheim: one old-format world with an allowed name),
+        # checked before the upload is accepted (E-3: they used to be checked after the world was moved aside)
+        problem = getattr(self.definition, "world_files_problem", None)
+        if problem is not None:
+            root = candidates[0]
+            files = []
+            for info in infos:
+                parts = [p for p in info.filename.replace("\\", "/").split("/") if p not in ("", ".")]
+                if parts and not info.is_dir() and "/".join(parts[:-1]) == root:
+                    files.append(parts[-1])
+            if (why := problem(files)) is not None:
+                return why, {}
         return None, {"root": candidates[0]}
 
     def validate_upload(self, upload: Any) -> str | None:
@@ -278,12 +290,18 @@ class FolderSaves:
             paths = self.definition.world_paths(client, instance, "reset", values)
             return self.set_aside_paths(client, instance, stamp, paths)
 
+        def check(client: AgentClient, instance: Instance) -> None:
+            # the request's values are checked before anything is changed (E-3: Rust's seed bound, Valheim's name)
+            game_check = getattr(self.definition, "check_world_reset", None)
+            if game_check is not None:
+                game_check(instance, values, params.get("seed"))
+
         def place(client: AgentClient, instance: Instance) -> None:
             seed = self.definition.prepare_world_reset(client, instance, values, params.get("seed"))
             chosen["seed"] = seed
             ctx.log(f"The server creates a new world at its next start{f' (seed {seed})' if seed else ''}")
 
-        result = _replace_save(job, ctx, what="resetting the world", place=place, set_aside=set_aside)
+        result = _replace_save(job, ctx, what="resetting the world", place=place, set_aside=set_aside, check=check)
         result["seed"] = chosen.get("seed")
         return result
 
@@ -306,7 +324,10 @@ class FolderSaves:
             paths = self.definition.world_paths(client, instance, "import", params)
             return self.set_aside_paths(client, instance, stamp, paths)
 
-        def place(client: AgentClient, instance: Instance) -> None:
+        def prepare(client: AgentClient, instance: Instance) -> None:
+            # unpacked into the staging folder and checked while the current world is still in place (E-3: a
+            # full disk or a world the game refuses used to fail after the world was moved aside); the agent
+            # unpacks only into a stopped server, so this runs after the stop
             protected = secret_files.require_extract_support(instance, client)
             op = client.extract(
                 instance.id,
@@ -317,13 +338,22 @@ class FolderSaves:
                 delete_archive=True,
                 **({"protected": protected} if protected else {}),
             )
-            done = client.wait_operation(op["id"], timeout=3 * 3600, on_progress=ctx.agent_progress(0.75, 0.1))
+            done = client.wait_operation(op["id"], timeout=3 * 3600, on_progress=ctx.agent_progress(0.62, 0.03))
             result = done.get("result") or {}
             if result.get("skipped_count"):
                 ctx.log(f"{result['skipped_count']} unsafe entries of the zip were skipped (links, special files)")
             source = f"{staging}/{root}" if root else staging
             if _stat(client, instance, source) is None:
                 raise ConflictError("The uploaded world folder was not found after unpacking", code="invalid_world")
+            problem = getattr(self.definition, "world_files_problem", None)
+            if problem is not None:
+                files = [str(e.get("name")) for e in _entries(client, instance, source) if e.get("type") == "file"]
+                if (why := problem(files)) is not None:
+                    raise ApiError(why, code="invalid_world")
+            placed["source"] = source
+
+        def place(client: AgentClient, instance: Instance) -> None:
+            source = placed["source"]
             target = self.definition.world_target(client, instance, root.rsplit("/", 1)[-1] if root else "", params)
             parent = target.rsplit("/", 1)[0] if "/" in target else ""
             if parent:
@@ -334,7 +364,7 @@ class FolderSaves:
             ctx.log(f"The uploaded world is now {target}")
 
         try:
-            result = _replace_save(job, ctx, what="importing a world", place=place, set_aside=set_aside)
+            result = _replace_save(job, ctx, what="importing a world", place=place, set_aside=set_aside, prepare=prepare)
         except Exception:
             instance = job_instance(job)
             drop_import_archive(Client(instance.node), instance, archive)

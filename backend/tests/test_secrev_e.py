@@ -267,3 +267,102 @@ def test_e4_a_valheim_server_without_its_join_password_is_not_started(clients, f
     with django_capture_on_commit_callbacks(execute=True):
         resp = clients["owner"].post(f"/api/instances/{src.id}/power", {"action": "start"}, format="json")
     assert resp.status_code == 202 and Job.objects.get(pk=resp.json()["id"]).status == JobStatus.SUCCEEDED
+
+
+# --- E-3 ------------------------------------------------------------------------------------------------------
+# adopted from e-bugs/poc/backend/test_e_saves_validate_late.py
+def test_e3_valheim_old_world_with_a_space_in_its_name_is_refused_at_the_upload(
+    clients, fake_agent, django_capture_on_commit_callbacks
+):
+    from .test_games_six import world_zip
+
+    vh = create(clients, django_capture_on_commit_callbacks, "valheim", options={"world_name": "Midgard"})
+    fake_agent.put_file(vh.id, "config/worlds_local/Midgard/_main.3.db2", b"DB")
+    fake_agent.put_file(vh.id, "config/worlds_local/Midgard/_main.3.fwl2", b"FWL")
+    start(fake_agent, vh)
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post(
+            f"/api/instances/{vh.id}/saves/import",
+            {"file": world_zip({"My World.fwl": b"F", "My World.db": b"D"}), "confirm_name": vh.name, "backup": "false"},
+            format="multipart",
+        )
+    assert resp.status_code == 400, resp.content
+    assert fake_agent.get_file(vh.id, "config/worlds_local/Midgard/_main.3.db2") == b"DB"
+    assert fake_agent.status(vh.id).get("running") is True
+
+
+def test_e3_rust_seed_above_the_games_maximum_is_refused_at_the_request(clients, fake_agent, django_capture_on_commit_callbacks):
+    from apps import games
+
+    ru = create(clients, django_capture_on_commit_callbacks, "rust")
+    ident = games.for_instance(ru).identity(ru)
+    fake_agent.put_file(ru.id, f"server/{ident}/proceduralmap.4500.1.250.sav", b"SAV")
+    start(fake_agent, ru)
+    resp = clients["owner"].post(
+        f"/api/instances/{ru.id}/saves/reset", {"confirm_name": ru.name, "backup": False, "seed": 3_000_000_000}, format="json"
+    )
+    assert resp.status_code == 400 and "seed" in resp.json()["error"]["details"]["fields"]
+    # and a job with such a seed (an older panel queued it) fails before the map is moved
+    job = run("saves_reset", ru, django_capture_on_commit_callbacks, seed=3_000_000_000, settings={}, backup=False)
+    assert job.status == JobStatus.FAILED and job.error_code == "invalid_setting"
+    assert fake_agent.get_file(ru.id, f"server/{ident}/proceduralmap.4500.1.250.sav") == b"SAV"
+    assert fake_agent.status(ru.id).get("running") is True
+
+
+def test_e3_an_import_whose_zip_cannot_be_unpacked_leaves_the_running_world_alone(
+    clients, fake_agent, django_capture_on_commit_callbacks
+):
+    from .test_games_six import WORLD, palworld_with_world, world_zip
+
+    inst = palworld_with_world(clients, fake_agent, django_capture_on_commit_callbacks)
+    start(fake_agent, inst)
+    fake_agent.failed_operations["import"] = ("No space left on device", "io_error")
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post(
+            f"/api/instances/{inst.id}/saves/import",
+            {
+                "file": world_zip({"ABCDEF0123456789ABCDEF0123456789/Level.sav": b"NEW"}),
+                "confirm_name": inst.name,
+                "backup": "false",
+            },
+            format="multipart",
+        )
+    assert resp.status_code == 202, resp.json()
+    job = Job.objects.get(pk=resp.json()["id"])
+    assert job.status == JobStatus.FAILED
+    assert fake_agent.get_file(inst.id, f"Pal/Saved/SaveGames/0/{WORLD}/Level.sav") == b"LEVEL"
+    assert fake_agent.status(inst.id).get("running") is True
+
+
+def test_e3_a_failed_commit_moves_the_saves_back_and_starts_the_server(
+    clients, fake_agent, django_capture_on_commit_callbacks, monkeypatch
+):
+    from apps import games
+    from apps.core.errors import ApiError
+
+    from .test_games_six import WORLD, palworld_with_world, world_zip
+
+    inst = palworld_with_world(clients, fake_agent, django_capture_on_commit_callbacks)
+    start(fake_agent, inst)
+    definition = games.for_instance(inst)
+
+    def place_world(*_a, **_k):  # the commit fails after the current world was moved aside
+        raise ApiError("the node refused the rename", code="io_error")
+
+    monkeypatch.setattr(type(definition), "place_world", place_world)
+    with django_capture_on_commit_callbacks(execute=True):
+        resp = clients["owner"].post(
+            f"/api/instances/{inst.id}/saves/import",
+            {
+                "file": world_zip({"ABCDEF0123456789ABCDEF0123456789/Level.sav": b"NEW"}),
+                "confirm_name": inst.name,
+                "backup": "false",
+            },
+            format="multipart",
+        )
+    job = Job.objects.get(pk=resp.json()["id"])
+    assert job.status == JobStatus.FAILED and job.error_code == "io_error"
+    assert fake_agent.get_file(inst.id, f"Pal/Saved/SaveGames/0/{WORLD}/Level.sav") == b"LEVEL"
+    assert fake_agent.status(inst.id).get("running") is True
+    log = " ".join(job.log)
+    assert "back in place" in log and "started again" in log

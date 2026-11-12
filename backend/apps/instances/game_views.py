@@ -498,6 +498,12 @@ class SavesResetView(APIView):
         reset_config = getattr(_saves_model, "reset_config", None)
         cfg = reset_config(instance) if reset_config is not None else definition.config_file("map-gen-settings")
         settings_values: dict[str, Any] = {}
+        if data["seed"] is not None and cfg is not None and cfg.field("seed") is not None:
+            # the game's own bound (E-3: Rust's seeds end at 2147483647, the request allowed 4294967295)
+            try:
+                codecs.validate_values(cfg, {"seed": data["seed"]})
+            except ValueError as exc:
+                raise ValidationError({"seed": [str(exc)]}) from exc
         if data["settings"]:
             if cfg is None:
                 raise ValidationError({"settings": ["This game has no map settings"]})

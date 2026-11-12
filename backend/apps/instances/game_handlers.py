@@ -285,12 +285,54 @@ def _stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
 
 
-def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside: Any = None) -> dict[str, Any]:
-    """The common part of saves_reset and saves_import: stop, safety backup, set aside, ``place``, start.
+class _RecordingClient:
+    """The agent client for ``set_aside``: records every rename it made, so they can be undone (E-3)."""
 
-    ``place(client, instance)`` puts the new save (or the map settings) in place after the saves were
-    moved aside. A failure before anything was moved starts a server that was running again; after
-    that the server is left stopped (its saves are in saves-replaced/, the safety backup is listed).
+    def __init__(self, client: AgentClient) -> None:
+        self._client = client
+        self.moves: list[tuple[str, str]] = []
+
+    def rename(self, instance_id: Any, source: str, destination: str, *args: Any, **kwargs: Any) -> Any:
+        result = self._client.rename(instance_id, source, destination, *args, **kwargs)
+        self.moves.append((source, destination))
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._client, name)
+
+
+def _undo_set_aside(client: AgentClient, instance: Instance, moves: list[tuple[str, str]], ctx: JobContext) -> bool:
+    """Move the set-aside entries back where they were (newest first). False when one cannot be moved back
+    (``place`` already put something there): the rest stays where it is and the log says so."""
+    for source, destination in reversed(moves):
+        try:
+            client.rename(instance.id, destination, source, timeout=600)
+        except Exception as exc:  # (an ApiError of the agent, or the agent unreachable)
+            ctx.log(f"warning: could not move {destination} back to {source}: {exc}")
+            return False
+    return True
+
+
+def _replace_save(
+    job: Job,
+    ctx: JobContext,
+    *,
+    what: str,
+    place: Any,
+    set_aside: Any = None,
+    check: Any = None,
+    prepare: Any = None,
+) -> dict[str, Any]:
+    """The common part of saves_reset and saves_import: check, stop, safety backup, prepare, set aside,
+    ``place``, start.
+
+    E-3: ``check(client, instance)`` checks the request before the server is stopped; ``prepare(client,
+    instance)`` gets the new save ready (unpacked into a staging folder, its files checked) after the stop
+    (the agent unpacks only into a stopped server) but before anything is moved aside: a failure of either
+    changes nothing, and a server that was running is started again. ``place(client, instance)`` then puts
+    the new save (or the map settings) in place after the saves were moved aside. A failure before anything was moved starts a server that was running again;
+    a failure of ``place`` moves the set-aside saves back and starts it again too; when they cannot be moved
+    back the server is left stopped (its saves are in saves-replaced/, the safety backup is listed).
     ``set_aside(client, instance, stamp)``: what is moved aside (default: the saves model's
     ``set_aside``; the folder saves model moves other paths for a reset than for an import).
     """
@@ -310,9 +352,12 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
     moved: list[str] = []
     stamp = _stamp()
     spec_before = current_spec_hash(instance)
+    recorder = _RecordingClient(client)
     try:
         if Instance.objects.filter(pk=instance.pk, archived_at__isnull=False).exists():
             raise ConflictError("This server is archived; unarchive it first", code="archived")
+        if check is not None:
+            check(client, instance)
         status = client.status(instance.id)
         # a container that Docker restarts (a crash loop) is stopped too: it would start on the saves
         # while they are replaced
@@ -344,9 +389,13 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
         else:
             ctx.log("No safety backup was requested")
         ctx.check_cancelled()
+        if prepare is not None:
+            ctx.progress(0.62, "Unpacking and checking the new world", force=True)
+            prepare(client, instance)
+            ctx.check_cancelled()
         ctx.progress(0.65, "Moving the current saves aside", force=True)
         changed = True
-        moved = (set_aside or saves.set_aside)(client, instance, stamp)
+        moved = (set_aside or saves.set_aside)(recorder, instance, stamp)
         if moved:
             ctx.log(f"Moved aside into {saves.describe()['set_aside_folder']}/{stamp}/: {', '.join(moved)}")
         ctx.progress(0.75, what.capitalize(), force=True)
@@ -355,6 +404,10 @@ def _replace_save(job: Job, ctx: JobContext, *, what: str, place: Any, set_aside
         raise
     except Exception as exc:
         if not changed:
+            put_back(job, instance, ctx, exc, was_running=was_running, untouched=True)
+        elif recorder.moves and _undo_set_aside(client, instance, recorder.moves, ctx):
+            # the saves are where they were: as if nothing had been changed (E-3)
+            ctx.log(f"{what.capitalize()} failed; the saves that were moved aside are back in place")
             put_back(job, instance, ctx, exc, was_running=was_running, untouched=True)
         elif was_running:
             _set_desired(instance, DesiredState.STOPPED)
