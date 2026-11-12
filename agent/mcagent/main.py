@@ -1183,8 +1183,14 @@ async def clone(
         raise AgentError("Stop the source server before cloning it", "source_running", 409)
 
     def _clone(op: Operation) -> dict[str, Any]:
-        from .safefs import copy_tree_fd
+        from .safefs import CopyIncomplete, copy_tree_fd
         from .snapshots import create_empty_dir, prepare_replacement, remove_tree
+
+        def _copy_or_fail(copy: Any, source: Any, target: Any, skip: Any) -> None:
+            try:
+                copy(source, target, skip)
+            except CopyIncomplete as exc:  # R-3: a clone with files missing is not a clone
+                raise AgentError(f"The clone was not made: {exc}", "clone_incomplete", 500) from exc
 
         skipped_worlds: list[str] = []
         src_text = str(src)
@@ -1224,7 +1230,9 @@ async def clone(
             with _staging_inside(dst, "clone") as (root_fd, stage_fd, stage_name):
                 # through the descriptor: renaming the staging folder cannot redirect the copy
                 copy = f"/proc/self/fd/{stage_fd}/c"
-                copy_tree_fd(src, copy, ignore)  # descriptors, never a path resolved again (B-4)
+                _copy_or_fail(
+                    copy_tree_fd, src, copy, ignore
+                )  # descriptors, never a path resolved again (B-4)
                 op.update(0.9, "Setting the owner of the copied files")
                 _chown_tree(Path(copy), settings.runtime_uid, settings.runtime_gid)
                 _swap_in_staged(root_fd, stage_fd, "c", stage_name)
@@ -1241,7 +1249,9 @@ async def clone(
                     "Could not create a btrfs subvolume; the clone is a plain directory "
                     "(convert it to enable snapshots)"
                 )
-            copy_tree_fd(src, staging, ignore)  # descriptors, never a path resolved again (B-4)
+            _copy_or_fail(
+                copy_tree_fd, src, staging, ignore
+            )  # descriptors, never a path resolved again (B-4)
             op.update(0.9, "Setting the owner of the copied files")
             _chown_tree(staging, settings.runtime_uid, settings.runtime_gid)
             if dst.exists():

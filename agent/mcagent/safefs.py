@@ -733,6 +733,22 @@ def open_dir_chain(
         raise
 
 
+class CopyIncomplete(PathError):
+    """:func:`copy_tree_fd` could not copy everything (R-3): ``failed`` = [(relative path, reason)]."""
+
+    def __init__(self, failed: list[tuple[str, str]]) -> None:
+        first = "; ".join(f"{path or '.'} ({why})" for path, why in failed[:5])
+        more = f" and {len(failed) - 5} more" if len(failed) > 5 else ""
+        super().__init__(f"{len(failed)} entries could not be copied: {first}{more}", "copy_incomplete", 500)
+        self.failed = failed
+
+
+# what "the entry changed underneath" looks like: removed, replaced by a link, a folder replaced by a file
+_GONE = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
+# special files a mod can make in place of a regular one: never copied (as copytree's caller skipped them)
+_SPECIAL = frozenset({errno.ENXIO, errno.EOPNOTSUPP, errno.ENODEV})
+
+
 def copy_tree_fd(
     src: str | os.PathLike[str],
     dst: str | os.PathLike[str],
@@ -744,12 +760,24 @@ def copy_tree_fd(
     descriptors (B-4): every folder is opened below its parent without following a link, every file is
     opened with ``O_NOFOLLOW | O_NONBLOCK`` and copied only when ``fstat`` says it is a regular file
     (a FIFO, socket or device put in its place is skipped, never read), links are copied as links.
-    Modes and times are copied (``copy2``/``copystat``). ``ignore(directory path, names)`` as copytree's."""
+    Modes and times are copied (``copy2``/``copystat``). ``ignore(directory path, names)`` as copytree's.
+
+    Only what changed underneath (removed, replaced by a link or by a file) is skipped; every other error
+    of the source, and a folder deeper than ``max_depth``, is collected and raises :class:`CopyIncomplete`
+    at the end (as copytree raised ``shutil.Error``; R-3). Errors writing the copy raise at once."""
     os.makedirs(dst, exist_ok=True)
     src_text = os.fspath(src)
+    failed: list[tuple[str, str]] = []
 
     def times(st: os.stat_result) -> tuple[int, int]:
         return (st.st_atime_ns, st.st_mtime_ns)
+
+    def problem(path: str, exc: OSError) -> bool:
+        """True when the entry is to be skipped quietly; else recorded as a failure (also False)."""
+        if exc.errno in _GONE:
+            return True
+        failed.append((path, f"{type(exc).__name__}: {exc.strerror or exc}"))
+        return False
 
     def copy_dir(sfd: int, dfd: int, rel: str, depth: int) -> None:
         names = sorted(os.listdir(sfd))
@@ -757,28 +785,39 @@ def copy_tree_fd(
         for name in names:
             if name in skipped:
                 continue
+            path = f"{rel}/{name}" if rel else name
             try:
                 st = os.stat(name, dir_fd=sfd, follow_symlinks=False)
-            except FileNotFoundError:
+            except OSError as exc:
+                problem(path, exc)
                 continue
             if statmod.S_ISLNK(st.st_mode):
-                target = os.readlink(name, dir_fd=sfd)
+                try:
+                    target = os.readlink(name, dir_fd=sfd)
+                except OSError as exc:
+                    problem(path, exc)
+                    continue
                 os.symlink(target, name, dir_fd=dfd)
                 with contextlib.suppress(OSError, NotImplementedError):
                     os.utime(name, ns=times(st), dir_fd=dfd, follow_symlinks=False)
             elif statmod.S_ISDIR(st.st_mode):
                 if depth >= max_depth:
+                    failed.append((path, f"deeper than {max_depth} levels"))
                     continue
                 try:
                     child = os.open(name, DIR_FLAGS, dir_fd=sfd)
-                except OSError:
-                    continue  # replaced by a link or removed meanwhile
+                except OSError as exc:
+                    problem(path, exc)
+                    continue
                 try:
                     with contextlib.suppress(FileExistsError):
                         os.mkdir(name, dir_fd=dfd)
                     dchild = os.open(name, DIR_FLAGS, dir_fd=dfd)
                     try:
-                        copy_dir(child, dchild, f"{rel}/{name}" if rel else name, depth + 1)
+                        try:
+                            copy_dir(child, dchild, path, depth + 1)
+                        except OSError as exc:  # listing it failed
+                            problem(path, exc)
                         cst = os.fstat(child)
                         os.chmod(dchild, statmod.S_IMODE(cst.st_mode))
                         os.utime(dchild, ns=times(cst))
@@ -793,8 +832,10 @@ def copy_tree_fd(
                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC | os.O_NOCTTY,
                         dir_fd=sfd,
                     )
-                except OSError:
-                    continue  # replaced by a link or removed meanwhile
+                except OSError as exc:
+                    if exc.errno not in _SPECIAL:  # (a socket or device swapped in: skipped like one)
+                        problem(path, exc)
+                    continue
                 try:
                     fst = os.fstat(sf)
                     if not statmod.S_ISREG(fst.st_mode):
@@ -807,11 +848,7 @@ def copy_tree_fd(
                         dir_fd=dfd,
                     )
                     try:
-                        with (
-                            os.fdopen(sf, "rb", closefd=False) as fin,
-                            os.fdopen(df, "wb", closefd=False) as fout,
-                        ):
-                            shutil.copyfileobj(fin, fout, 1024 * 1024)
+                        _copy_data(sf, df, path, failed)
                         os.chmod(df, statmod.S_IMODE(fst.st_mode))
                         os.utime(df, ns=times(fst))
                     finally:
@@ -832,3 +869,20 @@ def copy_tree_fd(
             os.close(dfd)
     finally:
         os.close(sfd)
+    if failed:
+        raise CopyIncomplete(failed)
+
+
+def _copy_data(sf: int, df: int, path: str, failed: list[tuple[str, str]]) -> None:
+    """Copy the file's bytes; a read error of the source is a failure of this entry, a write error raises."""
+    while True:
+        try:
+            chunk = os.read(sf, 1024 * 1024)
+        except OSError as exc:
+            failed.append((path, f"{type(exc).__name__}: {exc.strerror or exc}"))
+            return
+        if not chunk:
+            return
+        view = memoryview(chunk)
+        while view:
+            view = view[os.write(df, view) :]
