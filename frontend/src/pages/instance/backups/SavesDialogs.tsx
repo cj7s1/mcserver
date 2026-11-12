@@ -15,11 +15,11 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { api, errorMessage, uploadWithProgress } from "@/lib/api";
+import { api, ApiError, errorMessage, uploadWithProgress } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
 import { initialTexts } from "@/lib/game-config";
 import type { ConfigField, Instance, Job } from "@/lib/types";
-import { DEFAULT_RESET_FIELDS, resetBody } from "./saves-model";
+import { DEFAULT_RESET_FIELDS, resetBody, resetFieldErrors } from "./saves-model";
 
 const LIVE = ["running", "starting", "unhealthy", "restarting"];
 
@@ -110,6 +110,8 @@ export function SavesResetDialog({
       onStarted(job);
       onClose();
     } catch (err) {
+      // a value the panel refuses (the seed outside the game's bound): shown at its field too
+      if (err instanceof ApiError) setErrors(resetFieldErrors(resetFields, err.details));
       toast.error(errorMessage(err));
     } finally {
       setPending(false);
