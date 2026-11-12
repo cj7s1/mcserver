@@ -1731,6 +1731,20 @@ network_rollback_note() { # network_rollback_note REVISION
     say ""
 }
 
+# A rollback from a version with the friends features (instances 0008_unraid_and_friends) to one without
+# them: text only (FX2-4). Undoing that migration drops the four columns; the old panel knows no Friend role.
+FRIENDS_MIGRATION=backend/apps/instances/migrations/0008_unraid_and_friends.py
+friends_rollback_note() { # friends_rollback_note FROM TO: back to FROM from TO
+    g cat-file -e "$2:$FRIENDS_MIGRATION" 2>/dev/null || return 0
+    ! g cat-file -e "$1:$FRIENDS_MIGRATION" 2>/dev/null || return 0
+    say "What this rollback loses of the friends features (docs/FRIENDS.md): every server's \"Stop when empty\" and"
+    say "its Discord settings (\"Available in Discord\", its Discord roles, \"Let /join show the password\") go back to"
+    say "off (undoing migration instances 0008 drops them). Friend accounts see no server and cannot start one while"
+    say "the older version runs; their access comes back with the next upgrade. The Discord bot does not run there"
+    say "(its settings are kept for the next upgrade)."
+    say ""
+}
+
 # `run --no-build`: bring the containers in line with .env and the compose files, nothing else.
 apply_configuration() {
     local image
@@ -2017,6 +2031,7 @@ cmd_rollback() {
     if [ "$DRY" = 1 ]; then
         say ""
         network_rollback_note "$from"
+        friends_rollback_note "$from" "$to"
         say "Nothing was changed. To do it: ${LOOSE_REPAIR:+$LOOSE_REPAIR && }./scripts/upgrade.sh rollback$([ "$GAMES_ARCHIVE" = 1 ] && printf ' --archive-other-games')"
         return 0
     fi
@@ -2135,6 +2150,7 @@ $(dump_way_back)"
         say ""
     fi
     network_rollback_note "$from"
+    friends_rollback_note "$from" "$to"
     if [ "$from" != "$to" ] || [ -n "$SCRIPT_GONE" ]; then
         # Which checkout he is on, and which command is safe in which checkout.
         say "The source tree ($top) is now at the old version, $(short "$from"), as a detached HEAD. It fits"

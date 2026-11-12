@@ -97,3 +97,42 @@ def test_status_names_the_repair_of_an_agent_that_does_not_run(tmp_path: Path):
     status = site.upgrade("status")
     assert status.returncode == 0 and hint in words(status.stdout)
     assert 'If it does not start with "network ... not found"' in words(status.stdout)
+
+
+# --- FX2-4: what a rollback from the friends features loses -----------------------------------------------------
+FRIENDS = "What this rollback loses of the friends features (docs/FRIENDS.md):"
+
+
+class SiteWithFriends(Site):
+    """The upgrade brings the friends features (migration instances 0008), the old revision is the one before."""
+
+    old_migrations = {**Site.old_migrations, "instances": "0007_restore_other_games"}
+    upgrade_migrations = {"instances": "0008_unraid_and_friends"}
+
+
+def test_a_rollback_from_the_friends_features_says_what_it_loses(tmp_path: Path):
+    site = SiteWithFriends(tmp_path)
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    plan = site.upgrade("rollback", "--dry-run")
+    assert plan.returncode == 0, plan.both
+    text = words(plan.stdout)
+    assert "database migrations to undo: instances 0007_restore_other_games" in text
+    for said in (
+        FRIENDS,
+        'every server\'s "Stop when empty" and its Discord settings ("Available in Discord", its Discord roles, '
+        '"Let /join show the password") go back to off (undoing migration instances 0008 drops them).',
+        "Friend accounts see no server and cannot start one while the older version runs; their access comes back "
+        "with the next upgrade.",
+    ):
+        assert said in text, said
+    assert plan.stdout.index(FRIENDS) < plan.stdout.index("Nothing was changed. To do it: ./scripts/upgrade.sh rollback")
+    back = site.upgrade("rollback")
+    assert back.returncode == 0, back.both
+    assert back.stdout.index("==> Rolled back") < back.stdout.index(FRIENDS)
+
+
+def test_no_friends_note_for_a_rollback_without_them(tmp_path: Path):
+    site = Site(tmp_path)  # neither revision has instances 0008
+    assert site.upgrade("run", "--with-migrations").returncode == 0
+    assert FRIENDS not in site.upgrade("rollback", "--dry-run").stdout
+    assert FRIENDS not in site.upgrade("rollback").stdout
