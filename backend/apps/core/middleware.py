@@ -118,8 +118,6 @@ class UploadLimitMiddleware:
     MCPANEL_MAX_UPLOAD_BYTES (default 2 GiB); uploads without a Content-Length are refused (411).
     """
 
-    UPLOAD_HINTS = ("/files/upload", "/import", "/content/upload", "/world/replace")
-
     def __init__(self, get_response: Callable[[HttpRequest], HttpResponse]) -> None:
         self.get_response = get_response
 
@@ -134,7 +132,10 @@ class UploadLimitMiddleware:
                 length = int(raw) if raw else None
             except ValueError:
                 length = None
-            is_upload = any(h in request.path for h in self.UPLOAD_HINTS)
+            # the same routes as the ASGI layer, matched as a whole (D-5: a substring let other paths through)
+            from .asgi import UPLOAD_PATH
+
+            is_upload = bool(UPLOAD_PATH.match(request.path))
             if (length is not None and length > limit) or (length is None and is_upload):
                 return JsonResponse(
                     {

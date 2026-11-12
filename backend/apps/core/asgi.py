@@ -32,7 +32,7 @@ from django.core.handlers.asgi import ASGIHandler
 
 UPLOAD_PATH = re.compile(
     r"^/api/instances/[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
-    r"/(?:files/upload|import|content/upload|world/replace)/?$"
+    r"/(?:files/upload|import|content/upload|world/replace|saves/import)/?$"
 )
 BODY_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SESSION_KEY = re.compile(r"^[a-z0-9]{8,64}$")
