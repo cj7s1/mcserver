@@ -35,6 +35,8 @@ import { useInstanceContext } from "./InstanceLayout";
 import { useGameInfo } from "./game-api";
 import { CommandInput } from "./console/CommandInput";
 import { ConnectionIndicator } from "./console/ConnectionIndicator";
+import { classifyConsoleLink, type ConsoleLink } from "./console/console-links";
+import { ConsoleLinkDialog } from "./console/ConsoleLinkDialog";
 import {
   entryText,
   isFiltering,
@@ -112,6 +114,8 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
   const [counts, setCounts] = useState({ total: 0, shown: 0 });
   const [pending, setPending] = useState(0);
   const [historyBusy, setHistoryBusy] = useState(false);
+  // a link the user clicked in the output: opened only after they saw the whole URL (D-1)
+  const [link, setLink] = useState<ConsoleLink | null>(null);
 
   // --- buffer → terminal ------------------------------------------------------------
   // These helpers only touch refs and state setters, so the versions captured by the
@@ -265,7 +269,9 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
     term.loadAddon(
       new WebLinksAddon((event, uri) => {
         event.preventDefault();
-        window.open(uri, "_blank", "noopener,noreferrer");
+        // the server's output decides what is printed: ask first, showing where the link goes
+        const found = classifyConsoleLink(uri, window.location);
+        if (found) setLink(found);
       }),
     );
     term.open(host);
@@ -636,6 +642,7 @@ function ConsoleView({ instance, canCommandPerm, canFiles }: { instance: Instanc
         )}
         .
       </p>
+      <ConsoleLinkDialog link={link} onClose={() => setLink(null)} />
     </div>
   );
 }
