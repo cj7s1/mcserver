@@ -41,7 +41,7 @@ Edit `.env` (every variable is documented in `deploy/.env.example`):
 | `MCPANEL_ALLOWED_HOSTS`, `MCPANEL_CSRF_TRUSTED_ORIGINS` | Must contain the host/origin you type into the browser. |
 | `MCPANEL_LAN_ADDRESS`, `MCPANEL_PUBLIC_HOSTNAME` | Shown to users as connection addresses (informational only). |
 | `AGENT_RESTIC_PASSWORD` | **Store a copy somewhere safe.** Without it, backups can't be restored. |
-| `MCPANEL_SETUP_TOKEN` | Recommended before the first start (`openssl rand -hex 24`): the setup page asks for it before it creates the owner account, so nobody else who reaches the panel first can claim it. |
+| `MCPANEL_SETUP_TOKEN` | Set by `generate-secrets.sh` (by hand: `openssl rand -hex 24`, before the first start): the setup page asks for it before it creates the owner account, so nobody else who reaches the panel first can claim it. `grep '^MCPANEL_SETUP_TOKEN=' .env` shows it. Empty = no token asked for. |
 
 Start the stack:
 
@@ -50,8 +50,8 @@ docker compose up -d --build
 docker compose ps          # postgres, agent and panel: all three healthy after about a minute
 ```
 
-Open `http://<MCPANEL_BIND>:<MCPANEL_PORT>/`, create the owner account (enter `MCPANEL_SETUP_TOKEN` if you
-set it), and create a server.
+Open `http://<MCPANEL_BIND>:<MCPANEL_PORT>/`, create the owner account (enter the setup token:
+`grep '^MCPANEL_SETUP_TOKEN=' .env`), and create a server.
 
 ## What runs
 

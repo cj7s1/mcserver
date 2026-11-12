@@ -110,8 +110,8 @@ backups on the array cannot be used from the panel (section 10).
 cd /mnt/user/appdata/mcpanel-src/deploy && docker compose up -d --build
 ```
 
-Open `http://192.168.1.10:8080`, create the owner account (enter `MCPANEL_SETUP_TOKEN` if you set
-it), and create your first server.
+Open `http://192.168.1.10:8080`, create the owner account (enter the setup token that
+`generate-secrets.sh` wrote: `grep '^MCPANEL_SETUP_TOKEN=' .env`), and create your first server.
 
 ### First modpack server: Better MC
 

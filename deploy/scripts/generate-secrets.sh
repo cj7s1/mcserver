@@ -8,6 +8,10 @@
 # overwrites an existing file (delete or rename it yourself if you really want new
 # secrets: changing the secret key or restic password makes existing encrypted data
 # unreadable). Secrets are never printed. Only POSIX sh, od and awk are required.
+#
+# The panel's file also gets MCPANEL_SETUP_TOKEN: the first-run setup page asks for it
+# before it creates the owner account, so nobody else who reaches the panel first can
+# claim it. The script says where to find it (it is not printed either).
 set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -32,7 +36,7 @@ if [ "$mode" = node ]; then
 else
     example="${ENV_EXAMPLE:-$deploy_dir/.env.example}"
     target="${1:-$deploy_dir/.env}"
-    keys="MCPANEL_SECRET_KEY MCPANEL_AGENT_TOKEN POSTGRES_PASSWORD AGENT_RESTIC_PASSWORD"
+    keys="MCPANEL_SECRET_KEY MCPANEL_AGENT_TOKEN POSTGRES_PASSWORD AGENT_RESTIC_PASSWORD MCPANEL_SETUP_TOKEN"
 fi
 
 [ -f "$example" ] || die "template not found: $example"
@@ -49,7 +53,7 @@ random_hex() {
 for name in $keys; do
     case "$name" in
         MCPANEL_SECRET_KEY) value=$(random_hex 48) ;;
-        POSTGRES_PASSWORD) value=$(random_hex 24) ;;
+        POSTGRES_PASSWORD | MCPANEL_SETUP_TOKEN) value=$(random_hex 24) ;;
         *) value=$(random_hex 32) ;;
     esac
     eval "$name=\$value"
@@ -94,5 +98,7 @@ if [ "$mode" = node ]; then
 else
     echo "Next: review MCPANEL_DATA_DIR, MC_UID/MC_GID, MCPANEL_BIND, MCPANEL_ALLOWED_HOSTS and"
     echo "MCPANEL_CSRF_TRUSTED_ORIGINS in that file, then run: docker compose up -d --build"
+    echo "The first-run setup page asks for the setup token before it creates the owner account."
+    echo "It is MCPANEL_SETUP_TOKEN in that file; to see it: grep '^MCPANEL_SETUP_TOKEN=' $target"
 fi
 echo "Store a copy of AGENT_RESTIC_PASSWORD outside this server - backups cannot be restored without it."

@@ -115,7 +115,8 @@ docker compose up -d
 ```
 
 The first start builds the two images (it needs BuildKit: `docker buildx version`). Then open
-`http://<MCPANEL_BIND>:8080`, create the owner account, and create your first server.
+`http://<MCPANEL_BIND>:8080`, create the owner account (the setup page asks for the setup token that
+`generate-secrets.sh` wrote: `grep '^MCPANEL_SETUP_TOKEN=' .env`), and create your first server.
 For Unraid specifics (paths, UID/GID 99:100, the Docker tab, pools vs user shares), see
 [docs/UNRAID.md](docs/UNRAID.md). For general deployment, upgrades and reverse proxies, see
 [DEPLOYMENT.md](DEPLOYMENT.md).

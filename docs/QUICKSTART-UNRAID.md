@@ -111,8 +111,8 @@ cd mcpanel-src/deploy
 ./scripts/generate-secrets.sh
 ```
 
-This creates `deploy/.env` with fresh random passwords (it never overwrites an existing file). Now
-edit it:
+This creates `deploy/.env` with fresh random passwords and a setup token (it never overwrites an
+existing file). Now edit it:
 
 ```bash
 nano .env
@@ -139,18 +139,15 @@ MCPANEL_CSRF_TRUSTED_ORIGINS=http://192.168.1.10:8080,http://tower.local:8080
 # shown in the panel as the address players connect to
 MCPANEL_LAN_ADDRESS=192.168.1.10
 
-# asked for when you create the owner account in step 6 (see below)
-MCPANEL_SETUP_TOKEN=REPLACE-with-the-output-of-openssl-rand-hex-24
-
 TZ=Europe/Berlin
 ```
 
 * `MCPANEL_PORT`: pick a port nothing else uses (another container may already have 8080; for example
   `8484` works too). If you change it, change it in `MCPANEL_CSRF_TRUSTED_ORIGINS` as well.
 * `tower.local`: your Unraid server's name. Keep it only if you open the panel by that name.
-* `MCPANEL_SETUP_TOKEN`: a random value of your own: run `openssl rand -hex 24` and paste its output
-  after the `=`. Until the owner account exists, anyone who can open the panel could create
-  it; with a token, only someone who knows it can. It is not needed after setup.
+* Leave `MCPANEL_SETUP_TOKEN` as the script wrote it. Step 6 asks for it: until the owner account
+  exists, anyone who can open the panel could create it; with the token, only someone who knows it
+  can. It is not needed after setup. To see it: `grep '^MCPANEL_SETUP_TOKEN=' .env`
 * Save with **Ctrl+O, Enter**, quit with **Ctrl+X**.
 
 > **Important: copy `AGENT_RESTIC_PASSWORD`** from `.env` to your password manager. Backups cannot be
@@ -179,7 +176,8 @@ the job workers, the scheduler and Redis; `docker compose exec panel python
 
 Open **`http://192.168.1.10:8080`** in your browser. The first visit asks you to create the
 **owner** account, which has full control. Enter the **setup token** (`MCPANEL_SETUP_TOKEN` from
-step 4), then pick a username and a long password.
+step 4: `grep '^MCPANEL_SETUP_TOKEN=' .env` in `deploy/` shows it), then pick a username and a long
+password.
 
 ![First-run owner setup](images/quickstart/01-owner-setup.jpg)
 

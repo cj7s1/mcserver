@@ -65,7 +65,8 @@ x-panel-env: &panel-env
   TZ: ${TZ:-UTC}
   MCPANEL_SECRET_KEY: ${MCPANEL_SECRET_KEY:?MCPANEL_SECRET_KEY is not set - run deploy/scripts/generate-secrets.sh}
   MCPANEL_SECRET_KEY_FALLBACKS: ${MCPANEL_SECRET_KEY_FALLBACKS:-}
-  # First-run setup token (empty = the setup page is open to whoever reaches the panel first).
+  # First-run setup token, written by generate-secrets.sh (empty = the setup page is open to
+  # whoever reaches the panel first).
   MCPANEL_SETUP_TOKEN: ${MCPANEL_SETUP_TOKEN:-}
   MCPANEL_AGENT_URL: http://agent:8700
   MCPANEL_AGENT_TOKEN: ${MCPANEL_AGENT_TOKEN:?MCPANEL_AGENT_TOKEN is not set - run deploy/scripts/generate-secrets.sh}
