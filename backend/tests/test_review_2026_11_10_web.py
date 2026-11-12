@@ -168,7 +168,6 @@ async def test_a_json_cookie_of_another_app_does_not_hide_the_session(make_insta
 @pytest.mark.django_db(transaction=True)
 def test_the_size_gate_needs_an_active_user_and_a_session_of_the_current_password(make_user):
     from apps.core.asgi import _session_key, _signed_in
-
     from tests.conftest import SESSION_TOKENS
 
     user = make_user("gate-user", owner=True)
