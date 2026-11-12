@@ -492,7 +492,16 @@ def _root(settings: Settings, instance_id: UUID) -> SafeRoot:
         settings=settings,
         instance_id=instance_id,
         protected=docker_ops.server_protected_paths(settings, instance_id),
+        mounts=docker_ops.server_mount_points(settings, instance_id),
     )
+
+
+def _write_root(settings: Settings, instance_id: UUID) -> SafeRoot:
+    """:func:`_root` for a route that changes the server folder: 409 ``instance_busy`` while an operation
+    that blocks the lifecycle runs for the server (a restore, an import, an apply ...: a write would land in
+    a folder that is being replaced; B-11)."""
+    registry.assert_lifecycle_allowed(instance_id)
+    return _root(settings, instance_id)
 
 
 def _with_game_protected(settings: Settings, instance_id: UUID, protected: Any) -> Any:
@@ -1702,7 +1711,7 @@ def _write_encoding(root: SafeRoot, path: str, requested: str | None) -> str:
 async def files_write_text(
     instance_id: UUID, body: WriteTextRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    root = _root(settings, instance_id)
+    root = _write_root(settings, instance_id)
     encoding = await run_in_threadpool(_write_encoding, root, body.path, body.encoding)
     try:
         data = body.content.encode(encoding)
@@ -1839,7 +1848,7 @@ async def files_upload(
 ) -> dict[str, Any]:
     """Store the request body at ``path``. With ``sha256`` the file is only committed when the
     received bytes match it (the panel sends the hash of a file it downloaded and inspected)."""
-    root = _root(settings, instance_id)
+    root = _write_root(settings, instance_id)
     writer = await run_in_threadpool(root.open_writer, path, overwrite=overwrite, max_bytes=UPLOAD_LIMIT)
     digest = hashlib.sha256()
     try:
@@ -1860,7 +1869,7 @@ async def files_upload(
 async def files_mkdir(
     instance_id: UUID, body: MkdirRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    await run_in_threadpool(_root(settings, instance_id).mkdir, body.path, parents=body.parents)
+    await run_in_threadpool(_write_root(settings, instance_id).mkdir, body.path, parents=body.parents)
     return {"path": body.path}
 
 
@@ -1869,7 +1878,7 @@ async def files_rename(
     instance_id: UUID, body: RenameRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     await run_in_threadpool(
-        _root(settings, instance_id).rename, body.source, body.destination, overwrite=body.overwrite
+        _write_root(settings, instance_id).rename, body.source, body.destination, overwrite=body.overwrite
     )
     return {"source": body.source, "destination": body.destination}
 
@@ -1878,7 +1887,7 @@ async def files_rename(
 async def files_delete(
     instance_id: UUID, body: DeleteRequest, settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
-    root = _root(settings, instance_id)
+    root = _write_root(settings, instance_id)
     deleted = []
     for p in body.paths:
         await run_in_threadpool(root.delete, p, recursive=body.recursive)
@@ -1959,7 +1968,7 @@ async def files_fetch(
     """Download a file from an allow-listed provider URL into the instance, verifying its hash."""
     from .fetch import fetch_into
 
-    root = _root(settings, instance_id)
+    root = _write_root(settings, instance_id)
     return await run_in_threadpool(fetch_into, root, body)
 
 

@@ -311,10 +311,13 @@ class GuardedRoot(SafeRoot):
         settings: Settings,
         instance_id: UUID,
         protected: tuple[str, ...] = (),
+        mounts: tuple[str, ...] = (),
     ) -> None:
         super().__init__(root, uid, gid)
         self._settings = settings
         self._instance_id = instance_id
+        # folders the server's container mounts (B-1): never renamed, deleted or replaced, nor a folder above
+        self._mounts = tuple(folded(split_path(p)) for p in mounts if split_path(p))
         # the game's own protected paths (runtime profile ``protected_paths``: CS2's start hooks), case folded
         self._protected = tuple(folded(split_path(p)) for p in protected if split_path(p))
 
@@ -336,11 +339,25 @@ class GuardedRoot(SafeRoot):
                 403,
             )
 
+    def _refuse_mounted(self, rel: str) -> None:
+        """403 ``managed_file`` for a folder the container mounts or one above it (its content stays
+        writable): Docker would mount whatever is put in its place at the next start."""
+        target = folded(split_path(rel))
+        for mount in self._mounts:
+            if len(target) <= len(mount) and mount[: len(target)] == target:
+                raise PathError(
+                    f"{'/'.join(mount)} is mounted into the server's container; it (or a folder above it) "
+                    "cannot be renamed, deleted or replaced through the file manager",
+                    "managed_file",
+                    403,
+                )
+
     def _changed(self, *paths: str) -> None:
         files_changed(self._settings, self._instance_id, list(paths), "a file operation")
 
     def open_writer(self, rel: str, *, overwrite: bool = True, max_bytes: int | None = None) -> Any:
         self._refuse_managed(rel, above=True)
+        self._refuse_mounted(rel)
         self._changed(rel)
         return super().open_writer(rel, overwrite=overwrite, max_bytes=max_bytes)
 
@@ -352,6 +369,7 @@ class GuardedRoot(SafeRoot):
     def rename(self, src: str, dst: str, *, overwrite: bool = False) -> None:
         for rel in (src, dst):
             self._refuse_managed(rel, above=True)
+            self._refuse_mounted(rel)
             parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p not in ("", ".")]
             if parts and parts[0].casefold() == FOLDER.casefold():
                 raise PathError(
@@ -364,6 +382,7 @@ class GuardedRoot(SafeRoot):
         # deleting the marker (or .mcpanel/) only removes a verification: the start is refused then
         if self._protected:
             self._refuse_managed(rel, above=True)
+        self._refuse_mounted(rel)
         self._changed(rel)
         super().delete(rel, recursive=recursive)
 

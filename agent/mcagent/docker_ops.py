@@ -821,20 +821,46 @@ def _server_game_file(settings: Settings, instance_id: UUID) -> Path:
     return settings.state_dir / SERVER_GAME_DIR / f"{instance_id}.json"
 
 
-def remember_server_game(settings: Settings, instance_id: UUID, spec: InstanceSpec) -> None:
-    """Record the game of a server whose profile changes what the file API does (a literal owner or
-    protected paths), in the agent's state folder (never in the server folder, where the file API
-    could forge it). Written at every create; other games write nothing."""
+def remember_server_game(
+    settings: Settings, instance_id: UUID, spec: InstanceSpec, mounted: list[str] | None = None
+) -> None:
+    """Record the game of a server whose profile changes what the file API does (a literal owner,
+    protected paths, or folders of the server folder its container mounts), in the agent's state folder
+    (never in the server folder, where the file API could forge it). ``mounted``: the folders the
+    container mounts (sub-folder mounts and image volumes). Written at every create; other games write
+    nothing."""
     profile = profiles.for_spec(spec)
-    if profile.literal_owner is None and not profile.protected_paths:
+    mounts = sorted({*_subfolder_mounts(profile), *(mounted or [])})
+    if profile.literal_owner is None and not profile.protected_paths and not mounts:
         return
     path = _server_game_file(settings, instance_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as fh:
-        json.dump({"game": spec.game, "variant": spec.variant}, fh)
+        json.dump({"game": spec.game, "variant": spec.variant, "mounts": mounts}, fh)
     os.replace(tmp, path)
+
+
+def _subfolder_mounts(profile: RuntimeProfile) -> list[str]:
+    return [m.subdir.strip("/") for m in profile.mounts if m.subdir not in ("", ".")]
+
+
+def server_mount_points(settings: Settings, instance_id: UUID) -> tuple[str, ...]:
+    """Folders of the server folder the container mounts (B-1): the file API must not rename, delete or
+    replace them or a folder above them (Docker would follow a link put in their place at the next start).
+    ``.volumes`` (the agent's folder of image volumes) always."""
+    out = {IMAGE_VOLUMES_DIR}
+    try:
+        data = json.loads(_server_game_file(settings, instance_id).read_text())
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict):
+        out.update(m for m in data.get("mounts") or [] if isinstance(m, str) and m)
+        profile = server_profile(settings, instance_id)
+        if profile is not None:
+            out.update(_subfolder_mounts(profile))
+    return tuple(sorted(out))
 
 
 def forget_server_game(settings: Settings, instance_id: UUID) -> None:
@@ -910,8 +936,10 @@ def create_container(
         if name not in (container_name(instance_id), replacement_name(instance_id)):
             raise AgentError("Invalid container name", "internal", 500)
         kwargs["name"] = name
-    if profile.literal_owner is not None or profile.protected_paths:
-        remember_server_game(settings, instance_id, spec)
+    mounted = (
+        list(image_volume_plan(profile, image_volumes)[0].values()) if profile.mount_image_volumes else []
+    )
+    remember_server_game(settings, instance_id, spec, mounted)
     if profile.prepare_start is not None or profile.literal_owner is not None:
         prepare_start(settings, instance_id, profile)
     write_agent_files(settings, instance_id, profile, spec)
@@ -1305,6 +1333,25 @@ def start(instance_id: UUID, settings: Settings | None = None) -> None:
         )
         raise AgentError(
             f"Docker could not start the container: {text}", code, 409 if code == "port_conflict" else 502
+        ) from exc
+    _recheck_bind_sources(settings, instance_id, c)
+
+
+def _recheck_bind_sources(settings: Settings, instance_id: UUID, c: Container) -> None:
+    """The check of the mount sources once more right after the start (B-1): the check before the start
+    and Docker's mount are not one step. When a source is no longer a real folder, the container is
+    killed at once and the start fails with 409 ``volume_source_invalid``."""
+    try:
+        check_bind_sources(settings, instance_id, c)
+    except AgentError as exc:
+        log.error("Killing %s right after its start: %s", c.name, exc)
+        with contextlib.suppress(Exception):
+            c.kill()
+        raise AgentError(
+            f"{exc} The server was stopped right after its start: a folder it mounts was replaced while it "
+            "started.",
+            "volume_source_invalid",
+            409,
         ) from exc
 
 
