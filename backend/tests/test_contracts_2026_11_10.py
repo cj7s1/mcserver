@@ -69,7 +69,9 @@ def test_the_fake_agent_offers_what_the_agent_says_it_offers():
     source = (REPO / "agent" / "mcagent" / "main.py").read_text()
     match = re.search(r"^FEATURES = \[(.*?)\]", source, re.M | re.S)
     assert match, "FEATURES not found in agent/mcagent/main.py"
-    assert tuple(re.findall(r'"([a-z_]+)"', match.group(1))) == CURRENT_AGENT_FEATURES
+    # (the list's entries only: a comment may quote a feature's name too)
+    entries = re.findall(r'^\s*"([a-z_0-9]+)",?\s*(?:#.*)?$', match.group(1), re.M)
+    assert tuple(entries) == CURRENT_AGENT_FEATURES
 
 
 def test_clone_names_the_world_only_for_agents_that_know_level_name(

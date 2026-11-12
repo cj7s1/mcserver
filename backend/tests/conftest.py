@@ -122,6 +122,7 @@ CURRENT_AGENT_FEATURES = (
     "claim_marker",
     "backup_game_hint",
     "stop_not_ready",
+    "per_server_networks",
 )
 # GET /v1/info "games" of that agent (agent/mcagent/profiles: one runtime profile per game; phase 1 had
 # Minecraft only, phase 3 adds Factorio)
