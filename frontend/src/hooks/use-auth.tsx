@@ -27,8 +27,12 @@ export function useAuth() {
     can: (code: PermissionCode) => !!user?.permissions.includes(code),
     logout: async () => {
       clearUserStorage(); // first, so this tab's history never outlives the click (even if the request fails)
-      clearSessionToken(); // and the cookie alone signs nobody in (logout needs no token)
-      await api.post("/auth/logout");
+      try {
+        // the panel ends a session that has a token only for a request that carries it (R-13)
+        await api.post("/auth/logout");
+      } finally {
+        clearSessionToken(); // also when the request failed: without it the cookie alone signs nobody in
+      }
       // Drop every cached response, then tell the mounted auth gate directly (observers of removed
       // queries are not notified) and confirm with the server.
       const authHash = hashKey(qk.auth);

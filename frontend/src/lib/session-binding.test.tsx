@@ -149,7 +149,7 @@ describe("the session token on requests", () => {
     expect(getSessionToken()).toBe(TOKEN); // the login page itself does not drop it; a sign-in replaces it
 
     let authed = true;
-    stubFetch({
+    const calls = stubFetch({
       "/auth/state": () => ({ status: 200, body: authed ? SIGNED_IN : { setup_required: false, authenticated: false, user: null } }),
       "/auth/logout": () => {
         authed = false;
@@ -161,6 +161,23 @@ describe("the session token on requests", () => {
     await waitFor(() => expect(result.current.user?.id).toBe(4));
     await act(async () => {
       await result.current.logout();
+    });
+    // R-13: the logout itself carries the token (the panel ends a token session only then); afterwards it is gone
+    expect(headerOf(calls.find((c) => c.url === "/api/auth/logout"))).toBe(TOKEN);
+    expect(getSessionToken()).toBeNull();
+  });
+
+  it("a failed logout still drops the token in this browser", async () => {
+    setSessionToken(TOKEN);
+    stubFetch({
+      "/auth/state": () => ({ status: 200, body: SIGNED_IN }),
+      "/auth/logout": () => ({ status: 503, body: { error: { code: "service_unavailable", message: "down" } } }),
+    });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useAuth(), { wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={qc}>{children}</QueryClientProvider> });
+    await waitFor(() => expect(result.current.user?.id).toBe(4));
+    await act(async () => {
+      await result.current.logout().catch(() => undefined);
     });
     expect(getSessionToken()).toBeNull();
   });
