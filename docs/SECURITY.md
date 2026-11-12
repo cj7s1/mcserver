@@ -311,11 +311,15 @@ reboot ("failed to resolve host postgres"). The agent repairs two kinds of conta
   or has no such label). A running or restarting member that has no network although its
   `NetworkMode` names a user-defined network is stopped, connected again to every network it was seen
   on (`<data root>/agent/platform-networks.json`; aliases: service and container name) and started.
-  It reconnects itself the same way, without a restart. Limits: never a container outside the project,
-  never one that has a network, one attempt per container per 5 minutes, and after 3 failed or undone
-  repairs it gives up (logged). Every action is logged as a warning and reported in `GET /v1/info`
-  (`platform_network_repair`). The agent's Docker socket could do far more; this is the only thing it
-  does to containers that are not game servers.
+  It reconnects itself the same way, without a restart. It also restores a lost service name: Unraid's
+  Docker start can disconnect a container and connect it again without its Compose aliases (the panel
+  then cannot resolve `postgres` or `agent` although every container has its network), so a member that
+  is on a network of the project but no longer answers to its service name there is reconnected once
+  with its aliases, keeping its address (a cut of under a second). Limits: never a container outside
+  the project, never one that has its network and its service name, one attempt per container per 5
+  minutes, and after 3 failed or undone repairs it gives up (logged). Every action is logged as a
+  warning and reported in `GET /v1/info` (`platform_network_repair`). The agent's Docker socket could
+  do far more; this is the only thing it does to containers that are not game servers.
 
 When the agent itself does not run, `deploy/unraid/array-start.sh` (Unraid, at every array start) is the
 fallback for the same repair, and `docker compose up -d --force-recreate <service>` the manual one.
