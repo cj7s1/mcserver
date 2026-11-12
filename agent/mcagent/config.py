@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # host itself through a bridge address, or when Docker's userland proxy (rootless Docker,
     # iptables off) hands remote clients to the agent from the gateway.
     refuse_bridge_gateways: bool = True
+    # Check the digest of a version tag a runtime profile pins (``tag_digests``, A-8) before a container
+    # is created from it (AGENT_IMAGE_DIGEST_CHECK). Switch it off only to run a tag the maintainer
+    # re-pushed, after checking the new image yourself.
+    image_digest_check: bool = True
     port_min: int = 1024
     port_max: int = 65535
     max_memory_mb: int = 65536

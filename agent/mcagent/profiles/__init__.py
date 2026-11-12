@@ -94,6 +94,12 @@ def register(profile: RuntimeProfile) -> RuntimeProfile:
     for digest in profile.image_digests:
         if not _DIGEST_RE.match(digest):
             raise ValueError(f"Profile {profile.game}: invalid image digest {digest!r}")
+    for tag, digests in profile.tag_digests.items():
+        if profile.tag_error(tag) is not None or not digests:
+            raise ValueError(f"Profile {profile.game}: tag_digests names a tag it does not run: {tag!r}")
+        for digest in digests:
+            if not _DIGEST_RE.match(digest):
+                raise ValueError(f"Profile {profile.game}: invalid image digest {digest!r} for {tag}")
     for key in profile.redact_env:
         if not _ENV_NAME_RE.match(key):
             raise ValueError(f"Profile {profile.game}: invalid variable name {key!r} in redact_env")

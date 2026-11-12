@@ -115,6 +115,13 @@ COMMANDS = RconCommands(
     save_done_log=SAVE_DONE_PATTERN,
 )
 
+# the digest the tag pointed to when the probe ran (2026-11-11, audit-2026-11-09/design/probe-6games.md);
+# a re-pushed tag is refused (A-8)
+TAG_DIGESTS = MappingProxyType(
+    {"v1.2.0": ("sha256:0bfd0599c0cf3edf66ba40937ce3ae2a7c5de92073dc99d1c7e9a01fa581414e",)}
+)
+
+
 PROFILE = RuntimeProfile(
     game=GAME,
     label="Project Zomboid",
@@ -156,6 +163,7 @@ PROFILE = RuntimeProfile(
         "data/Recording",
     ),
     tag_pattern=TAG_PATTERN,
+    tag_digests=TAG_DIGESTS,
     env_values=MappingProxyType(ENV_VALUES),
     mount_image_volumes=True,
     install_retry_exits=(1,),

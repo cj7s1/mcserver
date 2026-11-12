@@ -84,6 +84,13 @@ def injected_env(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec
     }
 
 
+# the digest the tag pointed to when the probe ran (2026-11-11, audit-2026-11-09/design/probe-6games.md);
+# a re-pushed tag is refused (A-8)
+TAG_DIGESTS = MappingProxyType(
+    {"1.4.1": ("sha256:f34d67ba8023e343b10ffda0144759a8c8d986f276510460315a01051bed8a6d",)}
+)
+
+
 PROFILE = RuntimeProfile(
     game=GAME,
     label="Valheim",
@@ -107,6 +114,7 @@ PROFILE = RuntimeProfile(
     control="none",
     default_backup_excludes=("opt", "config/backups"),
     tag_pattern=TAG_PATTERN,
+    tag_digests=TAG_DIGESTS,
     env_values=MappingProxyType(ENV_VALUES),
     mount_image_volumes=True,
     env_ports=MappingProxyType({"SERVER_PORT": "udp"}),
@@ -116,4 +124,6 @@ PROFILE = RuntimeProfile(
     not_ready_stop_timeout=steam.NOT_READY_STOP_TIMEOUT,
     strict_env=True,
     redact_env=("SERVER_PASS",),
+    # without it the image starts the world with its default join password "secret" (I-3)
+    required_env=("SERVER_PASS",),
 )

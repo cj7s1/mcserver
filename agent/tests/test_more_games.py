@@ -50,6 +50,9 @@ def make_spec(game: str, env: dict[str, str] | None = None, ports=(), **over: An
         "env": env or {},
         "ports": [{"container_port": p, "host_port": p, "protocol": proto} for p, proto in ports],
     }
+    if game == "valheim" and "SERVER_PASS" not in values["env"]:
+        # the panel always sends the join password (required since I-3); tests that leave it out test that
+        values["env"] = {**values["env"], "SERVER_PASS": "skal-2026"}
     values.update(over)
     return InstanceSpec(**values)
 
@@ -1145,3 +1148,15 @@ def test_backup_and_restore_requests_take_a_checked_game():
     for bad in ("../x", "Palworld", "a" * 40, "x y"):
         with pytest.raises(ValidationError):
             BackupRequest(backup_id="b1", game=bad)
+
+
+# --- I-3 (security review 2026-11-11): Valheim refuses a spec without its join password -------------------
+def test_valheim_needs_its_join_password(settings):
+    """Without SERVER_PASS the image starts the world with its default password "secret" (E-4: a cloned
+    server had none). The panel answers 409 secret_required before; the agent refuses it as well."""
+    spec = make_spec("valheim").model_copy(update={"env": {}})
+    err = refused(settings, spec)
+    assert "SERVER_PASS" in str(err)
+    assert kwargs(settings, make_spec("valheim"))["environment"]["SERVER_PASS"] == "skal-2026"
+    for game in ("palworld", "cs2", "project-zomboid", "rust", "hkmp"):
+        assert profiles.get(game).required_env == (), game

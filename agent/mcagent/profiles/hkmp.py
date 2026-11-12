@@ -62,6 +62,13 @@ def injected_env(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec
     }
 
 
+# the digest the tag pointed to when the probe ran (2026-11-11, audit-2026-11-09/design/probe-6games.md);
+# a re-pushed tag is refused (A-8)
+TAG_DIGESTS = MappingProxyType(
+    {"v2.4.3-2": ("sha256:627179956e5c5acba2ebe6d37df53bdb0d4639e012efa56775f5203847d78a06",)}
+)
+
+
 PROFILE = RuntimeProfile(
     game=GAME,
     label="Hollow Knight (HKMP)",
@@ -98,6 +105,7 @@ PROFILE = RuntimeProfile(
     ),
     default_backup_excludes=("HKMPServer.exe", "HKMPServer.pdb", "logs"),
     tag_pattern=TAG_PATTERN,
+    tag_digests=TAG_DIGESTS,
     env_values=MappingProxyType(ENV_VALUES),
     mount_image_volumes=True,
     env_ports=MappingProxyType({"PORT": "udp"}),

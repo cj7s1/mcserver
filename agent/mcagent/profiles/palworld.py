@@ -146,6 +146,13 @@ def injected_env(profile: RuntimeProfile, settings: Settings, spec: InstanceSpec
     }
 
 
+# the digest the tag pointed to when the probe ran (2026-11-11, audit-2026-11-09/design/probe-6games.md);
+# a re-pushed tag is refused (A-8)
+TAG_DIGESTS = MappingProxyType(
+    {"v2.8.1": ("sha256:86fc7470949f6fcc931cb6443f61facc79bacc09e3f40d46e628d9e1ef6e56cd",)}
+)
+
+
 PROFILE = RuntimeProfile(
     game=GAME,
     label="Palworld",
@@ -187,6 +194,7 @@ PROFILE = RuntimeProfile(
         "Pal/Saved/Crashes",
     ),
     tag_pattern=TAG_PATTERN,
+    tag_digests=TAG_DIGESTS,
     env_values=MappingProxyType(ENV_VALUES),
     mount_image_volumes=True,
     clean_exit_codes=(0, 143),

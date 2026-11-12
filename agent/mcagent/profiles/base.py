@@ -187,6 +187,10 @@ class RuntimeProfile:
     # without usable version tags (Rust: only ``latest``): the repository must still be allowed
     # and the digest must be one of these. Without any, digests are refused (tags only).
     image_digests: tuple[str, ...] = ()
+    # The digests a version tag is known to point to (``{tag: (sha256:<hex>, ...)}``; A-8): a container
+    # is created from that tag only when the local image is one of them (its RepoDigests or, with
+    # Docker's containerd image store, its id), checked after any pull. Tags not listed are not checked.
+    tag_digests: Mapping[str, tuple[str, ...]] = field(default_factory=lambda: MappingProxyType({}))
     # Container variables whose values (at least 4 characters) are replaced by ``********`` in every
     # log text the agent hands out (GET logs, the stream, console history, last-run records,
     # console replies): passwords and tokens the image prints (PZ's launcher logs -adminpassword).
@@ -210,6 +214,9 @@ class RuntimeProfile:
     # what downloads or runs code (CS2_ADDITIONAL_ARGS, RUST_OXIDE_ENABLED, ...). Defaults the agent
     # injects only when the spec lacks them (1:1 ports, the control secret) are never both.
     strict_env: bool = False
+    # Variables a spec must set (non-empty): Valheim's join password, without which the image falls back to
+    # its own default password "secret" (I-3 / E-4). 400 env_not_allowed when missing.
+    required_env: tuple[str, ...] = ()
 
     @property
     def literal_owner(self) -> tuple[int, int] | None:

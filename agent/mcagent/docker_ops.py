@@ -434,6 +434,13 @@ def _validate_env(profile: RuntimeProfile, spec: InstanceSpec, injected: dict[st
             reason = profile.env_value_error(key, value)
         if reason is not None:
             raise AgentError(reason, "env_not_allowed", 400)
+    for key in profile.required_env:
+        if not str(spec.env.get(key) or injected.get(key) or ""):
+            raise AgentError(
+                f"{profile.label} servers need {key} (set the server's secret in the panel)",
+                "env_not_allowed",
+                400,
+            )
 
 
 def _mount_source(settings: Settings, instance_id: UUID, subdir: str) -> str:
@@ -691,6 +698,36 @@ def declared_volumes(image: str) -> list[str]:
     return sorted(((attrs.get("Config") or {}).get("Volumes") or {}).keys())
 
 
+def check_tag_digest(settings: Settings, profile: RuntimeProfile, image: str) -> None:
+    """409 ``image_digest_mismatch`` when ``image`` (``repository:tag``) is a tag the profile pins
+    (``tag_digests``) and the local image is none of its digests: the tag was moved (re-pushed) since
+    it was checked (A-8). Its RepoDigests are compared, and its id (Docker's containerd image store
+    uses the manifest digest as the id). Nothing to check for other tags or with the check off."""
+    if not settings.image_digest_check or not profile.tag_digests or "@" in image:
+        return
+    _repo, tag = split_image(image)
+    allowed = profile.tag_digests.get(tag)
+    if not allowed:
+        return
+    try:
+        img = client().images.get(image)
+    except ImageNotFound as exc:
+        raise AgentError(f"Image {image} is not present", "image_missing", 409) from exc
+    attrs = img.attrs or {}
+    seen = {str(ref).rpartition("@")[2] for ref in attrs.get("RepoDigests") or [] if "@" in str(ref)}
+    seen.add(str(attrs.get("Id") or getattr(img, "id", "") or ""))
+    if seen & set(allowed):
+        return
+    raise AgentError(
+        f"The image {image} on this host is not the one this agent knows for that tag "
+        f"(digest {', '.join(sorted(d for d in seen if d)) or 'unknown'}; expected {', '.join(allowed)}): "
+        "the tag was moved in the registry, so the container is not created. Use a version this agent "
+        "knows, or set AGENT_IMAGE_DIGEST_CHECK=false after checking the new image",
+        "image_digest_mismatch",
+        409,
+    )
+
+
 def uncovered_volumes(kwargs: dict[str, Any], image_volumes: list[str]) -> list[str]:
     """The VOLUMEs of the image that the create arguments give no bind mount or tmpfs of their own."""
     covered = {_norm_container_path(v["bind"]) for v in (kwargs.get("volumes") or {}).values()}
@@ -785,7 +822,9 @@ def create_container(
     profile = profiles.for_spec(spec)
     image_volumes = None
     if profile.mount_image_volumes or profile.game != profiles.DEFAULT_GAME:
-        image_volumes = declared_volumes(validate_image(settings, spec.image, profile))
+        image = validate_image(settings, spec.image, profile)
+        image_volumes = declared_volumes(image)
+        check_tag_digest(settings, profile, image)
     kwargs = build_create_kwargs(
         settings, instance_id, spec, spec_hash, image_volumes if profile.mount_image_volumes else None
     )
