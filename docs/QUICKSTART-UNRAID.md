@@ -63,8 +63,11 @@ You need:
 
    Both should print a version number. The second one is BuildKit, which step 5 needs to build
    the images. Run every command in this guide in that terminal.
-2. Only if `docker compose` is missing: open **Apps** (Community Applications), search for
-   **Compose Manager Plus** and install it; it adds the command. The older **Docker Compose
+2. Only if `docker compose` is missing (Unraid ships none): either keep the standalone binary
+   (`docker-compose-linux-x86_64` from <https://github.com/docker/compose/releases>) on a pool and,
+   after step 3, run `bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh --compose-bin
+   <its path>` (it links it now and at every boot, step 11), or open **Apps** (Community
+   Applications), search for **Compose Manager Plus** and install it; it adds the command. The older **Docker Compose
    Manager** plugin is deprecated and hidden in Community Applications by default. You only need
    the command from it: this guide starts MCPanel from the terminal, not as a stack of the
    plugin. No Compose plugin has been tested with MCPanel.
@@ -364,10 +367,19 @@ Console page keeps the last 2,000 lines of the run. Start creates the container 
 server cannot be started from the Docker tab.
 
 **Before you stop the array or reboot.** Without help, Unraid's Docker gives running servers at
-most 20 seconds and does not tell them to save first. Install the shutdown hook once; it stops
-the servers through the panel and the panel starts them again after boot:
-[UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md). Until the hook is installed, press Stop in the panel
-before you stop the array.
+most 20 seconds and does not tell them to save first. The shutdown hook stops the servers through
+the panel, and the panel starts them again after boot ([UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md)). It
+lives in RAM, so install it at every boot with one User Script (**Settings → User Scripts**, schedule
+**At Startup of Array**):
+
+```bash
+#!/bin/bash
+bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh
+```
+
+That script also links your Compose binary, puts the firewall back (if you installed it) and repairs
+a platform container that lost its network at the boot (docs/UNRAID.md, "At every array start").
+Until the hook is installed, press Stop in the panel before you stop the array.
 
 ## 12. Updating MCPanel
 

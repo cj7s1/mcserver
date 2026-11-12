@@ -7,7 +7,10 @@ stop, reboot and shutdown.
 
 ## Requirements
 
-* Docker Engine 24+ with the Compose v2 plugin (`docker compose version`).
+* Docker Engine 24+ with the Compose v2 plugin (`docker compose version`). Unraid ships no Compose:
+  use a Compose plugin of Community Applications, or a standalone binary that
+  `deploy/unraid/array-start.sh --compose-bin <path>` links into
+  `/usr/local/lib/docker/cli-plugins/` now and at every boot (docs/UNRAID.md, section 1).
 * BuildKit (`docker buildx version` must print a version). The panel and agent images are built on
   your host, and their Dockerfiles use `RUN --mount` and `COPY --chmod`, which only BuildKit
   understands. A host that has built these images before has it.

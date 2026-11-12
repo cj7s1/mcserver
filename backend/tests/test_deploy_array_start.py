@@ -350,3 +350,26 @@ def test_upgrade_sh_names_this_script_when_compose_is_missing(tmp_path: Path):
     refused = site.upgrade("status")
     assert refused.returncode == 1 and "the docker compose plugin is missing" in refused.stderr
     assert f"bash {site.deploy}/unraid/array-start.sh --compose-bin" in refused.stderr
+
+
+def test_the_docs_describe_the_one_line_user_script_and_the_repair():
+    def words(path: str) -> str:
+        return " ".join((REPO / path).read_text().split())
+
+    line = "bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh"
+    for path in ("docs/UNRAID.md", "docs/UNRAID-SHUTDOWN.md", "docs/QUICKSTART-UNRAID.md"):
+        text = words(path)
+        assert line in text and "At Startup of Array" in text, path
+        # the two-line form with a separate firewall line is gone
+        assert "instance-firewall.sh install --wait 300" not in text, path
+    unraid = words("docs/UNRAID.md")
+    for needle in (
+        "### At every array start: `array-start.sh`",
+        "**Not run on a real Unraid host yet**",
+        "array-start.sh --compose-bin /mnt/cache/system/docker-compose",
+        '"failed to resolve host postgres"',
+        "docker network connect --alias panel mcpanel_internal mcpanel-panel-1",
+    ):
+        assert needle in unraid or needle in (REPO / "docs/UNRAID.md").read_text(), needle
+    assert "array-start.sh --compose-bin" in words("DEPLOYMENT.md")
+    assert "array-start.sh" in words("DEVELOPMENT_STATUS.md") and "array-start.sh" in (REPO / "CLAUDE.md").read_text()

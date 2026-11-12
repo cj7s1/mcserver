@@ -27,9 +27,22 @@ docker buildx version
 
 Both must print a version. A server that has built the MCPanel images before has both.
 
-If `docker compose` is missing, a Compose plugin from Community Applications installs it. The
-current one is **Compose Manager Plus**. The older **Docker Compose Manager** is deprecated and
-hidden in Community Applications by default. No Compose plugin has been tested with MCPanel.
+Unraid ships no Docker Compose. Two ways to get it:
+
+* **A standalone binary** (what the owner's server uses): download `docker-compose-linux-x86_64` from
+  <https://github.com/docker/compose/releases>, keep it on a pool or the flash drive in a folder only
+  root can write (for example `/mnt/cache/system/docker-compose`), `chmod 755` it, and run once:
+
+  ```bash
+  bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh --compose-bin /mnt/cache/system/docker-compose
+  ```
+
+  That links it into `/usr/local/lib/docker/cli-plugins/` (in RAM, gone at every boot) and remembers
+  the path in `/boot/config/plugins/mcpanel/array-start.env`, so the array-start User Script (section
+  4) links it again at every boot. `upgrade.sh` names this command when Compose is missing.
+* **A Compose plugin** from Community Applications. The current one is **Compose Manager Plus**. The
+  older **Docker Compose Manager** is deprecated and hidden in Community Applications by default. No
+  Compose plugin has been tested with MCPanel.
 
 Start, upgrade and roll back MCPanel from the command line as described below, not as a stack of
 a Compose plugin: `upgrade.sh` and the shutdown hook were only tested that way.
@@ -191,19 +204,44 @@ Unraid's Docker tab gives a container 10 seconds to stop (Settings → Docker).
 
 The Minecraft servers keep running in all of these cases.
 
-### Array stop, reboot and shutdown
+### At every array start: `array-start.sh`
 
-Unraid does not stop the Minecraft containers itself. Docker stops them on its way down, with
-up to 20 seconds each and no save first. Install the shutdown hook so that the panel saves and
-stops them before Docker stops, and starts them again after boot:
-[UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md). The same User Scripts entry ("At Startup of Array") also
-puts the game servers' firewall back after every boot (section 5, "The game servers' firewall"):
+> **Not run on a real Unraid host yet** (it is tested against stand-ins). Run `bash
+> /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh dry-run` once in the terminal and read
+> what it would do; after the next reboot, `... array-start.sh status` should say `ok` on every line.
+
+Several things of MCPanel live in RAM on Unraid and are gone after every boot: the shutdown hook, the
+link of a standalone Docker Compose binary, the game servers' firewall. One script puts them back. In
+**Settings → User Scripts**, add a script with this one line and set its schedule to **At Startup of
+Array**:
 
 ```bash
 #!/bin/bash
-bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh install
-bash /mnt/user/appdata/mcpanel-src/deploy/unraid/instance-firewall.sh install --wait 300
+bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh
 ```
+
+At every array start it then, in this order (each step reports what it did in the User Scripts log
+and the syslog, tag `mcpanel`; a step that cannot be done is reported and the next one runs anyway):
+
+1. **Docker Compose:** when `docker compose` does not answer, it links your standalone Compose binary
+   into `/usr/local/lib/docker/cli-plugins/docker-compose` (section 1 says how to give it the binary);
+2. waits for Docker (up to 5 minutes);
+3. installs the **shutdown hook** (`install-hook.sh install`, [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md));
+4. puts the **game servers' firewall** back, but only if you had installed it (section 5);
+5. checks the **stack**: it waits up to 2 minutes for `panel`, `agent` and `postgres`, and repairs a
+   container that lost its network at the start (Docker 29 can drop it after a failed start; the
+   panel then restarts for ever with "failed to resolve host postgres"): it stops it, connects it to
+   its network with its service name as alias, and starts it (section 9).
+
+`bash .../array-start.sh status` shows what is in place now, `dry-run` what `run` would do; both
+change nothing. Another Compose project name: `--project <name>` once (remembered).
+
+### Array stop, reboot and shutdown
+
+Unraid does not stop the Minecraft containers itself. Docker stops them on its way down, with
+up to 20 seconds each and no save first. The shutdown hook makes the panel save and stop them
+before Docker stops, and start them again after boot: [UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md).
+`array-start.sh` (above) installs it at every array start.
 
 ## 5. Ports and players
 
@@ -279,11 +317,11 @@ bash instance-firewall.sh install
 bash instance-firewall.sh status     # installed / missing / differs
 ```
 
-Unraid forgets firewall rules at every boot: run `install` at every array start, in the User Scripts
-entry of the shutdown hook (section 4, "Array stop, reboot and shutdown"). `--wait 300` there waits up
-to 5 minutes for Docker and the stack's network. Run `install` again after Docker was switched off and
-on (Settings -> Docker) and after an upgrade; `status` says "differs" when the rules no longer fit (a new
-pool, a recreated network, other DNS servers).
+Unraid forgets firewall rules at every boot. `install` remembers that you installed them
+(`INSTALLED=yes` in `deploy/instance-firewall.env`; `remove` makes it `no`), and the array-start User
+Script (section 4) installs them again at every boot, only where you had. Run `install` again after
+Docker was switched off and on (Settings -> Docker) and after an upgrade; `status` says "differs" when
+the rules no longer fit (a new pool, a recreated network, other DNS servers).
 
 **Check it after installing**, from a game server's container (Docker tab -> the server's icon ->
 Console, or `docker exec -it <container> sh`; images without `curl` have `wget`):
@@ -549,6 +587,23 @@ pool or the array, not in RAM, and do not export it over SMB or NFS.
 * **A server stays busy after the `panel` row was stopped during a job:** the job is marked as
   failed about 6 minutes later, or at once with **Mark as failed** on the Activity page.
 * **Servers did not come back after a reboot:** see UNRAID-SHUTDOWN.md, "How the servers come back".
+* **The panel does not come back after a reboot; it restarts for ever and its log says "failed to
+  resolve host postgres":** Docker dropped its network after a failed start at boot (`docker inspect
+  -f '{{json .NetworkSettings.Networks}}' mcpanel-panel-1` prints `{}`). The array-start script repairs
+  it (section 4); by hand:
+
+  ```bash
+  docker stop mcpanel-panel-1
+  docker network connect --alias panel mcpanel_internal mcpanel-panel-1
+  docker start mcpanel-panel-1
+  ```
+
+  The same for `mcpanel-postgres-1` (alias `postgres`) or `mcpanel-agent-1` (alias `agent`; it also
+  needs `docker network connect mcpanel_instances mcpanel-agent-1`). With another project name the
+  network is `<project>_internal`.
+* **`upgrade.sh` says "the docker compose plugin is missing" after a reboot:** the link of your
+  standalone Compose binary is gone (it is in RAM). Section 1: `array-start.sh --compose-bin <path>`
+  once; the array-start User Script links it at every boot.
 * **The `agent` container does not start, with "network ... not found":** it was killed hard while
   servers ran (the agent leaves the servers' networks when they stop and when it stops), and one of
   those networks was removed while Docker was down (check "Preserve user defined networks", section 1).

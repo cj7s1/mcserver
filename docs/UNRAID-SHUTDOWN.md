@@ -117,17 +117,19 @@ when the `chmod` fails, they refuse and name the repair: `chmod -R go-w
 
 Pick one way to run the install at every boot:
 
-**User Scripts plugin.** Add a script with these two lines and set its schedule to
+**User Scripts plugin (recommended).** Add a script with this one line and set its schedule to
 **At Startup of Array**:
 
 ```bash
 #!/bin/bash
-bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh install
+bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh
 ```
 
-(The same entry can also put the game servers' firewall back after boot: a second line
-`bash /mnt/user/appdata/mcpanel-src/deploy/unraid/instance-firewall.sh install --wait 300`, see
-docs/UNRAID.md, "The game servers' firewall".)
+`array-start.sh` installs the hook (`install-hook.sh install`) and also does what else MCPanel needs
+at a boot: it links a standalone Docker Compose binary, waits for Docker, puts the game servers'
+firewall back where it was installed and repairs a platform container that lost its network
+(docs/UNRAID.md, "At every array start: `array-start.sh`"; not run on a real Unraid host yet).
+`bash .../array-start.sh status` says whether the hook is in place.
 
 Do not use "At Stopping of Array" for the hook itself: that runs after Docker has stopped,
 which is too late.

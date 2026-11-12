@@ -13,6 +13,27 @@ of session 1)._
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
 
+## Unraid boot: Compose, hook, firewall, network repair (branch `fix/boot-network-repair`, 2026-11-12)
+
+What the owner's live server showed after a reboot: `upgrade.sh` found no Compose (Unraid ships none; his
+standalone binary's link in `/usr/local/lib/docker/cli-plugins/` is in RAM), the panel container restarted
+for hours because Docker 29 had dropped its network after a failed first start (`NetworkSettings.Networks`
+empty; "failed to resolve host postgres"), and the shutdown hook was not installed (no User Script).
+
+* `deploy/unraid/array-start.sh run|status|dry-run`: the one User Scripts line at array start. It links a
+  configured Compose binary (`--compose-bin` once, remembered on the flash), waits for Docker, installs the
+  hook, puts the firewall back where it was installed (`instance-firewall.sh` records `INSTALLED=yes/no`),
+  and repairs a platform container without network (stop, connect with the service alias, start). Tested
+  against stand-ins only (`tests/test_deploy_array_start.py`); **not run on Unraid yet**: the owner's first
+  run should be `dry-run`, then `run`, then `status` after a reboot.
+* The panel's row in Unraid's Docker tab: WebUI entry and icon (labels on the panel service; the icon is
+  `frontend/public/unraid-icon.png`, served by the panel). Not seen in a real Docker tab yet.
+* `upgrade.sh`'s "the docker compose plugin is missing" names the script.
+* Docs: UNRAID.md (section 1 Compose, section 4 the User Script, troubleshooting for the restart loop with
+  the manual repair), UNRAID-SHUTDOWN.md, the quick start, DEPLOYMENT.md's Compose requirement.
+* Waiting: the agent's own network repair (NOTES-agent.md "Network repair") for SECURITY.md and the env
+  examples, once it is in.
+
 ## Security and bug review of 2026-11-11: fixes (branch `fix/security-review`, 2026-11-12)
 
 The review (`audit-2026-11-09/SECURITY-REVIEW-2026-11-11.md` next to the checkout; findings with traces in

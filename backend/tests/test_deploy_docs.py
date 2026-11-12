@@ -99,7 +99,8 @@ def test_a2_the_firewall_script_is_documented_as_untested_with_its_checks_and_bo
     unraid = words("docs/UNRAID.md")
     assert "### The game servers' firewall (`instance-firewall.sh`)" in read("docs/UNRAID.md")
     assert "**Not run on a real Unraid host yet.**" in unraid
-    assert "instance-firewall.sh install --wait 300" in unraid and "install-hook.sh install" in unraid
+    # put back at every array start by array-start.sh, only where the owner installed it
+    assert "deploy/unraid/array-start.sh" in unraid and "only where you had" in unraid
     for needle in (
         "curl -m 5 http://<your Unraid IP>/` must fail",
         "curl -m 5 https://example.com/` must work",
@@ -109,7 +110,7 @@ def test_a2_the_firewall_script_is_documented_as_untested_with_its_checks_and_bo
         assert needle in unraid, needle
     security = words("docs/SECURITY.md")
     assert "**It has not run on an Unraid host yet**" in security and "instance-firewall.sh" in security
-    assert "instance-firewall.sh install --wait 300" in words("docs/UNRAID-SHUTDOWN.md")
+    assert "bash /mnt/user/appdata/mcpanel-src/deploy/unraid/array-start.sh" in words("docs/UNRAID-SHUTDOWN.md")
 
 
 # --- round 2: the docs of every fix ------------------------------------------------------------------------
