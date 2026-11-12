@@ -548,8 +548,17 @@ would stop that server itself at array stop and count it as stopped by hand.
   finished" is the game's own anchored line (Factorio, Terraria, Project Zomboid), never a chat
   line, and diagnoses are never made from chat lines. Player counts are kept only in 0..100,000,
   names at most 64 characters, 200 per sample; players not seen for 90 days are dropped.
-* **A request to a game's HTTP API** (Satisfactory, Palworld, TShock, Rust's WebRCON) has one deadline
-  for the whole request, also for an answer that trickles in.
+* **A request to a game's HTTP API** (Satisfactory, Palworld, TShock's REST API) ends at its timeout
+  however slowly the game answers (504 `api_timeout`, TShock `rest_failed`).
+* **Operations that need a stopped server** (extract, restore, restore of a path, snapshot rollback and
+  convert, clone) check again inside the operation that it is stopped, and a start that slipped in
+  fails them before anything is changed; a start waiting for the lock answers 409 `instance_busy` when
+  such an operation registered meanwhile. Clone copies through file descriptors (no extended
+  attributes any more).
+* **Bounded answers:** a folder listing and the backup browser show at most 20,000 entries of one
+  folder, search looks at most at 50,000 files or 30 s (`truncated: true`), a zip download holds at
+  most 200,000 files (413 `archive_too_large`), mod hashing reads at most 64 GiB per pass and one pass
+  per server at a time, and a log line is cut at 16 KiB with a note.
 * **Player actions run with an id only.** On Rust and Palworld a typed name that matches more than one
   online player, or (`op`/`ban` on Rust, `ban` on Palworld) a display name at all, answers 409
   `ambiguous_player` with the candidates to pick from; TShock kicks and bans the exact name; a

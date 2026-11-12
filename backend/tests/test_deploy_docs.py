@@ -139,6 +139,8 @@ def test_security_md_describes_the_fixes_of_both_rounds():
         "The quick stop without a save (15 s) needs all of",
         "`node.low_disk_space`",
         "the five upload endpoints",
+        "**Operations that need a stopped server**",
+        "a zip download holds at most 200,000 files (413 `archive_too_large`)",
     ):
         assert needle in flat, needle
     # statements the fixes made wrong
