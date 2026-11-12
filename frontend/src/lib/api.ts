@@ -11,6 +11,8 @@ export class ApiError extends Error {
   status: number;
   code: string;
   details: Record<string, unknown>;
+  /** Seconds from the answer's Retry-After header (429 answers), when it has one. */
+  retryAfter?: number;
 
   constructor(status: number, code: string, message: string, details: Record<string, unknown> = {}) {
     super(message);
@@ -100,7 +102,10 @@ async function parseError(resp: Response): Promise<ApiError> {
       message = "The panel API is unreachable. Is the server running?";
     }
   }
-  return new ApiError(resp.status, code, message, details);
+  const err = new ApiError(resp.status, code, message, details);
+  const retryAfter = Number(resp.headers?.get?.("Retry-After") ?? NaN);
+  if (resp.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfter = retryAfter;
+  return err;
 }
 
 export interface RequestOptions {
@@ -212,6 +217,39 @@ export function uploadWithProgress<T>(
 
 export function downloadUrl(path: string, query?: Query): string {
   return buildUrl(path, query);
+}
+
+/**
+ * Seconds until a request refused with 429 `throttled` may be tried again: `details.wait` (the per-account
+ * limit on failed passwords, D-3), else the Retry-After header (the per-address limit); null for any other
+ * error or when the answer names no wait.
+ */
+export function throttleWait(err: unknown): number | null {
+  if (!(err instanceof ApiError) || err.status !== 429) return null;
+  const wait = Number(err.details?.wait);
+  if (Number.isFinite(wait) && wait > 0) return Math.ceil(wait);
+  return err.retryAfter && err.retryAfter > 0 ? Math.ceil(err.retryAfter) : null;
+}
+
+function waitText(seconds: number): string {
+  if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 120) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.round(minutes / 60);
+  return `${hours} hours`;
+}
+
+/**
+ * The message of a 429 `throttled` answer with its wait in words and the time it ends ("Try again in 9
+ * minutes (at 14:32).") in place of the API's "Expected available in 540 seconds."; null for other errors.
+ */
+export function throttledMessage(err: unknown, now: number = Date.now()): string | null {
+  if (!(err instanceof ApiError) || err.status !== 429) return null;
+  const wait = throttleWait(err);
+  const base = err.message.replace(/\s*Expected available in \d+ seconds?\.?\s*$/, "").trim() || "Too many attempts.";
+  if (wait === null) return base;
+  const at = new Date(now + wait * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return `${base}${/[.!?]$/.test(base) ? "" : "."} Try again in ${waitText(wait)} (at ${at}).`;
 }
 
 export function errorMessage(err: unknown): string {

@@ -26,7 +26,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { useAuth } from "@/hooks/use-auth";
 import { useTheme } from "@/hooks/use-theme";
-import { ApiError, api, errorMessage } from "@/lib/api";
+import { ApiError, api, errorMessage, throttledMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
 import type { AuthState, Me, PermissionDef } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -275,8 +275,11 @@ function PasswordForm({ me, required = false }: { me: Me; required?: boolean }) 
       qc.invalidateQueries(required ? undefined : { queryKey: qk.auth });
     },
     onError: (err) => {
-      if (err instanceof ApiError) setErrors(err.fieldErrors);
-      toast.error(errorMessage(err));
+      // 429 throttled: too many wrong current passwords for this account; the form says until when (D-3)
+      const throttled = throttledMessage(err);
+      if (throttled) setErrors({ non_field_errors: throttled });
+      else if (err instanceof ApiError) setErrors(err.fieldErrors);
+      toast.error(throttled ?? errorMessage(err));
     },
   });
 

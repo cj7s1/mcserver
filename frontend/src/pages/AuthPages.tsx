@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/hooks/use-auth";
-import { api, errorMessage } from "@/lib/api";
+import { api, errorMessage, throttledMessage } from "@/lib/api";
 import { qk } from "@/lib/queries";
 
 function AuthCard({ title, subtitle, children }: { title: string; subtitle?: ReactNode; children: ReactNode }) {
@@ -47,7 +47,8 @@ export function LoginPage() {
       await api.post("/auth/login", { username, password });
       await qc.invalidateQueries({ queryKey: qk.auth });
     } catch (err) {
-      setError(errorMessage(err));
+      // 429 throttled (too many failed sign-ins for this account or from this address): with the wait
+      setError(throttledMessage(err) ?? errorMessage(err));
     } finally {
       setBusy(false);
     }
