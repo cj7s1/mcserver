@@ -91,6 +91,7 @@ instance_patterns = [
     path("<uuid:pk>/modpack/rollback", modpacks.InstanceModpackRollbackView.as_view()),
     path("<uuid:pk>/modpack/check", modpacks.InstanceModpackCheckView.as_view()),
     path("<uuid:pk>/modpack/removed-files", modpacks.InstanceModpackRemovedFilesView.as_view()),
+    path("<uuid:pk>/share", instances.ShareView.as_view()),
     path("<uuid:pk>/<str:action>", instances.InstanceActionView.as_view()),
 ]
 

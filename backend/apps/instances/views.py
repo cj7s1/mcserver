@@ -1896,3 +1896,23 @@ class MigrateView(APIView):
             details={"from": instance.node.name, "to": target.name, "delete_source": bool(data.get("delete_source"))},
         )
         return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+class ShareView(APIView):
+    """``GET /api/instances/<id>/share``: the Share card (B1): address, ports, join steps, invite text, checklist.
+    ``instance.view``; the join password (``password``) only with ``instance.configure``, and in the invite text
+    only when asked for (``?with_password=true``)."""
+
+    @extend_schema(responses={200: dict})
+    def get(self, request: Request, pk: str) -> Response:
+        from .share import share_card
+
+        instance = get_instance_for(request.user, pk, "instance.view")
+        with_password = str(request.query_params.get("with_password") or "").lower() in ("1", "true", "yes")
+        if with_password and not request.user.has_panel_perm("instance.configure", instance):
+            raise PermissionDenied("Only users who may configure the server see its join password")
+        answer = share_card(instance, request.user, with_password=with_password)
+        response = Response(answer)
+        if "password" in answer:
+            response["Cache-Control"] = "no-store"
+        return response
