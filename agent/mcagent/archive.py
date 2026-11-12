@@ -36,6 +36,7 @@ from .safefs import PathError, SafeRoot, split_path, touches_protected
 
 MAX_TOTAL_BYTES = 64 * 1024 * 1024 * 1024  # 64 GiB uncompressed
 MAX_FILES = 500_000
+MAX_ZIP_FILES = 200_000  # files of one zip download (B-6)
 MAX_RATIO = 200  # uncompressed/compressed per member (zip only)
 CHUNK = 1024 * 1024
 # zipfile reads the whole central directory into memory and builds a ZipInfo per entry
@@ -550,6 +551,14 @@ def stream_zip(
             if excluded and _is_excluded(split_path(path), excluded):
                 continue
             files.append((path, "/".join([prefix, *split_path(path)[len(parts) :]]), st))
+            if len(files) > MAX_ZIP_FILES:
+                break
+    if len(files) > MAX_ZIP_FILES:  # B-6: the list of files is held in memory before the zip starts
+        raise AgentError(
+            f"The folder holds more than {MAX_ZIP_FILES} files; it cannot be downloaded as a zip",
+            "archive_too_large",
+            413,
+        )
     if too_deep:  # a zip without them would look complete (B-13)
         raise AgentError(
             f"The folder holds folders deeper than 64 levels ({len(too_deep)}); it cannot be downloaded as a zip",

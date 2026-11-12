@@ -62,6 +62,9 @@ RACY_WINDOW_NS = 2_000_000_000  # files modified this recently are not cached
 # (sparse) file of any size costs a mod nothing to create but would keep a hashing thread busy
 # for minutes per TiB.
 HASH_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
+# B-6: one pass reads at most this much (the next pass goes on from the cache); a server runs one pass at
+# a time, so one server cannot keep every hash worker busy
+HASH_PASS_MAX_BYTES = 64 * 1024 * 1024 * 1024
 # A blocking request (no ``wait``) waits at most this long for the folder's pass (below the
 # panel's 300 s timeout); the pass itself goes on in the background and is cached.
 BLOCKING_DEADLINE = 240.0
@@ -386,13 +389,18 @@ def hash_folder(
             fc.retain({e.name for e in entries})
         out: list[dict[str, Any]] = []
         last_save = time.monotonic()
+        read = 0
         for entry in entries:
             item = entry.as_dict()
             if entry.size > HASH_MAX_FILE_BYTES:
                 out.append(_too_large(item))
                 continue
             digest = fc.get(entry.name, Signature.of_entry(entry), algorithm)
+            if digest is None and read + entry.size > HASH_PASS_MAX_BYTES:
+                out.append({**item, "hash": None})  # left for the next pass (B-6)
+                continue
             if digest is None:
+                read += entry.size
                 try:
                     result = _hash_file(root, entry.path, algorithm, stop)
                 except _TooLarge:
@@ -452,6 +460,9 @@ class HashJobs:
         with self._lock:
             fut = self._jobs.get(key)
             if fut is None or fut.done():
+                # one pass per server at a time (B-6): another folder of the same server waits its turn
+                if any(k[0] == key[0] and k != key and not f.done() for k, f in self._jobs.items()):
+                    raise HashingBusy(key[1] if len(key) > 1 else "")
                 fut = self._executor.submit(fn)
                 self._jobs[key] = fut
                 fut.add_done_callback(lambda f, k=key: self._done(k, f))
@@ -515,10 +526,10 @@ def hash_directory(
         if pending == 0:
             return {"files": files, "complete": True, "pending": 0}
         if len(files) <= cache.max_entries:  # otherwise progress could never be cached
-            fut = jobs.ensure(key, run_pass)
             try:
-                return {"files": fut.result(timeout=wait), "complete": True, "pending": 0}
-            except FutureTimeout:
+                fut = jobs.ensure(key, run_pass)
+                return _result(fut.result(timeout=wait))
+            except (FutureTimeout, HashingBusy):
                 files, pending = cached_listing(root, cache, instance_id, folder, algorithm, suffixes)
                 return {"files": files, "complete": pending == 0, "pending": pending}
             except CancelledError as exc:  # the executor was shut down
@@ -532,4 +543,11 @@ def hash_directory(
         raise HashingBusy(folder) from exc
     except CancelledError as exc:
         raise HashingCancelled from exc
-    return {"files": files, "complete": True, "pending": 0}
+    return _result(files)
+
+
+def _result(files: list[dict[str, Any]]) -> dict[str, Any]:
+    """A pass's files as the answer: ``complete`` unless the pass left files for the next one
+    (HASH_PASS_MAX_BYTES, B-6)."""
+    pending = sum(1 for f in files if f.get("hash") is None and not f.get("too_large"))
+    return {"files": files, "complete": pending == 0, "pending": pending}

@@ -19,7 +19,7 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -193,6 +193,10 @@ def startup_unlock(settings: Settings, repos: Iterable[Path], workers: int = 4) 
 # Always left out of backups: the agent's temporary files and folders inside a server folder
 # (uploads in progress, staging folders of world imports and restores, imported archives).
 FIXED_EXCLUDES = (".mcpanel-tmp-*", ".mcpanel-import-*", ".mcpanel-world-*")
+
+
+# entries one backup-browser listing shows (B-6); restic's output is read line by line
+LS_MAX_ENTRIES = 20_000
 
 
 class DumpStream:
@@ -636,14 +640,65 @@ class Restic:
             raise AgentError("Snapshot has an unexpected layout", "snapshot_layout", 500)
         return paths[0].rstrip("/")
 
+    def _ls_lines(self, args: list[str], *, timeout: float = 600) -> Iterator[str]:
+        """The output lines of ``restic <args>`` as restic prints them, never all held at once (B-6). A
+        caller that stops early ends restic. Errors as :meth:`run` (a locked repository: unlocked and
+        tried once more)."""
+        for attempt in range(2):
+            self._wait_for_startup_unlock()
+            proc = subprocess.Popen(
+                [self.binary, *args],
+                env=self._env(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                errors="replace",
+            )
+            _register(proc)
+            err: deque[str] = deque(maxlen=200)
+            drain = threading.Thread(target=err.extend, args=(proc.stderr,), daemon=True)
+            drain.start()
+            timer = threading.Timer(timeout, terminate, args=(proc,))
+            timer.daemon = True
+            timer.start()
+            finished = False
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    yield line.rstrip("\n")
+                proc.wait()
+                finished = True
+            finally:
+                timer.cancel()
+                if not finished:
+                    terminate(proc)  # the caller stopped early (or failed): restic ends
+                drain.join(5)
+                _unregister(proc)
+            if proc.returncode == EXIT_LOCKED and attempt == 0:
+                self.unlock_stale()
+                continue
+            if proc.returncode not in (0, 3):
+                self._raise_for(proc, "".join(err), args[0])
+            return
+
     def ls(self, snapshot_id: str, rel_parts: list[str]) -> list[dict[str, Any]]:
-        """Direct children of a directory inside a snapshot (paths relative to the server folder)."""
+        return self.ls_bounded(snapshot_id, rel_parts)[0]
+
+    def ls_bounded(
+        self, snapshot_id: str, rel_parts: list[str], limit: int = LS_MAX_ENTRIES
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Direct children of a directory inside a snapshot (paths relative to the server folder), at most
+        ``limit`` (B-6), and whether there were more."""
         snap = self.snapshot(snapshot_id)
         base = self._root_path(snap)
         target = "/".join([base, *rel_parts])
-        proc = self.run(["ls", "--json", snap["id"], target], timeout=600)
         out = []
-        for line in proc.stdout.splitlines():
+        truncated = False
+        for line in self._ls_lines(["ls", "--json", snap["id"], target]):
+            if len(out) >= limit:
+                truncated = True
+                break
             try:
                 node = json.loads(line)
             except json.JSONDecodeError:
@@ -666,14 +721,13 @@ class Restic:
                 }
             )
         out.sort(key=lambda e: (e["type"] != "directory", (e["name"] or "").lower()))
-        return out
+        return out, truncated
 
     def node_type(self, snapshot_id: str, rel_parts: list[str]) -> str:
         """``file``, ``directory``, ``symlink``, ... of one path in a snapshot (404 when it is not there)."""
         snap = self.snapshot(snapshot_id)
         target = "/".join([self._root_path(snap), *rel_parts])
-        proc = self.run(["ls", "--json", snap["id"], target], timeout=600)
-        for line in proc.stdout.splitlines():
+        for line in self._ls_lines(["ls", "--json", snap["id"], target]):  # stops at the node (B-6)
             try:
                 node = json.loads(line)
             except json.JSONDecodeError:

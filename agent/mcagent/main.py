@@ -1642,8 +1642,14 @@ async def files_list(
     instance_id: UUID, path: str = "", settings: Settings = Depends(get_settings)
 ) -> dict[str, Any]:
     root = _root(settings, instance_id)
-    entries = await run_in_threadpool(root.list, path)
-    return {"path": "/".join(p for p in path.split("/") if p), "entries": [e.as_dict() for e in entries]}
+    entries, truncated = await run_in_threadpool(root.list_bounded, path)
+    out: dict[str, Any] = {
+        "path": "/".join(p for p in path.split("/") if p),
+        "entries": [e.as_dict() for e in entries],
+    }
+    if truncated:  # more entries than one listing shows (safefs.LIST_MAX_ENTRIES; B-6)
+        out["truncated"] = True
+    return out
 
 
 @app.get("/v1/instances/{instance_id}/files/stat", dependencies=[Depends(require_token)])
@@ -1909,8 +1915,11 @@ async def files_search(
     path: str = "",
     settings: Settings = Depends(get_settings),
 ) -> dict[str, Any]:
-    results = await run_in_threadpool(_root(settings, instance_id).search, path, q)
-    return {"results": results}
+    results, truncated = await run_in_threadpool(_root(settings, instance_id).search_bounded, path, q)
+    out: dict[str, Any] = {"results": results}
+    if truncated:  # stopped after safefs.SEARCH_MAX_FILES files or SEARCH_MAX_SECONDS (B-6)
+        out["truncated"] = True
+    return out
 
 
 @app.get("/v1/instances/{instance_id}/files/hashes", dependencies=[Depends(require_token)])
@@ -2508,8 +2517,11 @@ async def backup_files(
     from .safefs import split_path
 
     parts = split_path(path)
-    entries = await run_in_threadpool(Restic(settings, instance_id).ls, snapshot_id, parts)
-    return {"path": "/".join(parts), "entries": entries}
+    entries, truncated = await run_in_threadpool(Restic(settings, instance_id).ls_bounded, snapshot_id, parts)
+    out: dict[str, Any] = {"path": "/".join(parts), "entries": entries}
+    if truncated:  # more entries than one listing shows (backups.LS_MAX_ENTRIES; B-6)
+        out["truncated"] = True
+    return out
 
 
 @app.get("/v1/instances/{instance_id}/backups/{snapshot_id}/download", dependencies=[Depends(require_token)])

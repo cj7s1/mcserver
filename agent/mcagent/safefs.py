@@ -16,6 +16,7 @@ import os
 import secrets
 import shutil
 import stat as statmod
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -24,6 +25,10 @@ from typing import Any, BinaryIO
 
 log = logging.getLogger(__name__)
 
+# B-6: what one request may walk (generous: no real server folder comes near them)
+LIST_MAX_ENTRIES = 20_000  # entries of one folder listing
+SEARCH_MAX_FILES = 50_000  # files one search looks at
+SEARCH_MAX_SECONDS = 30.0
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 MAX_PATH_LEN = 4096
 MAX_COMPONENT_LEN = 255
@@ -261,11 +266,20 @@ class SafeRoot:
             )
 
     def list(self, rel: str) -> list[Entry]:
+        return self.list_bounded(rel, None)[0]
+
+    def list_bounded(self, rel: str, limit: int | None = LIST_MAX_ENTRIES) -> tuple[list[Entry], bool]:
+        """The folder's entries, at most ``limit`` of them (B-6; directory order decides which), sorted;
+        and whether there were more."""
         parts = split_path(rel)
         entries: list[Entry] = []
+        truncated = False
         with self._dir_fd(parts) as fd:
             with os.scandir(fd) as it:
                 for de in it:
+                    if limit is not None and len(entries) >= limit:
+                        truncated = True
+                        break
                     try:
                         st = de.stat(follow_symlinks=False)
                     except FileNotFoundError:
@@ -284,7 +298,7 @@ class SafeRoot:
                         )
                     )
         entries.sort(key=lambda e: (e.type != "directory", e.name.lower()))
-        return entries
+        return entries, truncated
 
     @contextmanager
     def open_read(self, rel: str) -> Iterator[tuple[BinaryIO, int]]:
@@ -554,13 +568,50 @@ class SafeRoot:
             ".log",
         ),
     ) -> list[dict]:
+        return self.search_bounded(
+            rel, query, max_results=max_results, max_file_bytes=max_file_bytes, extensions=extensions
+        )[0]
+
+    def search_bounded(
+        self,
+        rel: str,
+        query: str,
+        *,
+        max_results: int = 200,
+        max_file_bytes: int = 2 * 1024 * 1024,
+        extensions: tuple[str, ...] = (
+            ".properties",
+            ".json",
+            ".json5",
+            ".toml",
+            ".yml",
+            ".yaml",
+            ".cfg",
+            ".conf",
+            ".txt",
+            ".ini",
+            ".snbt",
+            ".js",
+            ".zs",
+            ".mcmeta",
+            ".log",
+        ),
+        max_files: int = SEARCH_MAX_FILES,
+        max_seconds: float = SEARCH_MAX_SECONDS,
+    ) -> tuple[list[dict], bool]:
+        """:meth:`search`, and whether it stopped at ``max_files`` files or ``max_seconds`` (B-6)."""
         if not query:
-            return []
+            return [], False
         needle = query.lower()
         results: list[dict] = []
+        looked = 0
+        deadline = time.monotonic() + max_seconds
         for path, st in self.walk_files(rel):
             if len(results) >= max_results:
                 break
+            looked += 1
+            if looked > max_files or time.monotonic() > deadline:
+                return results, True
             if st.st_size > max_file_bytes or not path.lower().endswith(extensions):
                 continue
             if needle in path.lower():
@@ -575,7 +626,7 @@ class SafeRoot:
                     results.append({"path": display_name(path), "line": lineno, "text": line.strip()[:300]})
                     if len(results) >= max_results:
                         break
-        return results
+        return results, False
 
     def disk_usage(self) -> int:
         total = 0

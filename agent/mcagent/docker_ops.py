@@ -2311,6 +2311,13 @@ def stats(instance_id: UUID) -> dict[str, Any]:
     }
 
 
+# B-6: one console line of GET /logs is at most this long (as in the live stream); read this far beyond it
+# before redacting, so a secret across the cut is hidden whole
+LOG_LINE_MAX_BYTES = 16 * 1024
+LOG_LINE_MARGIN = 1024
+LOG_LINE_CUT = " [mcpanel: line truncated]"
+
+
 def logs(
     instance_id: UUID, tail: int = 500, since: int | None = None, settings: Settings | None = None
 ) -> str:
@@ -2324,13 +2331,55 @@ def _container_log(
     kwargs: dict[str, Any] = {"tail": tail, "timestamps": False, "stdout": True, "stderr": True}
     if since:
         kwargs["since"] = since
-    text = c.logs(**kwargs).decode("utf-8", errors="replace")
     redact = (
         log_redactor(settings or get_settings(), c)
         if (getattr(c, "labels", None) or {}).get(LABEL_GAME)
         else None
     )
-    return redact(text) if redact is not None else text
+    out = c.logs(stream=True, follow=False, **kwargs)
+    lines: list[str] = []
+    buf = bytearray()
+    skipping = False
+
+    def add(raw: bytes | bytearray, cut: bool) -> None:
+        text = bytes(raw).decode("utf-8", errors="replace")
+        if redact is not None:
+            text = redact(text)  # before the cut: a secret across it is hidden whole
+        data = text.encode("utf-8", errors="replace")
+        if cut or len(data) > LOG_LINE_MAX_BYTES:
+            text = data[:LOG_LINE_MAX_BYTES].decode("utf-8", errors="ignore") + LOG_LINE_CUT
+        lines.append(text)
+
+    try:
+        for chunk in [out] if isinstance(out, bytes | bytearray) else out:
+            pos = 0
+            while pos < len(chunk):
+                nl = chunk.find(b"\n", pos)
+                piece = chunk[pos : len(chunk) if nl == -1 else nl]
+                if not skipping:
+                    room = LOG_LINE_MAX_BYTES + LOG_LINE_MARGIN - len(buf)
+                    buf += piece[:room]
+                    if len(piece) > room:  # B-6: one line is read up to the cap, the rest dropped
+                        add(buf, True)
+                        buf.clear()
+                        skipping = True
+                if nl == -1:
+                    break
+                if skipping:
+                    skipping = False
+                else:
+                    add(buf, False)
+                    buf.clear()
+                pos = nl + 1
+        if buf and not skipping:
+            add(buf, False)
+    finally:
+        close = getattr(out, "close", None)
+        if callable(close):
+            with contextlib.suppress(Exception):
+                close()
+    text = "\n".join(lines)
+    return text + "\n" if lines else text
 
 
 def previous_run_lines(settings: Settings, instance_id: UUID, c: Container | None) -> list[str]:
