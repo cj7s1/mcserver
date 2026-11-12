@@ -245,6 +245,13 @@ services:
     restart: always
     <<: *panel-hardening
     environment: *panel-env
+    # Unraid's Docker tab: the WebUI entry of the panel's icon ([IP] and [PORT:8000] are filled in by
+    # Unraid) and the icon, which the Unraid host fetches from the panel itself (a file of the
+    # frontend build, served without a login). Never add net.unraid.docker.managed: Unraid would then
+    # stop the panel itself at array stop, before the shutdown hook (docs/UNRAID-SHUTDOWN.md).
+    labels:
+      net.unraid.docker.webui: "http://[IP]:[PORT:8000]/"
+      net.unraid.docker.icon: "http://${MCPANEL_BIND:-127.0.0.1}:${MCPANEL_PORT:-8080}/unraid-icon.png"
     ports:
       - "${MCPANEL_BIND:-127.0.0.1}:${MCPANEL_PORT:-8080}:8000"
     networks: [internal]

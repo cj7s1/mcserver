@@ -179,7 +179,8 @@ the job workers, the scheduler and Redis; `docker compose exec panel python
 
 ## 6. Create your owner account
 
-Open **`http://192.168.1.10:8080`** in your browser. The first visit asks you to create the
+Open **`http://192.168.1.10:8080`** in your browser (or, in Unraid's **Docker** tab, click the
+`mcpanel-panel-1` container and choose **WebUI**). The first visit asks you to create the
 **owner** account, which has full control. Enter the **setup token** (`MCPANEL_SETUP_TOKEN` from
 step 4: `grep '^MCPANEL_SETUP_TOKEN=' .env` in `deploy/` shows it), then pick a username and a long
 password.

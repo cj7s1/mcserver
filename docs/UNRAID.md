@@ -131,7 +131,13 @@ lists them).
 
 ### What Unraid's Docker tab shows
 
-* Three rows for the platform: `mcpanel-panel-1`, `mcpanel-agent-1`, `mcpanel-postgres-1`.
+* Three rows for the platform: `mcpanel-panel-1`, `mcpanel-agent-1`, `mcpanel-postgres-1`. The panel's
+  row has MCPanel's icon, and clicking it offers **WebUI**, which opens the panel (the labels
+  `net.unraid.docker.webui` and `net.unraid.docker.icon` of `deploy/docker-compose.yml`; the Unraid host
+  fetches the icon from the panel, `http://<MCPANEL_BIND>:<MCPANEL_PORT>/unraid-icon.png`). None of the
+  containers carries `net.unraid.docker.managed`: Unraid would then stop it itself at array stop,
+  before the shutdown hook. A stack started before this version gets the labels with the next
+  `./scripts/upgrade.sh run`.
 * One row `mcpanel-<12 characters of the server id>` for every **running** Minecraft server.
 * No row for a stopped server. The panel removes the container 10 to 20 seconds after a stop
   and creates a new one at the next start. The world is in the server folder and is not touched.
