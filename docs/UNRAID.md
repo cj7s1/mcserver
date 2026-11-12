@@ -185,7 +185,14 @@ The Minecraft servers keep running in all of these cases.
 Unraid does not stop the Minecraft containers itself. Docker stops them on its way down, with
 up to 20 seconds each and no save first. Install the shutdown hook so that the panel saves and
 stops them before Docker stops, and starts them again after boot:
-[UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md).
+[UNRAID-SHUTDOWN.md](UNRAID-SHUTDOWN.md). The same User Scripts entry ("At Startup of Array") also
+puts the game servers' firewall back after every boot (section 5, "The game servers' firewall"):
+
+```bash
+#!/bin/bash
+bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh install
+bash /mnt/user/appdata/mcpanel-src/deploy/unraid/instance-firewall.sh install --wait 300
+```
 
 ## 5. Ports and players
 
@@ -205,8 +212,10 @@ stops them before Docker stops, and starts them again after boot:
   `nobody:users` too. The game itself (2.8 GB) is downloaded into the server folder on the first
   start and left out of backups; give it at least 8 GB of RAM (12 GB by default). The panel claims
   the server before its ports are published, so nothing outside the host can take it over first.
-  Another game server on the same Docker network could (a compromised one, docs/SECURITY.md): the
-  setup then stops with "claimed with another admin password" and the server is never published.
+  On its own network (the default) nothing but the agent reaches it before that; a server that is
+  still on the shared network could be claimed first by a compromised neighbour there
+  (docs/SECURITY.md): the setup then stops with "claimed with another admin password" and the server
+  is never published.
 * A Terraria server uses **TCP** 7777 by default (the next free TCP port when that one is taken, for
   example by a Satisfactory server); forward that TCP port. Vanilla and tModLoader run as root with
   five capabilities and drop to `MC_UID`; because the image cannot reuse the existing group 100
@@ -224,6 +233,57 @@ stops them before Docker stops, and starts them again after boot:
   backups; check the free space of the share first. Counter-Strike 2's image runs as uid 1000:1000
   (its files belong to 1000:1000, not `nobody:users`); the others run as root with a few capabilities
   and drop to `MC_UID`/`MC_GID`. Per-game notes (memory, passwords, tokens): [GAMES.md](GAMES.md).
+
+### The game servers' firewall (`instance-firewall.sh`)
+
+> **Not run on a real Unraid host yet.** The rule set was loaded into a real kernel (iptables-nft, in a
+> container's own network namespace: install, status, a second install, remove) and the script is
+> tested against stand-ins, but it has never run against Unraid's own firewall. Check it on your
+> server as described below before you rely on it.
+
+A game server runs code you do not control. If it is compromised (a bad mod, a bug in the game
+reached through its forwarded port), Docker lets it open connections to the Unraid host on every
+address (the web UI, SMB, every port another container publishes, the panel) and to every device on
+your LAN. `deploy/unraid/instance-firewall.sh` adds host firewall rules (chains `MCPANEL-FWD`, jumped
+to from Docker's `DOCKER-USER`, and `MCPANEL-IN`, from `INPUT`) that drop **new** connections from the
+game containers' addresses to the host itself and to private address ranges (10/8, 172.16/12,
+192.168/16, 169.254/16, and 100.64/10, Tailscale's). What keeps working: replies (players join from
+the LAN and the internet as before), a server and the agent on the same network, DNS to the LAN
+resolvers of `/etc/resolv.conf`, and the internet (Mojang's account check, the Steam downloads). The
+game containers' addresses are the per-server pool (`AGENT_INSTANCE_POOL`, default `10.213.0.0/16`, read
+from `deploy/.env`) and the subnet of the shared `mcpanel_instances` network, asked from Docker.
+
+```bash
+cd /mnt/user/appdata/mcpanel-src/deploy/unraid
+bash instance-firewall.sh dry-run    # what it would do: the exact rules and commands
+bash instance-firewall.sh install
+bash instance-firewall.sh status     # installed / missing / differs
+```
+
+Unraid forgets firewall rules at every boot: run `install` at every array start, in the User Scripts
+entry of the shutdown hook (section 4, "Array stop, reboot and shutdown"). `--wait 300` there waits up
+to 5 minutes for Docker and the stack's network. Run `install` again after Docker was switched off and
+on (Settings -> Docker) and after an upgrade; `status` says "differs" when the rules no longer fit (a new
+pool, a recreated network, other DNS servers).
+
+**Check it after installing**, from a game server's container (Docker tab -> the server's icon ->
+Console, or `docker exec -it <container> sh`; images without `curl` have `wget`):
+
+* `curl -m 5 http://<your Unraid IP>/` must fail (time out), and so must any other LAN device;
+* `curl -m 5 https://example.com/` must work;
+* players must still join, from your LAN and from the internet.
+
+If something a server needs stops working, `bash instance-firewall.sh remove` takes everything out at
+once. A server that must reach something on your LAN (a database, a proxy): `install --allow
+192.168.1.20:5432` (an address or range, optionally one port; stored in `deploy/instance-firewall.env`
+and repeated by every later `install`; `--forget 192.168.1.20:5432` drops it). A DNS server that is not
+in `/etc/resolv.conf`: `--allow-dns <ip>`. On an additional node: `--env /path/to/deploy/node.env`.
+
+Not covered: IPv6 (`status` and `install` say so when one of these networks has IPv6), servers on host
+networking or `br0`, and traffic between servers that are both still on the shared `mcpanel_instances`
+network (a server gets its own network at its next start: docs/SECURITY.md, "One network per server").
+Like the other scripts of this folder it refuses to run (or, as root in the checkout, tightens the
+checkout first) when group or others can write it, its folder, `deploy/.env` or its state file.
 
 ## 6. Snapshots on Unraid
 

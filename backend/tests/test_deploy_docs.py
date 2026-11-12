@@ -48,14 +48,17 @@ def test_d2_the_checkout_is_cloned_pulled_and_repaired_so_that_only_root_can_cha
 def test_a1_no_document_claims_the_game_servers_are_isolated_from_each_other():
     security = words("docs/SECURITY.md")
     assert "only the agent reaches them on the container network" not in security
-    assert "**which every game server shares**" in security
+    # round 2: one network per server; the shared network is named for what it still is
+    assert "### One network per server" in read("docs/SECURITY.md") and "`mcpanel_i_<first 12 hex digits" in security
+    assert "A server stays on the shared `mcpanel_instances` network" in security
     assert "nothing on your network can take it over first" not in words("docs/UNRAID.md")
     assert "nothing outside the host can take it over first" in words("docs/UNRAID.md")
     games = read("docs/GAMES.md")
     assert "inside the panel's network" not in games and "inside the panel's Docker network" not in words("docs/GAMES.md")
     header = read("deploy/docker-compose.yml").split("name: mcpanel", 1)[0]
     assert "can reach the agent port" not in header and "only the token" not in header
-    assert "The agent refuses every request" in header and "reach each" in header
+    assert "The agent refuses every request" in header and "one bridge per game server" in header
+    assert "reach each other's ports" in header  # what the shared network still allows
 
 
 def test_a9_who_can_join_and_what_a_compromised_server_reaches_are_documented():
@@ -89,3 +92,21 @@ def test_a9_who_can_join_and_what_a_compromised_server_reaches_are_documented():
         "The LAN and the internet",
     ):
         assert needle in flat, needle
+
+
+# --- A-2: the host firewall script ---------------------------------------------------------------------
+def test_a2_the_firewall_script_is_documented_as_untested_with_its_checks_and_boot_line():
+    unraid = words("docs/UNRAID.md")
+    assert "### The game servers' firewall (`instance-firewall.sh`)" in read("docs/UNRAID.md")
+    assert "**Not run on a real Unraid host yet.**" in unraid
+    assert "instance-firewall.sh install --wait 300" in unraid and "install-hook.sh install" in unraid
+    for needle in (
+        "curl -m 5 http://<your Unraid IP>/` must fail",
+        "curl -m 5 https://example.com/` must work",
+        "players must still join",
+        "bash instance-firewall.sh remove",
+    ):
+        assert needle in unraid, needle
+    security = words("docs/SECURITY.md")
+    assert "**It has not run on an Unraid host yet**" in security and "instance-firewall.sh" in security
+    assert "instance-firewall.sh install --wait 300" in words("docs/UNRAID-SHUTDOWN.md")

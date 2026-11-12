@@ -93,8 +93,14 @@ Anything that can talk to the Docker socket is effectively root on the host. The
   An additional node (`deploy/docker-compose.node.yml`) must publish it so the panel can reach it; it
   then serves HTTPS with a pinned certificate. Bind it to the LAN/VPN interface the panel uses
   (`MCPANEL_NODE_BIND`) and never forward it to the internet,
-* refuses API requests whose source address is on an instance network (Minecraft containers run
-  third-party code), even with a valid token (403 `forbidden_source`, WebSocket close 4403). The
+* refuses API requests whose source address is on an instance network (game containers run
+  third-party code), even with a valid token (403 `forbidden_source`, WebSocket close 4403): the
+  shared `mcpanel_instances` subnet and the whole per-server pool (`AGENT_INSTANCE_POOL`), and, with
+  `AGENT_REFUSE_BRIDGE_GATEWAYS` (default `true`), the gateway address of every bridge the agent is
+  attached to: a game container that goes to a node's published agent port through the host arrives
+  from such a gateway (switch it off only when the agent is called from the host itself through a
+  bridge address, or when Docker's userland proxy hands remote clients over from the gateway: rootless
+  Docker, `"iptables": false`). IPv4-mapped addresses (`::ffff:a.b.c.d`) are judged as IPv4. The
   subnets come from Docker and are refreshed every minute. Until Docker has answered after a start
   the agent does not let everything through (`agent/mcagent/netguard.py`): loopback and
   `/v1/health` pass; a subnet that was an instance network at the last run (remembered in
@@ -104,8 +110,9 @@ Anything that can talk to the Docker socket is effectively root on the host. The
   only loopback and health pass,
 * exposes only the narrow operations listed in `agent/mcagent/main.py` (no arbitrary exec, no arbitrary
   mounts, no arbitrary images),
-* requires the bearer token on every request (except the unauthenticated `/v1/health`, which reveals
-  only whether Docker is reachable).
+* requires the bearer token on every request except `/v1/health`, which reveals only whether Docker
+  is reachable. Its API description is not served at all (`/v1/openapi.json`, `/docs` and `/redoc`
+  answer 404).
 
 btrfs snapshots need no extra privilege: the default stack takes, rolls back and deletes them (deleting
 file by file). Extra privileges are granted only through an override file (docs/UNRAID.md section 6),
@@ -163,8 +170,16 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
   clone, restore, import): RCON (Minecraft 25575, Factorio and Project Zomboid 27015,
   Counter-Strike 2 on its game port's number over TCP), TShock's REST API (7878), Palworld's REST
   API (8212), Rust's WebRCON (28016) and its web page (8080). The agent reaches them over the
-  instance network `mcpanel_instances`, **which every game server shares**: the other game servers
-  reach them too (next section). Game ports are published per protocol (Factorio: UDP).
+  server's own network (next sections); a server whose container is still on the shared
+  `mcpanel_instances` network is reachable there by the other servers on it. Game ports are published
+  per protocol (Factorio: UDP).
+* Host networking and other networks (`br0`, macvlan) void `never_publish`: every listener of the
+  image is then on the host or LAN address. Factorio, TShock, Palworld, Project Zomboid,
+  Counter-Strike 2, Rust and Satisfactory refuse every network but the agent's own (400
+  `network_not_supported`); vanilla Terraria, tModLoader, Valheim and HKMP follow the agent's policy
+  (`AGENT_ALLOW_HOST_NETWORK`, `AGENT_ALLOWED_NETWORKS`, both off by default), and no game with a
+  network control port is ever allowed the host network. Minecraft follows the policy as before. The
+  Network page warns when a server is not on the agent's own network.
 * Redis (job queue, live events, cache) has no password and its cache holds pickled objects, so
   whoever can write to it can run code in the panel. It therefore has no network listener at all:
   it runs inside the panel container on a Unix socket (`--port 0`, mode 700) in `/run/mcpanel`, a
@@ -172,31 +187,62 @@ database read. The agent has its own upload limit (`AGENT_MAX_UPLOAD_BYTES`).
   the agent and the Minecraft containers included. Only with the optional `external-redis` Compose
   profile is Redis a container on the internal network again, as it was before.
 
+### One network per server
+
+Every server gets a bridge network of its own, `mcpanel_i_<first 12 hex digits of its id>`, with a
+/29 of `AGENT_INSTANCE_POOL` (default `10.213.0.0/16`, a private IPv4 range, at least a /28). The agent
+attaches its own container to it to reach the control ports, and Docker isolates bridges from each
+other: a server reaches itself and the agent, no other server. Checked on real Docker (2026-11-12):
+two servers on their own networks could not reach each other's RCON or game port, the agent API
+answered 403 from both, and the internet worked. The network keeps its subnet
+(`<data root>/agent/server-networks.json`), goes with the server's last container, and is made again
+with the same name and subnet when it is missing (Unraid removes user-defined networks when Docker
+restarts, unless "Preserve user defined networks" is on). Labels `io.mcpanel.managed=true`,
+`io.mcpanel.instance=<id>`, `io.mcpanel.network=server`; `GET /v1/info` reports `per_server_networks`.
+
+A server stays on the shared `mcpanel_instances` network (where the servers reach each other, as
+before) when its container was made before this version, until its next start (a stopped server's
+container is made again at every start; a running one keeps its network until it is recreated), and
+in the fallback: `AGENT_PER_SERVER_NETWORKS=false`, an invalid pool, an agent that does not run in a
+container or cannot find its own, an exhausted pool, or Docker refusing the network. The agent logs
+the reason once and reports it in `GET /v1/info`.
+
 ### What a compromised game server can reach
 
 A game server runs code you do not control (mods, plugins, the game itself, and whoever exploits a
 bug in it through its forwarded port). Docker's namespaces and the dropped capabilities contain the
-process; the network is Docker's default and MCPanel does not restrict it yet:
+process. On the network:
 
-* **Every other game server.** All game servers sit on one bridge, `mcpanel_instances`, with
-  Docker's default of open traffic between its members. Code in one of them reaches every other
-  server's control ports (the list above) and game ports, also of servers you did not forward or
-  bound to one address, and Docker's DNS resolves their names. The control secrets the panel
-  generates are 32 random characters (191 bits) and cannot be guessed; what is exposed is anything
-  weaker: an admin password you chose yourself (Palworld's REST API uses it), a Minecraft backend in
-  offline mode behind Velocity or BungeeCord (whoever reaches its port joins under any name), and a
-  new Satisfactory server during its first setup: the panel claims it before it publishes any port,
-  but a neighbour on the bridge can claim it first. The setup then stops with "claimed with another
-  admin password" and the server is never published.
+* **Other game servers:** not from its own network. A server still on the shared network reaches
+  the control and game ports of every other server on it, also of servers you did not forward, and
+  Docker's DNS resolves their names. The control secrets the panel generates are 32 random
+  characters (191 bits) and cannot be guessed; what is exposed there is anything weaker: an admin
+  password you chose yourself (Palworld's REST API uses it), a Minecraft backend in offline mode
+  behind Velocity or BungeeCord (whoever reaches its port joins under any name), and a new
+  Satisfactory server during its first setup: the panel claims it before it publishes any port, but
+  a neighbour on the shared network can claim it first. The setup then stops with "claimed with
+  another admin password" and the server is never published.
 * **The Docker host on every address:** the Unraid web UI, SMB/NFS, every port another container
   publishes on the host, and the panel's own port when it is published on a LAN address.
-* **The LAN and the internet** (Docker's default outbound NAT). It cannot simply be cut: Minecraft
-  checks accounts with Mojang, and the Steam images download the game at every start.
+* **The LAN and the internet** (Docker's default outbound NAT). The internet cannot simply be cut:
+  Minecraft checks accounts with Mojang, and the Steam images download the game at every start.
 
-Not reachable from a game container: the agent's API (it refuses requests from the instance
-network even with a valid token, above), Postgres, the panel's container address, Redis, a panel
-published on `127.0.0.1`, and containers on other Docker networks. No profile grants `NET_RAW` or
-`NET_ADMIN`, so a game container cannot spoof addresses or sniff the bridge.
+The host and the LAN can be closed with `deploy/unraid/instance-firewall.sh` (docs/UNRAID.md, "The
+game servers' firewall"): host firewall rules that drop new connections from the pool and the shared
+network's subnet to the host and to private ranges (10/8, 172.16/12, 192.168/16, 169.254/16,
+100.64/10), except replies, a server and the agent on the same network, DNS to the LAN resolvers and
+the `--allow` entries the owner adds; the internet stays open. **It has not run on an Unraid host yet**
+(it was loaded into a real kernel in a container's own network namespace and is tested against
+stand-ins); check it after installing as UNRAID.md says. Unraid forgets the rules at every boot, so
+it runs at every array start. IPv4 only: it says so when a network has IPv6. When the agent's default
+route goes through a server network (Docker picks the gateway of a container by network name, and
+`mcpanel_i_...` sorts before `mcpanel_internal`), its own new connections to the LAN (a proxy, a
+restic server) are dropped as well: add them with `--allow`.
+
+Not reachable from a game container: the agent's API (it refuses requests from the instance networks
+and the bridge gateways even with a valid token, above), Postgres, the panel's container address,
+Redis, a panel published on `127.0.0.1`, and containers on other Docker networks. No profile grants
+`NET_RAW` or `NET_ADMIN`, so a game container cannot spoof addresses or sniff the bridge.
 
 ## One panel container
 
@@ -440,7 +486,8 @@ has no profile for.
   The agent replaces the password with `********` in every log text it hands out (the console, the
   log download, the last-run record), so console viewers in the panel do not see it; `docker logs`
   on the host still shows it. It only grants RCON, which is reachable from the instance network
-  only, which every game server shares ("What a compromised game server can reach"). The panel
+  only: the server's own network, or the shared one for a server still on it ("One network per
+  server"). The panel
   writes it to `config/rconpw` before every start (from the server's encrypted control secret); the
   file API never hands that file out (download, zips: the agent leaves it out,
   backup browser) and never writes, renames or deletes it or its folder (403 `managed_file`); it is in
@@ -535,9 +582,10 @@ Games that take commands on their console only (Terraria) get one line at a time
 * **Claiming.** An unclaimed Satisfactory server belongs to whoever reaches its API first (a
   passwordless `InitialAdmin` login works until it is claimed). The panel never publishes such a
   server: its spec has no ports until the setup's claim, join-password and game steps are done
-  (`setup_state.ports_open`). Until the claim, another game server on the instance network can reach
-  the API and claim it first ("What a compromised game server can reach"); the setup then stops
-  with `claimed_elsewhere` and the server stays unpublished. The game writes
+  (`setup_state.ports_open`). On its own network nothing but the agent reaches it before the claim;
+  a server still on the shared network could be claimed first by another server there ("What a
+  compromised game server can reach"): the setup then stops with `claimed_elsewhere` and the server
+  stays unpublished. The game writes
   `saved/ServerSettings.7777.sav` before anybody claimed it, so that file proves nothing; what counts is the **claim marker** `.mcpanel/claim-verified`
   (size, `mtime_ns` and SHA-256 of that file), which only the agent writes, after it verified the
   claim through the API (an `InitialAdmin` login is refused, an `Administrator` login with the panel's

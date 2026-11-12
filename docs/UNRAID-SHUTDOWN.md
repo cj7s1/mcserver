@@ -125,6 +125,10 @@ Pick one way to run the install at every boot:
 bash /mnt/user/appdata/mcpanel-src/deploy/unraid/install-hook.sh install
 ```
 
+(The same entry can also put the game servers' firewall back after boot: a second line
+`bash /mnt/user/appdata/mcpanel-src/deploy/unraid/instance-firewall.sh install --wait 300`, see
+docs/UNRAID.md, "The game servers' firewall".)
+
 Do not use "At Stopping of Array" for the hook itself: that runs after Docker has stopped,
 which is too late.
 

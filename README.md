@@ -131,9 +131,10 @@ To upgrade later: `(umask 022 && git pull)`, then in `deploy/`: `./scripts/upgra
 > **Before you forward a game's port**, check who can join: Terraria, Palworld, HKMP and
 > Counter-Strike 2 let anyone in until you set a password, Rust has no password or whitelist in the
 > panel, and Project Zomboid lets anyone create an account
-> ([docs/GAMES.md](docs/GAMES.md), "Who can join by default"). A compromised game server can reach
-> the other game servers, the host and your LAN
-> ([docs/SECURITY.md](docs/SECURITY.md), "What a compromised game server can reach").
+> ([docs/GAMES.md](docs/GAMES.md), "Who can join by default"). Every server has a network of its
+> own, but a compromised one can still reach the host and your LAN until you install
+> `deploy/unraid/instance-firewall.sh` ([docs/UNRAID.md](docs/UNRAID.md), "The game servers' firewall";
+> [docs/SECURITY.md](docs/SECURITY.md), "What a compromised game server can reach").
 
 ## Development
 

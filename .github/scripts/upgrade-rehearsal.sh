@@ -175,8 +175,9 @@ data_is_there() { # the account logs in and the changed setting has its value
         SESSION_TOKEN=""
         status=$(api GET /api/system/settings)
         SESSION_TOKEN=$kept
-        [ "$status" = 401 ] && grep -q session_token_required "$OUT" ||
+        if [ "$status" != 401 ] || ! grep -q session_token_required "$OUT"; then
             die "$1: a call with the session cookie only answered $status: $(cat "$OUT")"
+        fi
         ok "$1: the session cookie alone is refused (session_token_required)"
     fi
     [ "$(sql "SELECT count(*) FROM accounts_user")" = 1 ] || die "$1: expected exactly one user"

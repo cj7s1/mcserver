@@ -26,8 +26,9 @@ change the settings:
 Forwarding Satisfactory's TCP port (the game needs it) also puts its HTTPS API on the internet,
 protected by the admin password the panel generated. A server's host address is `0.0.0.0` by
 default: every IPv4 address of the host, VPN interfaces included. What a game server can reach if it
-is compromised (every other game server on the same Docker network, the host, the LAN):
-[docs/SECURITY.md](SECURITY.md), "What a compromised game server can reach".
+is compromised (the host and your LAN unless the firewall script is installed; other servers only
+while both are on the shared network): [docs/SECURITY.md](SECURITY.md), "What a compromised game
+server can reach".
 
 ## What the six have in common
 
