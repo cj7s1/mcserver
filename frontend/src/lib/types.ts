@@ -777,7 +777,8 @@ export interface Schedule {
   only_when_running: boolean;
   last_run_at: string | null;
   next_run_at: string | null;
-  last_result: string;
+  /** null: a command schedule's result, hidden from users without console access on the server (D-13). */
+  last_result: string | null;
   created_at: string;
 }
 

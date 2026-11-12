@@ -66,7 +66,19 @@ const PERMISSION_LABELS: Partial<Record<PermissionCode, string>> = {
   "instance.backup": "Create backups",
   "instance.command": "Send commands",
   "instance.restore": "Restore backups",
+  "instance.console": "View console",
 };
+
+/**
+ * Whether the panel hid this command schedule's command (and last result) from the user: it sends them as
+ * null to users without console access on the server (D-13).
+ */
+export function commandHidden(s: { action: ScheduleAction | string; payload: Schedule["payload"] }): boolean {
+  return s.action === "command" && s.payload?.command === null;
+}
+
+/** What the schedules page shows for a hidden command or result. */
+export const HIDDEN_FOR_CONSOLE = "hidden (needs console access)";
 
 type Can = (code: PermissionCode) => boolean;
 
@@ -95,6 +107,8 @@ export function editBlockedReason(s: { action: ScheduleAction | string; payload:
   const label = ACTION_INFO[action]?.label.toLowerCase() ?? action;
   const blocked = actionBlockedReason(action, can);
   if (blocked) return `Editing ${label} schedules ${blocked}.`;
+  // the command is not known here: an edit would have to type it anew and could replace it unseen
+  if (commandHidden(s)) return `Its command is hidden from you; editing it needs the “${PERMISSION_LABELS["instance.console"]}” permission.`;
   if (action === "snapshot" && hasExplicitKeep(s) && !can(SNAPSHOT_KEEP_PERMISSION))
     return `This schedule sets its own keep count; editing it needs the “${PERMISSION_LABELS[SNAPSHOT_KEEP_PERMISSION]}” permission.`;
   return null;

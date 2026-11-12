@@ -36,8 +36,10 @@ import { browserOffset, describeCron, offsetFromIso } from "./schedules/cron";
 import {
   ACTION_INFO,
   actionBlockedReason,
+  commandHidden,
   DEFAULT_SNAPSHOT_KEEP,
   editBlockedReason,
+  HIDDEN_FOR_CONSOLE,
   RUNNING_ONLY_ACTIONS,
   scheduleActions,
   scheduleWarnMinutes,
@@ -76,6 +78,7 @@ function resultTone(result: string): string {
 }
 
 function payloadSummary(s: Schedule): string | null {
+  if (commandHidden(s)) return `Command ${HIDDEN_FOR_CONSOLE}`;
   if (s.action === "command" && typeof s.payload?.command === "string") return `/${s.payload.command}`;
   if (s.action === "backup") return typeof s.payload?.name === "string" && s.payload.name ? `Named “${s.payload.name}”` : null;
   if ((s.action as string) === "snapshot") {
@@ -179,10 +182,14 @@ function ScheduleRow({
         {s.last_run_at ? (
           <>
             <p title={formatDateTime(s.last_run_at)}>{relativeTime(s.last_run_at)}</p>
-            {s.last_result && (
-              <p className={cn("truncate", resultTone(s.last_result))} title={s.last_result}>
-                {s.last_result}
-              </p>
+            {s.last_result === null ? (
+              <p className="truncate text-muted-foreground italic">Result {HIDDEN_FOR_CONSOLE}</p>
+            ) : (
+              s.last_result && (
+                <p className={cn("truncate", resultTone(s.last_result))} title={s.last_result}>
+                  {s.last_result}
+                </p>
+              )
             )}
           </>
         ) : (
