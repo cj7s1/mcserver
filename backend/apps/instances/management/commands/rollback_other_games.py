@@ -115,6 +115,13 @@ def printable(text: Any) -> str:
     return "".join(c if c.isprintable() else "?" for c in str(text))
 
 
+def _missing_instance_fields() -> list[str]:
+    """Fields of the Instance model whose column the table does not have (yet or any more)."""
+    with connection.cursor() as cur:
+        present = {c.name for c in connection.introspection.get_table_description(cur, Instance._meta.db_table)}
+    return [f.name for f in Instance._meta.concrete_fields if f.column not in present]
+
+
 class Command(BaseCommand):
     help = "Before a rollback to a release without other games: list (or archive and record) the servers it would break"
 
@@ -333,7 +340,9 @@ class Command(BaseCommand):
         from apps.audit import service as audit
 
         label = self._label(server)
-        instance = Instance.objects.select_related("node").get(pk=server["id"])
+        # (a rollback that stopped half way may have dropped the columns of later migrations already: the
+        # model's fields the table does not have now are not read)
+        instance = Instance.objects.select_related("node").defer(*_missing_instance_fields()).get(pk=server["id"])
         disabled: list[int] = []
         if instance.archived_at is None:
             stop = self._job("stop", f"Stop server: {instance.name} (before a rollback)", instance)

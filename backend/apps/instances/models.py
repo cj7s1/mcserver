@@ -160,6 +160,16 @@ class Instance(models.Model):
     resume_after_boot = models.BooleanField(default=False, db_default=False)
     resume_flagged_at = models.DateTimeField(null=True, blank=True)
 
+    # Stop when empty (B2 of the feature plan of 2026-11-12): a running, ready server that had no players
+    # for this many minutes is stopped by apps.instances.idle (0 = never). Discord (B3): whether the bot
+    # offers the server ("available in Discord"), the Discord role ids that may start/stop it besides the
+    # bot's default roles, and whether /join shows the join password. db_default: an older image after a
+    # rollback inserts rows without these columns.
+    idle_stop_minutes = models.PositiveIntegerField(default=0, db_default=0)
+    discord_available = models.BooleanField(default=False, db_default=False)
+    discord_roles = models.JSONField(default=list, blank=True, db_default=[])
+    discord_share_password = models.BooleanField(default=False, db_default=False)
+
     archived_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
     created_at = models.DateTimeField(auto_now_add=True)

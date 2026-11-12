@@ -890,6 +890,15 @@ class GameDefinition:
         self.require(instance, "broadcast")
         raise NotImplementedError
 
+    def player_count_unavailable(self, instance: Instance | None) -> str | None:
+        """Why the panel cannot read this server's player count while it runs, else None (B2: "stop when empty"
+        needs it). Readable: a status ping (``query``: Minecraft, Satisfactory, TShock, the A2S games) or the
+        game's own player list (``players``: RCON, console, REST)."""
+        caps = self.capabilities(instance)
+        if "query" in caps or "players" in caps:
+            return None
+        return f"{self.label} servers do not report how many players are online"
+
     def online_players(self, instance: Instance) -> dict[str, Any]:
         """``{"online", "max", "players"}`` of a running server; raises ApiError when unreachable."""
         self.require(instance, "players")

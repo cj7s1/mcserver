@@ -340,6 +340,8 @@ CELERY_BEAT_SCHEDULE = {
     "jobs-watchdog": {"task": "apps.jobs.tasks.watchdog", "schedule": 120.0, "options": {"expires": 110}},
     "metrics-sample": {"task": "apps.metrics.tasks.sample_all", "schedule": 60.0, "options": {"expires": 50}},
     "metrics-cleanup": {"task": "apps.metrics.tasks.cleanup", "schedule": 3600.0, "options": {"expires": 3000}},
+    # stop when empty (B2): reads the metrics samples, asks no agent
+    "idle-stop": {"task": "apps.instances.tasks.idle_stop_tick", "schedule": 60.0, "options": {"expires": 55}},
     # free space of every node's server and backup storage (A-7)
     "node-disk-space": {"task": "apps.nodes.tasks.check_disk_space", "schedule": 900.0, "options": {"expires": 840}},
     # failed sign-ins older than 90 days (D-3)

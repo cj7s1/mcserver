@@ -272,7 +272,8 @@ def test_a_second_archive_after_a_rollback_that_stopped_half_way_keeps_the_first
     assert error is None, out
     # the rollback undid 0007 (the rollback port is set) and then failed before 0005
     migrate([("instances", "0006_games_phase2")])
-    assert Instance.objects.get(pk=factorio.pk).game_port == 65536
+    # (values(): the model has columns of later migrations that this schema does not have yet)
+    assert Instance.objects.filter(pk=factorio.pk).values_list("game_port", flat=True).get() == 65536
     nightly = Schedule.objects.create(instance=factorio, name="nightly", action="backup", cron="0 4 * * *")
     out, error = run(*UNDO, "--archive")  # the rollback once more
     assert error is None, out
@@ -321,8 +322,8 @@ def test_undoing_0006_refuses_while_a_server_of_another_game_is_not_recorded(mak
     assert "--archive-other-games" in str(refused.value)
     # nothing of what the server is was dropped
     assert {"game", "ports", "game_options", "secrets", "setup_state"} <= columns("instances_instance")
-    factorio = Instance.objects.get(pk=factorio.pk)
-    assert factorio.game == "factorio" and factorio.game_options == {"space_age": True, "save_name": "world"}
+    kept = Instance.objects.filter(pk=factorio.pk).values("game", "game_options").get()  # (see above: values())
+    assert kept["game"] == "factorio" and kept["game_options"] == {"space_age": True, "save_name": "world"}
     # forward again: the guard does nothing (also on a database that has these migrations already)
     migrate(latest())
     assert MigrationExecutor(connection).migration_plan(latest()) == []

@@ -36,3 +36,11 @@ def scheduler_tick() -> int:
     except Exception:  # never let it keep the schedules from running
         log.exception("resuming servers after a host shutdown failed")
     return run_due_schedules(now)
+
+
+@shared_task(name="apps.instances.tasks.idle_stop_tick", ignore_result=True, expires=55)
+def idle_stop_tick() -> int:
+    """Stop when empty (B2): stops the servers that had no players for their ``idle_stop_minutes``."""
+    from .idle import check_idle
+
+    return check_idle()

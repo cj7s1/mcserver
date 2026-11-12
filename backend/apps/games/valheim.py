@@ -405,6 +405,9 @@ class ValheimDefinition(SteamGameDefinition):
         client.write_text(instance.id, path, "\n".join([*lines, steam_id]) + "\n")
         return {"via": "file", "output": f"Added {steam_id} to {path}. {when}."}
 
+    def player_count_unavailable(self, instance: Instance | None) -> str | None:
+        return "Valheim has no way to tell how many players are online (no console, and no query on a private server)"
+
     def online_players(self, instance: Instance) -> dict[str, Any]:
         """Valheim answers no query on a private server and has no console: no list (409)."""
         raise CapabilityUnavailable(

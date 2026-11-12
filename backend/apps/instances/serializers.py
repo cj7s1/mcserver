@@ -109,6 +109,10 @@ class InstanceSerializer(serializers.ModelSerializer):
     container_memory_mb = serializers.IntegerField(read_only=True)
     loader = serializers.CharField(source="effective_loader", read_only=True)
     connection = serializers.SerializerMethodField()
+    idle_stop_unavailable = serializers.SerializerMethodField(
+        help_text="Why stop-when-empty (idle_stop_minutes) cannot be used for this server (the panel cannot read "
+        "its player count), or null"
+    )
     custom_network = serializers.SerializerMethodField(
         help_text="Whether the server may join another Docker network than the node agent's own (R-8: not the games "
         "whose control port listens on the network)"
@@ -216,6 +220,8 @@ class InstanceSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
             "connection",
+            "idle_stop_minutes",
+            "idle_stop_unavailable",
             "custom_network",
             "agent_networks",
             "permissions",
@@ -242,6 +248,7 @@ class InstanceSerializer(serializers.ModelSerializer):
                 "extra_ports",
                 "ports",
                 "network",
+                "idle_stop_minutes",
                 "minecraft_version",
                 "loader_version",
                 "java_version",
@@ -278,6 +285,20 @@ class InstanceSerializer(serializers.ModelSerializer):
         if not addresses:
             addresses.update(public=SystemSetting.get("public_address"), lan=SystemSetting.get("lan_address"))
         return connection_info(obj, public=addresses["public"], lan=addresses["lan"])
+
+    def get_idle_stop_unavailable(self, obj: Instance) -> str | None:
+        from .idle import unavailable_reason
+
+        return unavailable_reason(obj)
+
+    def validate_idle_stop_minutes(self, value: int) -> int:
+        from .idle import MAX_MINUTES, MIN_MINUTES, unavailable_reason
+
+        if value and not MIN_MINUTES <= value <= MAX_MINUTES:
+            raise serializers.ValidationError(f"0 (off) or {MIN_MINUTES} to {MAX_MINUTES} minutes")
+        if value and self.instance is not None and (why := unavailable_reason(self.instance)) is not None:
+            raise serializers.ValidationError(f"Not available for this server: {why}")
+        return value
 
     def get_custom_network(self, obj: Instance) -> bool:
         definition = games.get_or_none(obj.game or games.DEFAULT_GAME)

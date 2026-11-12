@@ -14,6 +14,7 @@ EVENTS = {
     "backup.succeeded": "Backup completed",
     "modpack.update_available": "Modpack update available (once per new release)",
     "node.low_disk_space": "Low disk space on a node (server or backup storage)",
+    "instance.idle_stopped": "Server stopped because nobody played on it",
 }
 
 
