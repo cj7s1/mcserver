@@ -3,7 +3,7 @@
  * step comes from the game's catalog entry, so the next games need no wizard code of their own.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowRight, KeyRound, Loader2, Rocket } from "lucide-react";
+import { ArrowLeft, ArrowRight, KeyRound, Loader2, Rocket, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -20,7 +20,7 @@ import { ApiError, errorMessage } from "@/lib/api";
 import { formatMemoryMb } from "@/lib/format";
 import { displayValue, fromText } from "@/lib/game-config";
 import { conditionText, derivedNumber, derivedRule, editablePorts, portPublished } from "@/lib/game-ports";
-import { memoryWording } from "@/lib/games";
+import { memoryWording, whoCanJoin } from "@/lib/games";
 import { OvercommitDeclined, postOrDecline } from "@/lib/power";
 import { qk } from "@/lib/queries";
 import type { GameInfo } from "@/lib/types";
@@ -421,6 +421,14 @@ export function GameWizard({
               ]}
             />
           </Section>
+          {whoCanJoin(catalogGame.id) && (
+            <Section title="Who can join" description="Once its port is forwarded on your router, until you change the settings">
+              <p className="flex items-start gap-2 text-sm">
+                <Users className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                {whoCanJoin(catalogGame.id)}
+              </p>
+            </Section>
+          )}
           {(game.secrets ?? []).length > 0 && (
             <Section
               title="Secrets"

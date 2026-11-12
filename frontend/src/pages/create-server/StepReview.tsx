@@ -1,4 +1,4 @@
-import { AlertTriangle, ExternalLink, Pencil, XCircle } from "lucide-react";
+import { AlertTriangle, ExternalLink, Pencil, Users, XCircle } from "lucide-react";
 import type { ReactNode } from "react";
 import { useId } from "react";
 import { Section } from "@/components/PageHeader";
@@ -16,6 +16,7 @@ import {
   type Derived,
   envObject,
   type FieldErrors,
+  minecraftWhoCanJoin,
   serverProperties,
   type StepId,
   type WizardState,
@@ -299,6 +300,15 @@ export function StepReview({
                 ]}
               />
             </Group>
+          </div>
+          <div className="flex items-start gap-2 rounded-lg border px-3 py-2 text-sm">
+            <Users className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+            <p>
+              <span className="font-medium">Who can join</span>{" "}
+              <span className="text-muted-foreground">(once its port is forwarded on your router)</span>:{" "}
+              {minecraftWhoCanJoin(state)}
+              {importing && state.importOverwrite ? " The archive's server.properties can change this." : ""}
+            </p>
           </div>
           {warnings.length > 0 && (
             <ul className="grid gap-1 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">

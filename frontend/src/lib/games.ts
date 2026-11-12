@@ -88,6 +88,31 @@ export function memoryModel(i: Pick<Instance, "memory_model">): MemoryModel {
   return i.memory_model ?? "jvm";
 }
 
+// --- who can join -------------------------------------------------------------------------------------
+
+/**
+ * Who can join a new server of each game once its port is forwarded, until the owner changes its
+ * settings: the create wizard's review says it (A-9 of the security review 2026-11-11). Kept in step with
+ * docs/GAMES.md, "Who can join by default"; Terraria's three variants share one line.
+ */
+const WHO_CAN_JOIN: Record<string, string> = {
+  [MINECRAFT]: "Any Minecraft account: online mode is on and the whitelist is off. The server is not listed anywhere.",
+  factorio: "Anyone with a factorio.com account; the game password is optional. Not listed publicly.",
+  satisfactory: "Your choice at creation: a join password, or open. The panel publishes the server only after it has claimed it.",
+  terraria: "Anyone: the server password is empty by default.",
+  palworld: "Anyone, unless you set a join password (Secrets). Not on the community server list.",
+  valheim: "Only players who know the join password (required). Not listed.",
+  "project-zomboid": "Anyone can create an account (“Anyone may create an account” is on; off = whitelist only). Not listed.",
+  hkmp: "Anyone: its whitelist is off.",
+  cs2: "Anyone, unless you set a join password. With a GSLT the server is listed in Steam's server browser.",
+  rust: "Anyone: the panel offers no password or whitelist, and Rust servers normally appear in the in-game server list.",
+};
+
+/** Who can join a new server of this game by default (see WHO_CAN_JOIN), or undefined for a game the UI does not know. */
+export function whoCanJoin(game: string | null | undefined): string | undefined {
+  return WHO_CAN_JOIN[game || MINECRAFT];
+}
+
 // --- variants (Minecraft server types) ------------------------------------------------------------
 
 const VARIANT_LABELS: Record<string, string> = {

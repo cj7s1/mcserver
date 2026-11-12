@@ -3,7 +3,7 @@
  * POST /instances/ payload (CreateInstanceSerializer in backend/apps/instances/serializers.py).
  */
 import { z } from "zod";
-import { containerMemoryMb, MINECRAFT } from "@/lib/games";
+import { containerMemoryMb, MINECRAFT, whoCanJoin } from "@/lib/games";
 import type {
   GameInfo,
   Instance,
@@ -643,6 +643,18 @@ export interface CreateResponse {
   java: JavaInfo;
   /** The nightly backup schedule created with the server; null when not asked for or not permitted. */
   backup_schedule?: Schedule | null;
+}
+
+/**
+ * Who can join the new Minecraft server once its port is forwarded (A-9): the game's default
+ * (lib/games.ts) as the gameplay step leaves it, else what its whitelist and online-mode choices make it.
+ */
+export function minecraftWhoCanJoin(state: Pick<WizardState, "onlineMode" | "whitelist">): string {
+  if (state.whitelist && !state.onlineMode)
+    return "Only names on the whitelist, but with online mode off anyone can use a whitelisted name.";
+  if (state.whitelist) return "Only players on the whitelist (add them on the Players page once the server exists). Not listed anywhere.";
+  if (!state.onlineMode) return "Anyone, with any user name: online mode is off. Not listed anywhere.";
+  return whoCanJoin(MINECRAFT) ?? "";
 }
 
 export function serverProperties(
