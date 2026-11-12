@@ -112,10 +112,55 @@ export function formatMcDate(value: string | undefined): string {
   return d ? d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : value;
 }
 
+// --- list files written by the server ---------------------------------------------------------------
+// whitelist.json, ops.json, banned-*.json and usercache.json come from the game server's own folder, so a
+// server (or anyone who can write its files) decides their content: an entry may be no object, or carry
+// a number or an object where a text is expected. Such values are made text (numbers) or dropped here,
+// once, so no page code calling string methods on them can fail.
+
+const ENTRY_TEXT_FIELDS = ["uuid", "name", "created", "source", "expires", "reason", "ip", "display_name"] as const;
+
+function asText(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return undefined;
+}
+
+function cleanEntry(raw: unknown): McListEntry | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const entry: Record<string, unknown> = { ...(raw as Record<string, unknown>) };
+  for (const key of ENTRY_TEXT_FIELDS) {
+    if (!(key in entry)) continue;
+    const text = asText(entry[key]);
+    if (text === undefined) delete entry[key];
+    else entry[key] = text;
+  }
+  if ("level" in entry && (typeof entry.level !== "number" || !Number.isFinite(entry.level))) delete entry.level;
+  if ("bypassesPlayerLimit" in entry && typeof entry.bypassesPlayerLimit !== "boolean") delete entry.bypassesPlayerLimit;
+  return entry as McListEntry;
+}
+
+function cleanList(raw: unknown): McListEntry[] {
+  return Array.isArray(raw) ? raw.map(cleanEntry).filter((e): e is McListEntry => e !== null) : [];
+}
+
+/** The players answer with every list entry's text fields as text (see above); everything else as it came. */
+export function normalizePlayers<T extends Partial<McPlayers>>(data: T): T {
+  if (!data || typeof data !== "object") return data;
+  const out: Record<string, unknown> = { ...data };
+  for (const key of ["whitelist", "ops", "bans", "ip_bans"] as const) if (key in out) out[key] = cleanList(out[key]);
+  if ("known_players" in out) {
+    out.known_players = cleanList(out.known_players)
+      .filter((k) => typeof k.name === "string" && k.name)
+      .map((k) => ({ ...k, uuid: k.uuid ?? "" }));
+  }
+  return out as T;
+}
+
 export function usePlayers(instanceId: string, poll: boolean) {
   return useQuery({
     queryKey: qk.players(instanceId),
-    queryFn: () => api.get<McPlayers>(`/instances/${instanceId}/players`),
+    queryFn: async () => normalizePlayers(await api.get<McPlayers>(`/instances/${instanceId}/players`)),
     refetchInterval: poll ? 15_000 : false,
     retry: false,
   });
@@ -190,7 +235,9 @@ export function useAvatarPreference(): [boolean, (on: boolean) => void] {
   return [on, set];
 }
 
-export function avatarUrl(entry: { uuid?: string; name?: string }): string | null {
-  const ref = entry.uuid ? entry.uuid.replace(/-/g, "") : entry.name;
+/** The head image of a player: by UUID, else by name; null without either (a value that is no text counts as none). */
+export function avatarUrl(entry: { uuid?: unknown; name?: unknown }): string | null {
+  const uuid = typeof entry.uuid === "string" ? entry.uuid.replace(/-/g, "") : "";
+  const ref = uuid || (typeof entry.name === "string" ? entry.name : "");
   return ref ? `https://mc-heads.net/avatar/${encodeURIComponent(ref)}/32` : null;
 }
