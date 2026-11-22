@@ -37,6 +37,19 @@ CF_RELEASE_TYPES = {1: "release", 2: "beta", 3: "alpha"}
 MODPACK_LOADERS = ("fabric", "forge", "neoforge", "quilt")
 
 
+def pack_minecraft_version(game_versions: list[str]) -> str:
+    """The Minecraft version of a pack release from its version tags: the newest one.
+
+    A pack runs on one version, but its release may be tagged with several: CurseForge lists Better MC
+    [BMC5] v54 (a 1.21.1 pack) as ``["1.21", "1.21.1"]``. The first tag was taken before, which made
+    the panel refuse 1.21.1 mods on that server. The newest tag is right for such packs; the install
+    manifest is the authority once the pack is installed (``pinning.sync_minecraft_version``).
+    """
+    from apps.catalog.providers import version_key
+
+    return max(game_versions, key=version_key)
+
+
 def _request(method: str, url: str, *, headers: dict[str, str] | None = None, provider: str, **kwargs: Any) -> Any:
     """A request to a provider's API: a redirect is followed only to the same host (the CurseForge key never goes
     elsewhere) and at most ``MAX_UPSTREAM_BYTES`` of the answer are read (C-10)."""
@@ -286,8 +299,6 @@ class Modrinth:
         warnings = []
         if server_side == "unsupported":
             raise ApiError("This modpack is marked client-only on Modrinth and cannot run as a server", code="client_only")
-        if len(release["game_versions"]) > 1:
-            warnings.append(f"Release lists several Minecraft versions; using {release['game_versions'][0]}")
         preflight: dict[str, Any] = {"available": False}
         file = release.get("file") or {}
         if file.get("url"):
@@ -295,6 +306,10 @@ class Modrinth:
 
             preflight = inspect_mrpack(file["url"], file.get("sha1"))
             warnings.extend(preflight.get("warnings") or [])
+        # the pack's own dependency on Minecraft (modrinth.index.json) beats the release's tags
+        minecraft = str(preflight.get("minecraft_version") or "") or pack_minecraft_version(release["game_versions"])
+        if len(release["game_versions"]) > 1 and not preflight.get("minecraft_version"):
+            warnings.append(f"Release lists several Minecraft versions; using {minecraft}")
         return {
             "provider": "modrinth",
             "server_type": "MODRINTH",
@@ -304,7 +319,7 @@ class Modrinth:
             "icon_url": project.get("icon_url") or "",
             "version_id": release["id"],
             "version_name": release.get("version_number") or release.get("name"),
-            "minecraft_version": release["game_versions"][0],
+            "minecraft_version": minecraft,
             "loader": loaders[0],
             "loader_version": preflight.get("loader_version") or "",
             "file": release.get("file"),
@@ -562,7 +577,7 @@ class CurseForge:
             "icon_url": project.get("icon_url") or "",
             "version_id": release["id"],
             "version_name": release.get("name"),
-            "minecraft_version": release["game_versions"][0],
+            "minecraft_version": pack_minecraft_version(release["game_versions"]),
             "loader": (release["loaders"] or [""])[0],
             "loader_version": "",
             "warnings": warnings,
@@ -707,7 +722,7 @@ class FTB:
             "icon_url": project.get("icon_url") or "",
             "version_id": release["id"],
             "version_name": release.get("name"),
-            "minecraft_version": release["game_versions"][0],
+            "minecraft_version": pack_minecraft_version(release["game_versions"]),
             "loader": (release["loaders"] or [""])[0],
             "loader_version": release.get("loader_version") or "",
             "warnings": warnings,

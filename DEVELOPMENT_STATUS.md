@@ -13,6 +13,17 @@ of session 1)._
 Keep this file honest. Implemented, unit-tested, integration-tested, validated on a real Minecraft
 server, and validated on Unraid are **different** levels.
 
+## Minecraft version of multi-tagged modpacks (on `main`, 2026-11-22)
+
+Found on the Unraid server: CurseForge tags Better MC [BMC5] v54 (a 1.21.1 pack) as `1.21, 1.21.1`. The
+panel took the first tag, recorded 1.21 and refused 1.21.1 mods (Distant Horizons 3.3.3) on that server.
+`providers.pack_minecraft_version` now takes the newest tag (Modrinth: the mrpack's own `minecraft`
+dependency first), and `pinning.sync_minecraft_version` corrects a running CurseForge pack from its install
+manifest (`minecraftVersion`), once per pinned file (`modpack_meta.minecraft_from_manifest`), from the
+reconciler. No spec change for CurseForge packs (their env has no `VERSION`), so no restart-required.
+Unit-tested (`tests/test_modpack_minecraft_version.py`; whole backend suite 2,492 passed); **not yet seen
+correcting the real server**.
+
 ## Friends: Share card, stop when empty, Discord bot, Friend role (branch `feature/unraid-and-friends`, 2026-11-12; feature plan section B)
 
 The owner's friends use Discord and are not technical. User docs: docs/FRIENDS.md; security: docs/SECURITY.md,

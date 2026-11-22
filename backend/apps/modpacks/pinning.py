@@ -101,6 +101,41 @@ def pin_installed_release(instance: Instance) -> bool:
     return True
 
 
+def sync_minecraft_version(instance: Instance) -> bool:
+    """Take the Minecraft version of a pinned CurseForge pack from its install manifest.
+
+    The panel records the version from the release's tags when the server is created or the pack
+    updated (``providers.pack_minecraft_version``). A release tagged with several versions can make
+    that guess wrong, and the panel then refuses mods made for the version the pack really runs.
+    The manifest itzg wrote (``minecraftVersion``) is what the pack runs on. It is read once per
+    pinned file and at most every RETRY_SECONDS while it is missing or of another file. Returns True
+    if the version was corrected.
+    """
+    if instance.server_type != ServerType.AUTO_CURSEFORGE or not instance.modpack_version_id:
+        return False
+    meta = instance.modpack_meta or {}
+    if meta.get("minecraft_from_manifest") == instance.modpack_version_id:
+        return False
+    if not cache.add(f"modpack:mc-sync:{instance.pk}", 1, RETRY_SECONDS):
+        return False
+    try:
+        raw = AgentClient(instance.node).read_text(instance.id, ".curseforge-manifest.json")["content"]
+        manifest = json.loads(raw)
+    except (ApiError, json.JSONDecodeError) as exc:
+        log.info("no curseforge manifest for %s yet: %s", instance.pk, exc)
+        return False
+    if not isinstance(manifest, dict) or str(manifest.get("fileId") or "") != instance.modpack_version_id:
+        return False  # not installed yet, or the manifest of another release: try again later
+    minecraft = str(manifest.get("minecraftVersion") or "").strip()[:40]
+    changed = bool(minecraft) and minecraft != instance.minecraft_version
+    if changed:
+        log.info("%s runs Minecraft %s per its manifest, not %s", instance.pk, minecraft, instance.minecraft_version)
+        instance.minecraft_version = minecraft
+    instance.modpack_meta = {**meta, "minecraft_from_manifest": instance.modpack_version_id}
+    instance.save(update_fields=["minecraft_version", "modpack_meta"] if changed else ["modpack_meta"])
+    return changed
+
+
 def retry_pin(instance: Instance) -> bool:
     """:func:`pin_installed_release` for a page view, at most every RETRY_SECONDS per server."""
     if not needs_pin(instance) or not cache.add(f"modpack:pin-retry:{instance.pk}", 1, RETRY_SECONDS):

@@ -264,6 +264,7 @@ def apply_observation(
     after = (instance.status, instance.status_detail, instance.container_state, instance.health)
     if not newly_installed and instance.status == Status.RUNNING and instance.installed_at is not None:
         _retry_pin(instance)
+        _sync_minecraft_version(instance)
     if not newly_installed and all(getattr(instance, f) == v for f, v in observed_before.items()):
         return False  # nothing new: no write
     instance.status_updated_at = timezone.now()
@@ -277,11 +278,23 @@ def apply_observation(
             pin_installed_release(instance)
         except Exception as exc:  # pinning is best effort; never break reconciliation
             log.warning("pinning failed for %s: %s", instance.pk, exc)
+        _sync_minecraft_version(instance)
     if before != after:
         broadcast("instance.status", instance_payload(instance), str(instance.id))
         _notify_transition(instance, before[0], after[0])
         return True
     return False
+
+
+def _sync_minecraft_version(instance: Instance) -> None:
+    """A running CurseForge pack: its Minecraft version from the install manifest, once per pinned
+    file (``pinning.sync_minecraft_version``)."""
+    from apps.modpacks import pinning
+
+    try:
+        pinning.sync_minecraft_version(instance)
+    except Exception as exc:  # best effort, like pinning; never break reconciliation
+        log.warning("minecraft version sync failed for %s: %s", instance.pk, exc)
 
 
 def _retry_pin(instance: Instance) -> None:
