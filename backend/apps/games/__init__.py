@@ -11,6 +11,7 @@ loads no models. To add a game: a module with a ``GameDefinition`` subclass, reg
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
 
 from apps.core.errors import ConflictError
@@ -69,6 +70,11 @@ GAMES_FEATURE = "games"
 
 _registry: dict[str, GameDefinition] = {}
 _loaded = False
+_loading = False
+# The first lookups after a start come from several request threads at once. _loaded is set only once
+# the registry is full, and the others wait here: before (2026-11-22), _loaded was set first, and a
+# second thread found an empty registry ("does not know the game 'minecraft'" on the Share card).
+_load_lock = threading.RLock()
 
 
 class UnknownGame(ConflictError):
@@ -78,35 +84,42 @@ class UnknownGame(ConflictError):
 
 
 def _load() -> None:
-    global _loaded
+    global _loaded, _loading
     if _loaded:
         return
-    _loaded = True
-    from .cs2 import Cs2Definition
-    from .factorio import FactorioDefinition
-    from .hkmp import HkmpDefinition
-    from .minecraft import MinecraftDefinition
-    from .palworld import PalworldDefinition
-    from .rust import RustDefinition
-    from .satisfactory import SatisfactoryDefinition
-    from .terraria import TerrariaDefinition
-    from .valheim import ValheimDefinition
-    from .zomboid import ZomboidDefinition
+    with _load_lock:
+        if _loaded or _loading:  # _loading: a call from one of the imports below, in this thread
+            return
+        _loading = True
+        try:
+            from .cs2 import Cs2Definition
+            from .factorio import FactorioDefinition
+            from .hkmp import HkmpDefinition
+            from .minecraft import MinecraftDefinition
+            from .palworld import PalworldDefinition
+            from .rust import RustDefinition
+            from .satisfactory import SatisfactoryDefinition
+            from .terraria import TerrariaDefinition
+            from .valheim import ValheimDefinition
+            from .zomboid import ZomboidDefinition
 
-    _registry.setdefault(DEFAULT_GAME, MinecraftDefinition())
-    _registry.setdefault(FactorioDefinition.id, FactorioDefinition())
-    _registry.setdefault(SatisfactoryDefinition.id, SatisfactoryDefinition())
-    _registry.setdefault(TerrariaDefinition.id, TerrariaDefinition())
-    # the six games of games-6-contract.md (images that download their game and follow Steam's branch)
-    for definition in (
-        PalworldDefinition(),
-        ValheimDefinition(),
-        ZomboidDefinition(),
-        HkmpDefinition(),
-        Cs2Definition(),
-        RustDefinition(),
-    ):
-        _registry.setdefault(definition.id, definition)
+            _registry.setdefault(DEFAULT_GAME, MinecraftDefinition())
+            _registry.setdefault(FactorioDefinition.id, FactorioDefinition())
+            _registry.setdefault(SatisfactoryDefinition.id, SatisfactoryDefinition())
+            _registry.setdefault(TerrariaDefinition.id, TerrariaDefinition())
+            # the six games of games-6-contract.md (images that download their game and follow Steam's branch)
+            for definition in (
+                PalworldDefinition(),
+                ValheimDefinition(),
+                ZomboidDefinition(),
+                HkmpDefinition(),
+                Cs2Definition(),
+                RustDefinition(),
+            ):
+                _registry.setdefault(definition.id, definition)
+            _loaded = True
+        finally:
+            _loading = False
 
 
 def register(definition: GameDefinition) -> GameDefinition:
